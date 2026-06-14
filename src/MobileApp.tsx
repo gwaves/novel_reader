@@ -77,10 +77,12 @@ function MobileApp() {
 
   function handleNavigatePrevious() {
     navigateToPreviousChapter()
+    readerRef.current?.scrollTo({ top: 0, behavior: 'smooth' })
   }
 
   function handleNavigateNext() {
     navigateToNextChapter()
+    readerRef.current?.scrollTo({ top: 0, behavior: 'smooth' })
   }
 
   if (!isHydrated) {
@@ -115,7 +117,7 @@ function MobileApp() {
         </button>
       </header>
 
-      <main className="mobile-main">
+      <main className="mobile-main" ref={readerRef}>
         {mobileTab === 'bookshelf' && (
           <section className="mobile-panel">
             <div className="mobile-section">
@@ -315,7 +317,7 @@ function MobileApp() {
         )}
 
         {mobileTab === 'reader' && (
-          <section className="mobile-panel mobile-reader" ref={readerRef}>
+          <section className="mobile-panel mobile-reader">
             {activeChapter ? (
               <>
                 <div className="mobile-reader-heading">
@@ -350,7 +352,7 @@ function MobileApp() {
                   style={{ fontSize: `${state.readerFontSize}px` }}
                 >
                   {activeChapter.content.split('\n').map((line, index) => (
-                    <p key={`${activeChapter.id}-${index}`}>{line || ' '}</p>
+                    <p key={`${activeChapter.id}-${index}`}>{line.trim() || ' '}</p>
                   ))}
                 </div>
 
