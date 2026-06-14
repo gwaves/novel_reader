@@ -53,10 +53,24 @@
   justify-content: space-between;
   gap: 12px;
   height: var(--mobile-header-height);
-  padding: 0 16px;
+  padding: 0 12px;
   background: var(--mobile-card-bg);
   border-bottom: 1px solid var(--mobile-border);
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.04);
+}
+
+.mobile-header-reader {
+  --mobile-header-height: 44px;
+  padding: 0 8px;
+}
+
+.mobile-header-reader .mobile-header-title {
+  text-align: center;
+}
+
+.mobile-header-reader .mobile-header-title h1 {
+  font-size: 15px;
+  font-weight: 500;
 }
 
 .mobile-header-title {
@@ -407,10 +421,10 @@
 
 .mobile-reader-heading {
   position: sticky;
-  top: 0;
+  top: 44px;
   z-index: 10;
   background: var(--mobile-bg);
-  padding: 16px;
+  padding: 10px 16px;
   border-bottom: 1px solid var(--mobile-border);
 }
 
@@ -421,10 +435,10 @@
 }
 
 .mobile-reader-heading h2 {
-  font-size: 20px;
+  font-size: 18px;
   font-weight: 600;
-  margin: 0 0 12px;
-  line-height: 1.4;
+  margin: 8px 0 0;
+  line-height: 1.35;
 }
 
 .mobile-reader-meta {
@@ -432,18 +446,18 @@
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  font-size: 13px;
+  font-size: 12px;
   color: var(--mobile-text-secondary);
 }
 
 .mobile-font-control {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
 }
 
 .mobile-font-control input {
-  width: 100px;
+  width: 80px;
 }
 
 .mobile-chapter-content {

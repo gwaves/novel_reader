@@ -100,23 +100,49 @@ function MobileApp() {
 
   return (
     <div className="mobile-shell">
-      <header className="mobile-header">
-        <div className="mobile-header-title">
-          <h1>{state.book ? state.book.title : '长篇小说陪读助手'}</h1>
-          {state.book && activeChapter && (
-            <small>
-              第 {activeChapter.index}/{state.book.chapters.length} 章 · {activeModelName || '未配置'} · Temp {activeTemperature}
-            </small>
-          )}
-        </div>
-        <button
-          type="button"
-          className="mobile-icon-button"
-          onClick={openModelConfig}
-          aria-label="模型配置"
-        >
-          ⚙️
-        </button>
+      <header className={mobileTab === 'reader' ? 'mobile-header mobile-header-reader' : 'mobile-header'}>
+        {mobileTab === 'reader' ? (
+          <>
+            <button
+              type="button"
+              className="mobile-icon-button"
+              onClick={() => setMobileTab('chapters')}
+              aria-label="目录"
+            >
+              ☰
+            </button>
+            <div className="mobile-header-title">
+              <h1>{activeChapter?.title ?? state.book?.title ?? '长篇小说陪读助手'}</h1>
+            </div>
+            <button
+              type="button"
+              className="mobile-icon-button"
+              onClick={openModelConfig}
+              aria-label="模型配置"
+            >
+              ⚙️
+            </button>
+          </>
+        ) : (
+          <>
+            <div className="mobile-header-title">
+              <h1>{state.book ? state.book.title : '长篇小说陪读助手'}</h1>
+              {state.book && activeChapter && (
+                <small>
+                  第 {activeChapter.index}/{state.book.chapters.length} 章 · {activeModelName || '未配置'} · Temp {activeTemperature}
+                </small>
+              )}
+            </div>
+            <button
+              type="button"
+              className="mobile-icon-button"
+              onClick={openModelConfig}
+              aria-label="模型配置"
+            >
+              ⚙️
+            </button>
+          </>
+        )}
       </header>
 
       <main className="mobile-main" ref={readerRef}>
@@ -323,12 +349,10 @@ function MobileApp() {
             {activeChapter ? (
               <>
                 <div className="mobile-reader-heading">
-                  <p className="eyebrow">
-                    第 {activeChapter.index}/{state.book?.chapters.length ?? 0} 章
-                  </p>
-                  <h2>{activeChapter.title}</h2>
                   <div className="mobile-reader-meta">
-                    <span>{activeChapter.wordCount} 字</span>
+                    <span>
+                      第 {activeChapter.index}/{state.book?.chapters.length ?? 0} 章 · {activeChapter.wordCount} 字
+                    </span>
                     <label className="mobile-font-control">
                       字号
                       <input
@@ -347,6 +371,7 @@ function MobileApp() {
                       <span>{state.readerFontSize}px</span>
                     </label>
                   </div>
+                  <h2>{activeChapter.title}</h2>
                 </div>
 
                 <div
