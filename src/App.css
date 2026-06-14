@@ -396,9 +396,33 @@ button:disabled {
   padding: 8px 10px;
 }
 
+.search-status {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  color: #766c60;
+  font-size: 13px;
+}
+
+.search-status button {
+  width: auto;
+  padding: 6px 9px;
+}
+
 .chapter-scroll {
   overflow: auto;
   padding: 10px;
+}
+
+.empty-chapter-search {
+  border-radius: 8px;
+  background: #fff;
+  color: #766c60;
+  font-size: 14px;
+  line-height: 1.6;
+  padding: 14px;
+  text-align: center;
 }
 
 .chapter {

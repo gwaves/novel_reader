@@ -25,6 +25,32 @@ Open:
 http://127.0.0.1:5173/
 ```
 
+You can change the dev server port:
+
+```bash
+NOVEL_READER_PORT=5174 npm run dev
+```
+
+## Reader Instance
+
+To run a separate local reading instance without occupying the development port:
+
+```bash
+NOVEL_READER_PORT=6173 npm run reader:build
+```
+
+Open:
+
+```text
+http://127.0.0.1:6173/
+```
+
+You can also customize the host:
+
+```bash
+NOVEL_READER_HOST=0.0.0.0 NOVEL_READER_PORT=6173 npm run reader:build
+```
+
 ## Build
 
 ```bash

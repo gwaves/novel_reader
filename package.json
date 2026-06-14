@@ -5,6 +5,8 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "reader": "vite preview",
+    "reader:build": "npm run build && npm run reader",
     "build": "tsc -b && vite build",
     "lint": "eslint .",
     "preview": "vite preview"

@@ -297,6 +297,62 @@ function inferTitle(fileName: string) {
   return fileName.replace(/\.[^.]+$/, '') || '未命名小说'
 }
 
+function parseChineseNumber(input: string) {
+  const digitMap: Record<string, number> = {
+    零: 0,
+    〇: 0,
+    一: 1,
+    二: 2,
+    两: 2,
+    三: 3,
+    四: 4,
+    五: 5,
+    六: 6,
+    七: 7,
+    八: 8,
+    九: 9,
+  }
+  const unitMap: Record<string, number> = {
+    十: 10,
+    百: 100,
+    千: 1000,
+    万: 10000,
+  }
+
+  if (/^\d+$/.test(input)) return Number(input)
+
+  let total = 0
+  let section = 0
+  let number = 0
+
+  for (const char of input) {
+    if (char in digitMap) {
+      number = digitMap[char]
+      continue
+    }
+
+    const unit = unitMap[char]
+    if (!unit) return null
+
+    if (unit === 10000) {
+      section = (section + number) * unit
+      total += section
+      section = 0
+    } else {
+      section += (number || 1) * unit
+    }
+    number = 0
+  }
+
+  return total + section + number
+}
+
+function getChapterTitleNumber(title: string) {
+  const match = title.match(/第\s*([零〇一二两三四五六七八九十百千万\d]+)\s*(?:章|回|节)/)
+
+  return match ? parseChineseNumber(match[1]) : null
+}
+
 async function decodeTextFile(file: File, encoding: ImportEncoding) {
   const buffer = await file.arrayBuffer()
 
@@ -614,6 +670,7 @@ function App() {
   const [state, setState] = useState<StoredState>(initialState)
   const [view, setView] = useState<AppView>('home')
   const [chapterPage, setChapterPage] = useState(1)
+  const [chapterSearch, setChapterSearch] = useState('')
   const [isHydrated, setIsHydrated] = useState(false)
   const [isGenerating, setIsGenerating] = useState(false)
   const [batchProgress, setBatchProgress] = useState('')
@@ -650,6 +707,20 @@ function App() {
         chapterPage * CHAPTERS_PER_PAGE,
       )
     : []
+  const normalizedChapterSearch = chapterSearch.trim().toLowerCase()
+  const searchedChapters =
+    state.book && normalizedChapterSearch
+      ? state.book.chapters.filter((chapter) => {
+          const titleNumber = getChapterTitleNumber(chapter.title)
+
+          return (
+            chapter.title.toLowerCase().includes(normalizedChapterSearch) ||
+            String(chapter.index).includes(normalizedChapterSearch) ||
+            (titleNumber !== null && String(titleNumber).includes(normalizedChapterSearch))
+          )
+        })
+      : []
+  const visibleChapters = normalizedChapterSearch ? searchedChapters : pagedChapters
 
   useEffect(() => {
     localStorage.removeItem(STORAGE_KEY)
@@ -1426,10 +1497,27 @@ function App() {
             </div>
 
             <div className="chapter-pager">
+              <label htmlFor="chapter-search">
+                搜索章节
+                <input
+                  id="chapter-search"
+                  value={chapterSearch}
+                  placeholder="章节号、标题关键词"
+                  onChange={(event) => setChapterSearch(event.target.value)}
+                />
+              </label>
+              {normalizedChapterSearch && (
+                <div className="search-status">
+                  找到 {searchedChapters.length} 章
+                  <button type="button" className="ghost-button" onClick={() => setChapterSearch('')}>
+                    清除
+                  </button>
+                </div>
+              )}
               <button
                 type="button"
                 className="ghost-button"
-                disabled={chapterPage <= 1}
+                disabled={chapterPage <= 1 || Boolean(normalizedChapterSearch)}
                 onClick={() => setChapterPage((page) => Math.max(1, page - 1))}
               >
                 上 100 章
@@ -1439,6 +1527,7 @@ function App() {
                 <select
                   id="chapter-page"
                   value={chapterPage}
+                  disabled={Boolean(normalizedChapterSearch)}
                   onChange={(event) => setChapterPage(Number(event.target.value))}
                 >
                   {Array.from({ length: chapterPageCount }, (_, index) => {
@@ -1457,7 +1546,7 @@ function App() {
               <button
                 type="button"
                 className="ghost-button"
-                disabled={chapterPage >= chapterPageCount}
+                disabled={chapterPage >= chapterPageCount || Boolean(normalizedChapterSearch)}
                 onClick={() => setChapterPage((page) => Math.min(chapterPageCount, page + 1))}
               >
                 下 100 章
@@ -1465,7 +1554,7 @@ function App() {
             </div>
 
             <div className="chapter-scroll" ref={chapterListRef}>
-              {pagedChapters.map((chapter) => (
+              {visibleChapters.map((chapter) => (
                 <button
                   key={chapter.id}
                   ref={chapter.id === activeChapter?.id ? activeChapterButtonRef : null}
@@ -1480,6 +1569,9 @@ function App() {
                   </small>
                 </button>
               ))}
+              {normalizedChapterSearch && !visibleChapters.length && (
+                <div className="empty-chapter-search">没有匹配的章节。</div>
+              )}
             </div>
           </aside>
 
