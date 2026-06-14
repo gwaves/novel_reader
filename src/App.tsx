@@ -31,6 +31,7 @@ type StoredState = {
   aiProvider: AIProvider
   ollamaModel: string
   ollamaTemperature: number
+  ollamaConcurrency: number
   openaiConfigs: OpenAIConfig[]
   activeOpenAIConfigId: string
   thinkingEnabled: boolean
@@ -52,12 +53,14 @@ type OpenAIConfig = {
   model: string
   thinkingEnabled: boolean
   temperature: number
+  concurrency: number
 }
 type ModelConfigDraft = Pick<
   StoredState,
   | 'aiProvider'
   | 'ollamaModel'
   | 'ollamaTemperature'
+  | 'ollamaConcurrency'
   | 'openaiConfigs'
   | 'activeOpenAIConfigId'
   | 'thinkingEnabled'
@@ -76,6 +79,7 @@ const initialState: StoredState = {
   aiProvider: 'ollama',
   ollamaModel: 'qwen2.5:7b',
   ollamaTemperature: 1,
+  ollamaConcurrency: 1,
   openaiConfigs: [
     {
       id: 'default-openai',
@@ -85,6 +89,7 @@ const initialState: StoredState = {
       model: 'gpt-4.1-mini',
       thinkingEnabled: false,
       temperature: 1,
+      concurrency: 3,
     },
   ],
   activeOpenAIConfigId: 'default-openai',
@@ -154,6 +159,7 @@ function normalizeStoredState(storedState: Partial<StoredState> & Record<string,
             model: legacyModel,
             thinkingEnabled: Boolean(storedState.thinkingEnabled),
             temperature: legacyTemperature,
+            concurrency: 3,
           },
         ]
 
@@ -173,6 +179,7 @@ function normalizeStoredState(storedState: Partial<StoredState> & Record<string,
       Number.isFinite(storedState.ollamaTemperature)
         ? storedState.ollamaTemperature
         : legacyTemperature,
+    ollamaConcurrency: normalizeConcurrency(storedState.ollamaConcurrency, 1),
     readerFontSize:
       typeof storedState.readerFontSize === 'number' &&
       Number.isFinite(storedState.readerFontSize)
@@ -200,7 +207,14 @@ function sanitizeOpenAIConfigs(
       typeof config.temperature === 'number' && Number.isFinite(config.temperature)
         ? config.temperature
         : fallbackTemperature,
+    concurrency: normalizeConcurrency(config.concurrency, 3),
   }))
+}
+
+function normalizeConcurrency(value: unknown, fallback: number) {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return fallback
+
+  return Math.max(1, Math.min(10, Math.floor(value)))
 }
 
 function getActiveOpenAIConfig(config: Pick<StoredState, 'openaiConfigs' | 'activeOpenAIConfigId'>) {
@@ -501,6 +515,10 @@ async function validateModelConfig(config: ModelConfigDraft): Promise<void> {
       throw new Error('Ollama Temperature 必须是数字。')
     }
 
+    if (normalizeConcurrency(config.ollamaConcurrency, 1) !== config.ollamaConcurrency) {
+      throw new Error('Ollama 并发度必须是 1 到 10 的整数。')
+    }
+
     const response = await fetch(`${OLLAMA_BASE_URL}/api/generate`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -543,6 +561,10 @@ async function validateModelConfig(config: ModelConfigDraft): Promise<void> {
     throw new Error('当前外部模型的 Temperature 必须是数字。')
   }
 
+  if (normalizeConcurrency(activeConfig.concurrency, 3) !== activeConfig.concurrency) {
+    throw new Error('当前外部模型的并发度必须是 1 到 10 的整数。')
+  }
+
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
   }
@@ -578,6 +600,7 @@ function getModelConfigDraft(state: StoredState): ModelConfigDraft {
     aiProvider: state.aiProvider,
     ollamaModel: state.ollamaModel,
     ollamaTemperature: state.ollamaTemperature,
+    ollamaConcurrency: state.ollamaConcurrency,
     openaiConfigs: state.openaiConfigs,
     activeOpenAIConfigId: state.activeOpenAIConfigId,
     thinkingEnabled: state.thinkingEnabled,
@@ -744,6 +767,7 @@ function App() {
 
   async function handleBatchGenerateCurrentPage() {
     const pendingChapters = pagedChapters.filter((chapter) => !state.summaries[chapter.id])
+    const concurrency = getActiveConcurrency()
 
     if (!pendingChapters.length) {
       setBatchProgress('当前章节页已经全部生成概要。')
@@ -754,20 +778,35 @@ function App() {
     setError('')
 
     try {
-      for (const [index, chapter] of pendingChapters.entries()) {
-        setBatchProgress(
-          `正在生成 ${index + 1}/${pendingChapters.length}：第 ${chapter.index} 章`,
-        )
-        const summary = await generateChapterSummary(chapter, true)
+      let nextIndex = 0
+      let completedCount = 0
 
-        setState((current) => ({
-          ...current,
-          summaries: {
-            ...current.summaries,
-            [chapter.id]: summary,
-          },
-        }))
+      async function worker() {
+        while (nextIndex < pendingChapters.length) {
+          const chapter = pendingChapters[nextIndex]
+          nextIndex += 1
+          setBatchProgress(
+            `并发 ${concurrency}，正在生成 ${completedCount + 1}/${pendingChapters.length}：第 ${chapter.index} 章`,
+          )
+          const summary = await generateChapterSummary(chapter, true)
+          completedCount += 1
+
+          setState((current) => ({
+            ...current,
+            summaries: {
+              ...current.summaries,
+              [chapter.id]: summary,
+            },
+          }))
+          setBatchProgress(
+            `并发 ${concurrency}，已完成 ${completedCount}/${pendingChapters.length}`,
+          )
+        }
       }
+
+      await Promise.all(
+        Array.from({ length: Math.min(concurrency, pendingChapters.length) }, () => worker()),
+      )
 
       setBatchProgress(`本页 ${pendingChapters.length} 章概要已生成。`)
     } catch (err) {
@@ -775,6 +814,14 @@ function App() {
     } finally {
       setIsGenerating(false)
     }
+  }
+
+  function getActiveConcurrency() {
+    if (state.aiProvider === 'openai') {
+      return normalizeConcurrency(getActiveOpenAIConfig(state)?.concurrency, 3)
+    }
+
+    return normalizeConcurrency(state.ollamaConcurrency, 1)
   }
 
   function updateActiveChapter(id: string) {
@@ -826,6 +873,7 @@ function App() {
           model: 'gpt-4.1-mini',
           thinkingEnabled: false,
           temperature: 1,
+          concurrency: 3,
         },
       ],
     }))
@@ -859,6 +907,7 @@ function App() {
         apiKey: config.apiKey.trim(),
         model: config.model.trim(),
         temperature: Number.isFinite(config.temperature) ? config.temperature : 1,
+        concurrency: normalizeConcurrency(config.concurrency, 3),
         name: config.name.trim() || config.model.trim() || '外部模型',
       }))
       const activeOpenAIConfigId = openaiConfigs.some(
@@ -875,6 +924,7 @@ function App() {
         ollamaTemperature: Number.isFinite(modelConfigDraft.ollamaTemperature)
           ? modelConfigDraft.ollamaTemperature
           : 1,
+        ollamaConcurrency: normalizeConcurrency(modelConfigDraft.ollamaConcurrency, 1),
         ollamaModel: modelConfigDraft.ollamaModel.trim(),
       }))
       setIsConfigOpen(false)
@@ -902,6 +952,7 @@ function App() {
     state.aiProvider === 'openai'
       ? activeOpenAIConfig?.temperature ?? 1
       : state.ollamaTemperature
+  const activeConcurrency = getActiveConcurrency()
   const draftActiveOpenAIConfig = getActiveOpenAIConfig(modelConfigDraft)
   const importedDate = state.book
     ? new Intl.DateTimeFormat('zh-CN', {
@@ -936,7 +987,7 @@ function App() {
         <div className="model-status">
           <span>{activeProviderLabel}</span>
           <small>
-            {activeModelName || '未配置'} · Temp {activeTemperature} · Thinking{' '}
+            {activeModelName || '未配置'} · Temp {activeTemperature} · 并发 {activeConcurrency} · Thinking{' '}
             {activeThinkingEnabled ? '开' : '关'}
           </small>
           <button type="button" className="ghost-button" onClick={openModelConfig}>
@@ -994,6 +1045,23 @@ function App() {
                     }
                   />
                   <small>默认 1。保存前会用当前值验证本地模型。</small>
+                  <label htmlFor="draft-ollama-concurrency">Ollama 并发度</label>
+                  <input
+                    id="draft-ollama-concurrency"
+                    type="number"
+                    min="1"
+                    max="10"
+                    step="1"
+                    value={modelConfigDraft.ollamaConcurrency}
+                    disabled={isTestingConfig}
+                    onChange={(event) =>
+                      setModelConfigDraft((current) => ({
+                        ...current,
+                        ollamaConcurrency: Number(event.target.value),
+                      }))
+                    }
+                  />
+                  <small>默认 1。本地模型通常建议保持低并发。</small>
                   <label className="thinking-toggle" htmlFor="draft-thinking-enabled">
                     <input
                       id="draft-thinking-enabled"
@@ -1131,6 +1199,20 @@ function App() {
                     }
                   />
                   <small>默认 1。部分兼容接口只接受特定值，保存前会用当前值验证。</small>
+                  <label htmlFor="draft-openai-concurrency">当前外部模型并发度</label>
+                  <input
+                    id="draft-openai-concurrency"
+                    type="number"
+                    min="1"
+                    max="10"
+                    step="1"
+                    value={draftActiveOpenAIConfig?.concurrency ?? 3}
+                    disabled={isTestingConfig}
+                    onChange={(event) =>
+                      updateActiveOpenAIConfig({ concurrency: Number(event.target.value) })
+                    }
+                  />
+                  <small>默认 3。批量生成当前章节页时会同时请求这么多章节。</small>
                   <label className="thinking-toggle" htmlFor="draft-openai-thinking-enabled">
                     <input
                       id="draft-openai-thinking-enabled"
