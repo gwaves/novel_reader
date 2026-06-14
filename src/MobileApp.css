@@ -440,17 +440,12 @@
 }
 
 .mobile-reader-heading {
-  position: sticky;
-  top: 44px;
-  z-index: 10;
-  display: flex;
-  align-items: center;
-  justify-content: center;
   background: var(--mobile-bg);
   padding: 8px 16px;
   border-bottom: 1px solid var(--mobile-border);
   font-size: 12px;
   color: var(--mobile-text-secondary);
+  text-align: center;
 }
 
 .mobile-chapter-content {
