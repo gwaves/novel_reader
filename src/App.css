@@ -458,6 +458,25 @@ button:disabled {
   color: #766c60;
 }
 
+.chapter-nav {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 16px 0 14px;
+}
+
+.chapter-nav button {
+  min-width: 86px;
+  padding: 8px 12px;
+}
+
+.chapter-nav span {
+  color: #766c60;
+  font-size: 13px;
+  text-align: center;
+}
+
 .reader-controls {
   display: flex;
   align-items: center;
@@ -620,5 +639,15 @@ button:disabled {
 
   .book-card dl {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .chapter-nav,
+  .reader-controls {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .chapter-nav span {
+    order: 3;
   }
 }

@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import './App.css'
 
 type Chapter = {
@@ -608,6 +608,9 @@ function getModelConfigDraft(state: StoredState): ModelConfigDraft {
 }
 
 function App() {
+  const readerRef = useRef<HTMLElement | null>(null)
+  const chapterListRef = useRef<HTMLDivElement | null>(null)
+  const activeChapterButtonRef = useRef<HTMLButtonElement | null>(null)
   const [state, setState] = useState<StoredState>(initialState)
   const [view, setView] = useState<AppView>('home')
   const [chapterPage, setChapterPage] = useState(1)
@@ -630,6 +633,14 @@ function App() {
   }, [state.book, state.activeChapterId])
 
   const activeSummary = activeChapter ? state.summaries[activeChapter.id] : null
+  const previousChapter =
+    state.book && activeChapter && activeChapter.index > 1
+      ? state.book.chapters[activeChapter.index - 2]
+      : null
+  const nextChapter =
+    state.book && activeChapter && activeChapter.index < state.book.chapters.length
+      ? state.book.chapters[activeChapter.index]
+      : null
   const chapterPageCount = state.book
     ? Math.max(1, Math.ceil(state.book.chapters.length / CHAPTERS_PER_PAGE))
     : 1
@@ -686,7 +697,63 @@ function App() {
 
     const activePage = Math.ceil(activeChapter.index / CHAPTERS_PER_PAGE)
     setChapterPage(activePage)
+    readerRef.current?.scrollTo({ top: 0 })
   }, [activeChapter?.id])
+
+  useEffect(() => {
+    if (view !== 'reader' || !activeChapter) return
+
+    window.requestAnimationFrame(() => {
+      activeChapterButtonRef.current?.scrollIntoView({
+        block: 'center',
+        inline: 'nearest',
+      })
+    })
+  }, [view, activeChapter?.id, chapterPage])
+
+  useEffect(() => {
+    if (view !== 'reader' || isConfigOpen) return
+
+    function handleKeyDown(event: KeyboardEvent) {
+      const target = event.target as HTMLElement | null
+      const tagName = target?.tagName
+      const isEditing =
+        target?.isContentEditable ||
+        tagName === 'INPUT' ||
+        tagName === 'TEXTAREA' ||
+        tagName === 'SELECT' ||
+        tagName === 'BUTTON'
+
+      if (isEditing) return
+
+      if (event.key === 'ArrowLeft') {
+        event.preventDefault()
+        navigateToPreviousChapter()
+        return
+      }
+
+      if (event.key === 'ArrowRight') {
+        event.preventDefault()
+        navigateToNextChapter()
+        return
+      }
+
+      if (event.key === 'ArrowUp') {
+        event.preventDefault()
+        readerRef.current?.scrollBy({ top: -Math.round(window.innerHeight * 0.72), behavior: 'smooth' })
+        return
+      }
+
+      if (event.key === 'ArrowDown') {
+        event.preventDefault()
+        readerRef.current?.scrollBy({ top: Math.round(window.innerHeight * 0.72), behavior: 'smooth' })
+      }
+    }
+
+    window.addEventListener('keydown', handleKeyDown)
+
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [view, isConfigOpen, previousChapter?.id, nextChapter?.id])
 
   async function handleImport(file: File) {
     setError('')
@@ -826,6 +893,18 @@ function App() {
 
   function updateActiveChapter(id: string) {
     setState((current) => ({ ...current, activeChapterId: id }))
+  }
+
+  function navigateToPreviousChapter() {
+    if (!previousChapter) return
+
+    updateActiveChapter(previousChapter.id)
+  }
+
+  function navigateToNextChapter() {
+    if (!nextChapter) return
+
+    updateActiveChapter(nextChapter.id)
   }
 
   function resetBook() {
@@ -1385,10 +1464,11 @@ function App() {
               </button>
             </div>
 
-            <div className="chapter-scroll">
+            <div className="chapter-scroll" ref={chapterListRef}>
               {pagedChapters.map((chapter) => (
                 <button
                   key={chapter.id}
+                  ref={chapter.id === activeChapter?.id ? activeChapterButtonRef : null}
                   type="button"
                   className={chapter.id === activeChapter?.id ? 'chapter active' : 'chapter'}
                   onClick={() => updateActiveChapter(chapter.id)}
@@ -1403,7 +1483,7 @@ function App() {
             </div>
           </aside>
 
-          <article className="chapter-reader">
+          <article className="chapter-reader" ref={readerRef}>
             {activeChapter && (
               <>
                 <div className="chapter-heading">
@@ -1411,6 +1491,25 @@ function App() {
                     位置 {activeChapter.index}/{state.book.chapters.length}
                   </p>
                   <h2>{activeChapter.title}</h2>
+                  <div className="chapter-nav">
+                    <button
+                      type="button"
+                      className="ghost-button"
+                      disabled={!previousChapter}
+                      onClick={navigateToPreviousChapter}
+                    >
+                      上一章
+                    </button>
+                    <span>键盘：↑↓ 滚动，←→ 切换章节</span>
+                    <button
+                      type="button"
+                      className="ghost-button"
+                      disabled={!nextChapter}
+                      onClick={navigateToNextChapter}
+                    >
+                      下一章
+                    </button>
+                  </div>
                   <div className="reader-controls">
                     <p>{activeChapter.wordCount} 字</p>
                     <label htmlFor="reader-font-size">
