@@ -69,8 +69,9 @@
 }
 
 .mobile-header-reader .mobile-header-title h1 {
-  font-size: 15px;
+  font-size: 14px;
   font-weight: 500;
+  color: var(--mobile-text-secondary);
 }
 
 .mobile-header-title {
@@ -312,6 +313,25 @@
   min-height: auto;
 }
 
+.mobile-font-field .mobile-font-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.mobile-font-field input {
+  flex: 1;
+  min-height: auto;
+  padding: 0;
+}
+
+.mobile-font-field span {
+  font-size: 14px;
+  color: var(--mobile-text-secondary);
+  min-width: 40px;
+  text-align: right;
+}
+
 .mobile-error {
   color: var(--mobile-danger);
   font-size: 14px;
@@ -423,41 +443,14 @@
   position: sticky;
   top: 44px;
   z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: center;
   background: var(--mobile-bg);
-  padding: 10px 16px;
+  padding: 8px 16px;
   border-bottom: 1px solid var(--mobile-border);
-}
-
-.mobile-reader-heading .eyebrow {
-  margin: 0 0 4px;
   font-size: 12px;
   color: var(--mobile-text-secondary);
-}
-
-.mobile-reader-heading h2 {
-  font-size: 18px;
-  font-weight: 600;
-  margin: 8px 0 0;
-  line-height: 1.35;
-}
-
-.mobile-reader-meta {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
-  font-size: 12px;
-  color: var(--mobile-text-secondary);
-}
-
-.mobile-font-control {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-}
-
-.mobile-font-control input {
-  width: 80px;
 }
 
 .mobile-chapter-content {

@@ -112,7 +112,7 @@ function MobileApp() {
               ☰
             </button>
             <div className="mobile-header-title">
-              <h1>{activeChapter?.title ?? state.book?.title ?? '长篇小说陪读助手'}</h1>
+              <h1>{state.book?.title ?? '长篇小说陪读助手'}</h1>
             </div>
             <button
               type="button"
@@ -235,6 +235,26 @@ function MobileApp() {
                   <option value="utf-8">UTF-8</option>
                 </select>
               </label>
+
+              <label className="mobile-field mobile-font-field">
+                字号
+                <div className="mobile-font-row">
+                  <input
+                    type="range"
+                    min="14"
+                    max="28"
+                    step="1"
+                    value={state.readerFontSize}
+                    onChange={(event) =>
+                      setState((current) => ({
+                        ...current,
+                        readerFontSize: Number(event.target.value),
+                      }))
+                    }
+                  />
+                  <span>{state.readerFontSize}px</span>
+                </div>
+              </label>
             </div>
             {error && <p className="mobile-error">{error}</p>}
           </section>
@@ -349,29 +369,9 @@ function MobileApp() {
             {activeChapter ? (
               <>
                 <div className="mobile-reader-heading">
-                  <div className="mobile-reader-meta">
-                    <span>
-                      第 {activeChapter.index}/{state.book?.chapters.length ?? 0} 章 · {activeChapter.wordCount} 字
-                    </span>
-                    <label className="mobile-font-control">
-                      字号
-                      <input
-                        type="range"
-                        min="14"
-                        max="28"
-                        step="1"
-                        value={state.readerFontSize}
-                        onChange={(event) =>
-                          setState((current) => ({
-                            ...current,
-                            readerFontSize: Number(event.target.value),
-                          }))
-                        }
-                      />
-                      <span>{state.readerFontSize}px</span>
-                    </label>
-                  </div>
-                  <h2>{activeChapter.title}</h2>
+                  <span>
+                    第 {activeChapter.index}/{state.book?.chapters.length ?? 0} 章 · {activeChapter.wordCount} 字
+                  </span>
                 </div>
 
                 <div
