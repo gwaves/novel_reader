@@ -66,7 +66,11 @@ function MobileApp() {
 
   useEffect(() => {
     if (mobileTab === 'reader' && activeChapter) {
-      readerRef.current?.scrollTo({ top: 0, behavior: 'smooth' })
+      requestAnimationFrame(() => {
+        if (readerRef.current) {
+          readerRef.current.scrollTop = 0
+        }
+      })
     }
   }, [activeChapter?.id, mobileTab])
 
@@ -77,12 +81,10 @@ function MobileApp() {
 
   function handleNavigatePrevious() {
     navigateToPreviousChapter()
-    readerRef.current?.scrollTo({ top: 0, behavior: 'smooth' })
   }
 
   function handleNavigateNext() {
     navigateToNextChapter()
-    readerRef.current?.scrollTo({ top: 0, behavior: 'smooth' })
   }
 
   if (!isHydrated) {
