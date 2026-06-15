@@ -137,6 +137,14 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_kg_relation_mentions_relation ON kg_relation_mentions(relation_id, chapter_index);
 `)
 
+// Migration: add first/last chapter index to relations if missing
+try {
+  db.exec(`ALTER TABLE kg_relations ADD COLUMN first_chapter_index INTEGER`)
+  db.exec(`ALTER TABLE kg_relations ADD COLUMN last_chapter_index INTEGER`)
+} catch {
+  // columns may already exist
+}
+
 const getStateStatement = db.prepare('SELECT value_json FROM app_state WHERE key = ?')
 const saveStateStatement = db.prepare(`
   INSERT INTO app_state (key, value_json, updated_at)
@@ -299,6 +307,8 @@ const listKgRelationsStatement = db.prepare(`
     r.type,
     r.description,
     r.confidence,
+    r.first_chapter_index AS firstChapterIndex,
+    r.last_chapter_index AS lastChapterIndex,
     source.id AS sourceId,
     source.name AS sourceName,
     source.type AS sourceType,
@@ -311,9 +321,46 @@ const listKgRelationsStatement = db.prepare(`
   JOIN kg_entities target ON target.id = r.target_entity_id
   LEFT JOIN kg_relation_mentions mention ON mention.relation_id = r.id
   WHERE r.book_id = ?
+    AND (? = '' OR r.type = ?)
   GROUP BY r.id
   ORDER BY mentionCount DESC, r.confidence DESC, r.updated_at DESC
   LIMIT ?
+`)
+const getKgRelationStatement = db.prepare(`
+  SELECT
+    r.id,
+    r.type,
+    r.description,
+    r.confidence,
+    r.first_chapter_index AS firstChapterIndex,
+    r.last_chapter_index AS lastChapterIndex,
+    source.id AS sourceId,
+    source.name AS sourceName,
+    source.type AS sourceType,
+    target.id AS targetId,
+    target.name AS targetName,
+    target.type AS targetType,
+    COUNT(mention.id) AS mentionCount
+  FROM kg_relations r
+  JOIN kg_entities source ON source.id = r.source_entity_id
+  JOIN kg_entities target ON target.id = r.target_entity_id
+  LEFT JOIN kg_relation_mentions mention ON mention.relation_id = r.id
+  WHERE r.id = ?
+  GROUP BY r.id
+`)
+const getKgRelationMentionsStatement = db.prepare(`
+  SELECT
+    m.id,
+    m.chapter_id AS chapterId,
+    m.chapter_index AS chapterIndex,
+    c.title AS chapterTitle,
+    m.evidence,
+    m.confidence
+  FROM kg_relation_mentions m
+  JOIN chapters c ON c.id = m.chapter_id
+  WHERE m.relation_id = ?
+  ORDER BY m.chapter_index ASC
+  LIMIT 100
 `)
 const getKgChapterExtractionStatement = db.prepare(`
   SELECT
@@ -448,16 +495,26 @@ const insertKgRelationStatement = db.prepare(`
     type,
     description,
     confidence,
+    first_chapter_index,
+    last_chapter_index,
     created_at,
     updated_at
   )
-  VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
 `)
 const updateKgRelationStatement = db.prepare(`
   UPDATE kg_relations
   SET
     description = COALESCE(NULLIF(?, ''), description),
     confidence = MAX(confidence, ?),
+    first_chapter_index = CASE
+      WHEN first_chapter_index IS NULL THEN ?
+      ELSE MIN(first_chapter_index, ?)
+    END,
+    last_chapter_index = CASE
+      WHEN last_chapter_index IS NULL THEN ?
+      ELSE MAX(last_chapter_index, ?)
+    END,
     updated_at = CURRENT_TIMESTAMP
   WHERE id = ?
 `)
@@ -691,7 +748,15 @@ function applyChapterExtraction(bookId, chapterId, extraction, model) {
     const relationId = existing?.id ?? randomUUID()
 
     if (existing) {
-      updateKgRelationStatement.run(description, confidence, relationId)
+      updateKgRelationStatement.run(
+        description,
+        confidence,
+        chapter.chapter_index,
+        chapter.chapter_index,
+        chapter.chapter_index,
+        chapter.chapter_index,
+        relationId,
+      )
     } else {
       insertKgRelationStatement.run(
         relationId,
@@ -701,6 +766,8 @@ function applyChapterExtraction(bookId, chapterId, extraction, model) {
         relationType,
         description,
         confidence,
+        chapter.chapter_index,
+        chapter.chapter_index,
       )
     }
 
@@ -880,9 +947,10 @@ const server = createServer(async (request, response) => {
         return
       }
 
+      const type = url.searchParams.get('type') ?? ''
       const limit = Math.max(1, Math.min(300, Number(url.searchParams.get('limit') ?? 150)))
       sendJson(response, 200, {
-        relations: listKgRelationsStatement.all(bookId, limit),
+        relations: listKgRelationsStatement.all(bookId, type, type, limit),
       })
       return
     }
@@ -966,6 +1034,23 @@ const server = createServer(async (request, response) => {
         entity: mapEntityRow(entity),
         mentions: getKgEntityMentionsStatement.all(entityId),
         relations: getKgEntityRelationsStatement.all(entityId, entityId),
+      })
+      return
+    }
+
+    const relationMatch = url.pathname.match(/^\/api\/kg\/relations\/([^/]+)$/)
+    if (request.method === 'GET' && relationMatch) {
+      const relationId = decodeURIComponent(relationMatch[1])
+      const relation = getKgRelationStatement.get(relationId)
+
+      if (!relation) {
+        sendJson(response, 404, { error: 'Relation not found.' })
+        return
+      }
+
+      sendJson(response, 200, {
+        relation,
+        mentions: getKgRelationMentionsStatement.all(relationId),
       })
       return
     }

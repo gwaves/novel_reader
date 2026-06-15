@@ -459,6 +459,27 @@ button:disabled {
   margin-bottom: 6px;
 }
 
+.kg-filter-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 14px;
+  flex-wrap: wrap;
+}
+
+.kg-filter-bar input,
+.kg-filter-bar select {
+  width: auto;
+  min-width: 160px;
+  flex: 1 1 200px;
+  max-width: 320px;
+}
+
+.kg-filter-bar button {
+  width: auto;
+  padding: 8px 12px;
+}
+
 .kg-scanned-card {
   margin-bottom: 20px;
 }
@@ -738,6 +759,17 @@ button.kg-mini-row:hover {
   margin: 8px 0 0;
   color: #786d60;
   font-size: 13px;
+}
+
+button.kg-relation-row {
+  width: 100%;
+  text-align: left;
+  cursor: pointer;
+}
+
+button.kg-relation-row:hover {
+  border-color: #b88947;
+  background: #f8efe0;
 }
 
 .upload-box {
