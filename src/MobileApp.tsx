@@ -41,12 +41,13 @@ function MobileApp() {
     draftActiveOpenAIConfig,
     importedDate,
     handleImport,
+    selectBook,
+    deleteBook,
     updateActiveChapter,
     handleGenerateSummary,
     handleBatchGenerateCurrentPage,
     navigateToPreviousChapter,
     navigateToNextChapter,
-    resetBook,
     openModelConfig,
     closeModelConfig,
     updateActiveOpenAIConfig,
@@ -151,7 +152,7 @@ function MobileApp() {
             <div className="mobile-section">
               <h2>书架</h2>
               <p className="mobile-hint">
-                书籍、阅读进度和概要都会保存在本机浏览器数据库里。
+                书籍、阅读进度和概要都会保存在本机 SQLite 数据库里。
               </p>
             </div>
 
@@ -193,14 +194,44 @@ function MobileApp() {
                   >
                     继续阅读
                   </button>
-                  <button type="button" className="mobile-ghost-button" onClick={resetBook}>
-                    清空并重新导入
+                  <button type="button" className="mobile-ghost-button" onClick={() => state.book && deleteBook(state.book.id)}>
+                    删除当前书
                   </button>
                 </div>
               </div>
             ) : (
               <div className="mobile-empty">
                 <p>还没有导入书籍。</p>
+              </div>
+            )}
+
+            {state.books.length > 0 && (
+              <div className="mobile-section">
+                <h2>全部书籍</h2>
+                <div className="mobile-book-list">
+                  {state.books.map((libraryBook) => {
+                    const isActive = libraryBook.book.id === state.activeBookId
+
+                    return (
+                      <div className={isActive ? 'mobile-book-row active' : 'mobile-book-row'} key={libraryBook.book.id}>
+                        <div>
+                          <h3>{libraryBook.book.title}</h3>
+                          <p>
+                            {libraryBook.book.chapters.length} 章 · 概要 {Object.keys(libraryBook.summaries).length} 章
+                          </p>
+                        </div>
+                        <div className="mobile-book-row-actions">
+                          <button type="button" className="mobile-primary-button" onClick={() => selectBook(libraryBook.book.id)}>
+                            {isActive ? '继续' : '打开'}
+                          </button>
+                          <button type="button" className="mobile-ghost-button" onClick={() => deleteBook(libraryBook.book.id)}>
+                            删除
+                          </button>
+                        </div>
+                      </div>
+                    )
+                  })}
+                </div>
               </div>
             )}
 
@@ -215,7 +246,7 @@ function MobileApp() {
                     event.target.value = ''
                   }}
                 />
-                <span className="mobile-primary-button">{state.book ? '导入新 txt 替换' : '选择 txt 文件'}</span>
+                <span className="mobile-primary-button">{state.books.length ? '导入新 txt 到书架' : '选择 txt 文件'}</span>
                 <small>支持“第1章 / 第一章 / Chapter 1”等格式</small>
               </label>
 

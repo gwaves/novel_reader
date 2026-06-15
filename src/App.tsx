@@ -1,12 +1,160 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useReaderState } from './hooks/useReaderState.ts'
-import type { AIProvider, ImportEncoding } from './hooks/useReaderState.ts'
+import type { AIProvider, Chapter, ImportEncoding, OpenAIConfig } from './hooks/useReaderState.ts'
 import './App.css'
+
+type KgOverview = {
+  scanned_chapters: number
+  entity_count: number
+  relation_count: number
+}
+
+type KgEntity = {
+  id: string
+  type: string
+  name: string
+  aliases: string[]
+  description: string | null
+  confidence: number
+  mentionCount: number
+}
+
+type KgScanMode = 'current' | 'page' | 'range' | 'all'
+
+function buildKnowledgeGraphPrompt(chapter: Chapter): string {
+  return `你是长篇小说知识图谱抽取器。请从章节中抽取人物、门派/组织、道具/法宝、功法/法术、地点、灵兽/妖兽、重要事件，以及它们之间的关系。
+
+只输出 JSON，不要输出 Markdown，不要解释。
+
+JSON 结构必须是：
+{
+  "entities": [
+    {
+      "name": "实体名",
+      "type": "character|sect|item|skill|location|beast|event|other",
+      "aliases": ["别名"],
+      "description": "只基于本章的简短描述",
+      "confidence": 0.0到1.0,
+      "evidence": ["1到3条原文短证据"]
+    }
+  ],
+  "relations": [
+    {
+      "source": "实体名",
+      "target": "实体名",
+      "type": "knows|ally_of|enemy_of|master_of|disciple_of|member_of|belongs_to|owns|uses|learns|created_by|located_in|appears_with|transforms_into|related_to",
+      "description": "只基于本章的关系描述",
+      "confidence": 0.0到1.0,
+      "evidence": ["1到3条原文短证据"]
+    }
+  ]
+}
+
+要求：
+1. source 和 target 必须出现在 entities 中。
+2. 不确定的实体 type 用 other，不确定的关系 type 用 related_to。
+3. evidence 必须来自原文短句，不要编造。
+4. 同一实体不要重复输出。
+
+章节标题：${chapter.title}
+章节序号：${chapter.index}
+章节正文：
+${chapter.content.slice(0, 16000)}`
+}
+
+function parseJsonObject(text: string): unknown {
+  try {
+    return JSON.parse(text)
+  } catch {
+    const match = text.match(/\{[\s\S]*\}/)
+    if (!match) throw new Error('模型没有返回 JSON 对象。')
+    return JSON.parse(match[0])
+  }
+}
+
+async function generateKnowledgeGraphWithOllama(
+  chapter: Chapter,
+  model: string,
+  temperature: number,
+): Promise<unknown> {
+  const response = await fetch('http://localhost:11434/api/generate', {
+    body: JSON.stringify({
+      model,
+      prompt: buildKnowledgeGraphPrompt(chapter),
+      stream: false,
+      format: 'json',
+      options: {
+        temperature,
+      },
+    }),
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    method: 'POST',
+  })
+
+  if (!response.ok) {
+    throw new Error(`Ollama 图谱扫描失败：${response.status}`)
+  }
+
+  const payload = (await response.json()) as { response?: string }
+  return parseJsonObject(payload.response ?? '')
+}
+
+async function generateKnowledgeGraphWithOpenAI(
+  chapter: Chapter,
+  config: OpenAIConfig,
+): Promise<unknown> {
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+  }
+
+  if (config.apiKey.trim()) {
+    headers.Authorization = `Bearer ${config.apiKey.trim()}`
+  }
+
+  const response = await fetch(`${config.baseUrl.replace(/\/+$/, '')}/chat/completions`, {
+    body: JSON.stringify({
+      model: config.model,
+      messages: [
+        {
+          role: 'user',
+          content: buildKnowledgeGraphPrompt(chapter),
+        },
+      ],
+      temperature: config.temperature,
+      response_format: { type: 'json_object' },
+      chat_template_kwargs: config.thinkingEnabled ? undefined : { enable_thinking: false },
+    }),
+    headers,
+    method: 'POST',
+  })
+
+  if (!response.ok) {
+    const body = await response.text()
+    throw new Error(`外部模型图谱扫描失败 ${response.status}：${body || '请求失败'}`)
+  }
+
+  const payload = (await response.json()) as {
+    choices?: Array<{ message?: { content?: string } }>
+  }
+  return parseJsonObject(payload.choices?.[0]?.message?.content ?? '')
+}
 
 function App() {
   const readerRef = useRef<HTMLElement | null>(null)
   const chapterListRef = useRef<HTMLDivElement | null>(null)
   const activeChapterButtonRef = useRef<HTMLButtonElement | null>(null)
+  const [kgOverview, setKgOverview] = useState<KgOverview | null>(null)
+  const [kgEntities, setKgEntities] = useState<KgEntity[]>([])
+  const [kgExtractionText, setKgExtractionText] = useState('')
+  const [kgError, setKgError] = useState('')
+  const [kgScanMode, setKgScanMode] = useState<KgScanMode>('current')
+  const [kgScanStart, setKgScanStart] = useState(1)
+  const [kgScanEnd, setKgScanEnd] = useState(1)
+  const [kgScanConcurrency, setKgScanConcurrency] = useState(1)
+  const [isKgScanning, setIsKgScanning] = useState(false)
+  const [kgScanProgress, setKgScanProgress] = useState('')
 
   const {
     state,
@@ -41,6 +189,7 @@ function App() {
     pageSummaryCount,
     currentProgressLabel,
     activeProviderLabel,
+    activeOpenAIConfig,
     activeModelName,
     activeThinkingEnabled,
     activeTemperature,
@@ -48,12 +197,13 @@ function App() {
     draftActiveOpenAIConfig,
     importedDate,
     handleImport,
+    selectBook,
+    deleteBook,
     updateActiveChapter,
     handleGenerateSummary,
     handleBatchGenerateCurrentPage,
     navigateToPreviousChapter,
     navigateToNextChapter,
-    resetBook,
     openModelConfig,
     closeModelConfig,
     updateActiveOpenAIConfig,
@@ -124,6 +274,190 @@ function App() {
     return () => window.removeEventListener('keydown', handleKeyDown)
   }, [view, isConfigOpen, previousChapter?.id, nextChapter?.id, navigateToPreviousChapter, navigateToNextChapter])
 
+  useEffect(() => {
+    if (view !== 'knowledge' || !state.book) return
+
+    void refreshKnowledgeGraph()
+  }, [view, state.book?.id])
+
+  useEffect(() => {
+    if (!state.book) return
+
+    setKgScanStart(activeChapter?.index ?? 1)
+    setKgScanEnd(activeChapter?.index ?? 1)
+  }, [state.book?.id, activeChapter?.id])
+
+  async function refreshKnowledgeGraph() {
+    if (!state.book) return
+
+    setKgError('')
+
+    try {
+      const [overviewResponse, entitiesResponse] = await Promise.all([
+        fetch(`/api/kg/overview?bookId=${encodeURIComponent(state.book.id)}`),
+        fetch(`/api/kg/entities?bookId=${encodeURIComponent(state.book.id)}&limit=50`),
+      ])
+
+      if (!overviewResponse.ok || !entitiesResponse.ok) {
+        throw new Error('知识图谱 API 请求失败。')
+      }
+
+      const overviewPayload = (await overviewResponse.json()) as { overview: KgOverview }
+      const entitiesPayload = (await entitiesResponse.json()) as { entities: KgEntity[] }
+      setKgOverview(overviewPayload.overview)
+      setKgEntities(entitiesPayload.entities)
+    } catch (err) {
+      setKgError(err instanceof Error ? err.message : '读取知识图谱失败。')
+    }
+  }
+
+  async function saveCurrentChapterExtraction() {
+    if (!state.book || !activeChapter) return
+
+    setKgError('')
+
+    try {
+      const extraction = JSON.parse(kgExtractionText) as unknown
+      const response = await fetch(
+        `/api/kg/chapters/${encodeURIComponent(activeChapter.id)}/extraction`,
+        {
+          body: JSON.stringify({
+            bookId: state.book.id,
+            extraction,
+            model: 'manual-json',
+          }),
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          method: 'PUT',
+        },
+      )
+
+      if (!response.ok) {
+        const payload = (await response.json()) as { error?: string }
+        throw new Error(payload.error ?? '保存章节抽取结果失败。')
+      }
+
+      setKgExtractionText('')
+      await refreshKnowledgeGraph()
+    } catch (err) {
+      setKgError(err instanceof Error ? err.message : '保存章节抽取结果失败。')
+    }
+  }
+
+  function getSelectedKgScanChapters(): Chapter[] {
+    if (!state.book) return []
+
+    if (kgScanMode === 'current') {
+      return activeChapter ? [activeChapter] : []
+    }
+
+    if (kgScanMode === 'page') {
+      return pagedChapters
+    }
+
+    if (kgScanMode === 'all') {
+      return state.book.chapters
+    }
+
+    const start = Math.max(1, Math.min(kgScanStart, kgScanEnd))
+    const end = Math.min(state.book.chapters.length, Math.max(kgScanStart, kgScanEnd))
+
+    return state.book.chapters.filter((chapter) => chapter.index >= start && chapter.index <= end)
+  }
+
+  async function saveChapterExtraction(chapter: Chapter, extraction: unknown, model: string) {
+    if (!state.book) return
+
+    const response = await fetch(`/api/kg/chapters/${encodeURIComponent(chapter.id)}/extraction`, {
+      body: JSON.stringify({
+        bookId: state.book.id,
+        extraction,
+        model,
+      }),
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      method: 'PUT',
+    })
+
+    if (!response.ok) {
+      const payload = (await response.json()) as { error?: string }
+      throw new Error(payload.error ?? `保存第 ${chapter.index} 章抽取结果失败。`)
+    }
+  }
+
+  async function generateKnowledgeGraphExtraction(chapter: Chapter): Promise<{ extraction: unknown; model: string }> {
+    if (state.aiProvider === 'openai') {
+      if (!activeOpenAIConfig) throw new Error('请先配置外部模型。')
+
+      return {
+        extraction: await generateKnowledgeGraphWithOpenAI(chapter, activeOpenAIConfig),
+        model: activeOpenAIConfig.model,
+      }
+    }
+
+    return {
+      extraction: await generateKnowledgeGraphWithOllama(
+        chapter,
+        state.ollamaModel,
+        state.ollamaTemperature,
+      ),
+      model: state.ollamaModel,
+    }
+  }
+
+  async function scanSelectedKnowledgeGraphChapters() {
+    const chapters = getSelectedKgScanChapters()
+
+    if (!state.book || !chapters.length) {
+      setKgError('没有可扫描的章节。')
+      return
+    }
+
+    if (
+      chapters.length > 50 &&
+      !window.confirm(`将扫描 ${chapters.length} 章，可能耗时较长并产生模型调用成本。确定开始吗？`)
+    ) {
+      return
+    }
+
+    setKgError('')
+    setIsKgScanning(true)
+
+    try {
+      let nextIndex = 0
+      let completedCount = 0
+      const concurrency = Math.max(1, Math.min(10, Math.floor(kgScanConcurrency)))
+
+      async function worker() {
+        while (nextIndex < chapters.length) {
+          const chapter = chapters[nextIndex]
+          nextIndex += 1
+          setKgScanProgress(
+            `并发 ${concurrency}，正在扫描 ${completedCount + 1}/${chapters.length}：第 ${chapter.index} 章 ${chapter.title}`,
+          )
+
+          const { extraction, model } = await generateKnowledgeGraphExtraction(chapter)
+          await saveChapterExtraction(chapter, extraction, model)
+          completedCount += 1
+
+          setKgScanProgress(`并发 ${concurrency}，已完成 ${completedCount}/${chapters.length}`)
+        }
+      }
+
+      await Promise.all(
+        Array.from({ length: Math.min(concurrency, chapters.length) }, () => worker()),
+      )
+      setKgScanProgress(`已完成 ${chapters.length} 章扫描。`)
+      await refreshKnowledgeGraph()
+    } catch (err) {
+      setKgError(err instanceof Error ? err.message : '章节扫描失败。')
+    } finally {
+      setIsKgScanning(false)
+    }
+  }
+
   if (!isHydrated) {
     return (
       <main className="app-shell">
@@ -142,12 +476,20 @@ function App() {
           <p className="eyebrow">Novel Reader MVP 0.1</p>
           <h1>长篇小说陪读助手</h1>
         </div>
-        {state.book && view === 'reader' && (
-          <button type="button" className="ghost-button home-button" onClick={() => setView('home')}>
-            返回首页
-          </button>
-        )}
         <div className="model-status">
+          {state.book && (
+            <div className="topbar-actions">
+              <button type="button" className="ghost-button home-button" onClick={() => setView('home')}>
+                首页
+              </button>
+              <button type="button" className="ghost-button home-button" onClick={() => setView('reader')}>
+                阅读
+              </button>
+              <button type="button" className="ghost-button home-button" onClick={() => setView('knowledge')}>
+                知识图谱
+              </button>
+            </div>
+          )}
           <span>{activeProviderLabel}</span>
           <small>
             {activeModelName || '未配置'} · Temp {activeTemperature} · 并发 {activeConcurrency} · Thinking{' '}
@@ -424,9 +766,9 @@ function App() {
         <section className="home-panel">
           <div className="import-copy">
             <p className="eyebrow">首页</p>
-            <h2>{state.book ? '本地书架' : '导入一本 txt 小说'}</h2>
+            <h2>{state.books.length ? '本地书架' : '导入一本 txt 小说'}</h2>
             <p>
-              章节切分结果、当前阅读位置和已生成概要都会保存在本机浏览器数据库里。返回首页不会清空数据，只有重新导入会替换当前书籍。
+              章节切分结果、每本书的阅读位置和已生成概要都会保存在本机 SQLite 数据库里。导入新 txt 会新增到书架，不会替换已有书籍。
             </p>
             <label className="encoding-field" htmlFor="import-encoding">
               文本编码
@@ -473,9 +815,43 @@ function App() {
                 <button type="button" onClick={() => setView('reader')}>
                   继续阅读
                 </button>
-                <button type="button" className="ghost-button" onClick={resetBook}>
-                  清空并重新导入
+                <button type="button" className="ghost-button" onClick={() => deleteBook(state.book!.id)}>
+                  删除当前书
                 </button>
+              </div>
+            </div>
+          )}
+
+          {state.books.length > 0 && (
+            <div className="book-card book-list-card">
+              <p className="eyebrow">全部书籍</p>
+              <div className="book-list">
+                {state.books.map((libraryBook) => {
+                  const isActive = libraryBook.book.id === state.activeBookId
+
+                  return (
+                    <div className={isActive ? 'book-row active' : 'book-row'} key={libraryBook.book.id}>
+                      <div>
+                        <h3>{libraryBook.book.title}</h3>
+                        <p>
+                          {libraryBook.book.chapters.length} 章 · 概要 {Object.keys(libraryBook.summaries).length} 章
+                        </p>
+                      </div>
+                      <div className="book-row-actions">
+                        <button type="button" onClick={() => selectBook(libraryBook.book.id)}>
+                          {isActive ? '继续阅读' : '打开'}
+                        </button>
+                        <button
+                          type="button"
+                          className="ghost-button"
+                          onClick={() => deleteBook(libraryBook.book.id)}
+                        >
+                          删除
+                        </button>
+                      </div>
+                    </div>
+                  )
+                })}
               </div>
             </div>
           )}
@@ -489,10 +865,182 @@ function App() {
                 if (file) void handleImport(file)
               }}
             />
-            <span>{state.book ? '导入新 txt 替换当前书' : '选择 txt 文件'}</span>
+            <span>{state.books.length ? '导入新 txt 到书架' : '选择 txt 文件'}</span>
             <small>支持“第1章 / 第一章 / Chapter 1”等常见标题格式</small>
           </label>
           {error && <p className="error">{error}</p>}
+        </section>
+      ) : view === 'knowledge' && state.book ? (
+        <section className="kg-panel">
+          <div className="kg-heading">
+            <div>
+              <p className="eyebrow">知识图谱</p>
+              <h2>{state.book.title}</h2>
+              <p>
+                第一阶段已接入 SQLite 图谱表和 API。现在可以保存章节级抽取 JSON，并查看实体和关系统计。
+              </p>
+            </div>
+            <button type="button" onClick={() => void refreshKnowledgeGraph()}>
+              刷新图谱
+            </button>
+          </div>
+
+          <div className="kg-stats">
+            <div>
+              <span>已扫描章节</span>
+              <strong>{kgOverview?.scanned_chapters ?? 0}</strong>
+            </div>
+            <div>
+              <span>实体</span>
+              <strong>{kgOverview?.entity_count ?? 0}</strong>
+            </div>
+            <div>
+              <span>关系</span>
+              <strong>{kgOverview?.relation_count ?? 0}</strong>
+            </div>
+          </div>
+
+          <section className="kg-card kg-scan-card">
+            <div>
+              <h3>章节扫描</h3>
+              <p>
+                选择要扫描的章节范围。扫描会使用当前模型配置，逐章提取实体和关系，并把每章中间结果保存到 SQLite。
+              </p>
+            </div>
+
+            <div className="kg-scan-options">
+              <label>
+                <input
+                  type="radio"
+                  checked={kgScanMode === 'current'}
+                  onChange={() => setKgScanMode('current')}
+                />
+                当前章节
+              </label>
+              <label>
+                <input
+                  type="radio"
+                  checked={kgScanMode === 'page'}
+                  onChange={() => setKgScanMode('page')}
+                />
+                当前章节页（{pagedChapters.length} 章）
+              </label>
+              <label>
+                <input
+                  type="radio"
+                  checked={kgScanMode === 'range'}
+                  onChange={() => setKgScanMode('range')}
+                />
+                指定范围
+              </label>
+              <label>
+                <input
+                  type="radio"
+                  checked={kgScanMode === 'all'}
+                  onChange={() => setKgScanMode('all')}
+                />
+                完全扫描全书（{state.book.chapters.length} 章）
+              </label>
+            </div>
+
+            {kgScanMode === 'range' && (
+              <div className="kg-range-fields">
+                <label htmlFor="kg-scan-start">
+                  起始章
+                  <input
+                    id="kg-scan-start"
+                    type="number"
+                    min="1"
+                    max={state.book.chapters.length}
+                    value={kgScanStart}
+                    onChange={(event) => setKgScanStart(Number(event.target.value))}
+                  />
+                </label>
+                <label htmlFor="kg-scan-end">
+                  结束章
+                  <input
+                    id="kg-scan-end"
+                    type="number"
+                    min="1"
+                    max={state.book.chapters.length}
+                    value={kgScanEnd}
+                    onChange={(event) => setKgScanEnd(Number(event.target.value))}
+                  />
+                </label>
+              </div>
+            )}
+
+            <div className="kg-range-fields">
+              <label htmlFor="kg-scan-concurrency">
+                并发数
+                <input
+                  id="kg-scan-concurrency"
+                  type="number"
+                  min="1"
+                  max="10"
+                  value={kgScanConcurrency}
+                  onChange={(event) =>
+                    setKgScanConcurrency(Math.max(1, Math.min(10, Number(event.target.value))))
+                  }
+                />
+              </label>
+            </div>
+
+            <div className="kg-scan-actions">
+              <button
+                type="button"
+                disabled={isKgScanning || getSelectedKgScanChapters().length === 0}
+                onClick={() => void scanSelectedKnowledgeGraphChapters()}
+              >
+                {isKgScanning ? '扫描中...' : `开始扫描 ${getSelectedKgScanChapters().length} 章`}
+              </button>
+              {kgScanProgress && <p>{kgScanProgress}</p>}
+            </div>
+          </section>
+
+          <div className="kg-grid">
+            <section className="kg-card">
+              <h3>当前章节中间结果</h3>
+              <p>
+                当前章节：{activeChapter ? `${activeChapter.title}（第 ${activeChapter.index} 章）` : '未选择'}
+              </p>
+              <textarea
+                value={kgExtractionText}
+                placeholder={`粘贴章节抽取 JSON，例如：\n{\n  "entities": [\n    {"name": "韩立", "type": "character", "aliases": [], "description": "本章人物", "confidence": 0.9, "evidence": ["原文短句"]}\n  ],\n  "relations": []\n}`}
+                onChange={(event) => setKgExtractionText(event.target.value)}
+              />
+              <button
+                type="button"
+                disabled={!activeChapter || !kgExtractionText.trim()}
+                onClick={() => void saveCurrentChapterExtraction()}
+              >
+                保存到图谱
+              </button>
+              {kgError && <p className="error">{kgError}</p>}
+            </section>
+
+            <section className="kg-card">
+              <h3>实体列表</h3>
+              {kgEntities.length ? (
+                <div className="kg-entity-list">
+                  {kgEntities.map((entity) => (
+                    <div className="kg-entity-row" key={entity.id}>
+                      <div>
+                        <strong>{entity.name}</strong>
+                        <span>{entity.type}</span>
+                      </div>
+                      <p>
+                        出现 {entity.mentionCount} 次
+                        {entity.aliases.length ? ` · 别名 ${entity.aliases.join('、')}` : ''}
+                      </p>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="empty-summary">还没有实体。先保存一个章节抽取 JSON，后续会接入自动扫描。</p>
+              )}
+            </section>
+          </div>
         </section>
       ) : state.book ? (
         <section className="reader-layout">
@@ -504,8 +1052,8 @@ function App() {
                 共 {state.book.chapters.length} 章，已生成概要 {processedCount} 章，当前：
                 {activeChapter?.title ?? '未开始'}
               </p>
-              <button type="button" className="ghost-button" onClick={resetBook}>
-                重新导入
+              <button type="button" className="ghost-button" onClick={() => setView('home')}>
+                返回书架
               </button>
             </div>
 

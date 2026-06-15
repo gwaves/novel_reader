@@ -3,6 +3,7 @@ import react from '@vitejs/plugin-react'
 
 const host = process.env.NOVEL_READER_HOST || '0.0.0.0'
 const port = Number(process.env.NOVEL_READER_PORT || process.env.PORT || 5173)
+const apiPort = Number(process.env.NOVEL_READER_API_PORT || 5174)
 
 // https://vite.dev/config/
 export default defineConfig({
@@ -24,6 +25,9 @@ export default defineConfig({
     host,
     port,
     strictPort: true,
+    proxy: {
+      '/api': `http://127.0.0.1:${apiPort}`,
+    },
   },
   preview: {
     host,

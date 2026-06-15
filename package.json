@@ -4,10 +4,12 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "dev": "vite",
+    "api": "node --no-warnings scripts/local-db-server.mjs",
+    "dev": "node scripts/dev.mjs",
+    "vite:dev": "vite",
     "reader": "vite preview",
     "reader:build": "npm run build && npm run reader",
-    "build": "tsc -b && vite build",
+    "build": "tsc -p tsconfig.app.json --noEmit && vite build",
     "lint": "eslint .",
     "preview": "vite preview"
   },

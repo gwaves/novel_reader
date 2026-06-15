@@ -23,7 +23,15 @@ export type Summary = {
   generatedBy: 'local' | 'ollama' | 'openai'
 }
 
+export type LibraryBook = {
+  book: Book
+  activeChapterId: string | null
+  summaries: Record<string, Summary>
+}
+
 export type StoredState = {
+  books: LibraryBook[]
+  activeBookId: string | null
   book: Book | null
   activeChapterId: string | null
   summaries: Record<string, Summary>
@@ -40,7 +48,7 @@ export type StoredState = {
 
 export type AIProvider = 'ollama' | 'openai'
 export type ImportEncoding = 'auto' | 'utf-8' | 'gb18030'
-export type AppView = 'home' | 'reader'
+export type AppView = 'home' | 'reader' | 'knowledge'
 export type OllamaModel = {
   name: string
 }
@@ -66,12 +74,14 @@ export type ModelConfigDraft = Pick<
 >
 
 const STORAGE_KEY = 'novel-reader-mvp-state'
-const DB_NAME = 'novel-reader-mvp'
-const DB_STORE = 'state'
-const DB_VERSION = 1
+const LEGACY_DB_NAME = 'novel-reader-mvp'
+const LEGACY_DB_STORE = 'state'
+const LEGACY_DB_VERSION = 1
 export const CHAPTERS_PER_PAGE = 100
 
 const initialState: StoredState = {
+  books: [],
+  activeBookId: null,
   book: null,
   activeChapterId: null,
   summaries: {},
@@ -111,28 +121,28 @@ function generateId(): string {
   return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`
 }
 
-function openDatabase(): Promise<IDBDatabase> {
+function openLegacyDatabase(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
-    const request = indexedDB.open(DB_NAME, DB_VERSION)
+    const request = indexedDB.open(LEGACY_DB_NAME, LEGACY_DB_VERSION)
 
     request.onerror = () => reject(request.error)
     request.onsuccess = () => resolve(request.result)
     request.onupgradeneeded = () => {
       const db = request.result
 
-      if (!db.objectStoreNames.contains(DB_STORE)) {
-        db.createObjectStore(DB_STORE)
+      if (!db.objectStoreNames.contains(LEGACY_DB_STORE)) {
+        db.createObjectStore(LEGACY_DB_STORE)
       }
     }
   })
 }
 
-function loadStateFromDb(): Promise<unknown> {
+function loadStateFromLegacyDb(): Promise<unknown> {
   return new Promise((resolve, reject) => {
-    openDatabase()
+    openLegacyDatabase()
       .then((db) => {
-        const transaction = db.transaction(DB_STORE, 'readonly')
-        const store = transaction.objectStore(DB_STORE)
+        const transaction = db.transaction(LEGACY_DB_STORE, 'readonly')
+        const store = transaction.objectStore(LEGACY_DB_STORE)
         const request = store.get(STORAGE_KEY)
 
         request.onsuccess = () => resolve(request.result ?? null)
@@ -142,24 +152,97 @@ function loadStateFromDb(): Promise<unknown> {
   })
 }
 
-function saveStateToDb(state: StoredState): Promise<void> {
-  return new Promise((resolve, reject) => {
-    openDatabase()
-      .then((db) => {
-        const transaction = db.transaction(DB_STORE, 'readwrite')
-        const store = transaction.objectStore(DB_STORE)
-        const request = store.put(state, STORAGE_KEY)
+async function loadStateFromLocalDb(): Promise<unknown> {
+  const response = await fetch('/api/state')
 
-        request.onsuccess = () => resolve()
-        request.onerror = () => reject(request.error)
-      })
-      .catch(reject)
+  if (!response.ok) {
+    throw new Error('Local database API is not available.')
+  }
+
+  const payload = (await response.json()) as { state?: unknown }
+  return payload.state ?? null
+}
+
+async function saveStateToLocalDb(state: StoredState): Promise<void> {
+  const response = await fetch('/api/state', {
+    body: JSON.stringify({ state }),
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    method: 'PUT',
   })
+
+  if (!response.ok) {
+    throw new Error('Local database API rejected the state payload.')
+  }
+}
+
+function isBook(value: unknown): value is Book {
+  const book = value as Book
+
+  return (
+    Boolean(book) &&
+    typeof book.id === 'string' &&
+    typeof book.title === 'string' &&
+    Array.isArray(book.chapters) &&
+    typeof book.importedAt === 'string'
+  )
+}
+
+function sanitizeSummaries(value: unknown): Record<string, Summary> {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Record<string, Summary>)
+    : {}
+}
+
+function sanitizeLibraryBooks(storedState: Partial<StoredState> & Record<string, unknown>): LibraryBook[] {
+  const fromBooks = Array.isArray(storedState.books)
+    ? storedState.books
+        .map((entry): LibraryBook | null => {
+          const libraryBook = entry as Partial<LibraryBook>
+
+          if (!isBook(libraryBook.book)) return null
+
+          const activeChapterId =
+            typeof libraryBook.activeChapterId === 'string'
+              ? libraryBook.activeChapterId
+              : libraryBook.book.chapters[0]?.id ?? null
+
+          return {
+            book: libraryBook.book,
+            activeChapterId,
+            summaries: sanitizeSummaries(libraryBook.summaries),
+          }
+        })
+        .filter((entry): entry is LibraryBook => Boolean(entry))
+    : []
+
+  if (fromBooks.length) return fromBooks
+
+  if (!isBook(storedState.book)) return []
+
+  return [
+    {
+      book: storedState.book,
+      activeChapterId:
+        typeof storedState.activeChapterId === 'string'
+          ? storedState.activeChapterId
+          : storedState.book.chapters[0]?.id ?? null,
+      summaries: sanitizeSummaries(storedState.summaries),
+    },
+  ]
 }
 
 export function normalizeStoredState(
   storedState: Partial<StoredState> & Record<string, unknown>,
 ): StoredState {
+  const books = sanitizeLibraryBooks(storedState)
+  const activeBookId =
+    typeof storedState.activeBookId === 'string' &&
+    books.some((entry) => entry.book.id === storedState.activeBookId)
+      ? storedState.activeBookId
+      : books[0]?.book.id ?? null
+  const activeLibraryBook = books.find((entry) => entry.book.id === activeBookId) ?? null
   const fallbackThinking =
     typeof storedState.thinkingEnabled === 'boolean' ? storedState.thinkingEnabled : false
   const fallbackOllamaModel =
@@ -190,9 +273,11 @@ export function normalizeStoredState(
       : fallbackOpenAIConfigs[0].id
 
   return {
-    book: storedState.book ?? null,
-    activeChapterId: storedState.activeChapterId ?? null,
-    summaries: storedState.summaries ?? {},
+    books,
+    activeBookId,
+    book: activeLibraryBook?.book ?? null,
+    activeChapterId: activeLibraryBook?.activeChapterId ?? null,
+    summaries: activeLibraryBook?.summaries ?? {},
     aiProvider: storedState.aiProvider === 'openai' ? 'openai' : 'ollama',
     ollamaModel: fallbackOllamaModel,
     ollamaTemperature: fallbackOllamaTemperature,
@@ -776,6 +861,8 @@ export interface UseReaderStateReturn {
   handleImport: (file: File) => Promise<void>
   handleGenerateSummary: (useOllama: boolean) => Promise<void>
   handleBatchGenerateCurrentPage: () => Promise<void>
+  selectBook: (bookId: string) => void
+  deleteBook: (bookId: string) => void
   updateActiveChapter: (id: string) => void
   navigateToPreviousChapter: () => void
   navigateToNextChapter: () => void
@@ -787,6 +874,21 @@ export interface UseReaderStateReturn {
   removeActiveOpenAIConfig: () => void
   saveModelConfig: () => Promise<void>
   getActiveConcurrency: () => number
+}
+
+function syncActiveLibraryBook(
+  current: StoredState,
+  updates: Partial<Pick<LibraryBook, 'activeChapterId' | 'summaries'>>,
+): StoredState {
+  if (!current.activeBookId) return { ...current, ...updates }
+
+  return {
+    ...current,
+    ...updates,
+    books: current.books.map((entry) =>
+      entry.book.id === current.activeBookId ? { ...entry, ...updates } : entry,
+    ),
+  }
 }
 
 export function useReaderState(): UseReaderStateReturn {
@@ -849,14 +951,25 @@ export function useReaderState(): UseReaderStateReturn {
   useEffect(() => {
     localStorage.removeItem(STORAGE_KEY)
 
-    loadStateFromDb()
+    loadStateFromLocalDb()
       .then((storedState) => {
         if (storedState) {
           setState(normalizeStoredState(storedState as Partial<StoredState> & Record<string, unknown>))
+          return
         }
+
+        return loadStateFromLegacyDb().then((legacyState) => {
+          if (!legacyState) return
+
+          const migratedState = normalizeStoredState(
+            legacyState as Partial<StoredState> & Record<string, unknown>,
+          )
+          setState(migratedState)
+          return saveStateToLocalDb(migratedState)
+        })
       })
       .catch(() => {
-        setError('读取本地书库失败，可以重新导入 txt。')
+        setError('读取本地 SQLite 书库失败，请确认本地数据库服务已启动。')
       })
       .finally(() => setIsHydrated(true))
   }, [])
@@ -864,8 +977,8 @@ export function useReaderState(): UseReaderStateReturn {
   useEffect(() => {
     if (!isHydrated) return
 
-    saveStateToDb(state).catch(() => {
-      setError('保存到浏览器数据库失败，可能是浏览器存储空间不足。')
+    saveStateToLocalDb(state).catch(() => {
+      setError('保存到本地 SQLite 失败，请确认本地数据库服务仍在运行。')
     })
   }, [isHydrated, state])
 
@@ -912,9 +1025,16 @@ export function useReaderState(): UseReaderStateReturn {
         chapters,
         importedAt: new Date().toISOString(),
       }
+      const libraryBook: LibraryBook = {
+        book,
+        activeChapterId: chapters[0].id,
+        summaries: {},
+      }
 
       setState((current) => ({
         ...current,
+        books: [...current.books, libraryBook],
+        activeBookId: book.id,
         book,
         activeChapterId: chapters[0].id,
         summaries: {},
@@ -937,13 +1057,14 @@ export function useReaderState(): UseReaderStateReturn {
     try {
       const summary = await generateChapterSummary(activeChapter, useOllama)
 
-      setState((current) => ({
-        ...current,
-        summaries: {
-          ...current.summaries,
-          [activeChapter.id]: summary,
-        },
-      }))
+      setState((current) =>
+        syncActiveLibraryBook(current, {
+          summaries: {
+            ...current.summaries,
+            [activeChapter.id]: summary,
+          },
+        }),
+      )
     } catch (err) {
       setError(err instanceof Error ? err.message : '生成概要失败。')
     } finally {
@@ -1007,13 +1128,14 @@ export function useReaderState(): UseReaderStateReturn {
           const summary = await generateChapterSummary(chapter, true)
           completedCount += 1
 
-          setState((current) => ({
-            ...current,
-            summaries: {
-              ...current.summaries,
-              [chapter.id]: summary,
-            },
-          }))
+          setState((current) =>
+            syncActiveLibraryBook(current, {
+              summaries: {
+                ...current.summaries,
+                [chapter.id]: summary,
+              },
+            }),
+          )
           setBatchProgress(
             `并发 ${concurrency}，已完成 ${completedCount}/${pendingChapters.length}`,
           )
@@ -1041,7 +1163,7 @@ export function useReaderState(): UseReaderStateReturn {
   }
 
   function updateActiveChapter(id: string) {
-    setState((current) => ({ ...current, activeChapterId: id }))
+    setState((current) => syncActiveLibraryBook(current, { activeChapterId: id }))
   }
 
   function navigateToPreviousChapter() {
@@ -1056,10 +1178,48 @@ export function useReaderState(): UseReaderStateReturn {
     updateActiveChapter(nextChapter.id)
   }
 
-  function resetBook() {
-    setState((current) => ({ ...current, book: null, activeChapterId: null, summaries: {} }))
+  function selectBook(bookId: string) {
+    const nextBook = state.books.find((entry) => entry.book.id === bookId)
+    if (!nextBook) return
+
+    setState((current) => ({
+      ...current,
+      activeBookId: nextBook.book.id,
+      book: nextBook.book,
+      activeChapterId: nextBook.activeChapterId ?? nextBook.book.chapters[0]?.id ?? null,
+      summaries: nextBook.summaries,
+    }))
+    setChapterPage(1)
+    setChapterSearch('')
+    setView('reader')
+    setMobileTab('reader')
+  }
+
+  function deleteBook(bookId: string) {
+    setState((current) => {
+      const nextBooks = current.books.filter((entry) => entry.book.id !== bookId)
+      const nextActive =
+        current.activeBookId === bookId
+          ? nextBooks[0] ?? null
+          : nextBooks.find((entry) => entry.book.id === current.activeBookId) ?? null
+
+      return {
+        ...current,
+        books: nextBooks,
+        activeBookId: nextActive?.book.id ?? null,
+        book: nextActive?.book ?? null,
+        activeChapterId: nextActive?.activeChapterId ?? nextActive?.book.chapters[0]?.id ?? null,
+        summaries: nextActive?.summaries ?? {},
+      }
+    })
     setView('home')
     setMobileTab('bookshelf')
+    setChapterSearch('')
+  }
+
+  function resetBook() {
+    if (!state.activeBookId) return
+    deleteBook(state.activeBookId)
   }
 
   function openModelConfig() {
@@ -1234,6 +1394,8 @@ export function useReaderState(): UseReaderStateReturn {
     handleImport,
     handleGenerateSummary,
     handleBatchGenerateCurrentPage,
+    selectBook,
+    deleteBook,
     updateActiveChapter,
     navigateToPreviousChapter,
     navigateToNextChapter,

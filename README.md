@@ -6,7 +6,7 @@ A local-first web reader for long Chinese web novels.
 
 - Import `.txt` novels with automatic UTF-8 / GB18030 decoding.
 - Split long novels into chapters and paginate the chapter list by 100 chapters.
-- Persist imported chapters, reading progress, summaries, and settings in browser IndexedDB.
+- Persist imported chapters, reading progress, summaries, and settings in a local SQLite database under `~/.novel_reader`.
 - Generate single-chapter or current-page summaries.
 - Configure local Ollama models and OpenAI-compatible external models.
 - Support multiple external model profiles, each with its own model name, base URL, API key, temperature, and thinking mode.
@@ -19,6 +19,12 @@ npm install
 npm run dev
 ```
 
+This starts both the Vite frontend and the local database API. The SQLite database is stored at:
+
+```text
+~/.novel_reader/novel_reader.sqlite
+```
+
 Open:
 
 ```text
@@ -29,6 +35,12 @@ You can change the dev server port:
 
 ```bash
 NOVEL_READER_PORT=5174 npm run dev
+```
+
+You can change the database location or API port:
+
+```bash
+NOVEL_READER_DATA_DIR=/path/to/data NOVEL_READER_API_PORT=6174 npm run dev
 ```
 
 ## Reader Instance
@@ -59,4 +71,4 @@ npm run build
 
 ## Notes
 
-This is currently a personal local web app. API keys are stored in the browser's local IndexedDB, so do not use this deployment model for a public multi-user service without adding a backend proxy and secret management.
+This is currently a personal local web app. API keys are stored in the local SQLite database, so do not use this deployment model for a public multi-user service without adding a backend proxy, authentication, and secret management.

@@ -1,0 +1,863 @@
+import { mkdirSync } from 'node:fs'
+import { createServer } from 'node:http'
+import { homedir } from 'node:os'
+import { dirname, join } from 'node:path'
+import { randomUUID } from 'node:crypto'
+import { DatabaseSync } from 'node:sqlite'
+
+const host = process.env.NOVEL_READER_API_HOST || '127.0.0.1'
+const port = Number(process.env.NOVEL_READER_API_PORT || 5174)
+const dataDir = process.env.NOVEL_READER_DATA_DIR || join(homedir(), '.novel_reader')
+const dbPath = process.env.NOVEL_READER_DB_PATH || join(dataDir, 'novel_reader.sqlite')
+const stateKey = 'novel-reader-mvp-state'
+
+mkdirSync(dirname(dbPath), { recursive: true })
+
+const db = new DatabaseSync(dbPath)
+db.exec(`
+  PRAGMA journal_mode = WAL;
+  PRAGMA foreign_keys = ON;
+
+  CREATE TABLE IF NOT EXISTS app_state (
+    key TEXT PRIMARY KEY,
+    value_json TEXT NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  );
+
+  CREATE TABLE IF NOT EXISTS books (
+    id TEXT PRIMARY KEY,
+    title TEXT NOT NULL,
+    imported_at TEXT NOT NULL,
+    chapter_count INTEGER NOT NULL DEFAULT 0,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  );
+
+  CREATE TABLE IF NOT EXISTS chapters (
+    id TEXT PRIMARY KEY,
+    book_id TEXT NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+    chapter_index INTEGER NOT NULL,
+    title TEXT NOT NULL,
+    content TEXT NOT NULL,
+    word_count INTEGER NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  );
+
+  CREATE TABLE IF NOT EXISTS summaries (
+    chapter_id TEXT PRIMARY KEY REFERENCES chapters(id) ON DELETE CASCADE,
+    short TEXT NOT NULL,
+    detail TEXT NOT NULL,
+    key_points_json TEXT NOT NULL,
+    skippable TEXT NOT NULL,
+    generated_by TEXT NOT NULL,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_chapters_book_index ON chapters(book_id, chapter_index);
+  CREATE INDEX IF NOT EXISTS idx_chapters_title ON chapters(title);
+
+  CREATE TABLE IF NOT EXISTS kg_scan_jobs (
+    id TEXT PRIMARY KEY,
+    book_id TEXT NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+    scope TEXT NOT NULL,
+    status TEXT NOT NULL,
+    total_chapters INTEGER NOT NULL DEFAULT 0,
+    completed_chapters INTEGER NOT NULL DEFAULT 0,
+    failed_chapters INTEGER NOT NULL DEFAULT 0,
+    error TEXT,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  );
+
+  CREATE TABLE IF NOT EXISTS kg_chapter_extractions (
+    chapter_id TEXT PRIMARY KEY REFERENCES chapters(id) ON DELETE CASCADE,
+    book_id TEXT NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+    status TEXT NOT NULL,
+    extraction_json TEXT,
+    error TEXT,
+    model TEXT,
+    scanned_at TEXT,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  );
+
+  CREATE TABLE IF NOT EXISTS kg_entities (
+    id TEXT PRIMARY KEY,
+    book_id TEXT NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+    type TEXT NOT NULL,
+    name TEXT NOT NULL,
+    normalized_name TEXT NOT NULL,
+    aliases_json TEXT NOT NULL DEFAULT '[]',
+    description TEXT,
+    confidence REAL NOT NULL DEFAULT 0,
+    first_chapter_index INTEGER,
+    last_chapter_index INTEGER,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(book_id, type, normalized_name)
+  );
+
+  CREATE TABLE IF NOT EXISTS kg_entity_mentions (
+    id TEXT PRIMARY KEY,
+    entity_id TEXT NOT NULL REFERENCES kg_entities(id) ON DELETE CASCADE,
+    book_id TEXT NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+    chapter_id TEXT NOT NULL REFERENCES chapters(id) ON DELETE CASCADE,
+    chapter_index INTEGER NOT NULL,
+    evidence TEXT,
+    confidence REAL NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  );
+
+  CREATE TABLE IF NOT EXISTS kg_relations (
+    id TEXT PRIMARY KEY,
+    book_id TEXT NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+    source_entity_id TEXT NOT NULL REFERENCES kg_entities(id) ON DELETE CASCADE,
+    target_entity_id TEXT NOT NULL REFERENCES kg_entities(id) ON DELETE CASCADE,
+    type TEXT NOT NULL,
+    description TEXT,
+    confidence REAL NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(book_id, source_entity_id, target_entity_id, type)
+  );
+
+  CREATE TABLE IF NOT EXISTS kg_relation_mentions (
+    id TEXT PRIMARY KEY,
+    relation_id TEXT NOT NULL REFERENCES kg_relations(id) ON DELETE CASCADE,
+    book_id TEXT NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+    chapter_id TEXT NOT NULL REFERENCES chapters(id) ON DELETE CASCADE,
+    chapter_index INTEGER NOT NULL,
+    evidence TEXT,
+    confidence REAL NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  );
+
+  CREATE INDEX IF NOT EXISTS idx_kg_entities_book_type ON kg_entities(book_id, type);
+  CREATE INDEX IF NOT EXISTS idx_kg_entities_name ON kg_entities(book_id, normalized_name);
+  CREATE INDEX IF NOT EXISTS idx_kg_entity_mentions_entity ON kg_entity_mentions(entity_id, chapter_index);
+  CREATE INDEX IF NOT EXISTS idx_kg_relations_book_type ON kg_relations(book_id, type);
+  CREATE INDEX IF NOT EXISTS idx_kg_relation_mentions_relation ON kg_relation_mentions(relation_id, chapter_index);
+`)
+
+const getStateStatement = db.prepare('SELECT value_json FROM app_state WHERE key = ?')
+const saveStateStatement = db.prepare(`
+  INSERT INTO app_state (key, value_json, updated_at)
+  VALUES (?, ?, CURRENT_TIMESTAMP)
+  ON CONFLICT(key) DO UPDATE SET
+    value_json = excluded.value_json,
+    updated_at = excluded.updated_at
+`)
+const listBookIdsStatement = db.prepare('SELECT id FROM books')
+const deleteBookStatement = db.prepare('DELETE FROM books WHERE id = ?')
+const upsertBookStatement = db.prepare(`
+  INSERT INTO books (id, title, imported_at, chapter_count, updated_at)
+  VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP)
+  ON CONFLICT(id) DO UPDATE SET
+    title = excluded.title,
+    imported_at = excluded.imported_at,
+    chapter_count = excluded.chapter_count,
+    updated_at = excluded.updated_at
+`)
+const upsertChapterStatement = db.prepare(`
+  INSERT INTO chapters (id, book_id, chapter_index, title, content, word_count, updated_at)
+  VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+  ON CONFLICT(id) DO UPDATE SET
+    book_id = excluded.book_id,
+    chapter_index = excluded.chapter_index,
+    title = excluded.title,
+    content = excluded.content,
+    word_count = excluded.word_count,
+    updated_at = excluded.updated_at
+`)
+const deleteSummariesForBookStatement = db.prepare(`
+  DELETE FROM summaries
+  WHERE chapter_id IN (
+    SELECT id FROM chapters WHERE book_id = ?
+  )
+`)
+const insertSummaryStatement = db.prepare(`
+  INSERT INTO summaries (
+    chapter_id,
+    short,
+    detail,
+    key_points_json,
+    skippable,
+    generated_by,
+    updated_at
+  )
+  VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+`)
+const getChapterStatement = db.prepare(`
+  SELECT id, book_id, chapter_index, title
+  FROM chapters
+  WHERE id = ?
+`)
+const getKgOverviewStatement = db.prepare(`
+  SELECT
+    (SELECT COUNT(*) FROM kg_chapter_extractions WHERE book_id = ?) AS scanned_chapters,
+    (SELECT COUNT(*) FROM kg_entities WHERE book_id = ?) AS entity_count,
+    (SELECT COUNT(*) FROM kg_relations WHERE book_id = ?) AS relation_count
+`)
+const listKgEntitiesStatement = db.prepare(`
+  SELECT
+    e.id,
+    e.book_id AS bookId,
+    e.type,
+    e.name,
+    e.aliases_json AS aliasesJson,
+    e.description,
+    e.confidence,
+    e.first_chapter_index AS firstChapterIndex,
+    e.last_chapter_index AS lastChapterIndex,
+    COUNT(m.id) AS mentionCount
+  FROM kg_entities e
+  LEFT JOIN kg_entity_mentions m ON m.entity_id = e.id
+  WHERE e.book_id = ?
+    AND (? = '' OR e.type = ?)
+    AND (? = '' OR e.normalized_name LIKE ? OR e.aliases_json LIKE ?)
+  GROUP BY e.id
+  ORDER BY mentionCount DESC, e.first_chapter_index ASC, e.name ASC
+  LIMIT ?
+`)
+const getKgEntityStatement = db.prepare(`
+  SELECT
+    id,
+    book_id AS bookId,
+    type,
+    name,
+    aliases_json AS aliasesJson,
+    description,
+    confidence,
+    first_chapter_index AS firstChapterIndex,
+    last_chapter_index AS lastChapterIndex
+  FROM kg_entities
+  WHERE id = ?
+`)
+const getKgEntityMentionsStatement = db.prepare(`
+  SELECT
+    m.id,
+    m.chapter_id AS chapterId,
+    m.chapter_index AS chapterIndex,
+    c.title AS chapterTitle,
+    m.evidence,
+    m.confidence
+  FROM kg_entity_mentions m
+  JOIN chapters c ON c.id = m.chapter_id
+  WHERE m.entity_id = ?
+  ORDER BY m.chapter_index ASC
+  LIMIT 100
+`)
+const getKgEntityRelationsStatement = db.prepare(`
+  SELECT
+    r.id,
+    r.type,
+    r.description,
+    r.confidence,
+    source.id AS sourceId,
+    source.name AS sourceName,
+    source.type AS sourceType,
+    target.id AS targetId,
+    target.name AS targetName,
+    target.type AS targetType
+  FROM kg_relations r
+  JOIN kg_entities source ON source.id = r.source_entity_id
+  JOIN kg_entities target ON target.id = r.target_entity_id
+  WHERE r.source_entity_id = ? OR r.target_entity_id = ?
+  ORDER BY r.confidence DESC, r.updated_at DESC
+  LIMIT 100
+`)
+const getKgChapterExtractionStatement = db.prepare(`
+  SELECT
+    chapter_id AS chapterId,
+    book_id AS bookId,
+    status,
+    extraction_json AS extractionJson,
+    error,
+    model,
+    scanned_at AS scannedAt,
+    updated_at AS updatedAt
+  FROM kg_chapter_extractions
+  WHERE chapter_id = ?
+`)
+const upsertKgChapterExtractionStatement = db.prepare(`
+  INSERT INTO kg_chapter_extractions (
+    chapter_id,
+    book_id,
+    status,
+    extraction_json,
+    error,
+    model,
+    scanned_at,
+    updated_at
+  )
+  VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+  ON CONFLICT(chapter_id) DO UPDATE SET
+    book_id = excluded.book_id,
+    status = excluded.status,
+    extraction_json = excluded.extraction_json,
+    error = excluded.error,
+    model = excluded.model,
+    scanned_at = excluded.scanned_at,
+    updated_at = excluded.updated_at
+`)
+const deleteKgEntityMentionsForChapterStatement = db.prepare(`
+  DELETE FROM kg_entity_mentions
+  WHERE chapter_id = ?
+`)
+const deleteKgRelationMentionsForChapterStatement = db.prepare(`
+  DELETE FROM kg_relation_mentions
+  WHERE chapter_id = ?
+`)
+const findKgEntityStatement = db.prepare(`
+  SELECT id, aliases_json AS aliasesJson, description, confidence, first_chapter_index AS firstChapterIndex, last_chapter_index AS lastChapterIndex
+  FROM kg_entities
+  WHERE book_id = ? AND type = ? AND normalized_name = ?
+`)
+const insertKgEntityStatement = db.prepare(`
+  INSERT INTO kg_entities (
+    id,
+    book_id,
+    type,
+    name,
+    normalized_name,
+    aliases_json,
+    description,
+    confidence,
+    first_chapter_index,
+    last_chapter_index,
+    created_at,
+    updated_at
+  )
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+`)
+const updateKgEntityStatement = db.prepare(`
+  UPDATE kg_entities
+  SET
+    aliases_json = ?,
+    description = COALESCE(NULLIF(?, ''), description),
+    confidence = MAX(confidence, ?),
+    first_chapter_index = CASE
+      WHEN first_chapter_index IS NULL THEN ?
+      ELSE MIN(first_chapter_index, ?)
+    END,
+    last_chapter_index = CASE
+      WHEN last_chapter_index IS NULL THEN ?
+      ELSE MAX(last_chapter_index, ?)
+    END,
+    updated_at = CURRENT_TIMESTAMP
+  WHERE id = ?
+`)
+const insertKgEntityMentionStatement = db.prepare(`
+  INSERT INTO kg_entity_mentions (
+    id,
+    entity_id,
+    book_id,
+    chapter_id,
+    chapter_index,
+    evidence,
+    confidence,
+    created_at
+  )
+  VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+`)
+const findKgRelationStatement = db.prepare(`
+  SELECT id, confidence
+  FROM kg_relations
+  WHERE book_id = ? AND source_entity_id = ? AND target_entity_id = ? AND type = ?
+`)
+const insertKgRelationStatement = db.prepare(`
+  INSERT INTO kg_relations (
+    id,
+    book_id,
+    source_entity_id,
+    target_entity_id,
+    type,
+    description,
+    confidence,
+    created_at,
+    updated_at
+  )
+  VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+`)
+const updateKgRelationStatement = db.prepare(`
+  UPDATE kg_relations
+  SET
+    description = COALESCE(NULLIF(?, ''), description),
+    confidence = MAX(confidence, ?),
+    updated_at = CURRENT_TIMESTAMP
+  WHERE id = ?
+`)
+const insertKgRelationMentionStatement = db.prepare(`
+  INSERT INTO kg_relation_mentions (
+    id,
+    relation_id,
+    book_id,
+    chapter_id,
+    chapter_index,
+    evidence,
+    confidence,
+    created_at
+  )
+  VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+`)
+
+function sendJson(response, statusCode, payload) {
+  response.writeHead(statusCode, {
+    'Access-Control-Allow-Headers': 'Content-Type',
+    'Access-Control-Allow-Methods': 'GET,PUT,POST,OPTIONS',
+    'Access-Control-Allow-Origin': '*',
+    'Content-Type': 'application/json; charset=utf-8',
+  })
+  response.end(JSON.stringify(payload))
+}
+
+function readJson(request) {
+  return new Promise((resolve, reject) => {
+    let body = ''
+
+    request.setEncoding('utf8')
+    request.on('data', (chunk) => {
+      body += chunk
+
+      if (body.length > 1024 * 1024 * 250) {
+        request.destroy()
+        reject(new Error('Request body is too large.'))
+      }
+    })
+    request.on('end', () => {
+      try {
+        resolve(body ? JSON.parse(body) : null)
+      } catch (error) {
+        reject(error)
+      }
+    })
+    request.on('error', reject)
+  })
+}
+
+function normalizeName(name) {
+  return String(name ?? '')
+    .trim()
+    .replace(/\s+/g, '')
+    .toLowerCase()
+}
+
+function safeJsonParse(value, fallback) {
+  if (!value) return fallback
+
+  try {
+    return JSON.parse(value)
+  } catch {
+    return fallback
+  }
+}
+
+function uniqueStrings(values) {
+  return Array.from(
+    new Set(
+      values
+        .filter((value) => typeof value === 'string')
+        .map((value) => value.trim())
+        .filter(Boolean),
+    ),
+  )
+}
+
+function normalizeConfidence(value) {
+  return typeof value === 'number' && Number.isFinite(value)
+    ? Math.max(0, Math.min(1, value))
+    : 0
+}
+
+function normalizeEntityType(type) {
+  const allowed = new Set(['character', 'sect', 'item', 'skill', 'location', 'beast', 'event', 'other'])
+  return allowed.has(type) ? type : 'other'
+}
+
+function normalizeRelationType(type) {
+  const allowed = new Set([
+    'knows',
+    'ally_of',
+    'enemy_of',
+    'master_of',
+    'disciple_of',
+    'member_of',
+    'belongs_to',
+    'owns',
+    'uses',
+    'learns',
+    'created_by',
+    'located_in',
+    'appears_with',
+    'transforms_into',
+    'related_to',
+  ])
+  return allowed.has(type) ? type : 'related_to'
+}
+
+function firstEvidence(evidence) {
+  if (Array.isArray(evidence)) return uniqueStrings(evidence).slice(0, 3).join('\n')
+  return typeof evidence === 'string' ? evidence.trim() : ''
+}
+
+function mapEntityRow(row) {
+  return {
+    ...row,
+    aliases: safeJsonParse(row.aliasesJson, []),
+    aliasesJson: undefined,
+  }
+}
+
+function upsertKgEntity(bookId, chapter, entity) {
+  const name = String(entity?.name ?? '').trim()
+  if (!name) return null
+
+  const type = normalizeEntityType(entity.type)
+  const normalizedName = normalizeName(name)
+  const aliases = uniqueStrings(Array.isArray(entity.aliases) ? entity.aliases : [])
+  const description = typeof entity.description === 'string' ? entity.description.trim() : ''
+  const confidence = normalizeConfidence(entity.confidence)
+  const existing = findKgEntityStatement.get(bookId, type, normalizedName)
+
+  if (!existing) {
+    const id = randomUUID()
+    insertKgEntityStatement.run(
+      id,
+      bookId,
+      type,
+      name,
+      normalizedName,
+      JSON.stringify(aliases),
+      description,
+      confidence,
+      chapter.chapter_index,
+      chapter.chapter_index,
+    )
+    insertKgEntityMentionStatement.run(
+      randomUUID(),
+      id,
+      bookId,
+      chapter.id,
+      chapter.chapter_index,
+      firstEvidence(entity.evidence),
+      confidence,
+    )
+    return id
+  }
+
+  const mergedAliases = uniqueStrings([...safeJsonParse(existing.aliasesJson, []), ...aliases])
+  updateKgEntityStatement.run(
+    JSON.stringify(mergedAliases),
+    description,
+    confidence,
+    chapter.chapter_index,
+    chapter.chapter_index,
+    chapter.chapter_index,
+    chapter.chapter_index,
+    existing.id,
+  )
+  insertKgEntityMentionStatement.run(
+    randomUUID(),
+    existing.id,
+    bookId,
+    chapter.id,
+    chapter.chapter_index,
+    firstEvidence(entity.evidence),
+    confidence,
+  )
+  return existing.id
+}
+
+function applyChapterExtraction(bookId, chapterId, extraction, model) {
+  const chapter = getChapterStatement.get(chapterId)
+
+  if (!chapter || chapter.book_id !== bookId) {
+    throw new Error('Chapter does not belong to the requested book.')
+  }
+
+  const entities = Array.isArray(extraction?.entities) ? extraction.entities : []
+  const relations = Array.isArray(extraction?.relations) ? extraction.relations : []
+  const entityIdByKey = new Map()
+
+  deleteKgRelationMentionsForChapterStatement.run(chapterId)
+  deleteKgEntityMentionsForChapterStatement.run(chapterId)
+  upsertKgChapterExtractionStatement.run(
+    chapterId,
+    bookId,
+    'completed',
+    JSON.stringify(extraction),
+    null,
+    typeof model === 'string' ? model : null,
+  )
+
+  for (const entity of entities) {
+    const entityId = upsertKgEntity(bookId, chapter, entity)
+    if (!entityId) continue
+
+    entityIdByKey.set(`${normalizeEntityType(entity.type)}:${normalizeName(entity.name)}`, entityId)
+    entityIdByKey.set(normalizeName(entity.name), entityId)
+
+    for (const alias of uniqueStrings(Array.isArray(entity.aliases) ? entity.aliases : [])) {
+      entityIdByKey.set(normalizeName(alias), entityId)
+    }
+  }
+
+  for (const relation of relations) {
+    const sourceName = normalizeName(relation?.source)
+    const targetName = normalizeName(relation?.target)
+    const sourceId = entityIdByKey.get(sourceName)
+    const targetId = entityIdByKey.get(targetName)
+
+    if (!sourceId || !targetId || sourceId === targetId) continue
+
+    const relationType = normalizeRelationType(relation.type)
+    const confidence = normalizeConfidence(relation.confidence)
+    const description = typeof relation.description === 'string' ? relation.description.trim() : ''
+    const existing = findKgRelationStatement.get(bookId, sourceId, targetId, relationType)
+    const relationId = existing?.id ?? randomUUID()
+
+    if (existing) {
+      updateKgRelationStatement.run(description, confidence, relationId)
+    } else {
+      insertKgRelationStatement.run(
+        relationId,
+        bookId,
+        sourceId,
+        targetId,
+        relationType,
+        description,
+        confidence,
+      )
+    }
+
+    insertKgRelationMentionStatement.run(
+      randomUUID(),
+      relationId,
+      bookId,
+      chapterId,
+      chapter.chapter_index,
+      firstEvidence(relation.evidence),
+      confidence,
+    )
+  }
+}
+
+function saveChapterExtractionTransaction(bookId, chapterId, extraction, model) {
+  db.exec('BEGIN')
+
+  try {
+    applyChapterExtraction(bookId, chapterId, extraction, model)
+    db.exec('COMMIT')
+  } catch (error) {
+    db.exec('ROLLBACK')
+    throw error
+  }
+}
+
+function mirrorStructuredState(state) {
+  const libraryBooks = Array.isArray(state?.books)
+    ? state.books
+    : state?.book
+      ? [{ book: state.book, summaries: state.summaries ?? {} }]
+      : []
+  const nextBookIds = new Set(libraryBooks.map((entry) => entry?.book?.id).filter(Boolean))
+
+  for (const row of listBookIdsStatement.all()) {
+    if (!nextBookIds.has(row.id)) {
+      deleteBookStatement.run(row.id)
+    }
+  }
+
+  for (const libraryBook of libraryBooks) {
+    const { book, summaries = {} } = libraryBook
+    if (!book) continue
+
+    upsertBookStatement.run(book.id, book.title, book.importedAt, book.chapters.length)
+    deleteSummariesForBookStatement.run(book.id)
+
+    for (const chapter of book.chapters) {
+      upsertChapterStatement.run(
+        chapter.id,
+        book.id,
+        chapter.index,
+        chapter.title,
+        chapter.content,
+        chapter.wordCount,
+      )
+
+      const summary = summaries[chapter.id]
+      if (summary) {
+        insertSummaryStatement.run(
+          chapter.id,
+          summary.short,
+          summary.detail,
+          JSON.stringify(summary.keyPoints ?? []),
+          summary.skippable,
+          summary.generatedBy,
+        )
+      }
+    }
+  }
+}
+
+function saveStateTransaction(state) {
+  db.exec('BEGIN')
+
+  try {
+    saveStateStatement.run(stateKey, JSON.stringify(state))
+    mirrorStructuredState(state)
+    db.exec('COMMIT')
+  } catch (error) {
+    db.exec('ROLLBACK')
+    throw error
+  }
+}
+
+const server = createServer(async (request, response) => {
+  if (request.method === 'OPTIONS') {
+    sendJson(response, 204, {})
+    return
+  }
+
+  const url = new URL(request.url ?? '/', `http://${request.headers.host ?? 'localhost'}`)
+
+  try {
+    if (request.method === 'GET' && url.pathname === '/api/state') {
+      const row = getStateStatement.get(stateKey)
+      sendJson(response, 200, { state: row ? JSON.parse(row.value_json) : null })
+      return
+    }
+
+    if (request.method === 'PUT' && url.pathname === '/api/state') {
+      const body = await readJson(request)
+
+      if (!body || typeof body !== 'object' || !('state' in body)) {
+        sendJson(response, 400, { error: 'Missing state payload.' })
+        return
+      }
+
+      saveStateTransaction(body.state)
+      sendJson(response, 200, { ok: true })
+      return
+    }
+
+    if (request.method === 'GET' && url.pathname === '/api/storage') {
+      sendJson(response, 200, { dataDir, dbPath })
+      return
+    }
+
+    if (request.method === 'GET' && url.pathname === '/api/kg/overview') {
+      const bookId = url.searchParams.get('bookId')
+
+      if (!bookId) {
+        sendJson(response, 400, { error: 'Missing bookId.' })
+        return
+      }
+
+      const overview = getKgOverviewStatement.get(bookId, bookId, bookId)
+      sendJson(response, 200, { overview })
+      return
+    }
+
+    if (request.method === 'GET' && url.pathname === '/api/kg/entities') {
+      const bookId = url.searchParams.get('bookId')
+
+      if (!bookId) {
+        sendJson(response, 400, { error: 'Missing bookId.' })
+        return
+      }
+
+      const type = url.searchParams.get('type') ?? ''
+      const query = normalizeName(url.searchParams.get('q') ?? '')
+      const limit = Math.max(1, Math.min(200, Number(url.searchParams.get('limit') ?? 100)))
+      const rows = listKgEntitiesStatement.all(
+        bookId,
+        type,
+        type,
+        query,
+        `%${query}%`,
+        `%${query}%`,
+        limit,
+      )
+
+      sendJson(response, 200, { entities: rows.map(mapEntityRow) })
+      return
+    }
+
+    const entityMatch = url.pathname.match(/^\/api\/kg\/entities\/([^/]+)$/)
+    if (request.method === 'GET' && entityMatch) {
+      const entityId = decodeURIComponent(entityMatch[1])
+      const entity = getKgEntityStatement.get(entityId)
+
+      if (!entity) {
+        sendJson(response, 404, { error: 'Entity not found.' })
+        return
+      }
+
+      sendJson(response, 200, {
+        entity: mapEntityRow(entity),
+        mentions: getKgEntityMentionsStatement.all(entityId),
+        relations: getKgEntityRelationsStatement.all(entityId, entityId),
+      })
+      return
+    }
+
+    const chapterExtractionMatch = url.pathname.match(/^\/api\/kg\/chapters\/([^/]+)\/extraction$/)
+    if (chapterExtractionMatch) {
+      const chapterId = decodeURIComponent(chapterExtractionMatch[1])
+
+      if (request.method === 'GET') {
+        const extraction = getKgChapterExtractionStatement.get(chapterId)
+        sendJson(response, 200, {
+          extraction: extraction
+            ? {
+                ...extraction,
+                extraction: safeJsonParse(extraction.extractionJson, null),
+                extractionJson: undefined,
+              }
+            : null,
+        })
+        return
+      }
+
+      if (request.method === 'PUT') {
+        const body = await readJson(request)
+        const bookId = body?.bookId
+        const extraction = body?.extraction
+
+        if (!bookId || typeof bookId !== 'string') {
+          sendJson(response, 400, { error: 'Missing bookId.' })
+          return
+        }
+
+        if (!extraction || typeof extraction !== 'object') {
+          sendJson(response, 400, { error: 'Missing extraction payload.' })
+          return
+        }
+
+        saveChapterExtractionTransaction(bookId, chapterId, extraction, body.model)
+        sendJson(response, 200, { ok: true })
+        return
+      }
+    }
+
+    sendJson(response, 404, { error: 'Not found.' })
+  } catch (error) {
+    sendJson(response, 500, {
+      error: error instanceof Error ? error.message : 'Internal server error.',
+    })
+  }
+})
+
+server.listen(port, host, () => {
+  console.log(`Novel Reader API listening on http://${host}:${port}`)
+  console.log(`SQLite database: ${dbPath}`)
+})
+
+function shutdown() {
+  server.close(() => {
+    db.close()
+    process.exit(0)
+  })
+}
+
+process.on('SIGINT', shutdown)
+process.on('SIGTERM', shutdown)
