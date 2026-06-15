@@ -19,6 +19,47 @@ type KgEntity = {
   mentionCount: number
 }
 
+type KgMention = {
+  id: string
+  chapterId: string
+  chapterIndex: number
+  chapterTitle: string
+  evidence: string | null
+  confidence: number
+}
+
+type KgRelation = {
+  id: string
+  type: string
+  description: string | null
+  confidence: number
+  sourceId: string
+  sourceName: string
+  sourceType: string
+  targetId: string
+  targetName: string
+  targetType: string
+  mentionCount?: number
+}
+
+type KgEntityDetail = {
+  entity: KgEntity
+  mentions: KgMention[]
+  relations: KgRelation[]
+}
+
+type KgScannedChapter = {
+  chapterId: string
+  chapterIndex: number
+  title: string
+  status: string
+  model: string | null
+  scannedAt: string | null
+  updatedAt: string
+  entityCount: number
+  relationCount: number
+}
+
 type KgScanMode = 'current' | 'page' | 'range' | 'all'
 
 function buildKnowledgeGraphPrompt(chapter: Chapter): string {
@@ -70,6 +111,17 @@ function parseJsonObject(text: string): unknown {
     if (!match) throw new Error('模型没有返回 JSON 对象。')
     return JSON.parse(match[0])
   }
+}
+
+function formatLocalDateTime(timestamp: string): string {
+  const normalizedTimestamp = /^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/.test(timestamp)
+    ? `${timestamp.replace(' ', 'T')}Z`
+    : timestamp
+
+  return new Intl.DateTimeFormat('zh-CN', {
+    dateStyle: 'short',
+    timeStyle: 'short',
+  }).format(new Date(normalizedTimestamp))
 }
 
 async function generateKnowledgeGraphWithOllama(
@@ -147,6 +199,12 @@ function App() {
   const activeChapterButtonRef = useRef<HTMLButtonElement | null>(null)
   const [kgOverview, setKgOverview] = useState<KgOverview | null>(null)
   const [kgEntities, setKgEntities] = useState<KgEntity[]>([])
+  const [kgRelations, setKgRelations] = useState<KgRelation[]>([])
+  const [kgEntityDetail, setKgEntityDetail] = useState<KgEntityDetail | null>(null)
+  const [kgScannedChapters, setKgScannedChapters] = useState<KgScannedChapter[]>([])
+  const [showKgScannedChapters, setShowKgScannedChapters] = useState(false)
+  const [showKgEntities, setShowKgEntities] = useState(false)
+  const [showKgRelations, setShowKgRelations] = useState(false)
   const [kgExtractionText, setKgExtractionText] = useState('')
   const [kgError, setKgError] = useState('')
   const [kgScanMode, setKgScanMode] = useState<KgScanMode>('current')
@@ -293,19 +351,25 @@ function App() {
     setKgError('')
 
     try {
-      const [overviewResponse, entitiesResponse] = await Promise.all([
+      const [overviewResponse, entitiesResponse, relationsResponse, chaptersResponse] = await Promise.all([
         fetch(`/api/kg/overview?bookId=${encodeURIComponent(state.book.id)}`),
         fetch(`/api/kg/entities?bookId=${encodeURIComponent(state.book.id)}&limit=50`),
+        fetch(`/api/kg/relations?bookId=${encodeURIComponent(state.book.id)}&limit=150`),
+        fetch(`/api/kg/chapters?bookId=${encodeURIComponent(state.book.id)}`),
       ])
 
-      if (!overviewResponse.ok || !entitiesResponse.ok) {
+      if (!overviewResponse.ok || !entitiesResponse.ok || !relationsResponse.ok || !chaptersResponse.ok) {
         throw new Error('知识图谱 API 请求失败。')
       }
 
       const overviewPayload = (await overviewResponse.json()) as { overview: KgOverview }
       const entitiesPayload = (await entitiesResponse.json()) as { entities: KgEntity[] }
+      const relationsPayload = (await relationsResponse.json()) as { relations: KgRelation[] }
+      const chaptersPayload = (await chaptersResponse.json()) as { chapters: KgScannedChapter[] }
       setKgOverview(overviewPayload.overview)
       setKgEntities(entitiesPayload.entities)
+      setKgRelations(relationsPayload.relations)
+      setKgScannedChapters(chaptersPayload.chapters)
     } catch (err) {
       setKgError(err instanceof Error ? err.message : '读取知识图谱失败。')
     }
@@ -345,6 +409,27 @@ function App() {
     }
   }
 
+  async function openKgEntityDetail(entityId: string) {
+    setKgError('')
+
+    try {
+      const response = await fetch(`/api/kg/entities/${encodeURIComponent(entityId)}`)
+
+      if (!response.ok) {
+        throw new Error('读取实体详情失败。')
+      }
+
+      setKgEntityDetail((await response.json()) as KgEntityDetail)
+    } catch (err) {
+      setKgError(err instanceof Error ? err.message : '读取实体详情失败。')
+    }
+  }
+
+  function openChapterFromKnowledgeGraph(chapterId: string) {
+    updateActiveChapter(chapterId)
+    setView('reader')
+  }
+
   function getSelectedKgScanChapters(): Chapter[] {
     if (!state.book) return []
 
@@ -364,6 +449,16 @@ function App() {
     const end = Math.min(state.book.chapters.length, Math.max(kgScanStart, kgScanEnd))
 
     return state.book.chapters.filter((chapter) => chapter.index >= start && chapter.index <= end)
+  }
+
+  function getPendingKgScanChapters(): Chapter[] {
+    const completedChapterIds = new Set(
+      kgScannedChapters
+        .filter((chapter) => chapter.status === 'completed')
+        .map((chapter) => chapter.chapterId),
+    )
+
+    return getSelectedKgScanChapters().filter((chapter) => !completedChapterIds.has(chapter.id))
   }
 
   async function saveChapterExtraction(chapter: Chapter, extraction: unknown, model: string) {
@@ -408,16 +503,24 @@ function App() {
   }
 
   async function scanSelectedKnowledgeGraphChapters() {
-    const chapters = getSelectedKgScanChapters()
+    const selectedChapters = getSelectedKgScanChapters()
+    const chapters = getPendingKgScanChapters()
 
-    if (!state.book || !chapters.length) {
+    if (!state.book || !selectedChapters.length) {
       setKgError('没有可扫描的章节。')
+      return
+    }
+
+    if (!chapters.length) {
+      setKgScanProgress(`选中的 ${selectedChapters.length} 章都已经扫描完成。`)
       return
     }
 
     if (
       chapters.length > 50 &&
-      !window.confirm(`将扫描 ${chapters.length} 章，可能耗时较长并产生模型调用成本。确定开始吗？`)
+      !window.confirm(
+        `已跳过 ${selectedChapters.length - chapters.length} 个已完成章节，将扫描剩余 ${chapters.length} 章，可能耗时较长并产生模型调用成本。确定开始吗？`,
+      )
     ) {
       return
     }
@@ -886,19 +989,200 @@ function App() {
           </div>
 
           <div className="kg-stats">
-            <div>
+            <button
+              type="button"
+              className={showKgScannedChapters ? 'active' : ''}
+              onClick={() => setShowKgScannedChapters((current) => !current)}
+            >
               <span>已扫描章节</span>
               <strong>{kgOverview?.scanned_chapters ?? 0}</strong>
-            </div>
-            <div>
+            </button>
+            <button
+              type="button"
+              className={showKgEntities ? 'active' : ''}
+              onClick={() => {
+                setShowKgEntities((current) => !current)
+                setShowKgRelations(false)
+              }}
+            >
               <span>实体</span>
               <strong>{kgOverview?.entity_count ?? 0}</strong>
-            </div>
-            <div>
+            </button>
+            <button
+              type="button"
+              className={showKgRelations ? 'active' : ''}
+              onClick={() => {
+                setShowKgRelations((current) => !current)
+                setShowKgEntities(false)
+              }}
+            >
               <span>关系</span>
               <strong>{kgOverview?.relation_count ?? 0}</strong>
-            </div>
+            </button>
           </div>
+
+          {showKgScannedChapters && (
+            <section className="kg-card kg-scanned-card">
+              <div className="kg-card-heading">
+                <div>
+                  <h3>已扫描章节</h3>
+                  <p>点击章节可跳转到阅读器中的对应章节。</p>
+                </div>
+                <button type="button" className="ghost-button" onClick={() => setShowKgScannedChapters(false)}>
+                  收起
+                </button>
+              </div>
+              {kgScannedChapters.length ? (
+                <div className="kg-scanned-list">
+                  {kgScannedChapters.map((chapter) => (
+                    <button
+                      type="button"
+                      className="kg-scanned-row"
+                      key={chapter.chapterId}
+                      onClick={() => {
+                        updateActiveChapter(chapter.chapterId)
+                        setView('reader')
+                      }}
+                    >
+                      <div>
+                        <strong>
+                          第 {chapter.chapterIndex} 章 · {chapter.title}
+                        </strong>
+                        <span>{chapter.status}</span>
+                      </div>
+                      <p>
+                        实体 {chapter.entityCount} · 关系 {chapter.relationCount}
+                        {chapter.model ? ` · ${chapter.model}` : ''}
+                        {' · '}
+                        {formatLocalDateTime(chapter.scannedAt ?? chapter.updatedAt)}
+                      </p>
+                    </button>
+                  ))}
+                </div>
+              ) : (
+                <p className="empty-summary">还没有已扫描章节。</p>
+              )}
+            </section>
+          )}
+
+          {showKgEntities && (
+            <section className="kg-card kg-scanned-card">
+              <div className="kg-card-heading">
+                <div>
+                  <h3>实体内容</h3>
+                  <p>点击实体可查看描述、出现章节和相关关系。</p>
+                </div>
+                <button type="button" className="ghost-button" onClick={() => setShowKgEntities(false)}>
+                  收起
+                </button>
+              </div>
+              {kgEntities.length ? (
+                <div className="kg-entity-list kg-large-list">
+                  {kgEntities.map((entity) => (
+                    <button
+                      type="button"
+                      className="kg-entity-row kg-clickable-row"
+                      key={entity.id}
+                      onClick={() => void openKgEntityDetail(entity.id)}
+                    >
+                      <div>
+                        <strong>{entity.name}</strong>
+                        <span>{entity.type}</span>
+                      </div>
+                      <p>
+                        出现 {entity.mentionCount} 次
+                        {entity.aliases.length ? ` · 别名 ${entity.aliases.join('、')}` : ''}
+                        {entity.description ? ` · ${entity.description}` : ''}
+                      </p>
+                    </button>
+                  ))}
+                </div>
+              ) : (
+                <p className="empty-summary">还没有实体。</p>
+              )}
+            </section>
+          )}
+
+          {kgEntityDetail && (
+            <section className="kg-card kg-detail-card">
+              <div className="kg-card-heading">
+                <div>
+                  <h3>{kgEntityDetail.entity.name}</h3>
+                  <p>
+                    {kgEntityDetail.entity.type}
+                    {kgEntityDetail.entity.aliases.length ? ` · 别名 ${kgEntityDetail.entity.aliases.join('、')}` : ''}
+                  </p>
+                </div>
+                <button type="button" className="ghost-button" onClick={() => setKgEntityDetail(null)}>
+                  关闭详情
+                </button>
+              </div>
+              {kgEntityDetail.entity.description && <p>{kgEntityDetail.entity.description}</p>}
+              <div className="kg-detail-grid">
+                <div>
+                  <h4>出现章节</h4>
+                  {kgEntityDetail.mentions.map((mention) => (
+                    <button
+                      type="button"
+                      className="kg-mini-row"
+                      key={mention.id}
+                      onClick={() => openChapterFromKnowledgeGraph(mention.chapterId)}
+                    >
+                      <strong>
+                        第 {mention.chapterIndex} 章 · {mention.chapterTitle}
+                      </strong>
+                      {mention.evidence && <span>{mention.evidence}</span>}
+                    </button>
+                  ))}
+                </div>
+                <div>
+                  <h4>相关关系</h4>
+                  {kgEntityDetail.relations.map((relation) => (
+                    <div className="kg-mini-row" key={relation.id}>
+                      <strong>
+                        {relation.sourceName} -- {relation.type} -- {relation.targetName}
+                      </strong>
+                      {relation.description && <span>{relation.description}</span>}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </section>
+          )}
+
+          {showKgRelations && (
+            <section className="kg-card kg-scanned-card">
+              <div className="kg-card-heading">
+                <div>
+                  <h3>关系内容</h3>
+                  <p>展示当前书中抽取出的实体关系，按出现证据数量和置信度排序。</p>
+                </div>
+                <button type="button" className="ghost-button" onClick={() => setShowKgRelations(false)}>
+                  收起
+                </button>
+              </div>
+              {kgRelations.length ? (
+                <div className="kg-relation-list">
+                  {kgRelations.map((relation) => (
+                    <div className="kg-relation-row" key={relation.id}>
+                      <div>
+                        <strong>{relation.sourceName}</strong>
+                        <span>{relation.type}</span>
+                        <strong>{relation.targetName}</strong>
+                      </div>
+                      <p>
+                        {relation.description || '暂无描述'}
+                        {' · '}
+                        证据 {relation.mentionCount ?? 0} · 置信度 {Math.round(relation.confidence * 100)}%
+                      </p>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="empty-summary">还没有关系。</p>
+              )}
+            </section>
+          )}
 
           <section className="kg-card kg-scan-card">
             <div>
@@ -992,8 +1276,12 @@ function App() {
                 disabled={isKgScanning || getSelectedKgScanChapters().length === 0}
                 onClick={() => void scanSelectedKnowledgeGraphChapters()}
               >
-                {isKgScanning ? '扫描中...' : `开始扫描 ${getSelectedKgScanChapters().length} 章`}
+                {isKgScanning ? '扫描中...' : `开始扫描 ${getPendingKgScanChapters().length} 章`}
               </button>
+              <p>
+                已选 {getSelectedKgScanChapters().length} 章，已完成将自动跳过{' '}
+                {getSelectedKgScanChapters().length - getPendingKgScanChapters().length} 章。
+              </p>
               {kgScanProgress && <p>{kgScanProgress}</p>}
             </div>
           </section>
@@ -1024,7 +1312,12 @@ function App() {
               {kgEntities.length ? (
                 <div className="kg-entity-list">
                   {kgEntities.map((entity) => (
-                    <div className="kg-entity-row" key={entity.id}>
+                    <button
+                      type="button"
+                      className="kg-entity-row kg-clickable-row"
+                      key={entity.id}
+                      onClick={() => void openKgEntityDetail(entity.id)}
+                    >
                       <div>
                         <strong>{entity.name}</strong>
                         <span>{entity.type}</span>
@@ -1033,7 +1326,7 @@ function App() {
                         出现 {entity.mentionCount} 次
                         {entity.aliases.length ? ` · 别名 ${entity.aliases.join('、')}` : ''}
                       </p>
-                    </div>
+                    </button>
                   ))}
                 </div>
               ) : (

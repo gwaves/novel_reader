@@ -264,6 +264,28 @@ const getKgEntityRelationsStatement = db.prepare(`
   ORDER BY r.confidence DESC, r.updated_at DESC
   LIMIT 100
 `)
+const listKgRelationsStatement = db.prepare(`
+  SELECT
+    r.id,
+    r.type,
+    r.description,
+    r.confidence,
+    source.id AS sourceId,
+    source.name AS sourceName,
+    source.type AS sourceType,
+    target.id AS targetId,
+    target.name AS targetName,
+    target.type AS targetType,
+    COUNT(mention.id) AS mentionCount
+  FROM kg_relations r
+  JOIN kg_entities source ON source.id = r.source_entity_id
+  JOIN kg_entities target ON target.id = r.target_entity_id
+  LEFT JOIN kg_relation_mentions mention ON mention.relation_id = r.id
+  WHERE r.book_id = ?
+  GROUP BY r.id
+  ORDER BY mentionCount DESC, r.confidence DESC, r.updated_at DESC
+  LIMIT ?
+`)
 const getKgChapterExtractionStatement = db.prepare(`
   SELECT
     chapter_id AS chapterId,
@@ -276,6 +298,31 @@ const getKgChapterExtractionStatement = db.prepare(`
     updated_at AS updatedAt
   FROM kg_chapter_extractions
   WHERE chapter_id = ?
+`)
+const listKgScannedChaptersStatement = db.prepare(`
+  SELECT
+    extraction.chapter_id AS chapterId,
+    extraction.book_id AS bookId,
+    chapter.chapter_index AS chapterIndex,
+    chapter.title AS title,
+    extraction.status,
+    extraction.model,
+    extraction.scanned_at AS scannedAt,
+    extraction.updated_at AS updatedAt,
+    (
+      SELECT COUNT(DISTINCT mention.entity_id)
+      FROM kg_entity_mentions mention
+      WHERE mention.chapter_id = extraction.chapter_id
+    ) AS entityCount,
+    (
+      SELECT COUNT(DISTINCT relation_mention.relation_id)
+      FROM kg_relation_mentions relation_mention
+      WHERE relation_mention.chapter_id = extraction.chapter_id
+    ) AS relationCount
+  FROM kg_chapter_extractions extraction
+  JOIN chapters chapter ON chapter.id = extraction.chapter_id
+  WHERE extraction.book_id = ?
+  ORDER BY chapter.chapter_index ASC
 `)
 const upsertKgChapterExtractionStatement = db.prepare(`
   INSERT INTO kg_chapter_extractions (
@@ -757,6 +804,20 @@ const server = createServer(async (request, response) => {
       return
     }
 
+    if (request.method === 'GET' && url.pathname === '/api/kg/chapters') {
+      const bookId = url.searchParams.get('bookId')
+
+      if (!bookId) {
+        sendJson(response, 400, { error: 'Missing bookId.' })
+        return
+      }
+
+      sendJson(response, 200, {
+        chapters: listKgScannedChaptersStatement.all(bookId),
+      })
+      return
+    }
+
     if (request.method === 'GET' && url.pathname === '/api/kg/entities') {
       const bookId = url.searchParams.get('bookId')
 
@@ -779,6 +840,21 @@ const server = createServer(async (request, response) => {
       )
 
       sendJson(response, 200, { entities: rows.map(mapEntityRow) })
+      return
+    }
+
+    if (request.method === 'GET' && url.pathname === '/api/kg/relations') {
+      const bookId = url.searchParams.get('bookId')
+
+      if (!bookId) {
+        sendJson(response, 400, { error: 'Missing bookId.' })
+        return
+      }
+
+      const limit = Math.max(1, Math.min(300, Number(url.searchParams.get('limit') ?? 150)))
+      sendJson(response, 200, {
+        relations: listKgRelationsStatement.all(bookId, limit),
+      })
       return
     }
 
