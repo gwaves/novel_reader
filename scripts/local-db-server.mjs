@@ -196,6 +196,35 @@ const getKgOverviewStatement = db.prepare(`
     (SELECT COUNT(*) FROM kg_entities WHERE book_id = ?) AS entity_count,
     (SELECT COUNT(*) FROM kg_relations WHERE book_id = ?) AS relation_count
 `)
+const insertKgScanJobStatement = db.prepare(`
+  INSERT INTO kg_scan_jobs (id, book_id, scope, status, total_chapters, completed_chapters, failed_chapters, error, created_at, updated_at)
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+`)
+const updateKgScanJobStatement = db.prepare(`
+  UPDATE kg_scan_jobs
+  SET completed_chapters = ?, failed_chapters = ?, error = ?, status = ?, updated_at = CURRENT_TIMESTAMP
+  WHERE id = ?
+`)
+const getLatestKgScanJobStatement = db.prepare(`
+  SELECT
+    id,
+    book_id AS bookId,
+    scope,
+    status,
+    total_chapters AS totalChapters,
+    completed_chapters AS completedChapters,
+    failed_chapters AS failedChapters,
+    error,
+    created_at AS createdAt,
+    updated_at AS updatedAt
+  FROM kg_scan_jobs
+  WHERE book_id = ?
+  ORDER BY created_at DESC
+  LIMIT 1
+`)
+const deleteKgScanJobsForBookStatement = db.prepare(`
+  DELETE FROM kg_scan_jobs WHERE book_id = ?
+`)
 const listKgEntitiesStatement = db.prepare(`
   SELECT
     e.id,
@@ -855,6 +884,71 @@ const server = createServer(async (request, response) => {
       sendJson(response, 200, {
         relations: listKgRelationsStatement.all(bookId, limit),
       })
+      return
+    }
+
+    if (request.method === 'POST' && url.pathname === '/api/kg/scan/jobs') {
+      const body = await readJson(request)
+      const bookId = body?.bookId
+      const scope = body?.scope
+      const totalChapters = body?.totalChapters
+
+      if (!bookId || typeof bookId !== 'string') {
+        sendJson(response, 400, { error: 'Missing bookId.' })
+        return
+      }
+      if (!scope || typeof scope !== 'string') {
+        sendJson(response, 400, { error: 'Missing scope.' })
+        return
+      }
+      if (typeof totalChapters !== 'number' || totalChapters < 1) {
+        sendJson(response, 400, { error: 'Invalid totalChapters.' })
+        return
+      }
+
+      deleteKgScanJobsForBookStatement.run(bookId)
+      const id = randomUUID()
+      insertKgScanJobStatement.run(id, bookId, scope, 'running', totalChapters, 0, 0, null)
+      const job = getLatestKgScanJobStatement.get(bookId)
+      sendJson(response, 200, { job })
+      return
+    }
+
+    if (request.method === 'GET' && url.pathname === '/api/kg/scan/status') {
+      const bookId = url.searchParams.get('bookId')
+
+      if (!bookId) {
+        sendJson(response, 400, { error: 'Missing bookId.' })
+        return
+      }
+
+      const job = getLatestKgScanJobStatement.get(bookId)
+      sendJson(response, 200, { job: job ?? null })
+      return
+    }
+
+    const scanJobUpdateMatch = url.pathname.match(/^\/api\/kg\/scan\/jobs\/([^/]+)$/)
+    if (request.method === 'PUT' && scanJobUpdateMatch) {
+      const jobId = decodeURIComponent(scanJobUpdateMatch[1])
+      const body = await readJson(request)
+      const status = body?.status
+      const completedChapters = body?.completedChapters
+      const failedChapters = body?.failedChapters
+      const error = body?.error
+
+      if (!status || typeof status !== 'string') {
+        sendJson(response, 400, { error: 'Missing status.' })
+        return
+      }
+
+      updateKgScanJobStatement.run(
+        typeof completedChapters === 'number' ? completedChapters : 0,
+        typeof failedChapters === 'number' ? failedChapters : 0,
+        typeof error === 'string' ? error : null,
+        status,
+        jobId,
+      )
+      sendJson(response, 200, { ok: true })
       return
     }
 

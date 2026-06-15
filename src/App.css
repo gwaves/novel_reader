@@ -578,6 +578,24 @@ button:disabled {
   font-size: 13px;
 }
 
+.kg-scan-status {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.03);
+}
+
+.kg-scan-status p {
+  margin: 0;
+}
+
+.kg-scan-status .error {
+  color: #d32f2f;
+}
+
 .kg-card textarea {
   width: 100%;
   min-height: 260px;
