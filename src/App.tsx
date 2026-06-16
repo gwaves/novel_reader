@@ -232,7 +232,7 @@ function App() {
   const [kgScanMode, setKgScanMode] = useState<KgScanMode>('current')
   const [kgScanStart, setKgScanStart] = useState(1)
   const [kgScanEnd, setKgScanEnd] = useState(1)
-  const [kgScanConcurrency, setKgScanConcurrency] = useState(1)
+  const [kgScanConcurrency, setKgScanConcurrency] = useState(10)
   const [isKgScanning, setIsKgScanning] = useState(false)
   const [kgScanProgress, setKgScanProgress] = useState('')
   const [kgScanJob, setKgScanJob] = useState<KgScanJob | null>(null)
