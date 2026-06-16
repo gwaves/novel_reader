@@ -145,6 +145,18 @@ try {
   // columns may already exist
 }
 
+// Migration: add review_status for low-confidence review queue
+try {
+  db.exec(`ALTER TABLE kg_entities ADD COLUMN review_status TEXT`)
+} catch {
+  // column may already exist
+}
+try {
+  db.exec(`ALTER TABLE kg_relations ADD COLUMN review_status TEXT`)
+} catch {
+  // column may already exist
+}
+
 const getStateStatement = db.prepare('SELECT value_json FROM app_state WHERE key = ?')
 const saveStateStatement = db.prepare(`
   INSERT INTO app_state (key, value_json, updated_at)
@@ -325,6 +337,61 @@ const listKgRelationsStatement = db.prepare(`
   GROUP BY r.id
   ORDER BY mentionCount DESC, r.confidence DESC, r.updated_at DESC
   LIMIT ?
+`)
+const listKgReviewEntitiesStatement = db.prepare(`
+  SELECT
+    e.id,
+    e.book_id AS bookId,
+    e.type,
+    e.name,
+    e.aliases_json AS aliasesJson,
+    e.description,
+    e.confidence,
+    e.first_chapter_index AS firstChapterIndex,
+    e.last_chapter_index AS lastChapterIndex,
+    COUNT(m.id) AS mentionCount
+  FROM kg_entities e
+  LEFT JOIN kg_entity_mentions m ON m.entity_id = e.id
+  WHERE e.book_id = ? AND e.review_status IS NULL
+  GROUP BY e.id
+  ORDER BY e.confidence ASC, e.updated_at DESC
+  LIMIT ?
+`)
+const listKgReviewRelationsStatement = db.prepare(`
+  SELECT
+    r.id,
+    r.type,
+    r.description,
+    r.confidence,
+    r.first_chapter_index AS firstChapterIndex,
+    r.last_chapter_index AS lastChapterIndex,
+    source.id AS sourceId,
+    source.name AS sourceName,
+    source.type AS sourceType,
+    target.id AS targetId,
+    target.name AS targetName,
+    target.type AS targetType,
+    COUNT(mention.id) AS mentionCount
+  FROM kg_relations r
+  JOIN kg_entities source ON source.id = r.source_entity_id
+  JOIN kg_entities target ON target.id = r.target_entity_id
+  LEFT JOIN kg_relation_mentions mention ON mention.relation_id = r.id
+  WHERE r.book_id = ? AND r.review_status IS NULL
+  GROUP BY r.id
+  ORDER BY r.confidence ASC, r.updated_at DESC
+  LIMIT ?
+`)
+const markKgEntitiesReviewedStatement = db.prepare(`
+  UPDATE kg_entities SET review_status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?
+`)
+const markKgRelationsReviewedStatement = db.prepare(`
+  UPDATE kg_relations SET review_status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?
+`)
+const resetKgEntityReviewStatusStatement = db.prepare(`
+  UPDATE kg_entities SET review_status = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?
+`)
+const resetKgRelationReviewStatusStatement = db.prepare(`
+  UPDATE kg_relations SET review_status = NULL, updated_at = CURRENT_TIMESTAMP WHERE id = ?
 `)
 const getKgRelationStatement = db.prepare(`
   SELECT
@@ -719,12 +786,119 @@ function firstEvidence(evidence) {
   return typeof evidence === 'string' ? evidence.trim() : ''
 }
 
+const REVIEW_CONFIDENCE_THRESHOLD = 0.6
+const REVIEW_ALIAS_MAX_LENGTH = 30
+
+function computeEntityReviewReasons(entity) {
+  const reasons = []
+  const confidence = normalizeConfidence(entity?.confidence)
+  if (confidence < REVIEW_CONFIDENCE_THRESHOLD) {
+    reasons.push('confidence_low')
+  }
+  if (entity?.type === 'other') {
+    reasons.push('type_unclear')
+  }
+  const normalizedName = normalizeName(entity?.name)
+  if (normalizedName.length <= 1) {
+    reasons.push('name_too_short')
+  }
+  const description = typeof entity?.description === 'string' ? entity.description.trim() : ''
+  if (!description) {
+    reasons.push('description_missing')
+  }
+  const aliases = uniqueStrings(Array.isArray(entity?.aliases) ? entity.aliases : [])
+  for (const alias of aliases) {
+    const normalizedAlias = normalizeName(alias)
+    if (
+      normalizedAlias === normalizedName ||
+      normalizedAlias.length > REVIEW_ALIAS_MAX_LENGTH ||
+      /\d|[\p{P}\p{S}]/u.test(alias)
+    ) {
+      reasons.push('alias_suspicious')
+      break
+    }
+  }
+  return reasons
+}
+
+function computeRelationReviewReasons(relation) {
+  const reasons = []
+  const confidence = normalizeConfidence(relation?.confidence)
+  if (confidence < REVIEW_CONFIDENCE_THRESHOLD) {
+    reasons.push('confidence_low')
+  }
+  if (relation?.type === 'related_to') {
+    reasons.push('type_unclear')
+  }
+  const description = typeof relation?.description === 'string' ? relation.description.trim() : ''
+  if (!description) {
+    reasons.push('description_missing')
+  }
+  if (relation?.source_entity_id && relation?.source_entity_id === relation?.target_entity_id) {
+    reasons.push('self_loop')
+  }
+  return reasons
+}
+
 function mapEntityRow(row) {
   return {
     ...row,
     aliases: safeJsonParse(row.aliasesJson, []),
     aliasesJson: undefined,
   }
+}
+
+function mapReviewEntity(row) {
+  const entity = mapEntityRow(row)
+  return {
+    ...entity,
+    reasons: computeEntityReviewReasons(entity),
+  }
+}
+
+function mapReviewRelation(row) {
+  return {
+    ...row,
+    reasons: computeRelationReviewReasons(row),
+  }
+}
+
+function getKgReviewQueue(bookId, kind, limit) {
+  const safeLimit = Math.max(1, Math.min(500, Number(limit) || 200))
+  const entities =
+    kind === 'relations'
+      ? []
+      : listKgReviewEntitiesStatement.all(bookId, safeLimit).map(mapReviewEntity)
+  const relations =
+    kind === 'entities'
+      ? []
+      : listKgReviewRelationsStatement.all(bookId, safeLimit).map(mapReviewRelation)
+
+  return {
+    entities: entities.filter((entity) => entity.reasons.length > 0),
+    relations: relations.filter((relation) => relation.reasons.length > 0),
+  }
+}
+
+function markKgReviewStatus(ids, kind, status) {
+  if (!Array.isArray(ids) || ids.length === 0) {
+    throw new Error('ids must be a non-empty array.')
+  }
+  if (!['entities', 'relations'].includes(kind)) {
+    throw new Error('kind must be entities or relations.')
+  }
+  if (!['approved', 'ignored'].includes(status)) {
+    throw new Error('status must be approved or ignored.')
+  }
+
+  const statement =
+    kind === 'entities' ? markKgEntitiesReviewedStatement : markKgRelationsReviewedStatement
+
+  for (const id of ids) {
+    statement.run(status, id)
+  }
+
+  return { marked: ids.length }
 }
 
 function upsertKgEntity(bookId, chapter, entity) {
@@ -965,6 +1139,9 @@ function updateKgEntityTransaction(entityId, payload) {
     entityId,
   )
 
+  // Editing an entity may fix the issues that flagged it for review.
+  resetKgEntityReviewStatusStatement.run(entityId)
+
   return getKgEntityWithAliases(entityId)
 }
 
@@ -1044,6 +1221,9 @@ function mergeKgEntitiesTransaction(sourceId, targetId) {
     targetId,
   )
 
+  // Merging changes the target entity, so re-evaluate its review status.
+  resetKgEntityReviewStatusStatement.run(targetId)
+
   deleteKgEntityStatement.run(sourceId)
 
   // 4. Recompute target chapter range
@@ -1115,6 +1295,10 @@ function updateKgRelationTransaction(relationId, payload) {
   }
 
   updateKgRelationFullStatement.run(type, description, relationId)
+
+  // Editing a relation may fix the issues that flagged it for review.
+  resetKgRelationReviewStatusStatement.run(relationId)
+
   return getKgRelationStatement.get(relationId)
 }
 
@@ -1275,6 +1459,51 @@ const server = createServer(async (request, response) => {
       sendJson(response, 200, {
         relations: listKgRelationsStatement.all(bookId, type, type, limit),
       })
+      return
+    }
+
+    if (request.method === 'GET' && url.pathname === '/api/kg/review-queue') {
+      const bookId = url.searchParams.get('bookId')
+
+      if (!bookId) {
+        sendJson(response, 400, { error: 'Missing bookId.' })
+        return
+      }
+
+      const kind = url.searchParams.get('kind') ?? 'all'
+      const limit = Number(url.searchParams.get('limit') ?? 200)
+      sendJson(response, 200, getKgReviewQueue(bookId, kind, limit))
+      return
+    }
+
+    if (request.method === 'POST' && url.pathname === '/api/kg/review-queue/mark') {
+      const body = await readJson(request)
+      const ids = body?.ids
+      const kind = body?.kind
+      const status = body?.status
+
+      if (!Array.isArray(ids) || ids.length === 0 || !ids.every((id) => typeof id === 'string')) {
+        sendJson(response, 400, { error: 'ids must be a non-empty array of strings.' })
+        return
+      }
+      if (kind !== 'entities' && kind !== 'relations') {
+        sendJson(response, 400, { error: 'kind must be entities or relations.' })
+        return
+      }
+      if (status !== 'approved' && status !== 'ignored') {
+        sendJson(response, 400, { error: 'status must be approved or ignored.' })
+        return
+      }
+
+      db.exec('BEGIN')
+      try {
+        const result = markKgReviewStatus(ids, kind, status)
+        db.exec('COMMIT')
+        sendJson(response, 200, result)
+      } catch (error) {
+        db.exec('ROLLBACK')
+        sendJson(response, 400, { error: error instanceof Error ? error.message : 'Mark failed.' })
+      }
       return
     }
 

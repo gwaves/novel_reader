@@ -57,6 +57,15 @@ type KgRelationDetail = {
   mentions: KgMention[]
 }
 
+type KgReviewEntity = KgEntity & { reasons: string[] }
+
+type KgReviewRelation = KgRelation & { reasons: string[] }
+
+type KgReviewQueueResponse = {
+  entities: KgReviewEntity[]
+  relations: KgReviewRelation[]
+}
+
 type KgScannedChapter = {
   chapterId: string
   chapterIndex: number
@@ -144,6 +153,18 @@ function formatLocalDateTime(timestamp: string): string {
     dateStyle: 'short',
     timeStyle: 'short',
   }).format(new Date(normalizedTimestamp))
+}
+
+function formatReviewReason(reason: string): string {
+  const labels: Record<string, string> = {
+    alias_suspicious: '别名可疑',
+    confidence_low: '置信度低',
+    description_missing: '缺少描述',
+    name_too_short: '名称过短',
+    self_loop: '自环关系',
+    type_unclear: '类型模糊',
+  }
+  return labels[reason] ?? reason
 }
 
 async function generateKnowledgeGraphWithOllama(
@@ -257,6 +278,11 @@ function App() {
   const [kgBatchMergeTargetId, setKgBatchMergeTargetId] = useState('')
   const [kgBatchMergeCandidates, setKgBatchMergeCandidates] = useState<KgEntity[]>([])
   const [kgBatchMergeQuery, setKgBatchMergeQuery] = useState('')
+  const [showKgReviewQueue, setShowKgReviewQueue] = useState(false)
+  const [kgReviewEntities, setKgReviewEntities] = useState<KgReviewEntity[]>([])
+  const [kgReviewRelations, setKgReviewRelations] = useState<KgReviewRelation[]>([])
+  const [kgReviewKind, setKgReviewKind] = useState<'all' | 'entity' | 'relation'>('all')
+  const [kgReviewSelectedIds, setKgReviewSelectedIds] = useState<string[]>([])
 
   const {
     state,
@@ -406,6 +432,12 @@ function App() {
   }, [view, state.book?.id, kgRelationTypeFilter])
 
   useEffect(() => {
+    if (view !== 'knowledge' || !state.book || !showKgReviewQueue) return
+    void fetchKgReviewQueue()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [view, state.book?.id, showKgReviewQueue, kgReviewKind])
+
+  useEffect(() => {
     if (kgEntityEdit) {
       setKgEntityEditName(kgEntityEdit.name)
       setKgEntityEditType(kgEntityEdit.type)
@@ -476,7 +508,7 @@ function App() {
       const chaptersPayload = (await chaptersResponse.json()) as { chapters: KgScannedChapter[] }
       setKgOverview(overviewPayload.overview)
       setKgScannedChapters(chaptersPayload.chapters)
-      await Promise.all([fetchKgEntities(), fetchKgRelations()])
+      await Promise.all([fetchKgEntities(), fetchKgRelations(), fetchKgReviewQueue()])
     } catch (err) {
       setKgError(err instanceof Error ? err.message : '读取知识图谱失败。')
     }
@@ -509,6 +541,22 @@ function App() {
       setKgRelations(payload.relations)
     } catch (err) {
       setKgError(err instanceof Error ? err.message : '读取关系列表失败。')
+    }
+  }
+
+  async function fetchKgReviewQueue() {
+    if (!state.book) return
+
+    try {
+      const response = await fetch(
+        `/api/kg/review-queue?bookId=${encodeURIComponent(state.book.id)}&kind=${encodeURIComponent(kgReviewKind)}&limit=300`,
+      )
+      if (!response.ok) throw new Error('读取复审队列失败。')
+      const payload = (await response.json()) as KgReviewQueueResponse
+      setKgReviewEntities(payload.entities)
+      setKgReviewRelations(payload.relations)
+    } catch (err) {
+      setKgError(err instanceof Error ? err.message : '读取复审队列失败。')
     }
   }
 
@@ -596,7 +644,7 @@ function App() {
       }
 
       setKgEntityEdit(null)
-      await Promise.all([fetchKgEntities(), openKgEntityDetail(entityId)])
+      await Promise.all([fetchKgEntities(), openKgEntityDetail(entityId), fetchKgReviewQueue()])
     } catch (err) {
       setKgError(err instanceof Error ? err.message : '更新实体失败。')
     }
@@ -718,7 +766,7 @@ function App() {
       }
 
       setKgRelationEdit(null)
-      await Promise.all([fetchKgRelations(), openKgRelationDetail(relationId)])
+      await Promise.all([fetchKgRelations(), openKgRelationDetail(relationId), fetchKgReviewQueue()])
     } catch (err) {
       setKgError(err instanceof Error ? err.message : '更新关系失败。')
     }
@@ -802,6 +850,70 @@ function App() {
       await openKgEntityDetail(result.entity.id)
     } catch (err) {
       setKgError(err instanceof Error ? err.message : '批量合并失败。')
+    }
+  }
+
+  const kgReviewItems = kgReviewKind === 'all'
+    ? [...kgReviewEntities, ...kgReviewRelations]
+    : kgReviewKind === 'entity'
+      ? kgReviewEntities
+      : kgReviewRelations
+
+  function isKgReviewEntity(item: KgReviewEntity | KgReviewRelation): item is KgReviewEntity {
+    return !('sourceName' in item)
+  }
+
+  function toggleKgReviewSelection(itemId: string) {
+    setKgReviewSelectedIds((current) =>
+      current.includes(itemId) ? current.filter((id) => id !== itemId) : [...current, itemId],
+    )
+  }
+
+  function selectAllKgReviewItems() {
+    setKgReviewSelectedIds(kgReviewItems.map((item) => item.id))
+  }
+
+  function clearKgReviewSelection() {
+    setKgReviewSelectedIds([])
+  }
+
+  async function markKgReviewItems(ids: string[], status: 'approved' | 'ignored') {
+    if (ids.length === 0) return
+
+    setKgError('')
+
+    const entityIds = ids.filter((id) => kgReviewEntities.some((entity) => entity.id === id))
+    const relationIds = ids.filter((id) => kgReviewRelations.some((relation) => relation.id === id))
+
+    try {
+      if (entityIds.length > 0) {
+        const response = await fetch('/api/kg/review-queue/mark', {
+          body: JSON.stringify({ ids: entityIds, kind: 'entities', status }),
+          headers: { 'Content-Type': 'application/json' },
+          method: 'POST',
+        })
+        if (!response.ok) {
+          const payload = (await response.json()) as { error?: string }
+          throw new Error(payload.error ?? '标记实体失败。')
+        }
+      }
+
+      if (relationIds.length > 0) {
+        const response = await fetch('/api/kg/review-queue/mark', {
+          body: JSON.stringify({ ids: relationIds, kind: 'relations', status }),
+          headers: { 'Content-Type': 'application/json' },
+          method: 'POST',
+        })
+        if (!response.ok) {
+          const payload = (await response.json()) as { error?: string }
+          throw new Error(payload.error ?? '标记关系失败。')
+        }
+      }
+
+      setKgReviewSelectedIds([])
+      await Promise.all([fetchKgReviewQueue(), refreshKnowledgeGraph()])
+    } catch (err) {
+      setKgError(err instanceof Error ? err.message : '标记失败。')
     }
   }
 
@@ -1841,7 +1953,10 @@ function App() {
             <button
               type="button"
               className={showKgScannedChapters ? 'active' : ''}
-              onClick={() => setShowKgScannedChapters((current) => !current)}
+              onClick={() => {
+                setShowKgScannedChapters((current) => !current)
+                setShowKgReviewQueue(false)
+              }}
             >
               <span>已扫描章节</span>
               <strong>{kgOverview?.scanned_chapters ?? 0}</strong>
@@ -1852,6 +1967,7 @@ function App() {
               onClick={() => {
                 setShowKgEntities((current) => !current)
                 setShowKgRelations(false)
+                setShowKgReviewQueue(false)
                 setKgEntityDetail(null)
                 setKgRelationDetail(null)
               }}
@@ -1865,6 +1981,7 @@ function App() {
               onClick={() => {
                 setShowKgRelations((current) => !current)
                 setShowKgEntities(false)
+                setShowKgReviewQueue(false)
                 setKgEntityDetail(null)
                 setKgRelationDetail(null)
               }}
@@ -1872,7 +1989,166 @@ function App() {
               <span>关系</span>
               <strong>{kgOverview?.relation_count ?? 0}</strong>
             </button>
+            <button
+              type="button"
+              className={showKgReviewQueue ? 'active' : ''}
+              onClick={() => {
+                setShowKgReviewQueue((current) => !current)
+                setShowKgEntities(false)
+                setShowKgRelations(false)
+                setShowKgScannedChapters(false)
+                setKgEntityDetail(null)
+                setKgRelationDetail(null)
+              }}
+            >
+              <span>待复审</span>
+              <strong>{kgReviewEntities.length + kgReviewRelations.length}</strong>
+            </button>
           </div>
+
+          {showKgReviewQueue && (
+            <section className="kg-card kg-scanned-card">
+              <div className="kg-card-heading">
+                <div>
+                  <h3>复审队列</h3>
+                  <p>自动标记置信度低、类型模糊或内容可疑的实体和关系，供人工审核。</p>
+                </div>
+                <button type="button" className="ghost-button" onClick={() => setShowKgReviewQueue(false)}>
+                  收起
+                </button>
+              </div>
+
+              <div className="kg-batch-actions">
+                <span>已选 {kgReviewSelectedIds.length} 项</span>
+                <button type="button" className="ghost-button" onClick={() => selectAllKgReviewItems()}>
+                  全选
+                </button>
+                <button type="button" className="ghost-button" onClick={() => clearKgReviewSelection()}>
+                  取消全选
+                </button>
+                <button
+                  type="button"
+                  disabled={kgReviewSelectedIds.length === 0}
+                  onClick={() => void markKgReviewItems(kgReviewSelectedIds, 'approved')}
+                >
+                  标记已审
+                </button>
+                <button
+                  type="button"
+                  className="ghost-button"
+                  disabled={kgReviewSelectedIds.length === 0}
+                  onClick={() => void markKgReviewItems(kgReviewSelectedIds, 'ignored')}
+                >
+                  忽略
+                </button>
+              </div>
+
+              <div className="kg-filter-bar">
+                <select value={kgReviewKind} onChange={(event) => setKgReviewKind(event.target.value as 'all' | 'entity' | 'relation')}>
+                  <option value="all">全部</option>
+                  <option value="entity">实体</option>
+                  <option value="relation">关系</option>
+                </select>
+                <span className="kg-review-count">
+                  实体 {kgReviewEntities.length} 条 · 关系 {kgReviewRelations.length} 条
+                </span>
+              </div>
+
+              {kgReviewItems.length ? (
+                <div className="kg-entity-list kg-large-list">
+                  {kgReviewItems.map((item) => {
+                    const isSelected = kgReviewSelectedIds.includes(item.id)
+                    const isEntity = isKgReviewEntity(item)
+
+                    return (
+                      <div
+                        className={isSelected ? 'kg-entity-row selected' : 'kg-entity-row'}
+                        key={item.id}
+                      >
+                        <div className="kg-review-row-main">
+                          <input
+                            type="checkbox"
+                            checked={isSelected}
+                            onChange={() => toggleKgReviewSelection(item.id)}
+                          />
+                          <button
+                            type="button"
+                            className="kg-review-row-content"
+                            onClick={() =>
+                              isEntity
+                                ? void openKgEntityDetail(item.id)
+                                : void openKgRelationDetail(item.id)
+                            }
+                          >
+                            <div>
+                              <div className="kg-entity-row-main">
+                                <strong>{isEntity ? item.name : `${item.sourceName} → ${item.targetName}`}</strong>
+                                <span>{item.type}</span>
+                              </div>
+                              <p>
+                                {isEntity
+                                  ? `出现 ${item.mentionCount} 次`
+                                  : `证据 ${item.mentionCount ?? 0} 次`}
+                                {' · '}
+                                置信度 {Math.round(item.confidence * 100)}%
+                              </p>
+                            </div>
+                            <div className="kg-review-reasons">
+                              {item.reasons.map((reason) => (
+                                <span className="tag" key={reason}>
+                                  {formatReviewReason(reason)}
+                                </span>
+                              ))}
+                            </div>
+                          </button>
+                        </div>
+                        <div className="kg-review-row-actions">
+                          <button
+                            type="button"
+                            className="ghost-button"
+                            onClick={() =>
+                              isEntity
+                                ? setKgEntityEdit(item)
+                                : setKgRelationEdit(item)
+                            }
+                          >
+                            编辑
+                          </button>
+                          <button
+                            type="button"
+                            className="ghost-button"
+                            onClick={() => void markKgReviewItems([item.id], 'approved')}
+                          >
+                            已审
+                          </button>
+                          <button
+                            type="button"
+                            className="ghost-button"
+                            onClick={() => void markKgReviewItems([item.id], 'ignored')}
+                          >
+                            忽略
+                          </button>
+                          <button
+                            type="button"
+                            className="ghost-button danger-button"
+                            onClick={() =>
+                              isEntity
+                                ? void deleteKgEntity(item.id)
+                                : void deleteKgRelation(item.id)
+                            }
+                          >
+                            删除
+                          </button>
+                        </div>
+                      </div>
+                    )
+                  })}
+                </div>
+              ) : (
+                <p className="empty-summary">没有需要复审的项。</p>
+              )}
+            </section>
+          )}
 
           {showKgScannedChapters && (
             <section className="kg-card kg-scanned-card">

@@ -1178,6 +1178,72 @@ button.kg-relation-row:hover {
   }
 }
 
+.kg-review-row-main {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+}
+
+.kg-review-row-main > input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  margin-top: 4px;
+  accent-color: #2c5b4b;
+  flex-shrink: 0;
+}
+
+.kg-review-row-content {
+  display: grid;
+  gap: 8px;
+  flex: 1;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.kg-review-row-content:hover {
+  opacity: 0.9;
+}
+
+.kg-review-row-content .kg-entity-row-main {
+  justify-content: flex-start;
+}
+
+.kg-review-reasons {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.kg-review-reasons .tag {
+  font-size: 12px;
+  padding: 2px 8px;
+  background: #fff1e0;
+  color: #8a5a2b;
+}
+
+.kg-review-row-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 10px;
+}
+
+.kg-review-row-actions button {
+  width: auto;
+  padding: 6px 10px;
+  font-size: 13px;
+}
+
+.kg-review-count {
+  color: #6b6256;
+  font-size: 13px;
+  font-weight: 650;
+}
+
 @media (max-width: 760px) {
   .topbar,
   .home-panel,
