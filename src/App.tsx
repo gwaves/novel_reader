@@ -232,7 +232,7 @@ function App() {
   const [kgScanMode, setKgScanMode] = useState<KgScanMode>('current')
   const [kgScanStart, setKgScanStart] = useState(1)
   const [kgScanEnd, setKgScanEnd] = useState(1)
-  const [kgScanConcurrency, setKgScanConcurrency] = useState(1)
+  const [kgScanConcurrency, setKgScanConcurrency] = useState(10)
   const [isKgScanning, setIsKgScanning] = useState(false)
   const [kgScanProgress, setKgScanProgress] = useState('')
   const [kgScanJob, setKgScanJob] = useState<KgScanJob | null>(null)
@@ -240,6 +240,15 @@ function App() {
   const [kgEntitySearch, setKgEntitySearch] = useState('')
   const [kgEntityTypeFilter, setKgEntityTypeFilter] = useState('')
   const [kgRelationTypeFilter, setKgRelationTypeFilter] = useState('')
+  const [kgEntityEdit, setKgEntityEdit] = useState<KgEntity | null>(null)
+  const [kgEntityEditName, setKgEntityEditName] = useState('')
+  const [kgEntityEditType, setKgEntityEditType] = useState('')
+  const [kgEntityEditAliases, setKgEntityEditAliases] = useState('')
+  const [kgEntityEditDescription, setKgEntityEditDescription] = useState('')
+  const [kgMergeSource, setKgMergeSource] = useState<KgEntity | null>(null)
+  const [kgMergeTargetId, setKgMergeTargetId] = useState('')
+  const [kgMergeCandidates, setKgMergeCandidates] = useState<KgEntity[]>([])
+  const [kgMergeQuery, setKgMergeQuery] = useState('')
 
   const {
     state,
@@ -389,6 +398,20 @@ function App() {
   }, [view, state.book?.id, kgRelationTypeFilter])
 
   useEffect(() => {
+    if (kgEntityEdit) {
+      setKgEntityEditName(kgEntityEdit.name)
+      setKgEntityEditType(kgEntityEdit.type)
+      setKgEntityEditAliases(kgEntityEdit.aliases.join('、'))
+      setKgEntityEditDescription(kgEntityEdit.description ?? '')
+    } else {
+      setKgEntityEditName('')
+      setKgEntityEditType('')
+      setKgEntityEditAliases('')
+      setKgEntityEditDescription('')
+    }
+  }, [kgEntityEdit])
+
+  useEffect(() => {
     if (!state.book) return
 
     setKgScanStart(activeChapter?.index ?? 1)
@@ -403,6 +426,14 @@ function App() {
       if (!response.ok) throw new Error('读取扫描状态失败。')
       const payload = (await response.json()) as { job: KgScanJob | null }
       setKgScanJob(payload.job)
+
+      if (payload.job?.status === 'running' && !isKgScanning) {
+        const staleThresholdMs = 30_000
+        const lastUpdate = new Date(payload.job.updatedAt).getTime()
+        if (Date.now() - lastUpdate > staleThresholdMs) {
+          void resumeKnowledgeGraphScan()
+        }
+      }
     } catch {
       // ignore non-fatal errors
     }
@@ -526,6 +557,128 @@ function App() {
       setKgRelationDetail((await response.json()) as KgRelationDetail)
     } catch (err) {
       setKgError(err instanceof Error ? err.message : '读取关系详情失败。')
+    }
+  }
+
+  async function updateKgEntity(entityId: string, payload: Partial<KgEntity>) {
+    setKgError('')
+
+    try {
+      const response = await fetch(`/api/kg/entities/${encodeURIComponent(entityId)}`, {
+        body: JSON.stringify(payload),
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        method: 'PUT',
+      })
+
+      if (!response.ok) {
+        const payload = (await response.json()) as { error?: string }
+        throw new Error(payload.error ?? '更新实体失败。')
+      }
+
+      setKgEntityEdit(null)
+      await Promise.all([fetchKgEntities(), openKgEntityDetail(entityId)])
+    } catch (err) {
+      setKgError(err instanceof Error ? err.message : '更新实体失败。')
+    }
+  }
+
+  async function deleteKgEntity(entityId: string) {
+    if (!window.confirm('确定要删除这个实体吗？相关的提及和关系也会被删除。')) return
+
+    setKgError('')
+
+    try {
+      const response = await fetch(`/api/kg/entities/${encodeURIComponent(entityId)}`, {
+        method: 'DELETE',
+      })
+
+      if (!response.ok) {
+        const payload = (await response.json()) as { error?: string }
+        throw new Error(payload.error ?? '删除实体失败。')
+      }
+
+      setKgEntityDetail(null)
+      setKgEntityEdit(null)
+      setKgMergeSource(null)
+      await refreshKnowledgeGraph()
+    } catch (err) {
+      setKgError(err instanceof Error ? err.message : '删除实体失败。')
+    }
+  }
+
+  async function searchKgMergeCandidates(query: string) {
+    if (!state.book || !kgMergeSource) return
+
+    try {
+      const response = await fetch(
+        `/api/kg/entities?bookId=${encodeURIComponent(state.book.id)}&type=${encodeURIComponent(kgMergeSource.type)}&q=${encodeURIComponent(query)}&limit=50`,
+      )
+      if (!response.ok) throw new Error('读取候选实体失败。')
+      const payload = (await response.json()) as { entities: KgEntity[] }
+      setKgMergeCandidates(payload.entities.filter((entity) => entity.id !== kgMergeSource.id))
+    } catch (err) {
+      setKgError(err instanceof Error ? err.message : '读取候选实体失败。')
+    }
+  }
+
+  function openKgMergeModal(sourceEntity: KgEntity) {
+    setKgMergeSource(sourceEntity)
+    setKgMergeTargetId('')
+    setKgMergeQuery('')
+    setKgMergeCandidates([])
+    void searchKgMergeCandidates('')
+  }
+
+  async function mergeKgEntities(sourceId: string, targetId: string) {
+    setKgError('')
+
+    try {
+      const response = await fetch('/api/kg/entities/merge', {
+        body: JSON.stringify({ sourceId, targetId }),
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        method: 'POST',
+      })
+
+      if (!response.ok) {
+        const payload = (await response.json()) as { error?: string }
+        throw new Error(payload.error ?? '合并实体失败。')
+      }
+
+      const result = (await response.json()) as { entity: KgEntity }
+      setKgMergeSource(null)
+      setKgMergeTargetId('')
+      setKgMergeCandidates([])
+      setKgEntityDetail(null)
+      await refreshKnowledgeGraph()
+      await openKgEntityDetail(result.entity.id)
+    } catch (err) {
+      setKgError(err instanceof Error ? err.message : '合并实体失败。')
+    }
+  }
+
+  async function deleteKgRelation(relationId: string) {
+    if (!window.confirm('确定要删除这条关系吗？相关的证据章节也会被删除。')) return
+
+    setKgError('')
+
+    try {
+      const response = await fetch(`/api/kg/relations/${encodeURIComponent(relationId)}`, {
+        method: 'DELETE',
+      })
+
+      if (!response.ok) {
+        const payload = (await response.json()) as { error?: string }
+        throw new Error(payload.error ?? '删除关系失败。')
+      }
+
+      setKgRelationDetail(null)
+      await refreshKnowledgeGraph()
+    } catch (err) {
+      setKgError(err instanceof Error ? err.message : '删除关系失败。')
     }
   }
 
@@ -1204,6 +1357,183 @@ function App() {
             </button>
           </div>
 
+          {kgEntityEdit && (
+            <div className="modal-backdrop" role="presentation">
+              <section className="config-modal" role="dialog" aria-modal="true" aria-labelledby="kg-edit-title">
+                <div className="modal-heading">
+                  <div>
+                    <p className="eyebrow">实体编辑</p>
+                    <h2 id="kg-edit-title">编辑实体</h2>
+                  </div>
+                  <button type="button" className="ghost-button" onClick={() => setKgEntityEdit(null)}>
+                    取消
+                  </button>
+                </div>
+
+                <div className="config-form">
+                  <label htmlFor="kg-edit-name">名称</label>
+                  <input
+                    id="kg-edit-name"
+                    type="text"
+                    value={kgEntityEditName}
+                    onChange={(event) => setKgEntityEditName(event.target.value)}
+                  />
+
+                  <label htmlFor="kg-edit-type">类型</label>
+                  <select
+                    id="kg-edit-type"
+                    value={kgEntityEditType}
+                    onChange={(event) => setKgEntityEditType(event.target.value)}
+                  >
+                    <option value="character">人物</option>
+                    <option value="sect">门派/组织</option>
+                    <option value="item">道具/法宝</option>
+                    <option value="skill">功法/法术</option>
+                    <option value="location">地点</option>
+                    <option value="beast">灵兽/妖兽</option>
+                    <option value="event">事件</option>
+                    <option value="other">其他</option>
+                  </select>
+
+                  <label htmlFor="kg-edit-aliases">别名（用中文顿号“、”分隔）</label>
+                  <input
+                    id="kg-edit-aliases"
+                    type="text"
+                    value={kgEntityEditAliases}
+                    onChange={(event) => setKgEntityEditAliases(event.target.value)}
+                  />
+
+                  <label htmlFor="kg-edit-description">描述</label>
+                  <input
+                    id="kg-edit-description"
+                    type="text"
+                    value={kgEntityEditDescription}
+                    onChange={(event) => setKgEntityEditDescription(event.target.value)}
+                  />
+                </div>
+
+                <div className="modal-actions">
+                  <button type="button" className="ghost-button" onClick={() => setKgEntityEdit(null)}>
+                    取消
+                  </button>
+                  <button
+                    type="button"
+                    disabled={!kgEntityEditName.trim()}
+                    onClick={() =>
+                      void updateKgEntity(kgEntityEdit.id, {
+                        name: kgEntityEditName.trim(),
+                        type: kgEntityEditType,
+                        aliases: kgEntityEditAliases
+                          .split('、')
+                          .map((alias) => alias.trim())
+                          .filter(Boolean),
+                        description: kgEntityEditDescription.trim(),
+                      })
+                    }
+                  >
+                    保存
+                  </button>
+                </div>
+              </section>
+            </div>
+          )}
+
+          {kgMergeSource && (
+            <div className="modal-backdrop" role="presentation">
+              <section className="config-modal" role="dialog" aria-modal="true" aria-labelledby="kg-merge-title">
+                <div className="modal-heading">
+                  <div>
+                    <p className="eyebrow">实体合并</p>
+                    <h2 id="kg-merge-title">合并实体</h2>
+                  </div>
+                  <button
+                    type="button"
+                    className="ghost-button"
+                    onClick={() => {
+                      setKgMergeSource(null)
+                      setKgMergeTargetId('')
+                      setKgMergeCandidates([])
+                      setKgMergeQuery('')
+                    }}
+                  >
+                    取消
+                  </button>
+                </div>
+
+                <div className="config-form">
+                  <p>
+                    将 <strong>{kgMergeSource.name}</strong> 合并到另一个实体。合并后，源实体的别名、提及和关系都会迁移到目标实体。
+                  </p>
+
+                  <label htmlFor="kg-merge-search">搜索目标实体</label>
+                  <input
+                    id="kg-merge-search"
+                    type="text"
+                    placeholder="输入名称或别名"
+                    value={kgMergeQuery}
+                    onChange={(event) => {
+                      setKgMergeQuery(event.target.value)
+                      void searchKgMergeCandidates(event.target.value)
+                    }}
+                  />
+
+                  <label>选择目标实体</label>
+                  {kgMergeCandidates.length ? (
+                    <div className="kg-merge-candidate-list">
+                      {kgMergeCandidates.map((candidate) => (
+                        <button
+                          type="button"
+                          key={candidate.id}
+                          className={candidate.id === kgMergeTargetId ? 'kg-entity-row active' : 'kg-entity-row'}
+                          onClick={() => setKgMergeTargetId(candidate.id)}
+                        >
+                          <div>
+                            <strong>{candidate.name}</strong>
+                            <span>{candidate.type}</span>
+                          </div>
+                          <p>
+                            出现 {candidate.mentionCount} 次
+                            {candidate.aliases.length ? ` · 别名 ${candidate.aliases.join('、')}` : ''}
+                          </p>
+                        </button>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="empty-summary">没有候选实体，请尝试其他搜索词。</p>
+                  )}
+
+                  {kgMergeTargetId && (
+                    <p className="empty-summary">
+                      已选择目标实体，确认后将把 <strong>{kgMergeSource.name}</strong> 合并进去。
+                    </p>
+                  )}
+                </div>
+
+                <div className="modal-actions">
+                  <button
+                    type="button"
+                    className="ghost-button"
+                    onClick={() => {
+                      setKgMergeSource(null)
+                      setKgMergeTargetId('')
+                      setKgMergeCandidates([])
+                      setKgMergeQuery('')
+                    }}
+                  >
+                    取消
+                  </button>
+                  <button
+                    type="button"
+                    disabled={!kgMergeTargetId}
+                    onClick={() => void mergeKgEntities(kgMergeSource.id, kgMergeTargetId)}
+                  >
+                    确认合并
+                  </button>
+                </div>
+              </section>
+            </div>
+          )}
+
           <div className="kg-stats">
             <button
               type="button"
@@ -1371,16 +1701,39 @@ function App() {
                     {kgEntityDetail.entity.lastChapterIndex != null ? ` · 末次出现 第${kgEntityDetail.entity.lastChapterIndex}章` : ''}
                   </p>
                 </div>
-                <button
-                  type="button"
-                  className="ghost-button"
-                  onClick={() => {
-                    setKgEntityDetail(null)
-                    setKgRelationDetail(null)
-                  }}
-                >
-                  关闭详情
-                </button>
+                <div className="kg-detail-actions">
+                  <button
+                    type="button"
+                    className="ghost-button"
+                    onClick={() => setKgEntityEdit(kgEntityDetail.entity)}
+                  >
+                    编辑
+                  </button>
+                  <button
+                    type="button"
+                    className="ghost-button"
+                    onClick={() => openKgMergeModal(kgEntityDetail.entity)}
+                  >
+                    合并
+                  </button>
+                  <button
+                    type="button"
+                    className="ghost-button danger-button"
+                    onClick={() => void deleteKgEntity(kgEntityDetail.entity.id)}
+                  >
+                    删除
+                  </button>
+                  <button
+                    type="button"
+                    className="ghost-button"
+                    onClick={() => {
+                      setKgEntityDetail(null)
+                      setKgRelationDetail(null)
+                    }}
+                  >
+                    关闭详情
+                  </button>
+                </div>
               </div>
               {kgEntityDetail.entity.description && <p>{kgEntityDetail.entity.description}</p>}
               <div className="kg-detail-grid">
@@ -1505,16 +1858,25 @@ function App() {
                     {kgRelationDetail.relation.lastChapterIndex != null ? ` · 末次出现 第${kgRelationDetail.relation.lastChapterIndex}章` : ''}
                   </p>
                 </div>
-                <button
-                  type="button"
-                  className="ghost-button"
-                  onClick={() => {
-                    setKgRelationDetail(null)
-                    setKgEntityDetail(null)
-                  }}
-                >
-                  关闭详情
-                </button>
+                <div className="kg-detail-actions">
+                  <button
+                    type="button"
+                    className="ghost-button danger-button"
+                    onClick={() => void deleteKgRelation(kgRelationDetail.relation.id)}
+                  >
+                    删除关系
+                  </button>
+                  <button
+                    type="button"
+                    className="ghost-button"
+                    onClick={() => {
+                      setKgRelationDetail(null)
+                      setKgEntityDetail(null)
+                    }}
+                  >
+                    关闭详情
+                  </button>
+                </div>
               </div>
               {kgRelationDetail.relation.description && <p>{kgRelationDetail.relation.description}</p>}
               <div className="kg-detail-grid">
