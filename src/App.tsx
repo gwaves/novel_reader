@@ -245,6 +245,9 @@ function App() {
   const [kgEntityEditType, setKgEntityEditType] = useState('')
   const [kgEntityEditAliases, setKgEntityEditAliases] = useState('')
   const [kgEntityEditDescription, setKgEntityEditDescription] = useState('')
+  const [kgRelationEdit, setKgRelationEdit] = useState<KgRelation | null>(null)
+  const [kgRelationEditType, setKgRelationEditType] = useState('')
+  const [kgRelationEditDescription, setKgRelationEditDescription] = useState('')
   const [kgMergeSource, setKgMergeSource] = useState<KgEntity | null>(null)
   const [kgMergeTargetId, setKgMergeTargetId] = useState('')
   const [kgMergeCandidates, setKgMergeCandidates] = useState<KgEntity[]>([])
@@ -410,6 +413,16 @@ function App() {
       setKgEntityEditDescription('')
     }
   }, [kgEntityEdit])
+
+  useEffect(() => {
+    if (kgRelationEdit) {
+      setKgRelationEditType(kgRelationEdit.type)
+      setKgRelationEditDescription(kgRelationEdit.description ?? '')
+    } else {
+      setKgRelationEditType('')
+      setKgRelationEditDescription('')
+    }
+  }, [kgRelationEdit])
 
   useEffect(() => {
     if (!state.book) return
@@ -679,6 +692,30 @@ function App() {
       await refreshKnowledgeGraph()
     } catch (err) {
       setKgError(err instanceof Error ? err.message : '删除关系失败。')
+    }
+  }
+
+  async function updateKgRelation(relationId: string, payload: { type: string; description: string }) {
+    setKgError('')
+
+    try {
+      const response = await fetch(`/api/kg/relations/${encodeURIComponent(relationId)}`, {
+        body: JSON.stringify(payload),
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        method: 'PUT',
+      })
+
+      if (!response.ok) {
+        const payload = (await response.json()) as { error?: string }
+        throw new Error(payload.error ?? '更新关系失败。')
+      }
+
+      setKgRelationEdit(null)
+      await Promise.all([fetchKgRelations(), openKgRelationDetail(relationId)])
+    } catch (err) {
+      setKgError(err instanceof Error ? err.message : '更新关系失败。')
     }
   }
 
@@ -1438,6 +1475,76 @@ function App() {
             </div>
           )}
 
+          {kgRelationEdit && (
+            <div className="modal-backdrop" role="presentation">
+              <section className="config-modal" role="dialog" aria-modal="true" aria-labelledby="kg-relation-edit-title">
+                <div className="modal-heading">
+                  <div>
+                    <p className="eyebrow">关系编辑</p>
+                    <h2 id="kg-relation-edit-title">编辑关系</h2>
+                  </div>
+                  <button type="button" className="ghost-button" onClick={() => setKgRelationEdit(null)}>
+                    取消
+                  </button>
+                </div>
+
+                <div className="config-form">
+                  <p>
+                    {kgRelationEdit.sourceName} <strong>--</strong> {kgRelationEdit.targetName}
+                  </p>
+
+                  <label htmlFor="kg-relation-edit-type">关系类型</label>
+                  <select
+                    id="kg-relation-edit-type"
+                    value={kgRelationEditType}
+                    onChange={(event) => setKgRelationEditType(event.target.value)}
+                  >
+                    <option value="knows">认识</option>
+                    <option value="ally_of">盟友</option>
+                    <option value="enemy_of">敌对</option>
+                    <option value="master_of">师父</option>
+                    <option value="disciple_of">徒弟</option>
+                    <option value="member_of">成员</option>
+                    <option value="belongs_to">属于</option>
+                    <option value="owns">拥有</option>
+                    <option value="uses">使用</option>
+                    <option value="learns">学习</option>
+                    <option value="created_by">创造者</option>
+                    <option value="located_in">位于</option>
+                    <option value="appears_with">一起出现</option>
+                    <option value="transforms_into">转化为</option>
+                    <option value="related_to">相关</option>
+                  </select>
+
+                  <label htmlFor="kg-relation-edit-description">描述</label>
+                  <input
+                    id="kg-relation-edit-description"
+                    type="text"
+                    value={kgRelationEditDescription}
+                    onChange={(event) => setKgRelationEditDescription(event.target.value)}
+                  />
+                </div>
+
+                <div className="modal-actions">
+                  <button type="button" className="ghost-button" onClick={() => setKgRelationEdit(null)}>
+                    取消
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      void updateKgRelation(kgRelationEdit.id, {
+                        type: kgRelationEditType,
+                        description: kgRelationEditDescription.trim(),
+                      })
+                    }
+                  >
+                    保存
+                  </button>
+                </div>
+              </section>
+            </div>
+          )}
+
           {kgMergeSource && (
             <div className="modal-backdrop" role="presentation">
               <section className="config-modal" role="dialog" aria-modal="true" aria-labelledby="kg-merge-title">
@@ -1859,6 +1966,13 @@ function App() {
                   </p>
                 </div>
                 <div className="kg-detail-actions">
+                  <button
+                    type="button"
+                    className="ghost-button"
+                    onClick={() => setKgRelationEdit(kgRelationDetail.relation)}
+                  >
+                    编辑关系
+                  </button>
                   <button
                     type="button"
                     className="ghost-button danger-button"

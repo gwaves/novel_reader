@@ -329,6 +329,7 @@ const listKgRelationsStatement = db.prepare(`
 const getKgRelationStatement = db.prepare(`
   SELECT
     r.id,
+    r.book_id AS bookId,
     r.type,
     r.description,
     r.confidence,
@@ -591,6 +592,19 @@ const updateKgRelationStatement = db.prepare(`
     END,
     updated_at = CURRENT_TIMESTAMP
   WHERE id = ?
+`)
+const updateKgRelationFullStatement = db.prepare(`
+  UPDATE kg_relations
+  SET
+    type = ?,
+    description = ?,
+    updated_at = CURRENT_TIMESTAMP
+  WHERE id = ?
+`)
+const findKgRelationConflictStatement = db.prepare(`
+  SELECT id
+  FROM kg_relations
+  WHERE book_id = ? AND source_entity_id = ? AND target_entity_id = ? AND type = ?
 `)
 const insertKgRelationMentionStatement = db.prepare(`
   INSERT INTO kg_relation_mentions (
@@ -1057,6 +1071,27 @@ function deleteKgRelationTransaction(relationId) {
   return { deleted: true }
 }
 
+function updateKgRelationTransaction(relationId, payload) {
+  const relation = getKgRelationStatement.get(relationId)
+  if (!relation) throw new Error('Relation not found.')
+
+  const type = normalizeRelationType(payload?.type)
+  const description = typeof payload?.description === 'string' ? payload.description.trim() : relation.description
+
+  const conflict = findKgRelationConflictStatement.get(
+    relation.bookId ?? relation.book_id,
+    relation.sourceId,
+    relation.targetId,
+    type,
+  )
+  if (conflict && conflict.id !== relationId) {
+    throw new Error('同书同类型下已存在相同端点的关系。')
+  }
+
+  updateKgRelationFullStatement.run(type, description, relationId)
+  return getKgRelationStatement.get(relationId)
+}
+
 function mirrorStructuredState(state) {
   const libraryBooks = Array.isArray(state?.books)
     ? state.books
@@ -1372,6 +1407,21 @@ const server = createServer(async (request, response) => {
           relation,
           mentions: getKgRelationMentionsStatement.all(relationId),
         })
+        return
+      }
+
+      if (request.method === 'PUT') {
+        const body = await readJson(request)
+
+        db.exec('BEGIN')
+        try {
+          const relation = updateKgRelationTransaction(relationId, body)
+          db.exec('COMMIT')
+          sendJson(response, 200, { relation })
+        } catch (error) {
+          db.exec('ROLLBACK')
+          sendJson(response, 400, { error: error instanceof Error ? error.message : 'Update failed.' })
+        }
         return
       }
 
