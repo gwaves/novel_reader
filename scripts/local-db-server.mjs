@@ -1055,6 +1055,32 @@ function mergeKgEntitiesTransaction(sourceId, targetId) {
   }
 }
 
+function mergeKgEntitiesBatchTransaction(sourceIds, targetId) {
+  if (!Array.isArray(sourceIds) || sourceIds.length === 0) {
+    throw new Error('至少选择一个要合并的源实体。')
+  }
+
+  if (sourceIds.includes(targetId)) {
+    throw new Error('主实体不能在被合并的源实体中。')
+  }
+
+  const target = getKgEntityWithAliases(targetId)
+  if (!target) throw new Error('主实体不存在。')
+
+  const sourceNames = []
+
+  for (const sourceId of sourceIds) {
+    const result = mergeKgEntitiesTransaction(sourceId, targetId)
+    sourceNames.push(result.sourceName)
+  }
+
+  return {
+    target: getKgEntityWithAliases(targetId),
+    mergedCount: sourceNames.length,
+    sourceNames,
+  }
+}
+
 function deleteKgEntityTransaction(entityId) {
   const entity = getKgEntityWithAliases(entityId)
   if (!entity) throw new Error('Entity not found.')
@@ -1387,6 +1413,37 @@ const server = createServer(async (request, response) => {
       } catch (error) {
         db.exec('ROLLBACK')
         sendJson(response, 400, { error: error instanceof Error ? error.message : 'Merge failed.' })
+      }
+      return
+    }
+
+    if (request.method === 'POST' && url.pathname === '/api/kg/entities/merge-batch') {
+      const body = await readJson(request)
+      const sourceIds = body?.sourceIds
+      const targetId = body?.targetId
+
+      if (!Array.isArray(sourceIds) || sourceIds.length === 0 || !sourceIds.every((id) => typeof id === 'string')) {
+        sendJson(response, 400, { error: 'sourceIds must be a non-empty array of strings.' })
+        return
+      }
+
+      if (!targetId || typeof targetId !== 'string') {
+        sendJson(response, 400, { error: 'Missing targetId.' })
+        return
+      }
+
+      db.exec('BEGIN')
+      try {
+        const result = mergeKgEntitiesBatchTransaction(sourceIds, targetId)
+        db.exec('COMMIT')
+        sendJson(response, 200, {
+          entity: mapEntityRow(result.target),
+          mergedCount: result.mergedCount,
+          sourceNames: result.sourceNames,
+        })
+      } catch (error) {
+        db.exec('ROLLBACK')
+        sendJson(response, 400, { error: error instanceof Error ? error.message : 'Batch merge failed.' })
       }
       return
     }

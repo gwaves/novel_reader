@@ -691,11 +691,44 @@ button:disabled {
   gap: 8px;
 }
 
+.kg-batch-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 14px;
+  padding: 12px;
+  border-radius: 8px;
+  background: #f1eadf;
+}
+
+.kg-batch-actions span {
+  color: #4d463d;
+  font-weight: 650;
+}
+
+.kg-entity-row-main {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.kg-entity-row-main input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  accent-color: #2c5b4b;
+}
+
 .kg-merge-candidate-list {
   display: grid;
   gap: 10px;
   max-height: 300px;
   overflow: auto;
+}
+
+.kg-entity-row.selected {
+  border-color: #b88947;
+  background: #f8efe0;
 }
 
 .kg-merge-candidate-list .kg-entity-row {

@@ -252,6 +252,11 @@ function App() {
   const [kgMergeTargetId, setKgMergeTargetId] = useState('')
   const [kgMergeCandidates, setKgMergeCandidates] = useState<KgEntity[]>([])
   const [kgMergeQuery, setKgMergeQuery] = useState('')
+  const [kgBatchMergeMode, setKgBatchMergeMode] = useState(false)
+  const [kgBatchMergeSelectedIds, setKgBatchMergeSelectedIds] = useState<string[]>([])
+  const [kgBatchMergeTargetId, setKgBatchMergeTargetId] = useState('')
+  const [kgBatchMergeCandidates, setKgBatchMergeCandidates] = useState<KgEntity[]>([])
+  const [kgBatchMergeQuery, setKgBatchMergeQuery] = useState('')
 
   const {
     state,
@@ -716,6 +721,87 @@ function App() {
       await Promise.all([fetchKgRelations(), openKgRelationDetail(relationId)])
     } catch (err) {
       setKgError(err instanceof Error ? err.message : '更新关系失败。')
+    }
+  }
+
+  function toggleKgBatchMergeMode() {
+    setKgBatchMergeMode((current) => {
+      if (current) {
+        setKgBatchMergeSelectedIds([])
+      }
+      return !current
+    })
+  }
+
+  function toggleKgBatchMergeSelection(entityId: string) {
+    setKgBatchMergeSelectedIds((current) =>
+      current.includes(entityId) ? current.filter((id) => id !== entityId) : [...current, entityId],
+    )
+  }
+
+  function selectAllKgBatchMergeEntities() {
+    setKgBatchMergeSelectedIds(kgEntities.map((entity) => entity.id))
+  }
+
+  function clearKgBatchMergeSelection() {
+    setKgBatchMergeSelectedIds([])
+  }
+
+  async function searchKgBatchMergeCandidates(query: string) {
+    if (!state.book) return
+
+    try {
+      const response = await fetch(
+        `/api/kg/entities?bookId=${encodeURIComponent(state.book.id)}&type=&q=${encodeURIComponent(query)}&limit=50`,
+      )
+      if (!response.ok) throw new Error('读取候选实体失败。')
+      const payload = (await response.json()) as { entities: KgEntity[] }
+      setKgBatchMergeCandidates(payload.entities)
+    } catch (err) {
+      setKgError(err instanceof Error ? err.message : '读取候选实体失败。')
+    }
+  }
+
+  function openKgBatchMergeModal() {
+    if (kgBatchMergeSelectedIds.length === 0) {
+      setKgError('请先选择要合并的实体。')
+      return
+    }
+
+    setKgBatchMergeTargetId('')
+    setKgBatchMergeQuery('')
+    setKgBatchMergeCandidates([])
+    void searchKgBatchMergeCandidates('')
+  }
+
+  async function mergeKgEntitiesBatch(sourceIds: string[], targetId: string) {
+    setKgError('')
+
+    try {
+      const response = await fetch('/api/kg/entities/merge-batch', {
+        body: JSON.stringify({ sourceIds, targetId }),
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        method: 'POST',
+      })
+
+      if (!response.ok) {
+        const payload = (await response.json()) as { error?: string }
+        throw new Error(payload.error ?? '批量合并失败。')
+      }
+
+      const result = (await response.json()) as { entity: KgEntity; mergedCount: number; sourceNames: string[] }
+      setKgBatchMergeSelectedIds([])
+      setKgBatchMergeTargetId('')
+      setKgBatchMergeCandidates([])
+      setKgBatchMergeQuery('')
+      setKgBatchMergeMode(false)
+      setKgEntityDetail(null)
+      await refreshKnowledgeGraph()
+      await openKgEntityDetail(result.entity.id)
+    } catch (err) {
+      setKgError(err instanceof Error ? err.message : '批量合并失败。')
     }
   }
 
@@ -1545,6 +1631,116 @@ function App() {
             </div>
           )}
 
+          {kgBatchMergeSelectedIds.length > 0 && (
+            <div className="modal-backdrop" role="presentation">
+              <section className="config-modal" role="dialog" aria-modal="true" aria-labelledby="kg-batch-merge-title">
+                <div className="modal-heading">
+                  <div>
+                    <p className="eyebrow">批量合并</p>
+                    <h2 id="kg-batch-merge-title">合并 {kgBatchMergeSelectedIds.length} 个实体</h2>
+                  </div>
+                  <button
+                    type="button"
+                    className="ghost-button"
+                    onClick={() => {
+                      setKgBatchMergeTargetId('')
+                      setKgBatchMergeCandidates([])
+                      setKgBatchMergeQuery('')
+                    }}
+                  >
+                    取消
+                  </button>
+                </div>
+
+                <div className="config-form">
+                  <label>将被合并的实体</label>
+                  <div className="kg-merge-candidate-list">
+                    {kgBatchMergeSelectedIds
+                      .map((id) => kgEntities.find((entity) => entity.id === id))
+                      .filter(Boolean)
+                      .map((entity) => (
+                        <div className="kg-entity-row" key={entity!.id}>
+                          <div>
+                            <strong>{entity!.name}</strong>
+                            <span>{entity!.type}</span>
+                          </div>
+                          <p>
+                            出现 {entity!.mentionCount} 次
+                            {entity!.aliases.length ? ` · 别名 ${entity!.aliases.join('、')}` : ''}
+                          </p>
+                        </div>
+                      ))}
+                  </div>
+
+                  <label htmlFor="kg-batch-merge-search">搜索主实体</label>
+                  <input
+                    id="kg-batch-merge-search"
+                    type="text"
+                    placeholder="输入名称或别名"
+                    value={kgBatchMergeQuery}
+                    onChange={(event) => {
+                      setKgBatchMergeQuery(event.target.value)
+                      void searchKgBatchMergeCandidates(event.target.value)
+                    }}
+                  />
+
+                  <label>选择主实体</label>
+                  {kgBatchMergeCandidates.length ? (
+                    <div className="kg-merge-candidate-list">
+                      {kgBatchMergeCandidates
+                        .filter((candidate) => !kgBatchMergeSelectedIds.includes(candidate.id))
+                        .map((candidate) => (
+                          <button
+                            type="button"
+                            key={candidate.id}
+                            className={candidate.id === kgBatchMergeTargetId ? 'kg-entity-row active' : 'kg-entity-row'}
+                            onClick={() => setKgBatchMergeTargetId(candidate.id)}
+                          >
+                            <div>
+                              <strong>{candidate.name}</strong>
+                              <span>{candidate.type}</span>
+                            </div>
+                            <p>
+                              出现 {candidate.mentionCount} 次
+                              {candidate.aliases.length ? ` · 别名 ${candidate.aliases.join('、')}` : ''}
+                            </p>
+                          </button>
+                        ))}
+                    </div>
+                  ) : (
+                    <p className="empty-summary">没有候选实体，请尝试其他搜索词。</p>
+                  )}
+                </div>
+
+                <div className="modal-actions">
+                  <button
+                    type="button"
+                    className="ghost-button"
+                    onClick={() => {
+                      setKgBatchMergeTargetId('')
+                      setKgBatchMergeCandidates([])
+                      setKgBatchMergeQuery('')
+                    }}
+                  >
+                    取消
+                  </button>
+                  <button
+                    type="button"
+                    disabled={!kgBatchMergeTargetId}
+                    onClick={() => void mergeKgEntitiesBatch(kgBatchMergeSelectedIds, kgBatchMergeTargetId)}
+                  >
+                    {(() => {
+                      const target = kgBatchMergeCandidates.find((candidate) => candidate.id === kgBatchMergeTargetId)
+                      return target
+                        ? `合并到 ${target.name}`
+                        : `合并 ${kgBatchMergeSelectedIds.length} 个实体`
+                    })()}
+                  </button>
+                </div>
+              </section>
+            </div>
+          )}
+
           {kgMergeSource && (
             <div className="modal-backdrop" role="presentation">
               <section className="config-modal" role="dialog" aria-modal="true" aria-labelledby="kg-merge-title">
@@ -1729,10 +1925,41 @@ function App() {
                   <h3>实体内容</h3>
                   <p>点击实体可查看描述、出现章节和相关关系。</p>
                 </div>
-                <button type="button" className="ghost-button" onClick={() => setShowKgEntities(false)}>
-                  收起
-                </button>
+                <div className="kg-detail-actions">
+                  {!kgBatchMergeMode ? (
+                    <button type="button" className="ghost-button" onClick={() => toggleKgBatchMergeMode()}>
+                      批量合并
+                    </button>
+                  ) : (
+                    <button type="button" className="ghost-button" onClick={() => toggleKgBatchMergeMode()}>
+                      退出批量模式
+                    </button>
+                  )}
+                  <button type="button" className="ghost-button" onClick={() => setShowKgEntities(false)}>
+                    收起
+                  </button>
+                </div>
               </div>
+
+              {kgBatchMergeMode && (
+                <div className="kg-batch-actions">
+                  <span>已选 {kgBatchMergeSelectedIds.length} 个实体</span>
+                  <button type="button" className="ghost-button" onClick={() => selectAllKgBatchMergeEntities()}>
+                    全选
+                  </button>
+                  <button type="button" className="ghost-button" onClick={() => clearKgBatchMergeSelection()}>
+                    取消全选
+                  </button>
+                  <button
+                    type="button"
+                    disabled={kgBatchMergeSelectedIds.length === 0}
+                    onClick={() => openKgBatchMergeModal()}
+                  >
+                    选择主实体合并
+                  </button>
+                </div>
+              )}
+
               <div className="kg-filter-bar">
                 <input
                   type="text"
@@ -1767,24 +1994,42 @@ function App() {
               </div>
               {kgEntities.length ? (
                 <div className="kg-entity-list kg-large-list">
-                  {kgEntities.map((entity) => (
-                    <button
-                      type="button"
-                      className="kg-entity-row kg-clickable-row"
-                      key={entity.id}
-                      onClick={() => void openKgEntityDetail(entity.id)}
-                    >
-                      <div>
-                        <strong>{entity.name}</strong>
-                        <span>{entity.type}</span>
-                      </div>
-                      <p>
-                        出现 {entity.mentionCount} 次
-                        {entity.aliases.length ? ` · 别名 ${entity.aliases.join('、')}` : ''}
-                        {entity.description ? ` · ${entity.description}` : ''}
-                      </p>
-                    </button>
-                  ))}
+                  {kgEntities.map((entity) => {
+                    const isSelected = kgBatchMergeSelectedIds.includes(entity.id)
+
+                    return (
+                      <button
+                        type="button"
+                        className={isSelected ? 'kg-entity-row kg-clickable-row selected' : 'kg-entity-row kg-clickable-row'}
+                        key={entity.id}
+                        onClick={() =>
+                          kgBatchMergeMode
+                            ? toggleKgBatchMergeSelection(entity.id)
+                            : void openKgEntityDetail(entity.id)
+                        }
+                      >
+                        <div>
+                          <div className="kg-entity-row-main">
+                            {kgBatchMergeMode && (
+                              <input
+                                type="checkbox"
+                                checked={isSelected}
+                                onChange={() => toggleKgBatchMergeSelection(entity.id)}
+                                onClick={(event) => event.stopPropagation()}
+                              />
+                            )}
+                            <strong>{entity.name}</strong>
+                          </div>
+                          <span>{entity.type}</span>
+                        </div>
+                        <p>
+                          出现 {entity.mentionCount} 次
+                          {entity.aliases.length ? ` · 别名 ${entity.aliases.join('、')}` : ''}
+                          {entity.description ? ` · ${entity.description}` : ''}
+                        </p>
+                      </button>
+                    )
+                  })}
                 </div>
               ) : (
                 <p className="empty-summary">还没有实体。</p>
