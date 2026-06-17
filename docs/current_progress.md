@@ -44,6 +44,9 @@ SQLite 图谱表
 - UI：知识图谱页面新增“待复审”统计按钮与复审队列面板，支持按实体/关系筛选、批量选择、标记已审/忽略/删除/编辑。
 - 编辑/合并实体或关系后会自动重置 review_status 为 NULL，以便重新评估。
 
+当前已知问题（非本功能引入）：
+- npm run lint 存在 7 个 pre-existing error/warning，集中在 useReaderState.ts 和 App.tsx 的 useEffect 依赖/setState 模式。TypeScript 编译和 vite build 均通过。
+
 所以我的建议下一步是：
 做“关系源/目标实体切换”
 允许在关系详情中把 source 或 target 改成另一个实体，解决抽取时端点错误的问题。
