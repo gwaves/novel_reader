@@ -84,7 +84,7 @@ type KgScanJob = {
   id: string
   bookId: string
   scope: string
-  status: 'running' | 'completed' | 'failed'
+  status: 'running' | 'completed' | 'failed' | 'cancelled'
   totalChapters: number
   completedChapters: number
   failedChapters: number
@@ -240,6 +240,7 @@ function App() {
   const readerRef = useRef<HTMLElement | null>(null)
   const chapterListRef = useRef<HTMLDivElement | null>(null)
   const activeChapterButtonRef = useRef<HTMLButtonElement | null>(null)
+  const shouldStopScanningRef = useRef(false)
   const [kgOverview, setKgOverview] = useState<KgOverview | null>(null)
   const [kgEntities, setKgEntities] = useState<KgEntity[]>([])
   const [kgRelations, setKgRelations] = useState<KgRelation[]>([])
@@ -255,6 +256,7 @@ function App() {
   const [kgScanEnd, setKgScanEnd] = useState(1)
   const [kgScanConcurrency, setKgScanConcurrency] = useState(10)
   const [isKgScanning, setIsKgScanning] = useState(false)
+  const [isStoppingKgScan, setIsStoppingKgScan] = useState(false)
   const [kgScanProgress, setKgScanProgress] = useState('')
   const [kgScanJob, setKgScanJob] = useState<KgScanJob | null>(null)
   const [kgRelationDetail, setKgRelationDetail] = useState<KgRelationDetail | null>(null)
@@ -571,7 +573,7 @@ function App() {
   }
 
   async function fetchKgScannedChapters() {
-    if (!state.book) return
+    if (!state.book) return []
 
     try {
       const response = await fetch(
@@ -580,8 +582,10 @@ function App() {
       if (!response.ok) throw new Error('读取已扫描章节失败。')
       const payload = (await response.json()) as { chapters: KgScannedChapter[] }
       setKgScannedChapters(payload.chapters)
+      return payload.chapters
     } catch (err) {
       setKgError(err instanceof Error ? err.message : '读取已扫描章节失败。')
+      return []
     }
   }
 
@@ -1040,11 +1044,11 @@ function App() {
     return state.book.chapters.filter((chapter) => !completedChapterIds.has(chapter.id))
   }
 
-  async function scanSelectedKnowledgeGraphChapters(options?: { forcePending?: boolean }) {
+  async function scanSelectedKnowledgeGraphChapters(options?: { forcePending?: boolean; pendingChapters?: Chapter[] }) {
     const selectedChapters = options?.forcePending
       ? state.book?.chapters ?? []
       : getSelectedKgScanChapters()
-    const chapters = options?.forcePending ? getAllPendingKgScanChapters() : getPendingKgScanChapters()
+    const chapters = options?.pendingChapters ?? (options?.forcePending ? getAllPendingKgScanChapters() : getPendingKgScanChapters())
 
     if (!state.book || !selectedChapters.length) {
       setKgError('没有可扫描的章节。')
@@ -1068,12 +1072,15 @@ function App() {
 
     setKgError('')
     setIsKgScanning(true)
+    setIsStoppingKgScan(false)
+    shouldStopScanningRef.current = false
 
     let jobId: string | null = null
     let completedCount = 0
     let failedCount = 0
+    let wasCancelled = false
 
-    async function updateJobProgress(status: KgScanJob['status']) {
+    async function updateJobProgress(status: KgScanJob['status'], error?: string | null) {
       if (!jobId) return
       try {
         await fetch(`/api/kg/scan/jobs/${encodeURIComponent(jobId)}`, {
@@ -1081,6 +1088,7 @@ function App() {
             status,
             completedChapters: completedCount,
             failedChapters: failedCount,
+            error,
           }),
           headers: { 'Content-Type': 'application/json' },
           method: 'PUT',
@@ -1120,6 +1128,11 @@ function App() {
 
       async function worker() {
         while (nextIndex < chapters.length) {
+          if (shouldStopScanningRef.current) {
+            wasCancelled = true
+            break
+          }
+
           const chapter = chapters[nextIndex]
           nextIndex += 1
           setKgScanProgress(
@@ -1135,7 +1148,10 @@ function App() {
           }
 
           setKgScanProgress(`并发 ${concurrency}，已完成 ${completedCount}/${chapters.length}，失败 ${failedCount} 章`)
-          await updateJobProgress('running')
+
+          if (!shouldStopScanningRef.current) {
+            await updateJobProgress('running')
+          }
         }
       }
 
@@ -1143,16 +1159,31 @@ function App() {
         Array.from({ length: Math.min(concurrency, chapters.length) }, () => worker()),
       )
 
-      const finalStatus: KgScanJob['status'] = failedCount > 0 && failedCount === chapters.length ? 'failed' : 'completed'
-      const finalError = failedCount > 0 ? `${failedCount} 章扫描失败` : null
+      let finalStatus: KgScanJob['status']
+      let finalError: string | null = null
+
+      if (wasCancelled) {
+        finalStatus = 'cancelled'
+        finalError = '已停止'
+      } else if (failedCount > 0 && failedCount === chapters.length) {
+        finalStatus = 'failed'
+        finalError = `${failedCount} 章扫描失败`
+      } else {
+        finalStatus = 'completed'
+        if (failedCount > 0) {
+          finalError = `${failedCount} 章扫描失败`
+        }
+      }
 
       setKgScanProgress(
-        finalStatus === 'completed'
-          ? `已完成 ${chapters.length} 章扫描。`
-          : `扫描结束，成功 ${completedCount} 章，失败 ${failedCount} 章。`,
+        finalStatus === 'cancelled'
+          ? `扫描已停止，已完成 ${completedCount}/${chapters.length} 章。`
+          : finalStatus === 'completed'
+            ? `已完成 ${chapters.length} 章扫描。`
+            : `扫描结束，成功 ${completedCount} 章，失败 ${failedCount} 章。`,
       )
 
-      await updateJobProgress(finalStatus)
+      await updateJobProgress(finalStatus, finalError)
       setKgScanJob((prev) =>
         prev
           ? { ...prev, status: finalStatus, completedChapters: completedCount, failedChapters: failedCount, error: finalError }
@@ -1162,20 +1193,35 @@ function App() {
       await refreshKnowledgeGraph()
     } catch (err) {
       setKgError(err instanceof Error ? err.message : '章节扫描失败。')
-      await updateJobProgress('failed')
+      await updateJobProgress('failed', '章节扫描失败')
       setKgScanJob((prev) => (prev ? { ...prev, status: 'failed' } : null))
     } finally {
       setIsKgScanning(false)
+      setIsStoppingKgScan(false)
+      shouldStopScanningRef.current = false
     }
+  }
+
+  function stopKnowledgeGraphScan() {
+    if (!isKgScanning) return
+    shouldStopScanningRef.current = true
+    setIsStoppingKgScan(true)
+    setKgScanProgress('正在停止扫描...')
   }
 
   async function resumeKnowledgeGraphScan() {
     if (!state.book) return
 
-    // Make sure we have the latest scanned chapter list before resuming,
-    // otherwise getAllPendingKgScanChapters() will treat every chapter as pending.
-    await fetchKgScannedChapters()
-    await scanSelectedKnowledgeGraphChapters({ forcePending: true })
+    // Fetch the latest scanned chapter list and compute pending chapters locally.
+    // Using the fetched result directly avoids React state batching issues where
+    // getAllPendingKgScanChapters() would still see the stale kgScannedChapters array.
+    const scannedChapters = await fetchKgScannedChapters()
+    const completedChapterIds = new Set(
+      scannedChapters.filter((chapter) => chapter.status === 'completed').map((chapter) => chapter.chapterId),
+    )
+    const pendingChapters = state.book.chapters.filter((chapter) => !completedChapterIds.has(chapter.id))
+
+    await scanSelectedKnowledgeGraphChapters({ forcePending: true, pendingChapters })
   }
 
   function getDisplayKgScanJobStatus(): { label: string; isInterrupted: boolean } {
@@ -1191,6 +1237,7 @@ function App() {
     }
 
     if (kgScanJob.status === 'completed') return { label: '已完成', isInterrupted: false }
+    if (kgScanJob.status === 'cancelled') return { label: '已停止', isInterrupted: false }
     return { label: '失败', isInterrupted: false }
   }
 
@@ -2673,13 +2720,29 @@ function App() {
             </div>
 
             <div className="kg-scan-actions">
-              <button
-                type="button"
-                disabled={isKgScanning || getSelectedKgScanChapters().length === 0}
-                onClick={() => void scanSelectedKnowledgeGraphChapters()}
-              >
-                {isKgScanning ? '扫描中...' : `开始扫描 ${getPendingKgScanChapters().length} 章`}
-              </button>
+              {isKgScanning ? (
+                <>
+                  <button type="button" disabled>
+                    扫描中...
+                  </button>
+                  <button
+                    type="button"
+                    className="ghost-button danger-button"
+                    disabled={isStoppingKgScan}
+                    onClick={() => void stopKnowledgeGraphScan()}
+                  >
+                    {isStoppingKgScan ? '停止中...' : '停止扫描'}
+                  </button>
+                </>
+              ) : (
+                <button
+                  type="button"
+                  disabled={getSelectedKgScanChapters().length === 0}
+                  onClick={() => void scanSelectedKnowledgeGraphChapters()}
+                >
+                  开始扫描 {getPendingKgScanChapters().length} 章
+                </button>
+              )}
               {kgScanJob && !isKgScanning && (
                 <div className="kg-scan-status">
                   <p>
@@ -2694,7 +2757,7 @@ function App() {
                     {kgScanJob.status === 'completed' && (
                       <span>（{kgScanJob.completedChapters}/{kgScanJob.totalChapters} 章）</span>
                     )}
-                    {kgScanJob.status === 'failed' && (
+                    {(kgScanJob.status === 'failed' || kgScanJob.status === 'cancelled') && (
                       <span>（成功 {kgScanJob.completedChapters}，失败 {kgScanJob.failedChapters}）</span>
                     )}
                     {kgScanJob.error && <span className="error"> · {kgScanJob.error}</span>}
