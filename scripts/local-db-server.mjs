@@ -133,8 +133,11 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_kg_entities_book_type ON kg_entities(book_id, type);
   CREATE INDEX IF NOT EXISTS idx_kg_entities_name ON kg_entities(book_id, normalized_name);
   CREATE INDEX IF NOT EXISTS idx_kg_entity_mentions_entity ON kg_entity_mentions(entity_id, chapter_index);
+  CREATE INDEX IF NOT EXISTS idx_kg_entity_mentions_chapter ON kg_entity_mentions(chapter_id);
   CREATE INDEX IF NOT EXISTS idx_kg_relations_book_type ON kg_relations(book_id, type);
   CREATE INDEX IF NOT EXISTS idx_kg_relation_mentions_relation ON kg_relation_mentions(relation_id, chapter_index);
+  CREATE INDEX IF NOT EXISTS idx_kg_relation_mentions_chapter ON kg_relation_mentions(chapter_id);
+  CREATE INDEX IF NOT EXISTS idx_kg_chapter_extractions_book ON kg_chapter_extractions(book_id);
 `)
 
 // Migration: add first/last chapter index to relations if missing
