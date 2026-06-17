@@ -570,6 +570,21 @@ function App() {
     }
   }
 
+  async function fetchKgScannedChapters() {
+    if (!state.book) return
+
+    try {
+      const response = await fetch(
+        `/api/kg/chapters?bookId=${encodeURIComponent(state.book.id)}`,
+      )
+      if (!response.ok) throw new Error('读取已扫描章节失败。')
+      const payload = (await response.json()) as { chapters: KgScannedChapter[] }
+      setKgScannedChapters(payload.chapters)
+    } catch (err) {
+      setKgError(err instanceof Error ? err.message : '读取已扫描章节失败。')
+    }
+  }
+
   async function saveCurrentChapterExtraction() {
     if (!state.book || !activeChapter) return
 
@@ -1156,6 +1171,10 @@ function App() {
 
   async function resumeKnowledgeGraphScan() {
     if (!state.book) return
+
+    // Make sure we have the latest scanned chapter list before resuming,
+    // otherwise getAllPendingKgScanChapters() will treat every chapter as pending.
+    await fetchKgScannedChapters()
     await scanSelectedKnowledgeGraphChapters({ forcePending: true })
   }
 
