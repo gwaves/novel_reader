@@ -49,11 +49,16 @@ SQLite 图谱表
 - PR #6：阅读器切换章节后自动滚动到章节顶部，修复方向键/按钮翻页后阅读位置不重置的问题。
 - PR #7：修复自动恢复扫描时会重复扫描已完成章节的 bug。恢复前会先拉取最新已扫描章节列表，确保只扫真正 pending 的章节。
 
+2026-06-18 更新：修复恢复扫描仍从已扫描章节重复开始的问题，并新增停止扫描按钮。
+- 修复根因：`resumeKnowledgeGraphScan` 调用 `fetchKgScannedChapters()` 后，旧代码立即读取 `kgScannedChapters` 这个 React state 闭包，导致拿到的是刷新前的空数组，从而把全书都当成 pending。现在 `fetchKgScannedChapters()` 返回最新已扫描章节列表，恢复扫描时直接用返回结果计算 pending 章节。
+- 新增停止扫描：扫描过程中显示「停止扫描」按钮，设置 `shouldStopScanningRef` 标志让并发 worker 在处理完当前章节后退出，任务状态记为 `cancelled`，UI 显示「已停止」。
+- 清理了数据库中遗留的 `running` 扫描任务，避免启动后仍显示旧任务。
+
 当前已知问题（非本功能引入）：
 - npm run lint 存在 7 个 pre-existing error/warning，集中在 useReaderState.ts 和 App.tsx 的 useEffect 依赖/setState 模式。TypeScript 编译和 vite build 均通过。
 
-所以我的建议下一步是：
-做“关系源/目标实体切换”
+接下来建议：
+- 关系源/目标实体切换（关系纠错）
 允许在关系详情中把 source 或 target 改成另一个实体，解决抽取时端点错误的问题。
 
 做完这个，关系纠错能力会进一步提升，为后续图可视化打下更干净的数据基础。
