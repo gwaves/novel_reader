@@ -329,6 +329,7 @@ const listKgRelationsStatement = db.prepare(`
 const getKgRelationStatement = db.prepare(`
   SELECT
     r.id,
+    r.book_id AS bookId,
     r.type,
     r.description,
     r.confidence,
@@ -468,6 +469,80 @@ const updateKgEntityStatement = db.prepare(`
     updated_at = CURRENT_TIMESTAMP
   WHERE id = ?
 `)
+const updateKgEntityFullStatement = db.prepare(`
+  UPDATE kg_entities
+  SET
+    type = ?,
+    name = ?,
+    normalized_name = ?,
+    aliases_json = ?,
+    description = ?,
+    updated_at = CURRENT_TIMESTAMP
+  WHERE id = ?
+`)
+const deleteKgEntityStatement = db.prepare(`
+  DELETE FROM kg_entities WHERE id = ?
+`)
+const deleteKgRelationStatement = db.prepare(`
+  DELETE FROM kg_relations WHERE id = ?
+`)
+const findKgEntityByNormalizedStatement = db.prepare(`
+  SELECT id
+  FROM kg_entities
+  WHERE book_id = ? AND type = ? AND normalized_name = ?
+`)
+const listKgEntityMentionsForMergeStatement = db.prepare(`
+  SELECT
+    id,
+    chapter_id AS chapterId,
+    chapter_index AS chapterIndex,
+    evidence,
+    confidence
+  FROM kg_entity_mentions
+  WHERE entity_id = ?
+  ORDER BY chapter_index ASC
+`)
+const listKgRelationsForMergeStatement = db.prepare(`
+  SELECT
+    id,
+    source_entity_id AS sourceEntityId,
+    target_entity_id AS targetEntityId,
+    type,
+    description,
+    confidence,
+    first_chapter_index AS firstChapterIndex,
+    last_chapter_index AS lastChapterIndex
+  FROM kg_relations
+  WHERE source_entity_id = ? OR target_entity_id = ?
+`)
+const findKgRelationByEndpointsStatement = db.prepare(`
+  SELECT id
+  FROM kg_relations
+  WHERE book_id = ? AND source_entity_id = ? AND target_entity_id = ? AND type = ?
+`)
+const updateKgRelationEndpointStatement = db.prepare(`
+  UPDATE kg_relations
+  SET source_entity_id = ?, target_entity_id = ?, updated_at = CURRENT_TIMESTAMP
+  WHERE id = ?
+`)
+const updateKgRelationMentionsRelationIdStatement = db.prepare(`
+  UPDATE kg_relation_mentions
+  SET relation_id = ?
+  WHERE relation_id = ?
+`)
+const deleteKgRelationMentionsByRelationStatement = db.prepare(`
+  DELETE FROM kg_relation_mentions WHERE relation_id = ?
+`)
+const getKgEntityMentionByChapterStatement = db.prepare(`
+  SELECT id, evidence, confidence
+  FROM kg_entity_mentions
+  WHERE entity_id = ? AND chapter_id = ?
+`)
+const updateKgEntityMentionStatement = db.prepare(`
+  UPDATE kg_entity_mentions
+  SET evidence = ?, confidence = MAX(confidence, ?)
+  WHERE id = ?
+`)
 const insertKgEntityMentionStatement = db.prepare(`
   INSERT INTO kg_entity_mentions (
     id,
@@ -518,6 +593,19 @@ const updateKgRelationStatement = db.prepare(`
     updated_at = CURRENT_TIMESTAMP
   WHERE id = ?
 `)
+const updateKgRelationFullStatement = db.prepare(`
+  UPDATE kg_relations
+  SET
+    type = ?,
+    description = ?,
+    updated_at = CURRENT_TIMESTAMP
+  WHERE id = ?
+`)
+const findKgRelationConflictStatement = db.prepare(`
+  SELECT id
+  FROM kg_relations
+  WHERE book_id = ? AND source_entity_id = ? AND target_entity_id = ? AND type = ?
+`)
 const insertKgRelationMentionStatement = db.prepare(`
   INSERT INTO kg_relation_mentions (
     id,
@@ -535,7 +623,7 @@ const insertKgRelationMentionStatement = db.prepare(`
 function sendJson(response, statusCode, payload) {
   response.writeHead(statusCode, {
     'Access-Control-Allow-Headers': 'Content-Type',
-    'Access-Control-Allow-Methods': 'GET,PUT,POST,OPTIONS',
+    'Access-Control-Allow-Methods': 'GET,PUT,POST,DELETE,OPTIONS',
     'Access-Control-Allow-Origin': '*',
     'Content-Type': 'application/json; charset=utf-8',
   })
@@ -795,6 +883,241 @@ function saveChapterExtractionTransaction(bookId, chapterId, extraction, model) 
   }
 }
 
+function getKgEntityWithAliases(entityId) {
+  const row = getKgEntityStatement.get(entityId)
+  if (!row) return null
+
+  return {
+    ...row,
+    aliases: safeJsonParse(row.aliasesJson, []),
+  }
+}
+
+function recomputeEntityChapterRange(entityId) {
+  const result = db.prepare(`
+    SELECT
+      MIN(chapter_index) AS firstChapterIndex,
+      MAX(chapter_index) AS lastChapterIndex
+    FROM kg_entity_mentions
+    WHERE entity_id = ?
+  `).get(entityId)
+
+  db.prepare(`
+    UPDATE kg_entities
+    SET
+      first_chapter_index = ?,
+      last_chapter_index = ?,
+      updated_at = CURRENT_TIMESTAMP
+    WHERE id = ?
+  `).run(
+    result?.firstChapterIndex ?? null,
+    result?.lastChapterIndex ?? null,
+    entityId,
+  )
+}
+
+function recomputeRelationChapterRange(relationId) {
+  const result = db.prepare(`
+    SELECT
+      MIN(chapter_index) AS firstChapterIndex,
+      MAX(chapter_index) AS lastChapterIndex
+    FROM kg_relation_mentions
+    WHERE relation_id = ?
+  `).get(relationId)
+
+  db.prepare(`
+    UPDATE kg_relations
+    SET
+      first_chapter_index = ?,
+      last_chapter_index = ?,
+      updated_at = CURRENT_TIMESTAMP
+    WHERE id = ?
+  `).run(
+    result?.firstChapterIndex ?? null,
+    result?.lastChapterIndex ?? null,
+    relationId,
+  )
+}
+
+function updateKgEntityTransaction(entityId, payload) {
+  const entity = getKgEntityWithAliases(entityId)
+  if (!entity) throw new Error('Entity not found.')
+
+  const name = String(payload?.name ?? '').trim()
+  if (!name) throw new Error('Entity name is required.')
+
+  const type = normalizeEntityType(payload?.type)
+  const normalizedName = normalizeName(name)
+  const aliases = uniqueStrings(Array.isArray(payload?.aliases) ? payload.aliases : [])
+  const description = typeof payload?.description === 'string' ? payload.description.trim() : entity.description
+
+  const duplicate = findKgEntityByNormalizedStatement.get(entity.bookId, type, normalizedName)
+  if (duplicate && duplicate.id !== entityId) {
+    throw new Error('同书同类型下已存在相同名称的实体。')
+  }
+
+  updateKgEntityFullStatement.run(
+    type,
+    name,
+    normalizedName,
+    JSON.stringify(aliases),
+    description,
+    entityId,
+  )
+
+  return getKgEntityWithAliases(entityId)
+}
+
+function mergeKgEntitiesTransaction(sourceId, targetId) {
+  if (sourceId === targetId) throw new Error('Cannot merge an entity into itself.')
+
+  const source = getKgEntityWithAliases(sourceId)
+  const target = getKgEntityWithAliases(targetId)
+
+  if (!source || !target) throw new Error('Entity not found.')
+  if (source.bookId !== target.bookId) throw new Error('Entities must belong to the same book.')
+
+  const mergedAliases = uniqueStrings([
+    ...target.aliases,
+    ...source.aliases,
+    source.name,
+  ]).filter((alias) => normalizeName(alias) !== normalizeName(target.name))
+
+  const mergedDescription = target.description || source.description || null
+
+  // 1. Merge entity mentions
+  const sourceMentions = listKgEntityMentionsForMergeStatement.all(sourceId)
+  for (const mention of sourceMentions) {
+    const existing = getKgEntityMentionByChapterStatement.get(targetId, mention.chapterId)
+    if (existing) {
+      const evidence = mention.evidence || existing.evidence
+      const confidence = Math.max(mention.confidence, existing.confidence)
+      updateKgEntityMentionStatement.run(evidence, confidence, existing.id)
+    } else {
+      insertKgEntityMentionStatement.run(
+        randomUUID(),
+        targetId,
+        target.bookId,
+        mention.chapterId,
+        mention.chapterIndex,
+        mention.evidence,
+        mention.confidence,
+      )
+    }
+  }
+
+  // 2. Migrate relations
+  const sourceRelations = listKgRelationsForMergeStatement.all(sourceId, sourceId)
+  for (const relation of sourceRelations) {
+    const newSourceId = relation.sourceEntityId === sourceId ? targetId : relation.sourceEntityId
+    const newTargetId = relation.targetEntityId === sourceId ? targetId : relation.targetEntityId
+
+    if (newSourceId === newTargetId) {
+      deleteKgRelationStatement.run(relation.id)
+      deleteKgRelationMentionsByRelationStatement.run(relation.id)
+      continue
+    }
+
+    const existing = findKgRelationByEndpointsStatement.get(
+      target.bookId,
+      newSourceId,
+      newTargetId,
+      relation.type,
+    )
+
+    if (existing) {
+      updateKgRelationMentionsRelationIdStatement.run(existing.id, relation.id)
+      recomputeRelationChapterRange(existing.id)
+      deleteKgRelationStatement.run(relation.id)
+    } else {
+      updateKgRelationEndpointStatement.run(newSourceId, newTargetId, relation.id)
+    }
+  }
+
+  // 3. Update target aliases/description and delete source
+  updateKgEntityFullStatement.run(
+    target.type,
+    target.name,
+    normalizeName(target.name),
+    JSON.stringify(mergedAliases),
+    mergedDescription,
+    targetId,
+  )
+
+  deleteKgEntityStatement.run(sourceId)
+
+  // 4. Recompute target chapter range
+  recomputeEntityChapterRange(targetId)
+
+  return {
+    target: getKgEntityWithAliases(targetId),
+    sourceName: source.name,
+  }
+}
+
+function mergeKgEntitiesBatchTransaction(sourceIds, targetId) {
+  if (!Array.isArray(sourceIds) || sourceIds.length === 0) {
+    throw new Error('至少选择一个要合并的源实体。')
+  }
+
+  if (sourceIds.includes(targetId)) {
+    throw new Error('主实体不能在被合并的源实体中。')
+  }
+
+  const target = getKgEntityWithAliases(targetId)
+  if (!target) throw new Error('主实体不存在。')
+
+  const sourceNames = []
+
+  for (const sourceId of sourceIds) {
+    const result = mergeKgEntitiesTransaction(sourceId, targetId)
+    sourceNames.push(result.sourceName)
+  }
+
+  return {
+    target: getKgEntityWithAliases(targetId),
+    mergedCount: sourceNames.length,
+    sourceNames,
+  }
+}
+
+function deleteKgEntityTransaction(entityId) {
+  const entity = getKgEntityWithAliases(entityId)
+  if (!entity) throw new Error('Entity not found.')
+
+  deleteKgEntityStatement.run(entityId)
+  return { deleted: true }
+}
+
+function deleteKgRelationTransaction(relationId) {
+  const relation = getKgRelationStatement.get(relationId)
+  if (!relation) throw new Error('Relation not found.')
+
+  deleteKgRelationStatement.run(relationId)
+  return { deleted: true }
+}
+
+function updateKgRelationTransaction(relationId, payload) {
+  const relation = getKgRelationStatement.get(relationId)
+  if (!relation) throw new Error('Relation not found.')
+
+  const type = normalizeRelationType(payload?.type)
+  const description = typeof payload?.description === 'string' ? payload.description.trim() : relation.description
+
+  const conflict = findKgRelationConflictStatement.get(
+    relation.bookId ?? relation.book_id,
+    relation.sourceId,
+    relation.targetId,
+    type,
+  )
+  if (conflict && conflict.id !== relationId) {
+    throw new Error('同书同类型下已存在相同端点的关系。')
+  }
+
+  updateKgRelationFullStatement.run(type, description, relationId)
+  return getKgRelationStatement.get(relationId)
+}
+
 function mirrorStructuredState(state) {
   const libraryBooks = Array.isArray(state?.books)
     ? state.books
@@ -1021,38 +1344,156 @@ const server = createServer(async (request, response) => {
     }
 
     const entityMatch = url.pathname.match(/^\/api\/kg\/entities\/([^/]+)$/)
-    if (request.method === 'GET' && entityMatch) {
+    if (entityMatch) {
       const entityId = decodeURIComponent(entityMatch[1])
-      const entity = getKgEntityStatement.get(entityId)
 
-      if (!entity) {
-        sendJson(response, 404, { error: 'Entity not found.' })
+      if (request.method === 'GET') {
+        const entity = getKgEntityStatement.get(entityId)
+
+        if (!entity) {
+          sendJson(response, 404, { error: 'Entity not found.' })
+          return
+        }
+
+        sendJson(response, 200, {
+          entity: mapEntityRow(entity),
+          mentions: getKgEntityMentionsStatement.all(entityId),
+          relations: getKgEntityRelationsStatement.all(entityId, entityId),
+        })
         return
       }
 
-      sendJson(response, 200, {
-        entity: mapEntityRow(entity),
-        mentions: getKgEntityMentionsStatement.all(entityId),
-        relations: getKgEntityRelationsStatement.all(entityId, entityId),
-      })
+      if (request.method === 'PUT') {
+        const body = await readJson(request)
+
+        db.exec('BEGIN')
+        try {
+          const entity = updateKgEntityTransaction(entityId, body)
+          db.exec('COMMIT')
+          sendJson(response, 200, { entity: mapEntityRow(entity) })
+        } catch (error) {
+          db.exec('ROLLBACK')
+          sendJson(response, 400, { error: error instanceof Error ? error.message : 'Update failed.' })
+        }
+        return
+      }
+
+      if (request.method === 'DELETE') {
+        db.exec('BEGIN')
+        try {
+          deleteKgEntityTransaction(entityId)
+          db.exec('COMMIT')
+          sendJson(response, 200, { ok: true })
+        } catch (error) {
+          db.exec('ROLLBACK')
+          sendJson(response, 400, { error: error instanceof Error ? error.message : 'Delete failed.' })
+        }
+        return
+      }
+    }
+
+    if (request.method === 'POST' && url.pathname === '/api/kg/entities/merge') {
+      const body = await readJson(request)
+      const sourceId = body?.sourceId
+      const targetId = body?.targetId
+
+      if (!sourceId || typeof sourceId !== 'string' || !targetId || typeof targetId !== 'string') {
+        sendJson(response, 400, { error: 'Missing sourceId or targetId.' })
+        return
+      }
+
+      db.exec('BEGIN')
+      try {
+        const result = mergeKgEntitiesTransaction(sourceId, targetId)
+        db.exec('COMMIT')
+        sendJson(response, 200, {
+          entity: mapEntityRow(result.target),
+          sourceName: result.sourceName,
+        })
+      } catch (error) {
+        db.exec('ROLLBACK')
+        sendJson(response, 400, { error: error instanceof Error ? error.message : 'Merge failed.' })
+      }
+      return
+    }
+
+    if (request.method === 'POST' && url.pathname === '/api/kg/entities/merge-batch') {
+      const body = await readJson(request)
+      const sourceIds = body?.sourceIds
+      const targetId = body?.targetId
+
+      if (!Array.isArray(sourceIds) || sourceIds.length === 0 || !sourceIds.every((id) => typeof id === 'string')) {
+        sendJson(response, 400, { error: 'sourceIds must be a non-empty array of strings.' })
+        return
+      }
+
+      if (!targetId || typeof targetId !== 'string') {
+        sendJson(response, 400, { error: 'Missing targetId.' })
+        return
+      }
+
+      db.exec('BEGIN')
+      try {
+        const result = mergeKgEntitiesBatchTransaction(sourceIds, targetId)
+        db.exec('COMMIT')
+        sendJson(response, 200, {
+          entity: mapEntityRow(result.target),
+          mergedCount: result.mergedCount,
+          sourceNames: result.sourceNames,
+        })
+      } catch (error) {
+        db.exec('ROLLBACK')
+        sendJson(response, 400, { error: error instanceof Error ? error.message : 'Batch merge failed.' })
+      }
       return
     }
 
     const relationMatch = url.pathname.match(/^\/api\/kg\/relations\/([^/]+)$/)
-    if (request.method === 'GET' && relationMatch) {
+    if (relationMatch) {
       const relationId = decodeURIComponent(relationMatch[1])
-      const relation = getKgRelationStatement.get(relationId)
 
-      if (!relation) {
-        sendJson(response, 404, { error: 'Relation not found.' })
+      if (request.method === 'GET') {
+        const relation = getKgRelationStatement.get(relationId)
+
+        if (!relation) {
+          sendJson(response, 404, { error: 'Relation not found.' })
+          return
+        }
+
+        sendJson(response, 200, {
+          relation,
+          mentions: getKgRelationMentionsStatement.all(relationId),
+        })
         return
       }
 
-      sendJson(response, 200, {
-        relation,
-        mentions: getKgRelationMentionsStatement.all(relationId),
-      })
-      return
+      if (request.method === 'PUT') {
+        const body = await readJson(request)
+
+        db.exec('BEGIN')
+        try {
+          const relation = updateKgRelationTransaction(relationId, body)
+          db.exec('COMMIT')
+          sendJson(response, 200, { relation })
+        } catch (error) {
+          db.exec('ROLLBACK')
+          sendJson(response, 400, { error: error instanceof Error ? error.message : 'Update failed.' })
+        }
+        return
+      }
+
+      if (request.method === 'DELETE') {
+        db.exec('BEGIN')
+        try {
+          deleteKgRelationTransaction(relationId)
+          db.exec('COMMIT')
+          sendJson(response, 200, { ok: true })
+        } catch (error) {
+          db.exec('ROLLBACK')
+          sendJson(response, 400, { error: error instanceof Error ? error.message : 'Delete failed.' })
+        }
+        return
+      }
     }
 
     const chapterExtractionMatch = url.pathname.match(/^\/api\/kg\/chapters\/([^/]+)\/extraction$/)

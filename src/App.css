@@ -684,8 +684,89 @@ button:disabled {
   overflow: auto;
 }
 
-.kg-detail-card {
-  margin-bottom: 20px;
+.kg-detail-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.kg-batch-actions {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 14px;
+  padding: 12px;
+  border-radius: 8px;
+  background: #f1eadf;
+}
+
+.kg-batch-actions span {
+  color: #4d463d;
+  font-weight: 650;
+}
+
+.kg-entity-row-main {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.kg-entity-row-main input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  accent-color: #2c5b4b;
+}
+
+.kg-merge-candidate-list {
+  display: grid;
+  gap: 10px;
+  max-height: 300px;
+  overflow: auto;
+}
+
+.kg-entity-row.selected {
+  border-color: #b88947;
+  background: #f8efe0;
+}
+
+.kg-merge-candidate-list .kg-entity-row {
+  width: 100%;
+  border: 1px solid #e4dbcf;
+  border-radius: 8px;
+  padding: 12px;
+  background: #fffdf8;
+  text-align: left;
+  cursor: pointer;
+}
+
+.kg-merge-candidate-list .kg-entity-row:hover,
+.kg-merge-candidate-list .kg-entity-row.active {
+  border-color: #b88947;
+  background: #f8efe0;
+}
+
+.kg-merge-candidate-list .kg-entity-row div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.kg-merge-candidate-list .kg-entity-row strong {
+  color: #24211c;
+}
+
+.kg-merge-candidate-list .kg-entity-row span {
+  color: #8a6f45;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.kg-merge-candidate-list .kg-entity-row p {
+  margin: 6px 0 0;
+  font-size: 13px;
 }
 
 .kg-detail-grid {
