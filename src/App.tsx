@@ -332,6 +332,7 @@ function App() {
     updateActiveChapter,
     handleGenerateSummary,
     handleBatchGenerateCurrentPage,
+    handleBatchGenerateAllMissingSummaries,
     navigateToPreviousChapter,
     navigateToNextChapter,
     openModelConfig,
@@ -3044,9 +3045,17 @@ function App() {
               >
                 批量生成本页缺失概要
               </button>
+              <button
+                type="button"
+                className="ghost-button"
+                onClick={() => void handleBatchGenerateAllMissingSummaries()}
+                disabled={isGenerating}
+              >
+                批量生成全书缺失概要
+              </button>
             </div>
             <p className="batch-status">
-              本页已生成 {pageSummaryCount}/{pagedChapters.length} 章
+              全书已生成 {processedCount}/{state.book.chapters.length} 章 · 本页 {pageSummaryCount}/{pagedChapters.length} 章
               {batchProgress ? ` · ${batchProgress}` : ''}
             </p>
 
