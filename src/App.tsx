@@ -359,6 +359,16 @@ function App() {
   }, [view, activeChapter?.id, chapterPage])
 
   useEffect(() => {
+    if (view !== 'reader' || !activeChapter) return
+
+    window.requestAnimationFrame(() => {
+      if (readerRef.current) {
+        readerRef.current.scrollTop = 0
+      }
+    })
+  }, [view, activeChapter?.id])
+
+  useEffect(() => {
     if (view !== 'reader' || isConfigOpen) return
 
     function handleKeyDown(event: KeyboardEvent) {
