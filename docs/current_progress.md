@@ -44,6 +44,11 @@ SQLite 图谱表
 - UI：知识图谱页面新增“待复审”统计按钮与复审队列面板，支持按实体/关系筛选、批量选择、标记已审/忽略/删除/编辑。
 - 编辑/合并实体或关系后会自动重置 review_status 为 NULL，以便重新评估。
 
+2026-06-18 更新：性能优化与 bug 修复（已提交 PR，待合并）。
+- PR #5：为 kg_entity_mentions、kg_relation_mentions 增加 chapter_id 索引，并为 kg_chapter_extractions 增加 book_id 索引。知识图谱“已扫描章节”接口从 ~8.3s 降至 ~0.02s。
+- PR #6：阅读器切换章节后自动滚动到章节顶部，修复方向键/按钮翻页后阅读位置不重置的问题。
+- PR #7：修复自动恢复扫描时会重复扫描已完成章节的 bug。恢复前会先拉取最新已扫描章节列表，确保只扫真正 pending 的章节。
+
 当前已知问题（非本功能引入）：
 - npm run lint 存在 7 个 pre-existing error/warning，集中在 useReaderState.ts 和 App.tsx 的 useEffect 依赖/setState 模式。TypeScript 编译和 vite build 均通过。
 
