@@ -69,3 +69,8 @@ SQLite 图谱表
 允许在关系详情中把 source 或 target 改成另一个实体，解决抽取时端点错误的问题。
 
 做完这个，关系纠错能力会进一步提升，为后续图可视化打下更干净的数据基础。
+
+2026-06-19 更新：修复离线扫描器偶发 `fetch failed` 并支持断点续传时重试失败章节。
+- `scripts/offline-scanner/llm.mjs`：新增 `fetchWithRetry`，对 `TypeError: fetch failed`、`AbortError`、`ECONNRESET`、`ETIMEDOUT`、`ECONNREFUSED` 等瞬态网络错误最多重试 3 次，退避间隔 500ms/1000ms/2000ms；单次请求默认超时 5 分钟（可通过 `OFFLINE_REQUEST_TIMEOUT_MS` 覆盖）。
+- `scripts/offline-scanner/scanner.mjs` + `db.mjs`：`resume` 恢复任务时自动将 `failed` 章节重置为 `pending`，避免失败章节被跳过。
+- 更新 `README.md`、新增 `README.zh-CN.md`，新增 `docs/development.md`、`docs/development.zh-CN.md` 完善开发文档。
