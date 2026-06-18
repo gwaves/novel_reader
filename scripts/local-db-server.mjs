@@ -190,13 +190,7 @@ const upsertChapterStatement = db.prepare(`
     word_count = excluded.word_count,
     updated_at = excluded.updated_at
 `)
-const deleteSummariesForBookStatement = db.prepare(`
-  DELETE FROM summaries
-  WHERE chapter_id IN (
-    SELECT id FROM chapters WHERE book_id = ?
-  )
-`)
-const insertSummaryStatement = db.prepare(`
+const upsertSummaryStatement = db.prepare(`
   INSERT INTO summaries (
     chapter_id,
     short,
@@ -207,6 +201,25 @@ const insertSummaryStatement = db.prepare(`
     updated_at
   )
   VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+  ON CONFLICT(chapter_id) DO UPDATE SET
+    short = excluded.short,
+    detail = excluded.detail,
+    key_points_json = excluded.key_points_json,
+    skippable = excluded.skippable,
+    generated_by = excluded.generated_by,
+    updated_at = excluded.updated_at
+`)
+const getSummariesForBookStatement = db.prepare(`
+  SELECT
+    s.chapter_id AS chapterId,
+    s.short,
+    s.detail,
+    s.key_points_json AS keyPointsJson,
+    s.skippable,
+    s.generated_by AS generatedBy
+  FROM summaries s
+  JOIN chapters c ON c.id = s.chapter_id
+  WHERE c.book_id = ?
 `)
 const getChapterStatement = db.prepare(`
   SELECT id, book_id, chapter_index, title
@@ -1305,6 +1318,27 @@ function updateKgRelationTransaction(relationId, payload) {
   return getKgRelationStatement.get(relationId)
 }
 
+function loadSummariesForBook(bookId) {
+  const rows = getSummariesForBookStatement.all(bookId)
+  const summaries = {}
+  for (const row of rows) {
+    let keyPoints = []
+    try {
+      keyPoints = JSON.parse(row.keyPointsJson || '[]')
+    } catch {
+      keyPoints = []
+    }
+    summaries[row.chapterId] = {
+      short: row.short,
+      detail: row.detail,
+      keyPoints,
+      skippable: row.skippable,
+      generatedBy: row.generatedBy,
+    }
+  }
+  return summaries
+}
+
 function mirrorStructuredState(state) {
   const libraryBooks = Array.isArray(state?.books)
     ? state.books
@@ -1324,7 +1358,6 @@ function mirrorStructuredState(state) {
     if (!book) continue
 
     upsertBookStatement.run(book.id, book.title, book.importedAt, book.chapters.length)
-    deleteSummariesForBookStatement.run(book.id)
 
     for (const chapter of book.chapters) {
       upsertChapterStatement.run(
@@ -1338,7 +1371,7 @@ function mirrorStructuredState(state) {
 
       const summary = summaries[chapter.id]
       if (summary) {
-        insertSummaryStatement.run(
+        upsertSummaryStatement.run(
           chapter.id,
           summary.short,
           summary.detail,
@@ -1375,7 +1408,24 @@ const server = createServer(async (request, response) => {
   try {
     if (request.method === 'GET' && url.pathname === '/api/state') {
       const row = getStateStatement.get(stateKey)
-      sendJson(response, 200, { state: row ? JSON.parse(row.value_json) : null })
+      const state = row ? JSON.parse(row.value_json) : null
+
+      // 用 summaries 表里的最新数据刷新 state 中的快照，
+      // 这样离线扫描器 export 到数据库后前端刷新就能看到最新计数。
+      if (state && Array.isArray(state.books)) {
+        for (const libraryBook of state.books) {
+          if (libraryBook?.book?.id) {
+            libraryBook.summaries = loadSummariesForBook(libraryBook.book.id)
+          }
+        }
+
+        const activeBook = state.books.find((entry) => entry?.book?.id === state.activeBookId)
+        if (activeBook) {
+          state.summaries = activeBook.summaries
+        }
+      }
+
+      sendJson(response, 200, { state })
       return
     }
 
