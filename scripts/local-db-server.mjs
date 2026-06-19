@@ -159,6 +159,16 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_kg_relation_mentions_relation ON kg_relation_mentions(relation_id, chapter_index);
   CREATE INDEX IF NOT EXISTS idx_kg_relation_mentions_chapter ON kg_relation_mentions(chapter_id);
   CREATE INDEX IF NOT EXISTS idx_kg_chapter_extractions_book ON kg_chapter_extractions(book_id);
+
+  CREATE TABLE IF NOT EXISTS summary_embeddings (
+    chapter_id TEXT PRIMARY KEY REFERENCES chapters(id) ON DELETE CASCADE,
+    book_id TEXT NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+    model TEXT NOT NULL,
+    dimension INTEGER NOT NULL,
+    embedding_json TEXT NOT NULL,
+    generated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+  );
+  CREATE INDEX IF NOT EXISTS idx_summary_embeddings_book ON summary_embeddings(book_id);
 `)
 
 // Migration: add first/last chapter index to relations if missing
@@ -241,6 +251,71 @@ const getSummariesForBookStatement = db.prepare(`
   FROM summaries s
   JOIN chapters c ON c.id = s.chapter_id
   WHERE c.book_id = ?
+`)
+const getSummaryForChapterStatement = db.prepare(`
+  SELECT
+    chapter_id AS chapterId,
+    short,
+    detail,
+    key_points_json AS keyPointsJson
+  FROM summaries
+  WHERE chapter_id = ?
+`)
+const countChaptersForBookStatement = db.prepare(`
+  SELECT COUNT(*) AS count FROM chapters WHERE book_id = ?
+`)
+const countEmbeddingsForBookStatement = db.prepare(`
+  SELECT COUNT(*) AS count FROM summary_embeddings WHERE book_id = ? AND model = ?
+`)
+const listEmbeddingsForBookStatement = db.prepare(`
+  SELECT
+    se.chapter_id AS chapterId,
+    se.embedding_json AS embeddingJson,
+    se.model,
+    se.dimension,
+    c.chapter_index AS chapterIndex,
+    c.title AS chapterTitle
+  FROM summary_embeddings se
+  JOIN chapters c ON c.id = se.chapter_id
+  WHERE se.book_id = ? AND se.model = ?
+  ORDER BY c.chapter_index ASC
+`)
+const getEmbeddingForChapterStatement = db.prepare(`
+  SELECT embedding_json AS embeddingJson, model, dimension
+  FROM summary_embeddings
+  WHERE chapter_id = ? AND model = ?
+`)
+const upsertEmbeddingStatement = db.prepare(`
+  INSERT INTO summary_embeddings (chapter_id, book_id, model, dimension, embedding_json, generated_at)
+  VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+  ON CONFLICT(chapter_id) DO UPDATE SET
+    book_id = excluded.book_id,
+    model = excluded.model,
+    dimension = excluded.dimension,
+    embedding_json = excluded.embedding_json,
+    generated_at = excluded.generated_at
+`)
+const listEntitiesForBookStatement = db.prepare(`
+  SELECT
+    id,
+    type,
+    name,
+    aliases_json AS aliasesJson,
+    first_chapter_index AS firstChapterIndex,
+    last_chapter_index AS lastChapterIndex
+  FROM kg_entities
+  WHERE book_id = ?
+`)
+const listEntityMentionsForEntityStatement = db.prepare(`
+  SELECT DISTINCT chapter_id AS chapterId, chapter_index AS chapterIndex
+  FROM kg_entity_mentions
+  WHERE entity_id = ?
+  ORDER BY chapter_index ASC
+`)
+const getChapterContentSnippetStatement = db.prepare(`
+  SELECT substr(content, 1, 500) AS snippet
+  FROM chapters
+  WHERE id = ?
 `)
 const getChapterStatement = db.prepare(`
   SELECT id, book_id, chapter_index, title
@@ -1202,6 +1277,308 @@ function normalizeRelationType(type) {
 function firstEvidence(evidence) {
   if (Array.isArray(evidence)) return uniqueStrings(evidence).slice(0, 3).join('\n')
   return typeof evidence === 'string' ? evidence.trim() : ''
+}
+
+function l2Normalize(vector) {
+  if (!Array.isArray(vector) || vector.length === 0) return vector
+  const sum = vector.reduce((acc, value) => acc + value * value, 0)
+  const norm = Math.sqrt(sum)
+  if (norm === 0) return vector
+  return vector.map((value) => value / norm)
+}
+
+function dotProduct(a, b) {
+  let result = 0
+  const length = Math.min(a.length, b.length)
+  for (let i = 0; i < length; i++) {
+    result += a[i] * b[i]
+  }
+  return result
+}
+
+function cosineSimilarity(a, b) {
+  return dotProduct(a, b)
+}
+
+function rrfScore(rankVector, rankEntity, k = 60) {
+  const scoreVector = rankVector > 0 ? 1 / (k + rankVector) : 0
+  const scoreEntity = rankEntity > 0 ? 1 / (k + rankEntity) : 0
+  return scoreVector + scoreEntity
+}
+
+function buildSummaryText(summary) {
+  const parts = []
+  if (summary?.short) parts.push(summary.short)
+  if (summary?.detail) parts.push(summary.detail)
+  const keyPoints = safeJsonParse(summary?.keyPointsJson, [])
+  if (Array.isArray(keyPoints) && keyPoints.length > 0) {
+    parts.push(...keyPoints)
+  }
+  return parts.join(' ').trim()
+}
+
+const EMBEDDING_BATCH_SIZE_OLLAMA = 5
+const EMBEDDING_BATCH_SIZE_OPENAI = 50
+const EMBEDDING_REQUEST_TIMEOUT_MS = 300000
+
+async function callOllamaEmbedding(text, config) {
+  const baseUrl = (config?.baseUrl || 'http://127.0.0.1:11434').trim().replace(/\/+$/, '')
+  const model = (config?.model || '').trim()
+  const controller = new AbortController()
+  const timeoutId = setTimeout(() => controller.abort(), EMBEDDING_REQUEST_TIMEOUT_MS)
+
+  try {
+    const response = await fetch(`${baseUrl}/api/embeddings`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model, prompt: text }),
+      signal: controller.signal,
+    })
+
+    clearTimeout(timeoutId)
+
+    if (!response.ok) {
+      throw new Error(`Ollama embedding failed: ${response.status} ${response.statusText}`)
+    }
+
+    const data = await response.json()
+    if (!Array.isArray(data?.embedding)) {
+      throw new Error('Ollama embedding response missing embedding array.')
+    }
+    return data.embedding
+  } catch (error) {
+    clearTimeout(timeoutId)
+    throw error
+  }
+}
+
+async function callOpenAIEmbedding(text, config) {
+  const baseUrl = (config?.baseUrl || '').trim().replace(/\/+$/, '')
+  const model = (config?.model || '').trim()
+  const apiKey = config?.apiKey || ''
+  if (!baseUrl || !model) {
+    throw new Error('OpenAI-compatible embedding requires baseUrl and model.')
+  }
+
+  const headers = { 'Content-Type': 'application/json' }
+  if (apiKey.trim()) {
+    headers.Authorization = `Bearer ${apiKey.trim()}`
+  }
+
+  const controller = new AbortController()
+  const timeoutId = setTimeout(() => controller.abort(), EMBEDDING_REQUEST_TIMEOUT_MS)
+
+  try {
+    const response = await fetch(`${baseUrl}/embeddings`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ model, input: text, encoding_format: 'float' }),
+      signal: controller.signal,
+    })
+
+    clearTimeout(timeoutId)
+
+    if (!response.ok) {
+      throw new Error(`OpenAI embedding failed: ${response.status} ${response.statusText}`)
+    }
+
+    const data = await response.json()
+    const embedding = data?.data?.[0]?.embedding
+    if (!Array.isArray(embedding)) {
+      throw new Error('OpenAI embedding response missing embedding array.')
+    }
+    return embedding
+  } catch (error) {
+    clearTimeout(timeoutId)
+    throw error
+  }
+}
+
+async function generateEmbedding(text, config) {
+  const provider = config?.provider
+  if (provider === 'openai') {
+    return callOpenAIEmbedding(text, config)
+  }
+  return callOllamaEmbedding(text, config)
+}
+
+function linkEntitiesFromQuery(query, entities) {
+  if (!query || !Array.isArray(entities) || entities.length === 0) return []
+
+  const normalizedQuery = normalizeName(query)
+  const matches = []
+
+  // Sort by name length descending so longer names are matched first.
+  const candidates = entities
+    .flatMap((entity) => {
+      const names = [entity.name]
+      const aliases = safeJsonParse(entity.aliasesJson, [])
+      if (Array.isArray(aliases)) {
+        names.push(...aliases)
+      }
+      return names
+        .filter(Boolean)
+        .map((name) => ({ entity, name, normalized: normalizeName(name) }))
+    })
+    .filter((candidate) => candidate.normalized.length >= 2)
+    .sort((a, b) => b.normalized.length - a.normalized.length)
+
+  const matchedEntityIds = new Set()
+  for (const candidate of candidates) {
+    if (matchedEntityIds.has(candidate.entity.id)) continue
+    if (normalizedQuery.includes(candidate.normalized)) {
+      matches.push(candidate.entity)
+      matchedEntityIds.add(candidate.entity.id)
+    }
+  }
+
+  return matches
+}
+
+async function searchRag(bookId, query, topK, includeSnippets, embeddingConfig) {
+  if (!bookId || typeof bookId !== 'string') {
+    throw new Error('Missing bookId.')
+  }
+  if (!query || typeof query !== 'string') {
+    throw new Error('Missing query.')
+  }
+
+  const safeTopK = Math.max(1, Math.min(50, Number(topK) || 10))
+  const model = (embeddingConfig?.model || '').trim()
+  if (!model) {
+    throw new Error('Missing embedding model.')
+  }
+
+  const totalChapters = countChaptersForBookStatement.get(bookId)?.count ?? 0
+  if (totalChapters === 0) {
+    throw new Error('Book has no chapters.')
+  }
+
+  const embeddedCount = countEmbeddingsForBookStatement.get(bookId, model)?.count ?? 0
+  if (embeddedCount / totalChapters < 0.8) {
+    const error = new Error(`Embeddings not ready: ${embeddedCount}/${totalChapters} chapters embedded.`)
+    error.code = 'EMBEDDINGS_NOT_READY'
+    error.embeddedCount = embeddedCount
+    error.totalChapters = totalChapters
+    throw error
+  }
+
+  // Generate query embedding.
+  const queryEmbeddingRaw = await generateEmbedding(query, embeddingConfig)
+  const queryEmbedding = l2Normalize(queryEmbeddingRaw)
+
+  // Entity linking.
+  const allEntities = listEntitiesForBookStatement.all(bookId)
+  const matchedEntities = linkEntitiesFromQuery(query, allEntities)
+
+  // Entity recall: map chapterId -> set of matched entity ids.
+  const entityRecalledChapterIds = new Map()
+  for (const entity of matchedEntities) {
+    const mentions = listEntityMentionsForEntityStatement.all(entity.id)
+    for (const mention of mentions) {
+      const set = entityRecalledChapterIds.get(mention.chapterId) || new Set()
+      set.add(entity.id)
+      entityRecalledChapterIds.set(mention.chapterId, set)
+    }
+  }
+
+  // Vector recall.
+  const embeddingRows = listEmbeddingsForBookStatement.all(bookId, model)
+  const vectorRanked = embeddingRows
+    .map((row) => {
+      const embedding = l2Normalize(safeJsonParse(row.embeddingJson, []))
+      const similarity = cosineSimilarity(queryEmbedding, embedding)
+      return { chapterId: row.chapterId, similarity, chapterIndex: row.chapterIndex, chapterTitle: row.chapterTitle }
+    })
+    .filter((item) => Number.isFinite(item.similarity))
+    .sort((a, b) => b.similarity - a.similarity)
+
+  // Build fused ranking.
+  const vectorRankByChapterId = new Map()
+  vectorRanked.forEach((item, index) => {
+    vectorRankByChapterId.set(item.chapterId, index + 1)
+  })
+
+  const entityRankByChapterId = new Map()
+  const entityRecalledList = Array.from(entityRecalledChapterIds.entries())
+    .map(([chapterId, entityIds]) => ({ chapterId, entityCount: entityIds.size }))
+    .sort((a, b) => b.entityCount - a.entityCount)
+  entityRecalledList.forEach((item, index) => {
+    entityRankByChapterId.set(item.chapterId, index + 1)
+  })
+
+  const candidateChapterIds = new Set([
+    ...vectorRanked.map((item) => item.chapterId),
+    ...entityRecalledList.map((item) => item.chapterId),
+  ])
+
+  const fused = Array.from(candidateChapterIds)
+    .map((chapterId) => {
+      const vectorItem = vectorRanked.find((item) => item.chapterId === chapterId)
+      const similarity = vectorItem?.similarity ?? 0
+      const vectorRank = vectorRankByChapterId.get(chapterId) || 0
+      const entityRank = entityRankByChapterId.get(chapterId) || 0
+      const entityCount = entityRecalledChapterIds.get(chapterId)?.size ?? 0
+      const matchType = vectorRank > 0 && entityRank > 0 ? 'both' : vectorRank > 0 ? 'vector' : 'entity'
+      return {
+        chapterId,
+        chapterIndex: vectorItem?.chapterIndex ?? 0,
+        chapterTitle: vectorItem?.chapterTitle ?? '',
+        similarity,
+        matchType,
+        entityCount,
+        score: rrfScore(vectorRank, entityRank),
+      }
+    })
+    .sort((a, b) => b.score - a.score)
+    .slice(0, safeTopK)
+
+  // Enrich results with summary, matched entities, and optional snippet.
+  const results = []
+  for (const item of fused) {
+    const summary = getSummaryForChapterStatement.get(item.chapterId)
+    if (!summary) continue
+
+    const matchedEntityNames = []
+    for (const entity of matchedEntities) {
+      const mentions = listEntityMentionsForEntityStatement.all(entity.id)
+      if (mentions.some((mention) => mention.chapterId === item.chapterId)) {
+        matchedEntityNames.push(entity.name)
+      }
+    }
+
+    let contentSnippet = null
+    if (includeSnippets) {
+      const snippetRow = getChapterContentSnippetStatement.get(item.chapterId)
+      contentSnippet = snippetRow?.snippet || null
+    }
+
+    results.push({
+      chapterId: item.chapterId,
+      chapterIndex: item.chapterIndex,
+      chapterTitle: item.chapterTitle,
+      summary: {
+        short: summary.short,
+        detail: summary.detail,
+        keyPoints: safeJsonParse(summary.keyPointsJson, []),
+      },
+      similarity: item.similarity,
+      matchType: item.matchType,
+      matchedEntities: matchedEntityNames,
+      contentSnippet,
+    })
+  }
+
+  return {
+    results,
+    entityMatches: matchedEntities.map((entity) => ({
+      entityId: entity.id,
+      entityName: entity.name,
+      entityType: entity.type,
+      firstChapterIndex: entity.firstChapterIndex,
+      lastChapterIndex: entity.lastChapterIndex,
+    })),
+  }
 }
 
 const REVIEW_CONFIDENCE_THRESHOLD = 0.6
@@ -3019,6 +3396,154 @@ const server = createServer(async (request, response) => {
         sendJson(response, 200, { ok: true })
       } catch (error) {
         sendJson(response, 400, { error: error instanceof Error ? error.message : 'Replay failed.' })
+      }
+      return
+    }
+
+    if (request.method === 'POST' && url.pathname === '/api/rag/embeddings/batch') {
+      const body = await readJson(request)
+      const bookId = body?.bookId
+      const provider = body?.provider
+      const model = body?.model
+      const baseUrl = body?.baseUrl
+      const apiKey = body?.apiKey || ''
+      const requestedChapterIds = Array.isArray(body?.chapterIds) ? body.chapterIds : null
+
+      if (!bookId || typeof bookId !== 'string') {
+        sendJson(response, 400, { error: 'Missing bookId.' })
+        return
+      }
+      if (!model || typeof model !== 'string') {
+        sendJson(response, 400, { error: 'Missing model.' })
+        return
+      }
+      if (provider !== 'ollama' && provider !== 'openai') {
+        sendJson(response, 400, { error: 'provider must be ollama or openai.' })
+        return
+      }
+
+      let summaries
+      if (requestedChapterIds && requestedChapterIds.length > 0) {
+        summaries = requestedChapterIds
+          .map((id) => getSummaryForChapterStatement.get(id))
+          .filter(Boolean)
+      } else {
+        summaries = getSummariesForBookStatement.all(bookId)
+      }
+
+      const missingSummaries = summaries.filter((summary) => {
+        const existing = getEmbeddingForChapterStatement.get(summary.chapterId, model)
+        return !existing
+      })
+
+      const embeddingConfig = { provider, model, baseUrl, apiKey }
+      const batchSize = provider === 'ollama' ? EMBEDDING_BATCH_SIZE_OLLAMA : EMBEDDING_BATCH_SIZE_OPENAI
+      let completed = 0
+      let failed = 0
+
+      for (let i = 0; i < missingSummaries.length; i += batchSize) {
+        const batch = missingSummaries.slice(i, i + batchSize)
+        await Promise.all(
+          batch.map(async (summary) => {
+            const text = buildSummaryText(summary)
+            if (!text) {
+              failed++
+              return
+            }
+            try {
+              const embeddingRaw = await generateEmbedding(text, embeddingConfig)
+              const embedding = l2Normalize(embeddingRaw)
+              upsertEmbeddingStatement.run(
+                summary.chapterId,
+                bookId,
+                model,
+                embedding.length,
+                JSON.stringify(embedding),
+              )
+              completed++
+            } catch {
+              failed++
+            }
+          }),
+        )
+      }
+
+      sendJson(response, 200, {
+        completed,
+        failed,
+        total: missingSummaries.length,
+      })
+      return
+    }
+
+    if (request.method === 'GET' && url.pathname === '/api/rag/embeddings/status') {
+      const bookId = url.searchParams.get('bookId')
+      const model = url.searchParams.get('model') || ''
+
+      if (!bookId) {
+        sendJson(response, 400, { error: 'Missing bookId.' })
+        return
+      }
+      if (!model) {
+        sendJson(response, 400, { error: 'Missing model.' })
+        return
+      }
+
+      const totalChapters = countChaptersForBookStatement.get(bookId)?.count ?? 0
+      const embeddedChapters = countEmbeddingsForBookStatement.get(bookId, model)?.count ?? 0
+
+      sendJson(response, 200, {
+        totalChapters,
+        embeddedChapters,
+        missingChapters: Math.max(0, totalChapters - embeddedChapters),
+        model,
+      })
+      return
+    }
+
+    if (request.method === 'POST' && url.pathname === '/api/rag/search') {
+      const body = await readJson(request)
+      const bookId = body?.bookId
+      const query = body?.query
+      const topK = body?.topK
+      const includeSnippets = body?.includeSnippets === true
+      const provider = body?.provider
+      const model = body?.model
+      const baseUrl = body?.baseUrl
+      const apiKey = body?.apiKey || ''
+
+      if (!bookId || typeof bookId !== 'string') {
+        sendJson(response, 400, { error: 'Missing bookId.' })
+        return
+      }
+      if (!query || typeof query !== 'string') {
+        sendJson(response, 400, { error: 'Missing query.' })
+        return
+      }
+      if (provider !== 'ollama' && provider !== 'openai') {
+        sendJson(response, 400, { error: 'provider must be ollama or openai.' })
+        return
+      }
+      if (!model || typeof model !== 'string') {
+        sendJson(response, 400, { error: 'Missing model.' })
+        return
+      }
+
+      try {
+        const embeddingConfig = { provider, model, baseUrl, apiKey }
+        const result = await searchRag(bookId, query, topK, includeSnippets, embeddingConfig)
+        sendJson(response, 200, result)
+      } catch (error) {
+        if (error?.code === 'EMBEDDINGS_NOT_READY') {
+          sendJson(response, 409, {
+            error: error.message,
+            code: error.code,
+            embeddedCount: error.embeddedCount,
+            totalChapters: error.totalChapters,
+          })
+          return
+        }
+        sendJson(response, 400, { error: error instanceof Error ? error.message : 'Search failed.' })
       }
       return
     }
