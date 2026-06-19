@@ -851,10 +851,8 @@ async function validateLlmConfig(config: ModelConfigDraft): Promise<void> {
 }
 
 async function validateEmbeddingConfig(embeddingConfig: EmbeddingConfig): Promise<void> {
-  const provider = embeddingConfig.provider
   const baseUrl = embeddingConfig.baseUrl.trim().replace(/\/+$/, '')
   const model = embeddingConfig.model.trim()
-  const apiKey = embeddingConfig.apiKey
 
   if (!baseUrl) {
     throw new Error('[Embedding] 请填写 Base URL。')
@@ -864,48 +862,20 @@ async function validateEmbeddingConfig(embeddingConfig: EmbeddingConfig): Promis
     throw new Error('[Embedding] 请填写模型名。')
   }
 
-  if (provider === 'ollama') {
-    const response = await fetch(`${baseUrl}/api/embeddings`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model, prompt: '测试' }),
-    })
-
-    if (!response.ok) {
-      const body = await response.text()
-      throw new Error(`[Embedding] Ollama 验证失败 ${response.status}：${body || '请求失败'}`)
-    }
-
-    const data = (await response.json()) as { embedding?: unknown }
-    if (!Array.isArray(data?.embedding)) {
-      throw new Error('[Embedding] Ollama 返回缺少 embedding 数组。')
-    }
-
-    return
-  }
-
-  const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
-  }
-
-  if (apiKey.trim()) {
-    headers.Authorization = `Bearer ${apiKey.trim()}`
-  }
-
-  const response = await fetch(`${baseUrl}/embeddings`, {
+  const response = await fetch('/api/rag/embeddings/validate', {
+    body: JSON.stringify({
+      provider: embeddingConfig.provider,
+      model,
+      baseUrl,
+      apiKey: embeddingConfig.apiKey,
+    }),
+    headers: { 'Content-Type': 'application/json' },
     method: 'POST',
-    headers,
-    body: JSON.stringify({ model, input: '测试', encoding_format: 'float' }),
   })
 
   if (!response.ok) {
-    const body = await response.text()
-    throw new Error(`[Embedding] OpenAI-compatible 验证失败 ${response.status}：${body || '请求失败'}`)
-  }
-
-  const data = (await response.json()) as { data?: { embedding?: unknown }[] }
-  if (!Array.isArray(data?.data?.[0]?.embedding)) {
-    throw new Error('[Embedding] OpenAI-compatible 返回缺少 embedding 数组。')
+    const payload = (await response.json()) as { error?: string }
+    throw new Error(`[Embedding] 验证失败：${payload.error ?? response.statusText}`)
   }
 }
 

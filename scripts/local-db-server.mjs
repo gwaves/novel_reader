@@ -3479,6 +3479,35 @@ const server = createServer(async (request, response) => {
       return
     }
 
+    if (request.method === 'POST' && url.pathname === '/api/rag/embeddings/validate') {
+      const body = await readJson(request)
+      const provider = body?.provider
+      const model = body?.model
+      const baseUrl = body?.baseUrl
+      const apiKey = body?.apiKey || ''
+
+      if (!model || typeof model !== 'string') {
+        sendJson(response, 400, { error: 'Missing model.' })
+        return
+      }
+      if (provider !== 'ollama' && provider !== 'openai') {
+        sendJson(response, 400, { error: 'provider must be ollama or openai.' })
+        return
+      }
+
+      try {
+        const embeddingConfig = { provider, model, baseUrl, apiKey }
+        const embeddingRaw = await generateEmbedding('测试', embeddingConfig)
+        const embedding = l2Normalize(embeddingRaw)
+        sendJson(response, 200, { ok: true, dimension: embedding.length })
+      } catch (error) {
+        sendJson(response, 400, {
+          error: error instanceof Error ? error.message : 'Embedding validation failed.',
+        })
+      }
+      return
+    }
+
     if (request.method === 'GET' && url.pathname === '/api/rag/embeddings/status') {
       const bookId = url.searchParams.get('bookId')
       const model = url.searchParams.get('model') || ''
