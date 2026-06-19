@@ -341,6 +341,12 @@ button:disabled {
   line-height: 1.5;
 }
 
+.database-backup-card .database-backup-status {
+  margin-top: 8px;
+  color: #2c5b4b;
+  font-weight: 700;
+}
+
 .book-list-card {
   padding: 18px;
 }

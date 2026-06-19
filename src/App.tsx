@@ -372,6 +372,7 @@ function App() {
   const [isKgEvidenceSearching, setIsKgEvidenceSearching] = useState(false)
   const [isKgExporting, setIsKgExporting] = useState(false)
   const [isDatabaseBackupBusy, setIsDatabaseBackupBusy] = useState(false)
+  const [databaseBackupStatus, setDatabaseBackupStatus] = useState('')
   const [kgEntitySearch, setKgEntitySearch] = useState('')
   const [kgEntityTypeFilter, setKgEntityTypeFilter] = useState('')
   const [kgRelationTypeFilter, setKgRelationTypeFilter] = useState('')
@@ -867,6 +868,7 @@ function App() {
 
   async function downloadDatabaseBackup() {
     setKgError('')
+    setDatabaseBackupStatus('')
     setIsDatabaseBackupBusy(true)
 
     try {
@@ -889,8 +891,11 @@ function App() {
       link.click()
       link.remove()
       URL.revokeObjectURL(url)
+      setDatabaseBackupStatus(`已开始下载：${filename}。保存位置由浏览器下载设置决定。`)
     } catch (err) {
-      setKgError(err instanceof Error ? err.message : '导出数据库失败。')
+      const message = err instanceof Error ? err.message : '导出数据库失败。'
+      setDatabaseBackupStatus(message)
+      setKgError(message)
     } finally {
       setIsDatabaseBackupBusy(false)
     }
@@ -903,6 +908,7 @@ function App() {
     if (!confirmed) return
 
     setKgError('')
+    setDatabaseBackupStatus('')
     setIsDatabaseBackupBusy(true)
 
     try {
@@ -922,11 +928,13 @@ function App() {
         throw new Error(payload.error ?? '导入数据库失败。')
       }
 
-      window.alert(
-        `数据库备份已校验并排队恢复。\n当前数据库备份：${payload.backupPath ?? '已创建'}\n请重启本地数据库服务，然后刷新页面完成恢复。`,
+      setDatabaseBackupStatus(
+        `已排队恢复。当前数据库已备份到：${payload.backupPath ?? '已创建'}。请重启本地数据库服务后刷新页面。`,
       )
     } catch (err) {
-      setKgError(err instanceof Error ? err.message : '导入数据库失败。')
+      const message = err instanceof Error ? err.message : '导入数据库失败。'
+      setDatabaseBackupStatus(message)
+      setKgError(message)
     } finally {
       setIsDatabaseBackupBusy(false)
       if (databaseImportInputRef.current) {
@@ -2356,6 +2364,7 @@ function App() {
             <div>
               <h3>数据库备份</h3>
               <p>导出或恢复完整 SQLite 数据库，包含书架、章节、概要和知识图谱。</p>
+              {databaseBackupStatus && <p className="database-backup-status">{databaseBackupStatus}</p>}
             </div>
             <div className="book-actions">
               <button
