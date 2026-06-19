@@ -107,6 +107,25 @@ type ChapterExtraction = {
 
 Saving an extraction rewrites that chapter's graph mentions, upserts entities and relations, recomputes touched chapter ranges, and removes empty graph rows left by local rebuilds.
 
+### RAG Search Result
+
+```ts
+type RagSearchResult = {
+  chapterId: string
+  chapterIndex: number
+  chapterTitle: string
+  summary: {
+    short: string
+    detail: string
+    keyPoints: string[]
+  }
+  similarity: number
+  matchType: 'vector' | 'entity' | 'both'
+  matchedEntities: string[]
+  contentSnippet: string | null
+}
+```
+
 ## Core State APIs
 
 ### `GET /api/state`
@@ -152,6 +171,49 @@ Response:
   "dbPath": "/Users/example/.novel_reader/novel_reader.sqlite"
 }
 ```
+
+## Database Backup APIs
+
+### `GET /api/database/export`
+
+Exports the complete SQLite database as a downloadable `.sqlite` file.
+
+Response:
+
+- Content-Type: `application/vnd.sqlite3`
+- Content-Disposition filename: `novel_reader-backup-<timestamp>.sqlite`
+
+Implementation notes:
+
+- The server creates a temporary backup using `VACUUM INTO`.
+- The temporary file is removed after being read into the response.
+
+### `POST /api/database/import`
+
+Uploads a full SQLite backup file and stages it for restore on the next API server start.
+
+Request:
+
+- Raw binary SQLite file body.
+- Content-Type can be `application/octet-stream`.
+
+Response:
+
+```json
+{
+  "ok": true,
+  "backupPath": "/Users/example/.novel_reader/novel_reader-before-import-1780000000000.sqlite",
+  "pendingRestorePath": "/Users/example/.novel_reader/novel_reader.restore-pending.sqlite",
+  "requiresRestart": true
+}
+```
+
+Behavior:
+
+- Rejects empty uploads.
+- Validates the uploaded SQLite file before staging it.
+- Creates a backup of the current database before staging the restore.
+- The active database is replaced only after restarting the local API server.
 
 ## Knowledge Graph Overview
 
@@ -372,6 +434,28 @@ Validation:
 - Existing target must belong to the same book and cannot be the source.
 - New target name is required and cannot duplicate same-book same-type normalized name.
 
+### `GET /api/kg/entities/:entityId/neighborhood`
+
+Returns a one-hop graph around an entity. Used by the entity relation graph view.
+
+Query parameters:
+
+| Name | Required | Default | Description |
+|---|---:|---:|---|
+| `entityType` | no | `''` | Neighbor entity type filter. Center entity is always retained. |
+| `relationType` | no | `''` | Relation type filter |
+| `limit` | no | `100` | Relation limit, clamped to `1..200` |
+
+Response:
+
+```ts
+{
+  centerId: string
+  entities: KgEntity[]
+  relations: KgRelation[]
+}
+```
+
 ## Relation APIs
 
 ### `GET /api/kg/relations`
@@ -449,6 +533,97 @@ Response:
 ```json
 { "ok": true }
 ```
+
+## Graph, Evidence Search, And Export APIs
+
+### `GET /api/kg/graph`
+
+Returns a filtered global graph slice for a book.
+
+Query parameters:
+
+| Name | Required | Default | Description |
+|---|---:|---:|---|
+| `bookId` | yes | - | Book ID |
+| `entityType` | no | `''` | Requires both source and target to match this entity type when set |
+| `relationType` | no | `''` | Relation type filter |
+| `limit` | no | `150` | Relation limit, clamped to `1..300` |
+
+Response:
+
+```ts
+{
+  entities: KgEntity[]
+  relations: KgRelation[]
+}
+```
+
+### `GET /api/kg/search`
+
+Searches entity mentions and relation mentions/evidence.
+
+Query parameters:
+
+| Name | Required | Default | Description |
+|---|---:|---:|---|
+| `bookId` | yes | - | Book ID |
+| `q` | no | `''` | Search text |
+| `kind` | no | `all` | `all`, `entities`, or `relations` |
+| `entityType` | no | `''` | Entity mention type filter |
+| `relationType` | no | `''` | Relation mention type filter |
+| `limit` | no | `80` | Per-kind limit, clamped to `1..200` |
+
+Response:
+
+```ts
+{
+  entities: Array<{
+    mentionId: string
+    entityId: string
+    entityName: string
+    entityType: string
+    entityDescription: string | null
+    chapterId: string
+    chapterIndex: number
+    chapterTitle: string
+    evidence: string | null
+    confidence: number
+  }>
+  relations: Array<{
+    mentionId: string
+    relationId: string
+    relationType: string
+    relationDescription: string | null
+    sourceId: string
+    sourceName: string
+    sourceType: string
+    targetId: string
+    targetName: string
+    targetType: string
+    chapterId: string
+    chapterIndex: number
+    chapterTitle: string
+    evidence: string | null
+    confidence: number
+  }>
+}
+```
+
+### `GET /api/kg/export`
+
+Exports a book's knowledge graph.
+
+Query parameters:
+
+| Name | Required | Default | Description |
+|---|---:|---:|---|
+| `bookId` | yes | - | Book ID |
+| `format` | no | `json` | `json` or `graphml` |
+
+Responses:
+
+- `format=json`: `application/json`, filename `<book>-knowledge-graph.json`
+- `format=graphml`: `application/graphml+xml`, filename `<book>-knowledge-graph.graphml`
 
 ## Review Queue APIs
 
@@ -576,6 +751,71 @@ Response:
 
 ## Chapter Extraction APIs
 
+### `POST /api/kg/chapters/:chapterId/extraction/diff`
+
+Previews how a new extraction would change the normalized graph for one chapter without writing it.
+
+Request:
+
+```json
+{
+  "bookId": "book-id",
+  "extraction": {
+    "entities": [],
+    "relations": []
+  }
+}
+```
+
+Response:
+
+```ts
+{
+  chapter: { id: string, index: number, title: string }
+  summary: {
+    entitiesAdded: number
+    entitiesRemoved: number
+    entitiesUnchanged: number
+    relationsAdded: number
+    relationsRemoved: number
+    relationsUnchanged: number
+  }
+  entities: {
+    added: EntityDiffItem[]
+    removed: EntityDiffItem[]
+    unchanged: EntityDiffItem[]
+  }
+  relations: {
+    added: RelationDiffItem[]
+    removed: RelationDiffItem[]
+    unchanged: RelationDiffItem[]
+  }
+}
+
+type EntityDiffItem = {
+  key: string
+  name: string
+  type: string
+  description: string
+  evidence: string
+  confidence: number
+}
+
+type RelationDiffItem = {
+  key: string
+  sourceName: string
+  targetName: string
+  sourceType: string
+  targetType: string
+  type: string
+  description: string
+  evidence: string
+  confidence: number
+}
+```
+
+The exact diff payload is intended for UI preview and may evolve with graph maintenance logic.
+
 ### `GET /api/kg/chapters/:chapterId/extraction`
 
 Returns the saved raw extraction for a chapter.
@@ -651,13 +891,122 @@ Validation:
 - Saved extraction status must be `completed`.
 - Saved extraction JSON must parse to an object.
 
+## RAG APIs
+
+### `POST /api/rag/embeddings/batch`
+
+Generates embeddings for chapter summaries that do not already have an embedding for the selected model.
+
+Request:
+
+```json
+{
+  "bookId": "book-id",
+  "provider": "ollama",
+  "model": "nomic-embed-text",
+  "baseUrl": "http://127.0.0.1:11434",
+  "apiKey": "",
+  "chapterIds": ["optional-chapter-id"]
+}
+```
+
+Provider values:
+
+- `ollama`: calls `<baseUrl>/api/embeddings`
+- `openai`: calls `<baseUrl>/embeddings`
+
+Response:
+
+```json
+{
+  "completed": 10,
+  "failed": 0,
+  "total": 10
+}
+```
+
+Notes:
+
+- If `chapterIds` is omitted, all summaries for the book are considered.
+- Existing embeddings for the same `(chapter_id, model)` are skipped.
+- Embeddings are L2-normalized before storage.
+
+### `GET /api/rag/embeddings/status`
+
+Returns embedding coverage for a book and model.
+
+Query parameters:
+
+| Name | Required | Description |
+|---|---:|---|
+| `bookId` | yes | Book ID |
+| `model` | yes | Embedding model name |
+
+Response:
+
+```json
+{
+  "totalChapters": 100,
+  "embeddedChapters": 95,
+  "missingChapters": 5,
+  "model": "nomic-embed-text"
+}
+```
+
+### `POST /api/rag/search`
+
+Runs RAG search using summary embeddings plus knowledge graph entity recall.
+
+Request:
+
+```json
+{
+  "bookId": "book-id",
+  "query": "韩立什么时候得到某件法宝？",
+  "topK": 10,
+  "includeSnippets": true,
+  "provider": "ollama",
+  "model": "nomic-embed-text",
+  "baseUrl": "http://127.0.0.1:11434",
+  "apiKey": ""
+}
+```
+
+Response:
+
+```ts
+{
+  results: RagSearchResult[]
+  entityMatches: Array<{
+    entityId: string
+    entityName: string
+    entityType: string
+    firstChapterIndex: number | null
+    lastChapterIndex: number | null
+  }>
+}
+```
+
+Error response when embeddings are not ready:
+
+```json
+{
+  "error": "Embeddings not ready: 20/100 chapters embedded.",
+  "code": "EMBEDDINGS_NOT_READY",
+  "embeddedCount": 20,
+  "totalChapters": 100
+}
+```
+
+The API requires at least 80% embedding coverage for the selected model before search.
+
 ## Implementation Notes
 
 - The database is SQLite with `PRAGMA foreign_keys = ON` and `WAL` journal mode.
 - Entity uniqueness is `(book_id, type, normalized_name)`.
 - Relation uniqueness is `(book_id, source_entity_id, target_entity_id, type)`.
+- Summary embedding uniqueness is `(chapter_id, model)`.
 - Confidence values are normalized to `0..1`.
 - Unknown entity types are stored as `other`; unknown relation types are stored as `related_to`.
 - Entity and relation edits reset `review_status` to `NULL` so review heuristics can re-evaluate them.
 - API keys and model configuration are stored locally in SQLite as part of app state. Do not expose this API server to untrusted networks.
-

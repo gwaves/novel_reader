@@ -2,23 +2,30 @@
 
 [English](README.en.md) | [中文](README.md)
 
-A local-first web reader for long Chinese web novels, with AI-powered summaries and a knowledge graph for tracking characters, factions, items, skills, locations, and more.
+A local-first web reader for long Chinese web novels, with AI-powered summaries, RAG search, and a knowledge graph for tracking characters, factions, items, skills, locations, and more.
 
 ## Features
 
 - Import `.txt` novels with automatic UTF-8 / GB18030 decoding.
 - Split long novels into chapters and paginate the chapter list by 100 chapters.
-- Persist imported chapters, reading progress, summaries, and settings in a local SQLite database under `~/.novel_reader`.
-- Generate single-chapter or current-page summaries.
+- Persist imported chapters, reading progress, summaries, knowledge graph data, embeddings, and settings in a local SQLite database under `~/.novel_reader`.
+- Generate single-chapter, current-page, or all-missing chapter summaries.
 - Configure local Ollama models and OpenAI-compatible external models.
-- Support multiple external model profiles, each with its own model name, base URL, API key, temperature, and thinking mode.
+- Support multiple external model profiles, each with its own model name, base URL, API key, temperature, thinking mode, and optional embedding model.
 - Adjust reader font size.
+- Navigate chapters from both the top and bottom of the desktop reader.
+- Export or restore the full SQLite database from the web UI.
+- **RAG Search**:
+  - Generate summary embeddings with Ollama or OpenAI-compatible embedding models.
+  - Search across chapters with vector recall and knowledge-graph entity boosting.
+  - Generate an answer from retrieved chapter summaries/snippets.
 - **Knowledge Graph**:
   - Extract entities (characters, sects, items, skills, locations, beasts, events) and relations from each chapter.
-  - Batch scan the whole book with resumable jobs.
+  - Batch scan the whole book with resumable jobs, override rescans, saved-JSON replay, and graph change previews.
   - Review low-confidence entities and relations in a review queue.
   - Merge, edit, split, and delete entities and relations.
   - Browse entity/relation lists with filters and search.
+  - Search evidence, visualize entity neighborhoods/global graph slices, and export JSON or GraphML.
 - **Offline Scanner CLI** (`scripts/offline-scanner.mjs`):
   - Batch scan summaries and/or knowledge graph extractions outside the browser.
   - Resume interrupted scans and export results back to the main database.
@@ -28,6 +35,7 @@ A local-first web reader for long Chinese web novels, with AI-powered summaries 
 
 - [Development Guide](docs/development.md)
 - [开发文档（中文）](docs/development.zh-CN.md)
+- [Backend API Reference](docs/backend-api.md)
 - [Knowledge Graph Roadmap](docs/knowledge-graph-roadmap.md)
 - [Current Progress](docs/current_progress.md) (Chinese)
 
