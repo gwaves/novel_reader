@@ -83,6 +83,7 @@ novel_reader/
 │   ├── main.tsx            # Entry point (desktop / mobile routing)
 │   ├── App.tsx             # Main desktop UI
 │   ├── MobileApp.tsx       # Mobile UI
+│   ├── MobileApp.css       # Mobile UI styles
 │   ├── hooks/              # React hooks
 │   └── assets/             # Static assets
 ├── public/                 # Public static files
@@ -104,6 +105,7 @@ Main tables:
 - `kg_scan_jobs`, `kg_chapter_extractions` — knowledge graph scan state
 - `kg_entities`, `kg_entity_mentions` — extracted entities
 - `kg_relations`, `kg_relation_mentions` — extracted relations
+- `summary_embeddings` — per-chapter summary embeddings for RAG search
 - `app_state` — app settings and model configuration
 
 ## Knowledge Graph
@@ -114,9 +116,33 @@ The knowledge graph is implemented as a property graph on top of SQLite.
 - Scan jobs are resumable. Pending jobs are automatically resumed on app startup.
 - Low-confidence entities and relations are flagged for review in the UI.
 - Saved chapter extractions can be replayed into the graph for local rebuilds. Override rescans call the model again and replace the selected chapter evidence.
+- Chapter rescan previews can diff the new extraction against the current graph before applying changes.
+- Entity neighborhood and filtered global graph views are rendered with React Flow (`@xyflow/react`).
+- Knowledge graph evidence can be searched and exported as JSON or GraphML.
+- The global coreference pass groups likely duplicate character entities, asks the configured LLM to resolve identity clusters, and then merges aliases, mentions, and conflicting relations.
+- Review queue maintenance supports batch approval, ignore, and delete actions.
 
 See [knowledge-graph-roadmap.md](knowledge-graph-roadmap.md) for the full roadmap.
 See [backend-api.md](backend-api.md) for the backend API reference.
+
+## RAG Search
+
+RAG search combines summary embeddings with knowledge graph entity matching.
+
+- Embeddings are generated through `/api/rag/embeddings/batch` and stored in `summary_embeddings`.
+- Embedding configuration is separate from the text-generation model configuration and is validated through `/api/rag/embeddings/validate` so browser CORS does not block Ollama/OpenAI-compatible checks.
+- Search calls `/api/rag/search`, which fuses vector recall and entity recall with reciprocal-rank-style scoring.
+- Search results include chapter summaries, matched entity names, similarity, match type, and optional chapter snippets.
+- If fewer than 80% of chapters have embeddings for the selected model, the API returns `409 EMBEDDINGS_NOT_READY`.
+- The desktop and mobile UIs can generate embeddings, search, and ask the configured generation model to answer from retrieved results.
+
+## Database Backup And Restore
+
+The local API can export and stage a full SQLite restore.
+
+- `GET /api/database/export` streams a temporary `VACUUM INTO` backup and removes the temporary file after reading.
+- `POST /api/database/import` validates the uploaded SQLite file, backs up the current database, stores the upload as `novel_reader.restore-pending.sqlite`, and returns `requiresRestart: true`.
+- On API startup, a pending restore replaces the active database after the current database is backed up.
 
 ## Offline Scanner
 
@@ -174,7 +200,7 @@ npm run lint
 npm run build
 ```
 
-There are a few pre-existing ESLint warnings/errors in `useReaderState.ts` and `App.tsx`. TypeScript compilation and the Vite build should both pass.
+There are a few pre-existing ESLint warnings/errors around React hook dependency and set-state-in-effect rules. TypeScript compilation and the Vite build should both pass.
 
 ## Notes
 

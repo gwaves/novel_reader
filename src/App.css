@@ -941,6 +941,8 @@ button:disabled {
   background: #b88947;
   transition: width 0.3s ease;
 }
+
+.kg-card {
   border: 1px solid #ded6ca;
   border-radius: 8px;
   background: #fffaf2;

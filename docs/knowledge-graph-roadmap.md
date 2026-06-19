@@ -4,6 +4,22 @@
 
 Build a local-first knowledge graph for each imported novel. The graph should extract and connect characters, items, skills, sects, locations, beasts, and other story entities from every chapter. It should preserve chapter-level extraction results, support resumable scans, and provide query and visualization pages for global and entity-focused relationship graphs.
 
+## Current Status
+
+As of 2026-06-20, the original Phase 1-5 roadmap is largely implemented:
+
+- Foundation, extraction persistence, resumable scanning, and chapter-level replay are complete.
+- Entity/relation browsing, editing, merging, splitting, endpoint correction, and review queue workflows are complete.
+- Entity neighborhood graphs and filtered global graph views are complete.
+- Evidence search, JSON/GraphML export, and RAG search over summary embeddings are complete.
+- Global LLM-assisted coreference cleanup is available for likely duplicate character identities.
+
+The next development focus should shift from adding more graph operations to making destructive or model-assisted operations measurable and reversible:
+
+1. Add a repeatable quality-evaluation suite for extraction, coreference, graph maintenance, and RAG search.
+2. Add audit logs and rollback support for high-impact operations such as coreference merges, batch deletes, and override rescans.
+3. Upgrade search with FTS5 and richer filters once quality and recovery workflows are in place.
+
 ## Storage Choice
 
 Use the existing local SQLite database at:
