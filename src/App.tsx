@@ -271,6 +271,12 @@ function App() {
   const [kgRelationEdit, setKgRelationEdit] = useState<KgRelation | null>(null)
   const [kgRelationEditType, setKgRelationEditType] = useState('')
   const [kgRelationEditDescription, setKgRelationEditDescription] = useState('')
+  const [kgRelationEditSourceId, setKgRelationEditSourceId] = useState('')
+  const [kgRelationEditTargetId, setKgRelationEditTargetId] = useState('')
+  const [kgRelationEditSourceQuery, setKgRelationEditSourceQuery] = useState('')
+  const [kgRelationEditTargetQuery, setKgRelationEditTargetQuery] = useState('')
+  const [kgRelationEditSourceCandidates, setKgRelationEditSourceCandidates] = useState<KgEntity[]>([])
+  const [kgRelationEditTargetCandidates, setKgRelationEditTargetCandidates] = useState<KgEntity[]>([])
   const [kgMergeSource, setKgMergeSource] = useState<KgEntity | null>(null)
   const [kgMergeTargetId, setKgMergeTargetId] = useState('')
   const [kgMergeCandidates, setKgMergeCandidates] = useState<KgEntity[]>([])
@@ -280,6 +286,18 @@ function App() {
   const [kgBatchMergeTargetId, setKgBatchMergeTargetId] = useState('')
   const [kgBatchMergeCandidates, setKgBatchMergeCandidates] = useState<KgEntity[]>([])
   const [kgBatchMergeQuery, setKgBatchMergeQuery] = useState('')
+  const [kgSplitSource, setKgSplitSource] = useState<KgEntityDetail | null>(null)
+  const [kgSplitMode, setKgSplitMode] = useState<'new' | 'existing'>('new')
+  const [kgSplitName, setKgSplitName] = useState('')
+  const [kgSplitType, setKgSplitType] = useState('')
+  const [kgSplitAliases, setKgSplitAliases] = useState('')
+  const [kgSplitDescription, setKgSplitDescription] = useState('')
+  const [kgSplitMovedAliases, setKgSplitMovedAliases] = useState<string[]>([])
+  const [kgSplitMentionIds, setKgSplitMentionIds] = useState<string[]>([])
+  const [kgSplitRelationIds, setKgSplitRelationIds] = useState<string[]>([])
+  const [kgSplitTargetId, setKgSplitTargetId] = useState('')
+  const [kgSplitTargetQuery, setKgSplitTargetQuery] = useState('')
+  const [kgSplitTargetCandidates, setKgSplitTargetCandidates] = useState<KgEntity[]>([])
   const [showKgReviewQueue, setShowKgReviewQueue] = useState(false)
   const [kgReviewEntities, setKgReviewEntities] = useState<KgReviewEntity[]>([])
   const [kgReviewRelations, setKgReviewRelations] = useState<KgReviewRelation[]>([])
@@ -468,10 +486,23 @@ function App() {
     if (kgRelationEdit) {
       setKgRelationEditType(kgRelationEdit.type)
       setKgRelationEditDescription(kgRelationEdit.description ?? '')
+      setKgRelationEditSourceId(kgRelationEdit.sourceId)
+      setKgRelationEditTargetId(kgRelationEdit.targetId)
+      setKgRelationEditSourceQuery('')
+      setKgRelationEditTargetQuery('')
+      void searchKgRelationEndpointCandidates('', 'source')
+      void searchKgRelationEndpointCandidates('', 'target')
     } else {
       setKgRelationEditType('')
       setKgRelationEditDescription('')
+      setKgRelationEditSourceId('')
+      setKgRelationEditTargetId('')
+      setKgRelationEditSourceQuery('')
+      setKgRelationEditTargetQuery('')
+      setKgRelationEditSourceCandidates([])
+      setKgRelationEditTargetCandidates([])
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [kgRelationEdit])
 
   useEffect(() => {
@@ -778,7 +809,10 @@ function App() {
     }
   }
 
-  async function updateKgRelation(relationId: string, payload: { type: string; description: string }) {
+  async function updateKgRelation(
+    relationId: string,
+    payload: { type: string; description: string; sourceId: string; targetId: string },
+  ) {
     setKgError('')
 
     try {
@@ -795,11 +829,41 @@ function App() {
         throw new Error(payload.error ?? '更新关系失败。')
       }
 
+      const result = (await response.json()) as { relation: KgRelation }
       setKgRelationEdit(null)
-      await Promise.all([fetchKgRelations(), openKgRelationDetail(relationId), fetchKgReviewQueue()])
+      await Promise.all([fetchKgRelations(), openKgRelationDetail(result.relation.id), fetchKgReviewQueue()])
     } catch (err) {
       setKgError(err instanceof Error ? err.message : '更新关系失败。')
     }
+  }
+
+  async function searchKgRelationEndpointCandidates(query: string, endpoint: 'source' | 'target') {
+    if (!state.book) return
+
+    try {
+      const response = await fetch(
+        `/api/kg/entities?bookId=${encodeURIComponent(state.book.id)}&type=&q=${encodeURIComponent(query)}&limit=50`,
+      )
+      if (!response.ok) throw new Error('读取候选实体失败。')
+      const payload = (await response.json()) as { entities: KgEntity[] }
+      if (endpoint === 'source') {
+        setKgRelationEditSourceCandidates(payload.entities)
+      } else {
+        setKgRelationEditTargetCandidates(payload.entities)
+      }
+    } catch (err) {
+      setKgError(err instanceof Error ? err.message : '读取候选实体失败。')
+    }
+  }
+
+  function getKgEndpointLabel(
+    entityId: string,
+    fallbackName: string,
+    fallbackType: string,
+    candidates: KgEntity[],
+  ) {
+    const entity = candidates.find((candidate) => candidate.id === entityId)
+    return entity ? `${entity.name} · ${entity.type}` : `${fallbackName} · ${fallbackType}`
   }
 
   function toggleKgBatchMergeMode() {
@@ -880,6 +944,110 @@ function App() {
       await openKgEntityDetail(result.entity.id)
     } catch (err) {
       setKgError(err instanceof Error ? err.message : '批量合并失败。')
+    }
+  }
+
+  function openKgSplitModal(entityDetail: KgEntityDetail) {
+    setKgSplitSource(entityDetail)
+    setKgSplitMode('new')
+    setKgSplitName('')
+    setKgSplitType(entityDetail.entity.type)
+    setKgSplitAliases('')
+    setKgSplitDescription('')
+    setKgSplitMovedAliases([])
+    setKgSplitMentionIds([])
+    setKgSplitRelationIds([])
+    setKgSplitTargetId('')
+    setKgSplitTargetQuery('')
+    setKgSplitTargetCandidates([])
+  }
+
+  function closeKgSplitModal() {
+    setKgSplitSource(null)
+    setKgSplitMode('new')
+    setKgSplitName('')
+    setKgSplitType('')
+    setKgSplitAliases('')
+    setKgSplitDescription('')
+    setKgSplitMovedAliases([])
+    setKgSplitMentionIds([])
+    setKgSplitRelationIds([])
+    setKgSplitTargetId('')
+    setKgSplitTargetQuery('')
+    setKgSplitTargetCandidates([])
+  }
+
+  function toggleKgSplitMention(mentionId: string) {
+    setKgSplitMentionIds((current) =>
+      current.includes(mentionId) ? current.filter((id) => id !== mentionId) : [...current, mentionId],
+    )
+  }
+
+  function toggleKgSplitRelation(relationId: string) {
+    setKgSplitRelationIds((current) =>
+      current.includes(relationId) ? current.filter((id) => id !== relationId) : [...current, relationId],
+    )
+  }
+
+  function toggleKgSplitAlias(alias: string) {
+    setKgSplitMovedAliases((current) =>
+      current.includes(alias) ? current.filter((value) => value !== alias) : [...current, alias],
+    )
+  }
+
+  async function searchKgSplitTargetCandidates(query: string) {
+    if (!state.book || !kgSplitSource) return
+
+    try {
+      const response = await fetch(
+        `/api/kg/entities?bookId=${encodeURIComponent(state.book.id)}&type=&q=${encodeURIComponent(query)}&limit=50`,
+      )
+      if (!response.ok) throw new Error('读取候选实体失败。')
+      const payload = (await response.json()) as { entities: KgEntity[] }
+      setKgSplitTargetCandidates(payload.entities.filter((entity) => entity.id !== kgSplitSource.entity.id))
+    } catch (err) {
+      setKgError(err instanceof Error ? err.message : '读取候选实体失败。')
+    }
+  }
+
+  async function splitKgEntity() {
+    if (!kgSplitSource) return
+
+    setKgError('')
+
+    try {
+      const response = await fetch(`/api/kg/entities/${encodeURIComponent(kgSplitSource.entity.id)}/split`, {
+        body: JSON.stringify({
+          targetEntityId: kgSplitMode === 'existing' ? kgSplitTargetId : undefined,
+          name: kgSplitName.trim(),
+          type: kgSplitType,
+          aliases: kgSplitAliases
+            .split('、')
+            .map((alias) => alias.trim())
+            .filter(Boolean),
+          movedAliases: kgSplitMovedAliases,
+          description: kgSplitDescription.trim(),
+          mentionIds: kgSplitMentionIds,
+          relationIds: kgSplitRelationIds,
+        }),
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        method: 'POST',
+      })
+
+      if (!response.ok) {
+        const payload = (await response.json()) as { error?: string }
+        throw new Error(payload.error ?? '拆分实体失败。')
+      }
+
+      const result = (await response.json()) as { source: KgEntity; target: KgEntity }
+      closeKgSplitModal()
+      setKgRelationDetail(null)
+      await refreshKnowledgeGraph()
+      await openKgEntityDetail(result.target.id)
+    } catch (err) {
+      setKgError(err instanceof Error ? err.message : '拆分实体失败。')
     }
   }
 
@@ -1765,8 +1933,88 @@ function App() {
 
                 <div className="config-form">
                   <p>
-                    {kgRelationEdit.sourceName} <strong>--</strong> {kgRelationEdit.targetName}
+                    当前：{kgRelationEdit.sourceName} <strong>--</strong> {kgRelationEdit.targetName}
                   </p>
+
+                  <label htmlFor="kg-relation-edit-source">源实体</label>
+                  <div className="kg-endpoint-picker">
+                    <input
+                      id="kg-relation-edit-source"
+                      type="text"
+                      placeholder="搜索源实体"
+                      value={kgRelationEditSourceQuery}
+                      onChange={(event) => {
+                        setKgRelationEditSourceQuery(event.target.value)
+                        void searchKgRelationEndpointCandidates(event.target.value, 'source')
+                      }}
+                    />
+                    <span>
+                      已选：{getKgEndpointLabel(
+                        kgRelationEditSourceId,
+                        kgRelationEdit.sourceName,
+                        kgRelationEdit.sourceType,
+                        kgRelationEditSourceCandidates,
+                      )}
+                    </span>
+                    <div className="kg-merge-candidate-list">
+                      {kgRelationEditSourceCandidates
+                        .filter((candidate) => candidate.id !== kgRelationEditTargetId)
+                        .map((candidate) => (
+                          <button
+                            type="button"
+                            className={`kg-entity-row ${kgRelationEditSourceId === candidate.id ? 'active' : ''}`}
+                            key={candidate.id}
+                            onClick={() => setKgRelationEditSourceId(candidate.id)}
+                          >
+                            <div className="kg-entity-row-main">
+                              <strong>{candidate.name}</strong>
+                              <span>{candidate.type}</span>
+                            </div>
+                            <p>{candidate.description || '暂无描述'}</p>
+                          </button>
+                        ))}
+                    </div>
+                  </div>
+
+                  <label htmlFor="kg-relation-edit-target">目标实体</label>
+                  <div className="kg-endpoint-picker">
+                    <input
+                      id="kg-relation-edit-target"
+                      type="text"
+                      placeholder="搜索目标实体"
+                      value={kgRelationEditTargetQuery}
+                      onChange={(event) => {
+                        setKgRelationEditTargetQuery(event.target.value)
+                        void searchKgRelationEndpointCandidates(event.target.value, 'target')
+                      }}
+                    />
+                    <span>
+                      已选：{getKgEndpointLabel(
+                        kgRelationEditTargetId,
+                        kgRelationEdit.targetName,
+                        kgRelationEdit.targetType,
+                        kgRelationEditTargetCandidates,
+                      )}
+                    </span>
+                    <div className="kg-merge-candidate-list">
+                      {kgRelationEditTargetCandidates
+                        .filter((candidate) => candidate.id !== kgRelationEditSourceId)
+                        .map((candidate) => (
+                          <button
+                            type="button"
+                            className={`kg-entity-row ${kgRelationEditTargetId === candidate.id ? 'active' : ''}`}
+                            key={candidate.id}
+                            onClick={() => setKgRelationEditTargetId(candidate.id)}
+                          >
+                            <div className="kg-entity-row-main">
+                              <strong>{candidate.name}</strong>
+                              <span>{candidate.type}</span>
+                            </div>
+                            <p>{candidate.description || '暂无描述'}</p>
+                          </button>
+                        ))}
+                    </div>
+                  </div>
 
                   <label htmlFor="kg-relation-edit-type">关系类型</label>
                   <select
@@ -1806,14 +2054,213 @@ function App() {
                   </button>
                   <button
                     type="button"
+                    disabled={
+                      !kgRelationEditSourceId ||
+                      !kgRelationEditTargetId ||
+                      kgRelationEditSourceId === kgRelationEditTargetId
+                    }
                     onClick={() =>
                       void updateKgRelation(kgRelationEdit.id, {
                         type: kgRelationEditType,
                         description: kgRelationEditDescription.trim(),
+                        sourceId: kgRelationEditSourceId,
+                        targetId: kgRelationEditTargetId,
                       })
                     }
                   >
                     保存
+                  </button>
+                </div>
+              </section>
+            </div>
+          )}
+
+          {kgSplitSource && (
+            <div className="modal-backdrop" role="presentation">
+              <section className="config-modal" role="dialog" aria-modal="true" aria-labelledby="kg-split-title">
+                <div className="modal-heading">
+                  <div>
+                    <p className="eyebrow">实体拆分</p>
+                    <h2 id="kg-split-title">从 {kgSplitSource.entity.name} 拆出新实体</h2>
+                  </div>
+                  <button type="button" className="ghost-button" onClick={() => closeKgSplitModal()}>
+                    取消
+                  </button>
+                </div>
+
+                <div className="config-form">
+                  <label htmlFor="kg-split-mode">拆分目标</label>
+                  <select
+                    id="kg-split-mode"
+                    value={kgSplitMode}
+                    onChange={(event) => {
+                      const mode = event.target.value as 'new' | 'existing'
+                      setKgSplitMode(mode)
+                      if (mode === 'existing') {
+                        void searchKgSplitTargetCandidates(kgSplitTargetQuery)
+                      }
+                    }}
+                  >
+                    <option value="new">新实体</option>
+                    <option value="existing">已有实体</option>
+                  </select>
+
+                  {kgSplitMode === 'new' ? (
+                    <>
+                      <label htmlFor="kg-split-name">新实体名称</label>
+                      <input
+                        id="kg-split-name"
+                        type="text"
+                        value={kgSplitName}
+                        onChange={(event) => setKgSplitName(event.target.value)}
+                      />
+
+                      <label htmlFor="kg-split-type">类型</label>
+                      <select
+                        id="kg-split-type"
+                        value={kgSplitType}
+                        onChange={(event) => setKgSplitType(event.target.value)}
+                      >
+                        <option value="character">人物</option>
+                        <option value="sect">门派/组织</option>
+                        <option value="item">道具/法宝</option>
+                        <option value="skill">功法/法术</option>
+                        <option value="location">地点</option>
+                        <option value="beast">灵兽/妖兽</option>
+                        <option value="event">事件</option>
+                        <option value="other">其他</option>
+                      </select>
+
+                      <label htmlFor="kg-split-aliases">新别名（用中文顿号“、”分隔）</label>
+                      <input
+                        id="kg-split-aliases"
+                        type="text"
+                        value={kgSplitAliases}
+                        onChange={(event) => setKgSplitAliases(event.target.value)}
+                      />
+
+                      <label htmlFor="kg-split-description">描述</label>
+                      <input
+                        id="kg-split-description"
+                        type="text"
+                        value={kgSplitDescription}
+                        onChange={(event) => setKgSplitDescription(event.target.value)}
+                      />
+                    </>
+                  ) : (
+                    <>
+                      <label htmlFor="kg-split-target">目标实体</label>
+                      <div className="kg-endpoint-picker">
+                        <input
+                          id="kg-split-target"
+                          type="text"
+                          placeholder="搜索已有实体"
+                          value={kgSplitTargetQuery}
+                          onChange={(event) => {
+                            setKgSplitTargetQuery(event.target.value)
+                            void searchKgSplitTargetCandidates(event.target.value)
+                          }}
+                        />
+                        <span>
+                          已选：{
+                            kgSplitTargetCandidates.find((candidate) => candidate.id === kgSplitTargetId)
+                              ? getKgEndpointLabel(kgSplitTargetId, '', '', kgSplitTargetCandidates)
+                              : '未选择'
+                          }
+                        </span>
+                        <div className="kg-merge-candidate-list">
+                          {kgSplitTargetCandidates.map((candidate) => (
+                            <button
+                              type="button"
+                              className={`kg-entity-row ${kgSplitTargetId === candidate.id ? 'active' : ''}`}
+                              key={candidate.id}
+                              onClick={() => setKgSplitTargetId(candidate.id)}
+                            >
+                              <div className="kg-entity-row-main">
+                                <strong>{candidate.name}</strong>
+                                <span>{candidate.type}</span>
+                              </div>
+                              <p>{candidate.description || '暂无描述'}</p>
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    </>
+                  )}
+
+                  {kgSplitSource.entity.aliases.length > 0 && (
+                    <div className="kg-split-section">
+                      <h3>迁出别名</h3>
+                      <div className="kg-split-list compact">
+                        {kgSplitSource.entity.aliases.map((alias) => (
+                          <label className="kg-split-option" key={alias}>
+                            <input
+                              type="checkbox"
+                              checked={kgSplitMovedAliases.includes(alias)}
+                              onChange={() => toggleKgSplitAlias(alias)}
+                            />
+                            <span>
+                              <strong>{alias}</strong>
+                            </span>
+                          </label>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  <div className="kg-split-section">
+                    <h3>迁出出现章节</h3>
+                    <div className="kg-split-list">
+                      {kgSplitSource.mentions.map((mention) => (
+                        <label className="kg-split-option" key={mention.id}>
+                          <input
+                            type="checkbox"
+                            checked={kgSplitMentionIds.includes(mention.id)}
+                            onChange={() => toggleKgSplitMention(mention.id)}
+                          />
+                          <span>
+                            <strong>第 {mention.chapterIndex} 章 · {mention.chapterTitle}</strong>
+                            {mention.evidence && <small>{mention.evidence}</small>}
+                          </span>
+                        </label>
+                      ))}
+                    </div>
+                  </div>
+
+                  <div className="kg-split-section">
+                    <h3>迁出相关关系</h3>
+                    <div className="kg-split-list">
+                      {kgSplitSource.relations.map((relation) => (
+                        <label className="kg-split-option" key={relation.id}>
+                          <input
+                            type="checkbox"
+                            checked={kgSplitRelationIds.includes(relation.id)}
+                            onChange={() => toggleKgSplitRelation(relation.id)}
+                          />
+                          <span>
+                            <strong>{relation.sourceName} -- {relation.type} -- {relation.targetName}</strong>
+                            {relation.description && <small>{relation.description}</small>}
+                          </span>
+                        </label>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+
+                <div className="modal-actions">
+                  <button type="button" className="ghost-button" onClick={() => closeKgSplitModal()}>
+                    取消
+                  </button>
+                  <button
+                    type="button"
+                    disabled={
+                      (kgSplitMode === 'new' && !kgSplitName.trim()) ||
+                      (kgSplitMode === 'existing' && !kgSplitTargetId) ||
+                      (kgSplitMentionIds.length === 0 && kgSplitRelationIds.length === 0)
+                    }
+                    onClick={() => void splitKgEntity()}
+                  >
+                    拆分
                   </button>
                 </div>
               </section>
@@ -2420,6 +2867,13 @@ function App() {
                     onClick={() => openKgMergeModal(kgEntityDetail.entity)}
                   >
                     合并
+                  </button>
+                  <button
+                    type="button"
+                    className="ghost-button"
+                    onClick={() => openKgSplitModal(kgEntityDetail)}
+                  >
+                    拆分
                   </button>
                   <button
                     type="button"
