@@ -621,6 +621,26 @@ const getKgEntityMentionByChapterStatement = db.prepare(`
   FROM kg_entity_mentions
   WHERE entity_id = ? AND chapter_id = ?
 `)
+const getKgEntityMentionForSplitStatement = db.prepare(`
+  SELECT
+    id,
+    entity_id AS entityId,
+    book_id AS bookId,
+    chapter_id AS chapterId,
+    chapter_index AS chapterIndex,
+    evidence,
+    confidence
+  FROM kg_entity_mentions
+  WHERE id = ?
+`)
+const updateKgEntityMentionEntityStatement = db.prepare(`
+  UPDATE kg_entity_mentions
+  SET entity_id = ?
+  WHERE id = ?
+`)
+const deleteKgEntityMentionStatement = db.prepare(`
+  DELETE FROM kg_entity_mentions WHERE id = ?
+`)
 const updateKgEntityMentionStatement = db.prepare(`
   UPDATE kg_entity_mentions
   SET evidence = ?, confidence = MAX(confidence, ?)
@@ -688,6 +708,14 @@ const findKgRelationConflictStatement = db.prepare(`
   SELECT id
   FROM kg_relations
   WHERE book_id = ? AND source_entity_id = ? AND target_entity_id = ? AND type = ?
+`)
+const mergeKgRelationIntoStatement = db.prepare(`
+  UPDATE kg_relations
+  SET
+    description = COALESCE(NULLIF(?, ''), description),
+    confidence = MAX(confidence, ?),
+    updated_at = CURRENT_TIMESTAMP
+  WHERE id = ?
 `)
 const insertKgRelationMentionStatement = db.prepare(`
   INSERT INTO kg_relation_mentions (
@@ -1277,6 +1305,172 @@ function mergeKgEntitiesBatchTransaction(sourceIds, targetId) {
   }
 }
 
+function moveKgRelationEndpoint(relation, sourceId, targetId, bookId) {
+  const newSourceId = relation.sourceId === sourceId ? targetId : relation.sourceId
+  const newTargetId = relation.targetId === sourceId ? targetId : relation.targetId
+
+  if (newSourceId === newTargetId) {
+    deleteKgRelationStatement.run(relation.id)
+    deleteKgRelationMentionsByRelationStatement.run(relation.id)
+    return null
+  }
+
+  const existing = findKgRelationByEndpointsStatement.get(
+    bookId,
+    newSourceId,
+    newTargetId,
+    relation.type,
+  )
+
+  if (existing && existing.id !== relation.id) {
+    mergeKgRelationIntoStatement.run(relation.description ?? '', relation.confidence, existing.id)
+    updateKgRelationMentionsRelationIdStatement.run(existing.id, relation.id)
+    deleteKgRelationStatement.run(relation.id)
+    recomputeRelationChapterRange(existing.id)
+    resetKgRelationReviewStatusStatement.run(existing.id)
+    return existing.id
+  }
+
+  updateKgRelationEndpointStatement.run(newSourceId, newTargetId, relation.id)
+  resetKgRelationReviewStatusStatement.run(relation.id)
+  return relation.id
+}
+
+function splitKgEntityTransaction(sourceId, payload) {
+  const source = getKgEntityWithAliases(sourceId)
+  if (!source) throw new Error('源实体不存在。')
+
+  const mentionIds = Array.isArray(payload?.mentionIds)
+    ? uniqueStrings(payload.mentionIds)
+    : []
+  const relationIds = Array.isArray(payload?.relationIds)
+    ? uniqueStrings(payload.relationIds)
+    : []
+
+  if (mentionIds.length === 0 && relationIds.length === 0) {
+    throw new Error('至少选择一个要拆出的出现章节或关系。')
+  }
+
+  const targetEntityId = typeof payload?.targetEntityId === 'string' ? payload.targetEntityId : ''
+  const movedAliases = uniqueStrings(Array.isArray(payload?.movedAliases) ? payload.movedAliases : [])
+
+  let targetId = targetEntityId
+  let target = targetId ? getKgEntityWithAliases(targetId) : null
+
+  if (targetId) {
+    if (!target) throw new Error('目标实体不存在。')
+    if (target.id === sourceId) throw new Error('不能把实体拆到自身。')
+    if (target.bookId !== source.bookId) throw new Error('目标实体必须属于同一本书。')
+  } else {
+    const name = String(payload?.name ?? '').trim()
+    if (!name) throw new Error('新实体名称不能为空。')
+
+    const type = normalizeEntityType(payload?.type)
+    const normalizedName = normalizeName(name)
+    const duplicate = findKgEntityByNormalizedStatement.get(source.bookId, type, normalizedName)
+    if (duplicate) {
+      throw new Error('同书同类型下已存在相同名称的实体。')
+    }
+
+    const aliases = uniqueStrings([
+      ...(Array.isArray(payload?.aliases) ? payload.aliases : []),
+      ...movedAliases,
+    ]).filter((alias) => normalizeName(alias) !== normalizedName)
+    const description = typeof payload?.description === 'string' ? payload.description.trim() : ''
+    targetId = randomUUID()
+
+    insertKgEntityStatement.run(
+      targetId,
+      source.bookId,
+      type,
+      name,
+      normalizedName,
+      JSON.stringify(aliases),
+      description,
+      source.confidence,
+      null,
+      null,
+    )
+    target = getKgEntityWithAliases(targetId)
+  }
+
+  if (!target) throw new Error('目标实体不存在。')
+
+  if (targetEntityId && movedAliases.length > 0) {
+    const mergedTargetAliases = uniqueStrings([
+      ...target.aliases,
+      ...movedAliases,
+    ]).filter((alias) => normalizeName(alias) !== normalizeName(target.name))
+
+    updateKgEntityFullStatement.run(
+      target.type,
+      target.name,
+      normalizeName(target.name),
+      JSON.stringify(mergedTargetAliases),
+      target.description,
+      target.id,
+    )
+  }
+
+  if (movedAliases.length > 0) {
+    const movedAliasNames = new Set(movedAliases.map(normalizeName))
+    const remainingSourceAliases = source.aliases.filter((alias) => !movedAliasNames.has(normalizeName(alias)))
+    updateKgEntityFullStatement.run(
+      source.type,
+      source.name,
+      normalizeName(source.name),
+      JSON.stringify(remainingSourceAliases),
+      source.description,
+      source.id,
+    )
+  }
+
+  for (const mentionId of mentionIds) {
+    const mention = getKgEntityMentionForSplitStatement.get(mentionId)
+    if (!mention || mention.entityId !== sourceId || mention.bookId !== source.bookId) {
+      throw new Error('选择的出现章节不属于源实体。')
+    }
+
+    const existing = getKgEntityMentionByChapterStatement.get(targetId, mention.chapterId)
+    if (existing) {
+      const evidence = mention.evidence || existing.evidence
+      const confidence = Math.max(mention.confidence, existing.confidence)
+      updateKgEntityMentionStatement.run(evidence, confidence, existing.id)
+      deleteKgEntityMentionStatement.run(mention.id)
+    } else {
+      updateKgEntityMentionEntityStatement.run(targetId, mention.id)
+    }
+  }
+
+  const touchedRelationIds = new Set()
+  for (const relationId of relationIds) {
+    const relation = getKgRelationStatement.get(relationId)
+    if (!relation || relation.bookId !== source.bookId) {
+      throw new Error('选择的关系不属于源实体所在书籍。')
+    }
+    if (relation.sourceId !== sourceId && relation.targetId !== sourceId) {
+      throw new Error('选择的关系不连接源实体。')
+    }
+
+    const movedRelationId = moveKgRelationEndpoint(relation, sourceId, targetId, source.bookId)
+    if (movedRelationId) touchedRelationIds.add(movedRelationId)
+  }
+
+  recomputeEntityChapterRange(sourceId)
+  recomputeEntityChapterRange(targetId)
+  resetKgEntityReviewStatusStatement.run(sourceId)
+  resetKgEntityReviewStatusStatement.run(targetId)
+
+  for (const relationId of touchedRelationIds) {
+    recomputeRelationChapterRange(relationId)
+  }
+
+  return {
+    source: getKgEntityWithAliases(sourceId),
+    target: getKgEntityWithAliases(targetId),
+  }
+}
+
 function deleteKgEntityTransaction(entityId) {
   const entity = getKgEntityWithAliases(entityId)
   if (!entity) throw new Error('Entity not found.')
@@ -1299,18 +1493,40 @@ function updateKgRelationTransaction(relationId, payload) {
 
   const type = normalizeRelationType(payload?.type)
   const description = typeof payload?.description === 'string' ? payload.description.trim() : relation.description
+  const sourceId = typeof payload?.sourceId === 'string' ? payload.sourceId : relation.sourceId
+  const targetId = typeof payload?.targetId === 'string' ? payload.targetId : relation.targetId
+
+  if (sourceId === targetId) {
+    throw new Error('关系源实体和目标实体不能相同。')
+  }
+
+  const source = getKgEntityStatement.get(sourceId)
+  const target = getKgEntityStatement.get(targetId)
+  if (!source || !target) throw new Error('关系端点实体不存在。')
+  if (source.bookId !== relation.bookId || target.bookId !== relation.bookId) {
+    throw new Error('关系端点必须属于同一本书。')
+  }
 
   const conflict = findKgRelationConflictStatement.get(
-    relation.bookId ?? relation.book_id,
-    relation.sourceId,
-    relation.targetId,
+    relation.bookId,
+    sourceId,
+    targetId,
     type,
   )
   if (conflict && conflict.id !== relationId) {
-    throw new Error('同书同类型下已存在相同端点的关系。')
+    mergeKgRelationIntoStatement.run(description ?? '', relation.confidence, conflict.id)
+    updateKgRelationMentionsRelationIdStatement.run(conflict.id, relationId)
+    deleteKgRelationStatement.run(relationId)
+    recomputeRelationChapterRange(conflict.id)
+
+    // Editing a relation may fix the issues that flagged it for review.
+    resetKgRelationReviewStatusStatement.run(conflict.id)
+
+    return getKgRelationStatement.get(conflict.id)
   }
 
   updateKgRelationFullStatement.run(type, description, relationId)
+  updateKgRelationEndpointStatement.run(sourceId, targetId, relationId)
 
   // Editing a relation may fix the issues that flagged it for review.
   resetKgRelationReviewStatusStatement.run(relationId)
@@ -1622,6 +1838,26 @@ const server = createServer(async (request, response) => {
         jobId,
       )
       sendJson(response, 200, { ok: true })
+      return
+    }
+
+    const entitySplitMatch = url.pathname.match(/^\/api\/kg\/entities\/([^/]+)\/split$/)
+    if (request.method === 'POST' && entitySplitMatch) {
+      const entityId = decodeURIComponent(entitySplitMatch[1])
+      const body = await readJson(request)
+
+      db.exec('BEGIN')
+      try {
+        const result = splitKgEntityTransaction(entityId, body)
+        db.exec('COMMIT')
+        sendJson(response, 200, {
+          source: mapEntityRow(result.source),
+          target: mapEntityRow(result.target),
+        })
+      } catch (error) {
+        db.exec('ROLLBACK')
+        sendJson(response, 400, { error: error instanceof Error ? error.message : 'Split failed.' })
+      }
       return
     }
 

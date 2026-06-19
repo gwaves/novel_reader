@@ -769,6 +769,76 @@ button:disabled {
   font-size: 13px;
 }
 
+.kg-endpoint-picker {
+  display: grid;
+  gap: 8px;
+}
+
+.kg-endpoint-picker > span {
+  color: #6f6558;
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.kg-endpoint-picker .kg-merge-candidate-list {
+  max-height: 220px;
+  overflow: auto;
+}
+
+.kg-split-section {
+  display: grid;
+  gap: 8px;
+}
+
+.kg-split-section h3 {
+  margin: 4px 0 0;
+  color: #2c5b4b;
+  font-size: 15px;
+}
+
+.kg-split-list {
+  display: grid;
+  gap: 8px;
+  max-height: 220px;
+  overflow: auto;
+}
+
+.kg-split-list.compact {
+  max-height: 150px;
+}
+
+.kg-split-option {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 10px;
+  align-items: flex-start;
+  border: 1px solid #e4dbcf;
+  border-radius: 8px;
+  padding: 10px;
+  background: #fffdf8;
+}
+
+.kg-split-option input {
+  margin-top: 4px;
+  accent-color: #2c5b4b;
+}
+
+.kg-split-option span {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.kg-split-option strong {
+  color: #24211c;
+  font-size: 13px;
+}
+
+.kg-split-option small {
+  color: #6f6558;
+  line-height: 1.5;
+}
+
 .kg-detail-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
