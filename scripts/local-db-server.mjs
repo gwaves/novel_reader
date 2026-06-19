@@ -396,6 +396,71 @@ const listKgGraphRelationsStatement = db.prepare(`
   ORDER BY mentionCount DESC, r.confidence DESC, r.updated_at DESC
   LIMIT ?
 `)
+const searchKgEntityEvidenceStatement = db.prepare(`
+  SELECT
+    m.id AS mentionId,
+    e.id AS entityId,
+    e.name AS entityName,
+    e.type AS entityType,
+    e.description AS entityDescription,
+    c.id AS chapterId,
+    c.chapter_index AS chapterIndex,
+    c.title AS chapterTitle,
+    m.evidence,
+    m.confidence
+  FROM kg_entity_mentions m
+  JOIN kg_entities e ON e.id = m.entity_id
+  JOIN chapters c ON c.id = m.chapter_id
+  WHERE e.book_id = ?
+    AND (? = '' OR e.type = ?)
+    AND (
+      ? = ''
+      OR e.name LIKE ?
+      OR e.normalized_name LIKE ?
+      OR e.aliases_json LIKE ?
+      OR e.description LIKE ?
+      OR m.evidence LIKE ?
+      OR c.title LIKE ?
+    )
+  ORDER BY c.chapter_index ASC, e.name ASC
+  LIMIT ?
+`)
+const searchKgRelationEvidenceStatement = db.prepare(`
+  SELECT
+    mention.id AS mentionId,
+    r.id AS relationId,
+    r.type AS relationType,
+    r.description AS relationDescription,
+    source.id AS sourceId,
+    source.name AS sourceName,
+    source.type AS sourceType,
+    target.id AS targetId,
+    target.name AS targetName,
+    target.type AS targetType,
+    c.id AS chapterId,
+    c.chapter_index AS chapterIndex,
+    c.title AS chapterTitle,
+    mention.evidence,
+    mention.confidence
+  FROM kg_relation_mentions mention
+  JOIN kg_relations r ON r.id = mention.relation_id
+  JOIN kg_entities source ON source.id = r.source_entity_id
+  JOIN kg_entities target ON target.id = r.target_entity_id
+  JOIN chapters c ON c.id = mention.chapter_id
+  WHERE r.book_id = ?
+    AND (? = '' OR r.type = ?)
+    AND (
+      ? = ''
+      OR r.type LIKE ?
+      OR r.description LIKE ?
+      OR mention.evidence LIKE ?
+      OR source.name LIKE ?
+      OR target.name LIKE ?
+      OR c.title LIKE ?
+    )
+  ORDER BY c.chapter_index ASC, source.name ASC, target.name ASC
+  LIMIT ?
+`)
 const listKgRelationsStatement = db.prepare(`
   SELECT
     r.id,
@@ -1089,6 +1154,52 @@ function getKgBookGraph(bookId, options = {}) {
       .map(mapEntityRow),
     relations,
   }
+}
+
+function searchKgEvidence(bookId, options = {}) {
+  const query = typeof options.query === 'string' ? options.query.trim() : ''
+  const normalizedQuery = normalizeName(query)
+  const likeQuery = `%${query}%`
+  const normalizedLikeQuery = `%${normalizedQuery}%`
+  const kind = typeof options.kind === 'string' ? options.kind : 'all'
+  const entityType = typeof options.entityType === 'string' ? options.entityType : ''
+  const relationType = typeof options.relationType === 'string' ? options.relationType : ''
+  const safeLimit = Math.max(1, Math.min(200, Number(options.limit) || 80))
+
+  const entities =
+    kind === 'relations'
+      ? []
+      : searchKgEntityEvidenceStatement.all(
+          bookId,
+          entityType,
+          entityType,
+          query,
+          likeQuery,
+          normalizedLikeQuery,
+          likeQuery,
+          likeQuery,
+          likeQuery,
+          likeQuery,
+          safeLimit,
+        )
+  const relations =
+    kind === 'entities'
+      ? []
+      : searchKgRelationEvidenceStatement.all(
+          bookId,
+          relationType,
+          relationType,
+          query,
+          likeQuery,
+          likeQuery,
+          likeQuery,
+          likeQuery,
+          likeQuery,
+          likeQuery,
+          safeLimit,
+        )
+
+  return { entities, relations }
 }
 
 function markKgReviewStatus(ids, kind, status) {
@@ -1993,6 +2104,24 @@ const server = createServer(async (request, response) => {
         entityType: url.searchParams.get('entityType') ?? '',
         relationType: url.searchParams.get('relationType') ?? '',
         limit: Number(url.searchParams.get('limit') ?? 150),
+      }))
+      return
+    }
+
+    if (request.method === 'GET' && url.pathname === '/api/kg/search') {
+      const bookId = url.searchParams.get('bookId')
+
+      if (!bookId) {
+        sendJson(response, 400, { error: 'Missing bookId.' })
+        return
+      }
+
+      sendJson(response, 200, searchKgEvidence(bookId, {
+        query: url.searchParams.get('q') ?? '',
+        kind: url.searchParams.get('kind') ?? 'all',
+        entityType: url.searchParams.get('entityType') ?? '',
+        relationType: url.searchParams.get('relationType') ?? '',
+        limit: Number(url.searchParams.get('limit') ?? 80),
       }))
       return
     }

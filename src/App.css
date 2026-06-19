@@ -484,6 +484,66 @@ button:disabled {
   margin-bottom: 20px;
 }
 
+.kg-search-results {
+  display: grid;
+  gap: 18px;
+  margin-top: 16px;
+}
+
+.kg-search-results h4 {
+  margin: 0 0 10px;
+  color: #211e19;
+}
+
+.kg-search-hit-list {
+  display: grid;
+  gap: 10px;
+  max-height: 360px;
+  overflow: auto;
+}
+
+.kg-search-hit {
+  display: grid;
+  gap: 8px;
+  border: 1px solid #e4dbcf;
+  border-radius: 8px;
+  padding: 12px;
+  background: #fffdf8;
+}
+
+.kg-search-hit div {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.kg-search-hit button {
+  width: auto;
+  padding: 6px 10px;
+}
+
+.kg-search-hit span {
+  border-radius: 999px;
+  padding: 4px 8px;
+  background: #f1eadf;
+  color: #6f6558;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.kg-search-hit strong {
+  color: #24211c;
+}
+
+.kg-search-hit p {
+  margin: 0;
+  color: #5e5549;
+  font-size: 13px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+}
+
 .kg-scanned-list {
   display: grid;
   gap: 10px;

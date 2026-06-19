@@ -78,6 +78,42 @@ type KgBookGraph = {
   relations: KgRelation[]
 }
 
+type KgEvidenceEntityHit = {
+  mentionId: string
+  entityId: string
+  entityName: string
+  entityType: string
+  entityDescription: string | null
+  chapterId: string
+  chapterIndex: number
+  chapterTitle: string
+  evidence: string | null
+  confidence: number
+}
+
+type KgEvidenceRelationHit = {
+  mentionId: string
+  relationId: string
+  relationType: string
+  relationDescription: string | null
+  sourceId: string
+  sourceName: string
+  sourceType: string
+  targetId: string
+  targetName: string
+  targetType: string
+  chapterId: string
+  chapterIndex: number
+  chapterTitle: string
+  evidence: string | null
+  confidence: number
+}
+
+type KgEvidenceSearchResponse = {
+  entities: KgEvidenceEntityHit[]
+  relations: KgEvidenceRelationHit[]
+}
+
 type KgGraphNodeData = {
   entity: KgEntity
   label: string
@@ -327,6 +363,12 @@ function App() {
   const [showKgBookGraph, setShowKgBookGraph] = useState(false)
   const [kgBookGraphEntityTypeFilter, setKgBookGraphEntityTypeFilter] = useState('character')
   const [kgBookGraphRelationTypeFilter, setKgBookGraphRelationTypeFilter] = useState('')
+  const [showKgEvidenceSearch, setShowKgEvidenceSearch] = useState(false)
+  const [kgEvidenceSearchQuery, setKgEvidenceSearchQuery] = useState('')
+  const [kgEvidenceSearchKind, setKgEvidenceSearchKind] = useState<'all' | 'entities' | 'relations'>('all')
+  const [kgEvidenceEntityHits, setKgEvidenceEntityHits] = useState<KgEvidenceEntityHit[]>([])
+  const [kgEvidenceRelationHits, setKgEvidenceRelationHits] = useState<KgEvidenceRelationHit[]>([])
+  const [isKgEvidenceSearching, setIsKgEvidenceSearching] = useState(false)
   const [kgEntitySearch, setKgEntitySearch] = useState('')
   const [kgEntityTypeFilter, setKgEntityTypeFilter] = useState('')
   const [kgRelationTypeFilter, setKgRelationTypeFilter] = useState('')
@@ -787,6 +829,38 @@ function App() {
       setKgBookGraph((await response.json()) as KgBookGraph)
     } catch (err) {
       setKgError(err instanceof Error ? err.message : '读取全局图谱失败。')
+    }
+  }
+
+  async function searchKgEvidence() {
+    if (!state.book) return
+
+    const query = kgEvidenceSearchQuery.trim()
+    if (!query) {
+      setKgEvidenceEntityHits([])
+      setKgEvidenceRelationHits([])
+      return
+    }
+
+    setKgError('')
+    setIsKgEvidenceSearching(true)
+
+    try {
+      const response = await fetch(
+        `/api/kg/search?bookId=${encodeURIComponent(state.book.id)}&q=${encodeURIComponent(query)}&kind=${encodeURIComponent(kgEvidenceSearchKind)}&limit=120`,
+      )
+
+      if (!response.ok) {
+        throw new Error('搜索图谱证据失败。')
+      }
+
+      const payload = (await response.json()) as KgEvidenceSearchResponse
+      setKgEvidenceEntityHits(payload.entities)
+      setKgEvidenceRelationHits(payload.relations)
+    } catch (err) {
+      setKgError(err instanceof Error ? err.message : '搜索图谱证据失败。')
+    } finally {
+      setIsKgEvidenceSearching(false)
     }
   }
 
@@ -2841,6 +2915,7 @@ function App() {
                 setShowKgScannedChapters((current) => !current)
                 setShowKgReviewQueue(false)
                 setShowKgBookGraph(false)
+                setShowKgEvidenceSearch(false)
               }}
             >
               <span>已扫描章节</span>
@@ -2854,6 +2929,7 @@ function App() {
                 setShowKgRelations(false)
                 setShowKgReviewQueue(false)
                 setShowKgBookGraph(false)
+                setShowKgEvidenceSearch(false)
                 setKgEntityDetail(null)
                 setKgRelationDetail(null)
               }}
@@ -2869,6 +2945,7 @@ function App() {
                 setShowKgEntities(false)
                 setShowKgReviewQueue(false)
                 setShowKgBookGraph(false)
+                setShowKgEvidenceSearch(false)
                 setKgEntityDetail(null)
                 setKgRelationDetail(null)
               }}
@@ -2885,6 +2962,7 @@ function App() {
                 setShowKgRelations(false)
                 setShowKgReviewQueue(false)
                 setShowKgScannedChapters(false)
+                setShowKgEvidenceSearch(false)
                 setKgEntityDetail(null)
                 setKgRelationDetail(null)
                 if (!showKgBookGraph) void fetchKgBookGraph()
@@ -2895,6 +2973,23 @@ function App() {
             </button>
             <button
               type="button"
+              className={showKgEvidenceSearch ? 'active' : ''}
+              onClick={() => {
+                setShowKgEvidenceSearch((current) => !current)
+                setShowKgEntities(false)
+                setShowKgRelations(false)
+                setShowKgReviewQueue(false)
+                setShowKgScannedChapters(false)
+                setShowKgBookGraph(false)
+                setKgEntityDetail(null)
+                setKgRelationDetail(null)
+              }}
+            >
+              <span>证据搜索</span>
+              <strong>{kgEvidenceEntityHits.length + kgEvidenceRelationHits.length}</strong>
+            </button>
+            <button
+              type="button"
               className={showKgReviewQueue ? 'active' : ''}
               onClick={() => {
                 setShowKgReviewQueue((current) => !current)
@@ -2902,6 +2997,7 @@ function App() {
                 setShowKgRelations(false)
                 setShowKgScannedChapters(false)
                 setShowKgBookGraph(false)
+                setShowKgEvidenceSearch(false)
                 setKgEntityDetail(null)
                 setKgRelationDetail(null)
               }}
@@ -2910,6 +3006,109 @@ function App() {
               <strong>{kgReviewEntities.length + kgReviewRelations.length}</strong>
             </button>
           </div>
+
+          {showKgEvidenceSearch && (
+            <section className="kg-card kg-scanned-card">
+              <div className="kg-card-heading">
+                <div>
+                  <h3>证据搜索</h3>
+                  <p>搜索实体、关系、证据文本、描述和章节标题，结果可跳转到对应详情或正文。</p>
+                </div>
+                <button type="button" className="ghost-button" onClick={() => setShowKgEvidenceSearch(false)}>
+                  收起
+                </button>
+              </div>
+
+              <div className="kg-filter-bar">
+                <input
+                  type="search"
+                  placeholder="搜索实体、关系或证据"
+                  value={kgEvidenceSearchQuery}
+                  onChange={(event) => setKgEvidenceSearchQuery(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter') void searchKgEvidence()
+                  }}
+                />
+                <select
+                  value={kgEvidenceSearchKind}
+                  onChange={(event) => setKgEvidenceSearchKind(event.target.value as 'all' | 'entities' | 'relations')}
+                >
+                  <option value="all">全部证据</option>
+                  <option value="entities">只看实体</option>
+                  <option value="relations">只看关系</option>
+                </select>
+                <button type="button" disabled={isKgEvidenceSearching} onClick={() => void searchKgEvidence()}>
+                  {isKgEvidenceSearching ? '搜索中...' : '搜索'}
+                </button>
+                {(kgEvidenceSearchQuery || kgEvidenceEntityHits.length || kgEvidenceRelationHits.length) && (
+                  <button
+                    type="button"
+                    className="ghost-button"
+                    onClick={() => {
+                      setKgEvidenceSearchQuery('')
+                      setKgEvidenceEntityHits([])
+                      setKgEvidenceRelationHits([])
+                    }}
+                  >
+                    清除
+                  </button>
+                )}
+              </div>
+
+              {kgEvidenceEntityHits.length || kgEvidenceRelationHits.length ? (
+                <div className="kg-search-results">
+                  {kgEvidenceEntityHits.length > 0 && (
+                    <div>
+                      <h4>实体证据 · {kgEvidenceEntityHits.length}</h4>
+                      <div className="kg-search-hit-list">
+                        {kgEvidenceEntityHits.map((hit) => (
+                          <article className="kg-search-hit" key={hit.mentionId}>
+                            <div>
+                              <button type="button" onClick={() => void openKgEntityDetail(hit.entityId)}>
+                                {hit.entityName}
+                              </button>
+                              <span>{getKgEntityTypeLabel(hit.entityType)}</span>
+                              <button type="button" className="ghost-button" onClick={() => openChapterFromKnowledgeGraph(hit.chapterId)}>
+                                第 {hit.chapterIndex} 章
+                              </button>
+                            </div>
+                            <strong>{hit.chapterTitle}</strong>
+                            <p>{hit.evidence || hit.entityDescription || '暂无证据文本。'}</p>
+                          </article>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {kgEvidenceRelationHits.length > 0 && (
+                    <div>
+                      <h4>关系证据 · {kgEvidenceRelationHits.length}</h4>
+                      <div className="kg-search-hit-list">
+                        {kgEvidenceRelationHits.map((hit) => (
+                          <article className="kg-search-hit" key={hit.mentionId}>
+                            <div>
+                              <button type="button" onClick={() => void openKgRelationDetail(hit.relationId)}>
+                                {hit.sourceName} -- {hit.relationType} -- {hit.targetName}
+                              </button>
+                              <button type="button" className="ghost-button" onClick={() => openChapterFromKnowledgeGraph(hit.chapterId)}>
+                                第 {hit.chapterIndex} 章
+                              </button>
+                            </div>
+                            <strong>{hit.chapterTitle}</strong>
+                            <p>{hit.evidence || hit.relationDescription || '暂无证据文本。'}</p>
+                          </article>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <p className="empty-summary">
+                  {kgEvidenceSearchQuery.trim() ? '没有匹配的图谱证据。' : '输入关键词后搜索图谱证据。'}
+                </p>
+              )}
+            </section>
+          )}
 
           {showKgReviewQueue && (
             <section className="kg-card kg-scanned-card">
