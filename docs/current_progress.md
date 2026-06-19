@@ -111,6 +111,11 @@ SQLite 图谱表
 - 后端：新增 `POST /api/database/import`，上传 `.sqlite` 后校验完整性和关键表，先备份当前数据库，再把恢复文件排队到下次服务启动替换。
 - UI：首页新增“数据库备份”，支持备份完整数据库和选择备份文件恢复；恢复会提示重启本地数据库服务后生效。
 
+2026-06-19 更新：章节图谱 diff 预览 v1 已完成。
+- 后端：新增章节 extraction diff 预览接口，对比当前章节已写入图谱证据和候选 extraction JSON。
+- UI：手动保存当前章节 JSON 前会先显示新增/移除/不变实体和关系证据，确认后才写入。
+- UI：覆盖重扫 10 章以内会先生成 extraction 并汇总 diff，确认后应用，避免局部重建直接覆盖。
+
 2026-06-19 更新：章节重扫与 raw extraction 重放已完成。
 - 后端：`PUT /api/kg/chapters/:id/extraction` 覆盖保存时会重写该章节图谱证据，并重新计算受影响实体/关系的 first/last seen。
 - 后端：新增 `POST /api/kg/chapters/:id/replay`，可从 `kg_chapter_extractions.extraction_json` 重放写入图谱，不重新调用模型。

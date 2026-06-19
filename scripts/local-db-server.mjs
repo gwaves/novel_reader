@@ -674,6 +674,37 @@ const getKgRelationMentionsStatement = db.prepare(`
   ORDER BY m.chapter_index ASC
   LIMIT 100
 `)
+const listKgChapterEntityDiffRowsStatement = db.prepare(`
+  SELECT
+    e.id AS entityId,
+    e.name,
+    e.type,
+    e.description,
+    m.evidence,
+    m.confidence
+  FROM kg_entity_mentions m
+  JOIN kg_entities e ON e.id = m.entity_id
+  WHERE m.chapter_id = ?
+  ORDER BY e.type ASC, e.name ASC
+`)
+const listKgChapterRelationDiffRowsStatement = db.prepare(`
+  SELECT
+    r.id AS relationId,
+    r.type,
+    r.description,
+    r.confidence,
+    source.name AS sourceName,
+    source.type AS sourceType,
+    target.name AS targetName,
+    target.type AS targetType,
+    m.evidence
+  FROM kg_relation_mentions m
+  JOIN kg_relations r ON r.id = m.relation_id
+  JOIN kg_entities source ON source.id = r.source_entity_id
+  JOIN kg_entities target ON target.id = r.target_entity_id
+  WHERE m.chapter_id = ?
+  ORDER BY r.type ASC, source.name ASC, target.name ASC
+`)
 const getKgChapterExtractionStatement = db.prepare(`
   SELECT
     chapter_id AS chapterId,
@@ -1666,6 +1697,125 @@ function saveChapterExtractionTransaction(bookId, chapterId, extraction, model) 
   } catch (error) {
     db.exec('ROLLBACK')
     throw error
+  }
+}
+
+function buildExtractionDiffItems(existingItems, nextItems) {
+  const existingByKey = new Map(existingItems.map((item) => [item.key, item]))
+  const nextByKey = new Map(nextItems.map((item) => [item.key, item]))
+  const added = []
+  const removed = []
+  const unchanged = []
+
+  for (const item of nextItems) {
+    if (existingByKey.has(item.key)) {
+      unchanged.push(item)
+    } else {
+      added.push(item)
+    }
+  }
+
+  for (const item of existingItems) {
+    if (!nextByKey.has(item.key)) {
+      removed.push(item)
+    }
+  }
+
+  return { added, removed, unchanged }
+}
+
+function getChapterExtractionDiff(bookId, chapterId, extraction) {
+  const chapter = getChapterStatement.get(chapterId)
+  if (!chapter || chapter.book_id !== bookId) {
+    throw new Error('Chapter does not belong to the requested book.')
+  }
+
+  const entities = Array.isArray(extraction?.entities) ? extraction.entities : []
+  const relations = Array.isArray(extraction?.relations) ? extraction.relations : []
+  const nextEntityByName = new Map()
+  const nextEntities = []
+
+  for (const entity of entities) {
+    const name = String(entity?.name ?? '').trim()
+    if (!name) continue
+
+    const type = normalizeEntityType(entity?.type)
+    const item = {
+      key: `${type}:${normalizeName(name)}`,
+      name,
+      type,
+      description: typeof entity?.description === 'string' ? entity.description.trim() : '',
+      evidence: firstEvidence(entity?.evidence),
+      confidence: normalizeConfidence(entity?.confidence),
+    }
+    nextEntities.push(item)
+    nextEntityByName.set(normalizeName(name), item)
+
+    for (const alias of uniqueStrings(Array.isArray(entity?.aliases) ? entity.aliases : [])) {
+      nextEntityByName.set(normalizeName(alias), item)
+    }
+  }
+
+  const existingEntities = listKgChapterEntityDiffRowsStatement.all(chapterId).map((row) => ({
+    key: `${normalizeEntityType(row.type)}:${normalizeName(row.name)}`,
+    name: row.name,
+    type: row.type,
+    description: row.description ?? '',
+    evidence: row.evidence ?? '',
+    confidence: normalizeConfidence(row.confidence),
+  }))
+
+  const nextRelations = []
+  for (const relation of relations) {
+    const source = nextEntityByName.get(normalizeName(relation?.source))
+    const target = nextEntityByName.get(normalizeName(relation?.target))
+    if (!source || !target) continue
+
+    const type = normalizeRelationType(relation?.type)
+    nextRelations.push({
+      key: `${source.key}->${target.key}:${type}`,
+      sourceName: source.name,
+      targetName: target.name,
+      sourceType: source.type,
+      targetType: target.type,
+      type,
+      description: typeof relation?.description === 'string' ? relation.description.trim() : '',
+      evidence: firstEvidence(relation?.evidence),
+      confidence: normalizeConfidence(relation?.confidence),
+    })
+  }
+
+  const existingRelations = listKgChapterRelationDiffRowsStatement.all(chapterId).map((row) => ({
+    key: `${normalizeEntityType(row.sourceType)}:${normalizeName(row.sourceName)}->${normalizeEntityType(row.targetType)}:${normalizeName(row.targetName)}:${normalizeRelationType(row.type)}`,
+    sourceName: row.sourceName,
+    targetName: row.targetName,
+    sourceType: row.sourceType,
+    targetType: row.targetType,
+    type: row.type,
+    description: row.description ?? '',
+    evidence: row.evidence ?? '',
+    confidence: normalizeConfidence(row.confidence),
+  }))
+
+  const entityDiff = buildExtractionDiffItems(existingEntities, nextEntities)
+  const relationDiff = buildExtractionDiffItems(existingRelations, nextRelations)
+
+  return {
+    chapter: {
+      id: chapter.id,
+      index: chapter.chapter_index,
+      title: chapter.title,
+    },
+    summary: {
+      entitiesAdded: entityDiff.added.length,
+      entitiesRemoved: entityDiff.removed.length,
+      entitiesUnchanged: entityDiff.unchanged.length,
+      relationsAdded: relationDiff.added.length,
+      relationsRemoved: relationDiff.removed.length,
+      relationsUnchanged: relationDiff.unchanged.length,
+    },
+    entities: entityDiff,
+    relations: relationDiff,
   }
 }
 
@@ -2787,6 +2937,31 @@ const server = createServer(async (request, response) => {
         }
         return
       }
+    }
+
+    const chapterExtractionDiffMatch = url.pathname.match(/^\/api\/kg\/chapters\/([^/]+)\/extraction\/diff$/)
+    if (request.method === 'POST' && chapterExtractionDiffMatch) {
+      const chapterId = decodeURIComponent(chapterExtractionDiffMatch[1])
+      const body = await readJson(request)
+      const bookId = body?.bookId
+      const extraction = body?.extraction
+
+      if (!bookId || typeof bookId !== 'string') {
+        sendJson(response, 400, { error: 'Missing bookId.' })
+        return
+      }
+
+      if (!extraction || typeof extraction !== 'object') {
+        sendJson(response, 400, { error: 'Missing extraction payload.' })
+        return
+      }
+
+      try {
+        sendJson(response, 200, getChapterExtractionDiff(bookId, chapterId, extraction))
+      } catch (error) {
+        sendJson(response, 400, { error: error instanceof Error ? error.message : 'Diff failed.' })
+      }
+      return
     }
 
     const chapterExtractionMatch = url.pathname.match(/^\/api\/kg\/chapters\/([^/]+)\/extraction$/)

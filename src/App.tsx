@@ -114,6 +114,65 @@ type KgEvidenceSearchResponse = {
   relations: KgEvidenceRelationHit[]
 }
 
+type KgExtractionDiffEntity = {
+  key: string
+  name: string
+  type: string
+  description: string
+  evidence: string
+  confidence: number
+}
+
+type KgExtractionDiffRelation = {
+  key: string
+  sourceName: string
+  targetName: string
+  sourceType: string
+  targetType: string
+  type: string
+  description: string
+  evidence: string
+  confidence: number
+}
+
+type KgExtractionDiff = {
+  chapter: {
+    id: string
+    index: number
+    title: string
+  }
+  summary: {
+    entitiesAdded: number
+    entitiesRemoved: number
+    entitiesUnchanged: number
+    relationsAdded: number
+    relationsRemoved: number
+    relationsUnchanged: number
+  }
+  entities: {
+    added: KgExtractionDiffEntity[]
+    removed: KgExtractionDiffEntity[]
+    unchanged: KgExtractionDiffEntity[]
+  }
+  relations: {
+    added: KgExtractionDiffRelation[]
+    removed: KgExtractionDiffRelation[]
+    unchanged: KgExtractionDiffRelation[]
+  }
+}
+
+type KgExtractionPreviewItem = {
+  chapter: Chapter
+  diff: KgExtractionDiff
+  extraction: unknown
+  model: string
+}
+
+type KgExtractionPreview = {
+  title: string
+  items: KgExtractionPreviewItem[]
+}
+
 type KgGraphNodeData = {
   entity: KgEntity
   label: string
@@ -345,6 +404,8 @@ function App() {
   const [showKgEntities, setShowKgEntities] = useState(false)
   const [showKgRelations, setShowKgRelations] = useState(false)
   const [kgExtractionText, setKgExtractionText] = useState('')
+  const [kgExtractionPreview, setKgExtractionPreview] = useState<KgExtractionPreview | null>(null)
+  const [isKgApplyingPreview, setIsKgApplyingPreview] = useState(false)
   const [kgError, setKgError] = useState('')
   const [kgScanMode, setKgScanMode] = useState<KgScanMode>('current')
   const [kgScanStart, setKgScanStart] = useState(1)
@@ -715,30 +776,57 @@ function App() {
 
     try {
       const extraction = JSON.parse(kgExtractionText) as unknown
-      const response = await fetch(
-        `/api/kg/chapters/${encodeURIComponent(activeChapter.id)}/extraction`,
-        {
-          body: JSON.stringify({
-            bookId: state.book.id,
-            extraction,
-            model: 'manual-json',
-          }),
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          method: 'PUT',
-        },
-      )
+      const diff = await fetchChapterExtractionDiff(activeChapter, extraction)
+      setKgExtractionPreview({
+        title: '保存当前章节前预览',
+        items: [{ chapter: activeChapter, diff, extraction, model: 'manual-json' }],
+      })
+    } catch (err) {
+      setKgError(err instanceof Error ? err.message : '保存章节抽取结果失败。')
+    }
+  }
 
-      if (!response.ok) {
-        const payload = (await response.json()) as { error?: string }
-        throw new Error(payload.error ?? '保存章节抽取结果失败。')
+  async function fetchChapterExtractionDiff(chapter: Chapter, extraction: unknown): Promise<KgExtractionDiff> {
+    if (!state.book) throw new Error('未选择书籍。')
+
+    const response = await fetch(`/api/kg/chapters/${encodeURIComponent(chapter.id)}/extraction/diff`, {
+      body: JSON.stringify({
+        bookId: state.book.id,
+        extraction,
+      }),
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      method: 'POST',
+    })
+
+    if (!response.ok) {
+      const payload = (await response.json()) as { error?: string }
+      throw new Error(payload.error ?? `预览第 ${chapter.index} 章图谱变化失败。`)
+    }
+
+    return (await response.json()) as KgExtractionDiff
+  }
+
+  async function applyKgExtractionPreview() {
+    if (!kgExtractionPreview) return
+
+    setKgError('')
+    setIsKgApplyingPreview(true)
+
+    try {
+      for (const item of kgExtractionPreview.items) {
+        await saveChapterExtraction(item.chapter, item.extraction, item.model)
       }
 
       setKgExtractionText('')
+      setKgExtractionPreview(null)
+      setKgScanProgress(`已应用 ${kgExtractionPreview.items.length} 章图谱变化。`)
       await refreshKnowledgeGraph()
     } catch (err) {
-      setKgError(err instanceof Error ? err.message : '保存章节抽取结果失败。')
+      setKgError(err instanceof Error ? err.message : '应用图谱变化失败。')
+    } finally {
+      setIsKgApplyingPreview(false)
     }
   }
 
@@ -1550,6 +1638,11 @@ function App() {
       return
     }
 
+    if (!options?.forcePending && overwriteCompleted && chapters.length <= 10) {
+      await previewOverwriteKnowledgeGraphScan(chapters)
+      return
+    }
+
     if (
       !options?.forcePending &&
       chapters.length > 50 &&
@@ -1699,6 +1792,36 @@ function App() {
       setIsKgScanning(false)
       setIsStoppingKgScan(false)
       shouldStopScanningRef.current = false
+    }
+  }
+
+  async function previewOverwriteKnowledgeGraphScan(chapters: Chapter[]) {
+    if (!state.book) return
+
+    setKgError('')
+    setIsKgScanning(true)
+    setKgScanProgress(`正在生成 ${chapters.length} 章重扫预览...`)
+
+    try {
+      const items: KgExtractionPreviewItem[] = []
+
+      for (const chapter of chapters) {
+        setKgScanProgress(`正在预览第 ${chapter.index} 章 ${chapter.title}`)
+        const { extraction, model } = await generateKnowledgeGraphExtraction(chapter)
+        const diff = await fetchChapterExtractionDiff(chapter, extraction)
+        items.push({ chapter, diff, extraction, model })
+      }
+
+      setKgExtractionPreview({
+        title: `覆盖重扫前预览（${chapters.length} 章）`,
+        items,
+      })
+      setKgScanProgress(`已生成 ${chapters.length} 章重扫预览，确认后才会写入图谱。`)
+    } catch (err) {
+      setKgError(err instanceof Error ? err.message : '生成重扫预览失败。')
+      setKgScanProgress('')
+    } finally {
+      setIsKgScanning(false)
     }
   }
 
@@ -3066,6 +3189,110 @@ function App() {
             </div>
           )}
 
+          {kgExtractionPreview && (
+            <div className="modal-backdrop" role="presentation">
+              <section className="config-modal kg-diff-modal" role="dialog" aria-modal="true" aria-labelledby="kg-diff-title">
+                <div className="modal-heading">
+                  <div>
+                    <p className="eyebrow">图谱变化预览</p>
+                    <h2 id="kg-diff-title">{kgExtractionPreview.title}</h2>
+                  </div>
+                  <button
+                    type="button"
+                    className="ghost-button"
+                    disabled={isKgApplyingPreview}
+                    onClick={() => setKgExtractionPreview(null)}
+                  >
+                    取消
+                  </button>
+                </div>
+
+                <div className="kg-diff-summary">
+                  <span>
+                    实体 +{kgExtractionPreview.items.reduce((sum, item) => sum + item.diff.summary.entitiesAdded, 0)}
+                  </span>
+                  <span>
+                    实体 -{kgExtractionPreview.items.reduce((sum, item) => sum + item.diff.summary.entitiesRemoved, 0)}
+                  </span>
+                  <span>
+                    关系 +{kgExtractionPreview.items.reduce((sum, item) => sum + item.diff.summary.relationsAdded, 0)}
+                  </span>
+                  <span>
+                    关系 -{kgExtractionPreview.items.reduce((sum, item) => sum + item.diff.summary.relationsRemoved, 0)}
+                  </span>
+                </div>
+
+                <div className="kg-diff-list">
+                  {kgExtractionPreview.items.map((item) => (
+                    <article className="kg-diff-chapter" key={item.chapter.id}>
+                      <h3>
+                        第 {item.chapter.index} 章 · {item.chapter.title}
+                      </h3>
+                      <p>
+                        实体 +{item.diff.summary.entitiesAdded} / -{item.diff.summary.entitiesRemoved} / 不变 {item.diff.summary.entitiesUnchanged}
+                        {' · '}
+                        关系 +{item.diff.summary.relationsAdded} / -{item.diff.summary.relationsRemoved} / 不变 {item.diff.summary.relationsUnchanged}
+                      </p>
+
+                      <div className="kg-diff-columns">
+                        <div>
+                          <h4>新增实体</h4>
+                          {item.diff.entities.added.slice(0, 8).map((entity) => (
+                            <span className="tag" key={entity.key}>{entity.name} · {getKgEntityTypeLabel(entity.type)}</span>
+                          ))}
+                          {!item.diff.entities.added.length && <small>无</small>}
+                        </div>
+                        <div>
+                          <h4>移除实体证据</h4>
+                          {item.diff.entities.removed.slice(0, 8).map((entity) => (
+                            <span className="tag" key={entity.key}>{entity.name} · {getKgEntityTypeLabel(entity.type)}</span>
+                          ))}
+                          {!item.diff.entities.removed.length && <small>无</small>}
+                        </div>
+                        <div>
+                          <h4>新增关系</h4>
+                          {item.diff.relations.added.slice(0, 8).map((relation) => (
+                            <span className="tag" key={relation.key}>
+                              {relation.sourceName} -- {relation.type} -- {relation.targetName}
+                            </span>
+                          ))}
+                          {!item.diff.relations.added.length && <small>无</small>}
+                        </div>
+                        <div>
+                          <h4>移除关系证据</h4>
+                          {item.diff.relations.removed.slice(0, 8).map((relation) => (
+                            <span className="tag" key={relation.key}>
+                              {relation.sourceName} -- {relation.type} -- {relation.targetName}
+                            </span>
+                          ))}
+                          {!item.diff.relations.removed.length && <small>无</small>}
+                        </div>
+                      </div>
+                    </article>
+                  ))}
+                </div>
+
+                <div className="modal-actions">
+                  <button
+                    type="button"
+                    className="ghost-button"
+                    disabled={isKgApplyingPreview}
+                    onClick={() => setKgExtractionPreview(null)}
+                  >
+                    取消
+                  </button>
+                  <button
+                    type="button"
+                    disabled={isKgApplyingPreview}
+                    onClick={() => void applyKgExtractionPreview()}
+                  >
+                    {isKgApplyingPreview ? '应用中...' : '确认应用到图谱'}
+                  </button>
+                </div>
+              </section>
+            </div>
+          )}
+
           <div className="kg-stats">
             <button
               type="button"
@@ -4150,7 +4377,7 @@ function App() {
                     onClick={() => void scanSelectedKnowledgeGraphChapters({ overwriteCompleted: kgScanOverwriteCompleted })}
                   >
                     {kgScanOverwriteCompleted
-                      ? `覆盖重扫 ${getSelectedKgScanChapters().length} 章`
+                      ? `预览覆盖重扫 ${getSelectedKgScanChapters().length} 章`
                       : `开始扫描 ${getPendingKgScanChapters().length} 章`}
                   </button>
                   <button
@@ -4216,7 +4443,7 @@ function App() {
                 disabled={!activeChapter || !kgExtractionText.trim()}
                 onClick={() => void saveCurrentChapterExtraction()}
               >
-                保存到图谱
+                预览并保存到图谱
               </button>
               {kgError && <p className="error">{kgError}</p>}
             </section>

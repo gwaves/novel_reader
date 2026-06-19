@@ -959,6 +959,78 @@ button:disabled {
   line-height: 1.5;
 }
 
+.kg-diff-modal {
+  width: min(980px, 94vw);
+}
+
+.kg-diff-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 10px 0 14px;
+}
+
+.kg-diff-summary span {
+  border: 1px solid #e4dbcf;
+  border-radius: 999px;
+  padding: 6px 10px;
+  background: #fffdf8;
+  color: #2c5b4b;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.kg-diff-list {
+  display: grid;
+  gap: 12px;
+  max-height: min(58vh, 620px);
+  overflow: auto;
+}
+
+.kg-diff-chapter {
+  border: 1px solid #e4dbcf;
+  border-radius: 8px;
+  padding: 12px;
+  background: #fffdf8;
+}
+
+.kg-diff-chapter h3 {
+  margin: 0 0 6px;
+  font-size: 16px;
+}
+
+.kg-diff-chapter p {
+  margin: 0 0 12px;
+  color: #6f6558;
+  font-size: 13px;
+}
+
+.kg-diff-columns {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.kg-diff-columns div {
+  display: flex;
+  align-content: flex-start;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-height: 42px;
+}
+
+.kg-diff-columns h4 {
+  flex: 0 0 100%;
+  margin: 0;
+  color: #24211c;
+  font-size: 13px;
+}
+
+.kg-diff-columns small {
+  color: #8a8175;
+}
+
 .kg-graph-panel {
   display: grid;
   gap: 12px;
