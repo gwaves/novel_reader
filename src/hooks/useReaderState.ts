@@ -750,17 +750,22 @@ async function fetchOllamaModels(): Promise<OllamaModel[]> {
 }
 
 export async function validateModelConfig(config: ModelConfigDraft): Promise<void> {
+  await validateLlmConfig(config)
+  await validateEmbeddingConfig(config.embeddingConfig)
+}
+
+async function validateLlmConfig(config: ModelConfigDraft): Promise<void> {
   if (config.aiProvider === 'ollama') {
     if (!config.ollamaModel.trim()) {
-      throw new Error('请先选择或填写 Ollama 模型。')
+      throw new Error('[LLM] 请先选择或填写 Ollama 模型。')
     }
 
     if (!Number.isFinite(config.ollamaTemperature)) {
-      throw new Error('Ollama Temperature 必须是数字。')
+      throw new Error('[LLM] Ollama Temperature 必须是数字。')
     }
 
     if (normalizeConcurrency(config.ollamaConcurrency, 1) !== config.ollamaConcurrency) {
-      throw new Error('Ollama 并发度必须是 1 到 10 的整数。')
+      throw new Error('[LLM] Ollama 并发度必须是 1 到 10 的整数。')
     }
 
     const response = await fetch(`${OLLAMA_BASE_URL}/api/generate`, {
@@ -779,7 +784,7 @@ export async function validateModelConfig(config: ModelConfigDraft): Promise<voi
 
     if (!response.ok) {
       const body = await response.text()
-      throw new Error(`Ollama 验证失败 ${response.status}：${body || '请求失败'}`)
+      throw new Error(`[LLM] Ollama 验证失败 ${response.status}：${body || '请求失败'}`)
     }
 
     return
@@ -788,25 +793,25 @@ export async function validateModelConfig(config: ModelConfigDraft): Promise<voi
   const activeConfig = getActiveOpenAIConfig(config)
 
   if (!activeConfig) {
-    throw new Error('请先新增一个外部模型配置。')
+    throw new Error('[LLM] 请先新增一个外部模型配置。')
   }
 
   const normalizedBaseUrl = activeConfig.baseUrl.trim().replace(/\/+$/, '')
 
   if (!normalizedBaseUrl) {
-    throw new Error('请填写 Base URL。')
+    throw new Error('[LLM] 请填写 Base URL。')
   }
 
   if (!activeConfig.model.trim()) {
-    throw new Error('请填写 Model Name。')
+    throw new Error('[LLM] 请填写 Model Name。')
   }
 
   if (!Number.isFinite(activeConfig.temperature)) {
-    throw new Error('当前外部模型的 Temperature 必须是数字。')
+    throw new Error('[LLM] 当前外部模型的 Temperature 必须是数字。')
   }
 
   if (normalizeConcurrency(activeConfig.concurrency, 3) !== activeConfig.concurrency) {
-    throw new Error('当前外部模型的并发度必须是 1 到 10 的整数。')
+    throw new Error('[LLM] 当前外部模型的并发度必须是 1 到 10 的整数。')
   }
 
   const headers: Record<string, string> = {
@@ -841,7 +846,66 @@ export async function validateModelConfig(config: ModelConfigDraft): Promise<voi
 
   if (!response.ok) {
     const body = await response.text()
-    throw new Error(`OpenAI-compatible 验证失败 ${response.status}：${body || '请求失败'}`)
+    throw new Error(`[LLM] OpenAI-compatible 验证失败 ${response.status}：${body || '请求失败'}`)
+  }
+}
+
+async function validateEmbeddingConfig(embeddingConfig: EmbeddingConfig): Promise<void> {
+  const provider = embeddingConfig.provider
+  const baseUrl = embeddingConfig.baseUrl.trim().replace(/\/+$/, '')
+  const model = embeddingConfig.model.trim()
+  const apiKey = embeddingConfig.apiKey
+
+  if (!baseUrl) {
+    throw new Error('[Embedding] 请填写 Base URL。')
+  }
+
+  if (!model) {
+    throw new Error('[Embedding] 请填写模型名。')
+  }
+
+  if (provider === 'ollama') {
+    const response = await fetch(`${baseUrl}/api/embeddings`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model, prompt: '测试' }),
+    })
+
+    if (!response.ok) {
+      const body = await response.text()
+      throw new Error(`[Embedding] Ollama 验证失败 ${response.status}：${body || '请求失败'}`)
+    }
+
+    const data = (await response.json()) as { embedding?: unknown }
+    if (!Array.isArray(data?.embedding)) {
+      throw new Error('[Embedding] Ollama 返回缺少 embedding 数组。')
+    }
+
+    return
+  }
+
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+  }
+
+  if (apiKey.trim()) {
+    headers.Authorization = `Bearer ${apiKey.trim()}`
+  }
+
+  const response = await fetch(`${baseUrl}/embeddings`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ model, input: '测试', encoding_format: 'float' }),
+  })
+
+  if (!response.ok) {
+    const body = await response.text()
+    throw new Error(`[Embedding] OpenAI-compatible 验证失败 ${response.status}：${body || '请求失败'}`)
+  }
+
+  const data = (await response.json()) as { data?: { embedding?: unknown }[] }
+  if (!Array.isArray(data?.data?.[0]?.embedding)) {
+    throw new Error('[Embedding] OpenAI-compatible 返回缺少 embedding 数组。')
   }
 }
 

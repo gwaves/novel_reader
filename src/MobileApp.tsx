@@ -1081,6 +1081,10 @@ ${context}
                       />
                     )}
                   </label>
+                  <div className="mobile-config-section-divider">
+                    <h3>Embedding 配置</h3>
+                    <p>用于 RAG 智能搜索的 embedding 模型</p>
+                  </div>
                   <label className="mobile-field">
                     Embedding 提供商
                     <select
@@ -1274,6 +1278,10 @@ ${context}
                     />
                     启用 Thinking
                   </label>
+                  <div className="mobile-config-section-divider">
+                    <h3>Embedding 配置</h3>
+                    <p>用于 RAG 智能搜索的 embedding 模型</p>
+                  </div>
                   <label className="mobile-field">
                     Embedding 提供商
                     <select

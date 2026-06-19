@@ -140,6 +140,26 @@
   line-height: 1.5;
 }
 
+.config-section-divider {
+  border-top: 1px solid #ded6ca;
+  margin-top: 16px;
+  padding-top: 18px;
+}
+
+.config-section-divider h3 {
+  margin: 0 0 6px;
+  color: #211e19;
+  font-size: 16px;
+  font-weight: 700;
+}
+
+.config-section-divider p {
+  margin: 0 0 12px;
+  color: #5e5549;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
 .external-model-row {
   display: flex;
   align-items: center;

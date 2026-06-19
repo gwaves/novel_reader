@@ -2623,6 +2623,10 @@ ${context}
                       : '未自动发现模型，可手动填写；保存前会实际测试一次。'}
                   </small>
 
+                  <div className="config-section-divider">
+                    <h3>Embedding 配置</h3>
+                    <p>用于 RAG 智能搜索的 embedding 模型，可与上方 LLM 不同。</p>
+                  </div>
                   <label htmlFor="draft-embedding-provider">Embedding 提供商</label>
                   <select
                     id="draft-embedding-provider"
@@ -2821,6 +2825,10 @@ ${context}
                       : '当前外部模型会发送 /no_think，适合不需要思考模式的模型'}
                   </small>
 
+                  <div className="config-section-divider">
+                    <h3>Embedding 配置</h3>
+                    <p>用于 RAG 智能搜索的 embedding 模型，可与上方 LLM 不同。</p>
+                  </div>
                   <label htmlFor="draft-embedding-provider">Embedding 提供商</label>
                   <select
                     id="draft-embedding-provider"
