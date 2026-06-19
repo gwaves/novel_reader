@@ -86,6 +86,14 @@ SQLite 图谱表
 - 章节重扫与图谱重建
 允许对单章或章节范围重新抽取，并从保存的 raw extraction 重放图谱写入。这样可以在提示词、模型或人工修正策略变更后，有控制地刷新局部图谱数据。
 
+2026-06-19 更新：章节重扫与 raw extraction 重放已完成。
+- 后端：`PUT /api/kg/chapters/:id/extraction` 覆盖保存时会重写该章节图谱证据，并重新计算受影响实体/关系的 first/last seen。
+- 后端：新增 `POST /api/kg/chapters/:id/replay`，可从 `kg_chapter_extractions.extraction_json` 重放写入图谱，不重新调用模型。
+- 清理：重写章节后会删除没有证据的空关系，以及没有出现章节和关系的空实体，避免局部重建后留下陈旧节点。
+- UI：章节扫描面板新增“覆盖已完成章节”，可对当前章节/当前页/指定范围/全书重新抽取。
+- UI：章节扫描面板新增“重放已保存 JSON”，用于按当前选择范围从已有 raw extraction 重建图谱。
+- 验证：`npm run build` 通过；使用临时 SQLite 数据库走通保存 extraction、replay、覆盖为空后清理旧实体/关系。`npm run lint` 仍为既有 7 个 error/10 个 warning，集中在 React hooks 和正则 escape。
+
 2026-06-19 更新：实体拆分已完成。
 - API：新增 `POST /api/kg/entities/:id/split`，可从源实体拆出新实体，或拆到已有实体。
 - 数据迁移：支持迁移选中的 `kg_entity_mentions`，并重新计算源实体和新实体 first/last seen。

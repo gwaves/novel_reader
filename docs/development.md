@@ -113,6 +113,7 @@ The knowledge graph is implemented as a property graph on top of SQLite.
 - Scan flow: `chapter text -> LLM extraction -> raw JSON -> normalize -> upsert entities/relations`
 - Scan jobs are resumable. Pending jobs are automatically resumed on app startup.
 - Low-confidence entities and relations are flagged for review in the UI.
+- Saved chapter extractions can be replayed into the graph for local rebuilds. Override rescans call the model again and replace the selected chapter evidence.
 
 See [knowledge-graph-roadmap.md](knowledge-graph-roadmap.md) for the full roadmap.
 

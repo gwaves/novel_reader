@@ -587,6 +587,21 @@ button:disabled {
   color: #24211c;
 }
 
+.kg-inline-toggle {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: #5e5549;
+  font-size: 13px;
+  font-weight: 650;
+}
+
+.kg-inline-toggle input {
+  width: 16px;
+  height: 16px;
+  accent-color: #2c5b4b;
+}
+
 .kg-scan-actions {
   display: flex;
   align-items: center;
