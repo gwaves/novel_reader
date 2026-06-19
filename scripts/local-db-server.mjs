@@ -1,4 +1,12 @@
-import { mkdirSync } from 'node:fs'
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  renameSync,
+  unlinkSync,
+  writeFileSync,
+} from 'node:fs'
 import { createServer } from 'node:http'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
@@ -9,9 +17,22 @@ const host = process.env.NOVEL_READER_API_HOST || '127.0.0.1'
 const port = Number(process.env.NOVEL_READER_API_PORT || 5174)
 const dataDir = process.env.NOVEL_READER_DATA_DIR || join(homedir(), '.novel_reader')
 const dbPath = process.env.NOVEL_READER_DB_PATH || join(dataDir, 'novel_reader.sqlite')
+const pendingRestorePath = join(dataDir, 'novel_reader.restore-pending.sqlite')
 const stateKey = 'novel-reader-mvp-state'
 
 mkdirSync(dirname(dbPath), { recursive: true })
+
+if (existsSync(pendingRestorePath)) {
+  const backupPath = join(dataDir, `novel_reader.before-restore-${Date.now()}.sqlite`)
+  if (existsSync(dbPath)) {
+    copyFileSync(dbPath, backupPath)
+  }
+  renameSync(pendingRestorePath, dbPath)
+  for (const suffix of ['-wal', '-shm']) {
+    const sidecarPath = `${dbPath}${suffix}`
+    if (existsSync(sidecarPath)) unlinkSync(sidecarPath)
+  }
+}
 
 const db = new DatabaseSync(dbPath)
 db.exec(`
@@ -226,6 +247,11 @@ const getChapterStatement = db.prepare(`
   FROM chapters
   WHERE id = ?
 `)
+const getBookStatement = db.prepare(`
+  SELECT id, title, imported_at AS importedAt, chapter_count AS chapterCount
+  FROM books
+  WHERE id = ?
+`)
 const getKgOverviewStatement = db.prepare(`
   SELECT
     (SELECT COUNT(*) FROM kg_chapter_extractions WHERE book_id = ?) AS scanned_chapters,
@@ -329,6 +355,138 @@ const getKgEntityRelationsStatement = db.prepare(`
   ORDER BY r.confidence DESC, r.updated_at DESC
   LIMIT 100
 `)
+const getKgNeighborhoodEntityStatement = db.prepare(`
+  SELECT
+    e.id,
+    e.book_id AS bookId,
+    e.type,
+    e.name,
+    e.aliases_json AS aliasesJson,
+    e.description,
+    e.confidence,
+    e.first_chapter_index AS firstChapterIndex,
+    e.last_chapter_index AS lastChapterIndex,
+    COUNT(m.id) AS mentionCount
+  FROM kg_entities e
+  LEFT JOIN kg_entity_mentions m ON m.entity_id = e.id
+  WHERE e.id = ?
+  GROUP BY e.id
+`)
+const listKgNeighborhoodRelationsStatement = db.prepare(`
+  SELECT
+    r.id,
+    r.type,
+    r.description,
+    r.confidence,
+    r.first_chapter_index AS firstChapterIndex,
+    r.last_chapter_index AS lastChapterIndex,
+    source.id AS sourceId,
+    source.name AS sourceName,
+    source.type AS sourceType,
+    target.id AS targetId,
+    target.name AS targetName,
+    target.type AS targetType,
+    COUNT(mention.id) AS mentionCount
+  FROM kg_relations r
+  JOIN kg_entities source ON source.id = r.source_entity_id
+  JOIN kg_entities target ON target.id = r.target_entity_id
+  LEFT JOIN kg_relation_mentions mention ON mention.relation_id = r.id
+  WHERE r.source_entity_id = ? OR r.target_entity_id = ?
+  GROUP BY r.id
+  ORDER BY mentionCount DESC, r.confidence DESC, r.updated_at DESC
+  LIMIT ?
+`)
+const listKgGraphRelationsStatement = db.prepare(`
+  SELECT
+    r.id,
+    r.type,
+    r.description,
+    r.confidence,
+    r.first_chapter_index AS firstChapterIndex,
+    r.last_chapter_index AS lastChapterIndex,
+    source.id AS sourceId,
+    source.name AS sourceName,
+    source.type AS sourceType,
+    target.id AS targetId,
+    target.name AS targetName,
+    target.type AS targetType,
+    COUNT(mention.id) AS mentionCount
+  FROM kg_relations r
+  JOIN kg_entities source ON source.id = r.source_entity_id
+  JOIN kg_entities target ON target.id = r.target_entity_id
+  LEFT JOIN kg_relation_mentions mention ON mention.relation_id = r.id
+  WHERE r.book_id = ?
+    AND (? = '' OR r.type = ?)
+    AND (? = '' OR (source.type = ? AND target.type = ?))
+  GROUP BY r.id
+  ORDER BY mentionCount DESC, r.confidence DESC, r.updated_at DESC
+  LIMIT ?
+`)
+const searchKgEntityEvidenceStatement = db.prepare(`
+  SELECT
+    m.id AS mentionId,
+    e.id AS entityId,
+    e.name AS entityName,
+    e.type AS entityType,
+    e.description AS entityDescription,
+    c.id AS chapterId,
+    c.chapter_index AS chapterIndex,
+    c.title AS chapterTitle,
+    m.evidence,
+    m.confidence
+  FROM kg_entity_mentions m
+  JOIN kg_entities e ON e.id = m.entity_id
+  JOIN chapters c ON c.id = m.chapter_id
+  WHERE e.book_id = ?
+    AND (? = '' OR e.type = ?)
+    AND (
+      ? = ''
+      OR e.name LIKE ?
+      OR e.normalized_name LIKE ?
+      OR e.aliases_json LIKE ?
+      OR e.description LIKE ?
+      OR m.evidence LIKE ?
+      OR c.title LIKE ?
+    )
+  ORDER BY c.chapter_index ASC, e.name ASC
+  LIMIT ?
+`)
+const searchKgRelationEvidenceStatement = db.prepare(`
+  SELECT
+    mention.id AS mentionId,
+    r.id AS relationId,
+    r.type AS relationType,
+    r.description AS relationDescription,
+    source.id AS sourceId,
+    source.name AS sourceName,
+    source.type AS sourceType,
+    target.id AS targetId,
+    target.name AS targetName,
+    target.type AS targetType,
+    c.id AS chapterId,
+    c.chapter_index AS chapterIndex,
+    c.title AS chapterTitle,
+    mention.evidence,
+    mention.confidence
+  FROM kg_relation_mentions mention
+  JOIN kg_relations r ON r.id = mention.relation_id
+  JOIN kg_entities source ON source.id = r.source_entity_id
+  JOIN kg_entities target ON target.id = r.target_entity_id
+  JOIN chapters c ON c.id = mention.chapter_id
+  WHERE r.book_id = ?
+    AND (? = '' OR r.type = ?)
+    AND (
+      ? = ''
+      OR r.type LIKE ?
+      OR r.description LIKE ?
+      OR mention.evidence LIKE ?
+      OR source.name LIKE ?
+      OR target.name LIKE ?
+      OR c.title LIKE ?
+    )
+  ORDER BY c.chapter_index ASC, source.name ASC, target.name ASC
+  LIMIT ?
+`)
 const listKgRelationsStatement = db.prepare(`
   SELECT
     r.id,
@@ -353,6 +511,76 @@ const listKgRelationsStatement = db.prepare(`
   GROUP BY r.id
   ORDER BY mentionCount DESC, r.confidence DESC, r.updated_at DESC
   LIMIT ?
+`)
+const listKgExportEntitiesStatement = db.prepare(`
+  SELECT
+    e.id,
+    e.book_id AS bookId,
+    e.type,
+    e.name,
+    e.aliases_json AS aliasesJson,
+    e.description,
+    e.confidence,
+    e.first_chapter_index AS firstChapterIndex,
+    e.last_chapter_index AS lastChapterIndex,
+    COUNT(m.id) AS mentionCount
+  FROM kg_entities e
+  LEFT JOIN kg_entity_mentions m ON m.entity_id = e.id
+  WHERE e.book_id = ?
+  GROUP BY e.id
+  ORDER BY e.type ASC, e.name ASC
+`)
+const listKgExportEntityMentionsStatement = db.prepare(`
+  SELECT
+    m.id,
+    m.entity_id AS entityId,
+    m.chapter_id AS chapterId,
+    c.chapter_index AS chapterIndex,
+    c.title AS chapterTitle,
+    m.evidence,
+    m.confidence
+  FROM kg_entity_mentions m
+  JOIN chapters c ON c.id = m.chapter_id
+  WHERE m.book_id = ?
+  ORDER BY c.chapter_index ASC
+`)
+const listKgExportRelationsStatement = db.prepare(`
+  SELECT
+    r.id,
+    r.book_id AS bookId,
+    r.type,
+    r.description,
+    r.confidence,
+    r.first_chapter_index AS firstChapterIndex,
+    r.last_chapter_index AS lastChapterIndex,
+    source.id AS sourceId,
+    source.name AS sourceName,
+    source.type AS sourceType,
+    target.id AS targetId,
+    target.name AS targetName,
+    target.type AS targetType,
+    COUNT(mention.id) AS mentionCount
+  FROM kg_relations r
+  JOIN kg_entities source ON source.id = r.source_entity_id
+  JOIN kg_entities target ON target.id = r.target_entity_id
+  LEFT JOIN kg_relation_mentions mention ON mention.relation_id = r.id
+  WHERE r.book_id = ?
+  GROUP BY r.id
+  ORDER BY r.type ASC, source.name ASC, target.name ASC
+`)
+const listKgExportRelationMentionsStatement = db.prepare(`
+  SELECT
+    m.id,
+    m.relation_id AS relationId,
+    m.chapter_id AS chapterId,
+    c.chapter_index AS chapterIndex,
+    c.title AS chapterTitle,
+    m.evidence,
+    m.confidence
+  FROM kg_relation_mentions m
+  JOIN chapters c ON c.id = m.chapter_id
+  WHERE m.book_id = ?
+  ORDER BY c.chapter_index ASC
 `)
 const listKgReviewEntitiesStatement = db.prepare(`
   SELECT
@@ -445,6 +673,37 @@ const getKgRelationMentionsStatement = db.prepare(`
   WHERE m.relation_id = ?
   ORDER BY m.chapter_index ASC
   LIMIT 100
+`)
+const listKgChapterEntityDiffRowsStatement = db.prepare(`
+  SELECT
+    e.id AS entityId,
+    e.name,
+    e.type,
+    e.description,
+    m.evidence,
+    m.confidence
+  FROM kg_entity_mentions m
+  JOIN kg_entities e ON e.id = m.entity_id
+  WHERE m.chapter_id = ?
+  ORDER BY e.type ASC, e.name ASC
+`)
+const listKgChapterRelationDiffRowsStatement = db.prepare(`
+  SELECT
+    r.id AS relationId,
+    r.type,
+    r.description,
+    r.confidence,
+    source.name AS sourceName,
+    source.type AS sourceType,
+    target.name AS targetName,
+    target.type AS targetType,
+    m.evidence
+  FROM kg_relation_mentions m
+  JOIN kg_relations r ON r.id = m.relation_id
+  JOIN kg_entities source ON source.id = r.source_entity_id
+  JOIN kg_entities target ON target.id = r.target_entity_id
+  WHERE m.chapter_id = ?
+  ORDER BY r.type ASC, source.name ASC, target.name ASC
 `)
 const getKgChapterExtractionStatement = db.prepare(`
   SELECT
@@ -771,6 +1030,17 @@ function sendJson(response, statusCode, payload) {
   response.end(JSON.stringify(payload))
 }
 
+function sendFile(response, statusCode, body, contentType, filename) {
+  response.writeHead(statusCode, {
+    'Access-Control-Allow-Headers': 'Content-Type',
+    'Access-Control-Allow-Methods': 'GET,PUT,POST,DELETE,OPTIONS',
+    'Access-Control-Allow-Origin': '*',
+    'Content-Disposition': `attachment; filename="${filename}"`,
+    'Content-Type': `${contentType}; charset=utf-8`,
+  })
+  response.end(body)
+}
+
 function readJson(request) {
   return new Promise((resolve, reject) => {
     let body = ''
@@ -795,6 +1065,29 @@ function readJson(request) {
   })
 }
 
+function readBinary(request) {
+  return new Promise((resolve, reject) => {
+    const chunks = []
+    let totalLength = 0
+
+    request.on('data', (chunk) => {
+      chunks.push(chunk)
+      totalLength += chunk.length
+
+      if (totalLength > 1024 * 1024 * 1024) {
+        request.destroy()
+        reject(new Error('Database backup is too large.'))
+      }
+    })
+    request.on('end', () => resolve(Buffer.concat(chunks)))
+    request.on('error', reject)
+  })
+}
+
+function sqliteString(value) {
+  return `'${String(value).replaceAll("'", "''")}'`
+}
+
 function normalizeName(name) {
   return String(name ?? '')
     .trim()
@@ -809,6 +1102,57 @@ function safeJsonParse(value, fallback) {
     return JSON.parse(value)
   } catch {
     return fallback
+  }
+}
+
+function escapeXml(value) {
+  return String(value ?? '')
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&apos;')
+}
+
+function safeFilename(value) {
+  return String(value ?? 'knowledge-graph')
+    .trim()
+    .replace(/[^\w\u4e00-\u9fa5.-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 80) || 'knowledge-graph'
+}
+
+function createDatabaseBackup(prefix = 'novel_reader-backup') {
+  const backupPath = join(dataDir, `${prefix}-${Date.now()}.sqlite`)
+  if (existsSync(backupPath)) unlinkSync(backupPath)
+  db.exec(`VACUUM INTO ${sqliteString(backupPath)}`)
+  return backupPath
+}
+
+function validateDatabaseBackup(candidatePath) {
+  const candidate = new DatabaseSync(candidatePath, { readOnly: true })
+
+  try {
+    const integrity = candidate.prepare('PRAGMA integrity_check').get()
+    if (!integrity || integrity.integrity_check !== 'ok') {
+      throw new Error('SQLite integrity check failed.')
+    }
+
+    const requiredTables = ['app_state', 'books', 'chapters']
+    const rows = candidate
+      .prepare(`
+        SELECT name FROM sqlite_master
+        WHERE type = 'table' AND name IN ('app_state', 'books', 'chapters')
+      `)
+      .all()
+    const names = new Set(rows.map((row) => row.name))
+    for (const table of requiredTables) {
+      if (!names.has(table)) {
+        throw new Error(`Missing required table: ${table}.`)
+      }
+    }
+  } finally {
+    candidate.close()
   }
 }
 
@@ -952,6 +1296,224 @@ function getKgReviewQueue(bookId, kind, limit) {
     entities: entities.filter((entity) => entity.reasons.length > 0),
     relations: relations.filter((relation) => relation.reasons.length > 0),
   }
+}
+
+function getKgEntityNeighborhood(entityId, options = {}) {
+  const center = getKgNeighborhoodEntityStatement.get(entityId)
+  if (!center) return null
+
+  const relationType = typeof options.relationType === 'string' ? options.relationType : ''
+  const entityType = typeof options.entityType === 'string' ? options.entityType : ''
+  const safeLimit = Math.max(1, Math.min(200, Number(options.limit) || 100))
+  const relations = listKgNeighborhoodRelationsStatement
+    .all(entityId, entityId, safeLimit)
+    .filter((relation) => !relationType || relation.type === relationType)
+
+  const entityIds = new Set([entityId])
+  for (const relation of relations) {
+    entityIds.add(relation.sourceId)
+    entityIds.add(relation.targetId)
+  }
+
+  const entitiesById = new Map()
+  for (const id of entityIds) {
+    const row = getKgNeighborhoodEntityStatement.get(id)
+    if (row) entitiesById.set(id, mapEntityRow(row))
+  }
+
+  const visibleEntityIds = new Set([entityId])
+  for (const [id, entity] of entitiesById) {
+    if (id === entityId || !entityType || entity.type === entityType) {
+      visibleEntityIds.add(id)
+    }
+  }
+
+  return {
+    centerId: entityId,
+    entities: Array.from(visibleEntityIds)
+      .map((id) => entitiesById.get(id))
+      .filter(Boolean),
+    relations: relations.filter(
+      (relation) => visibleEntityIds.has(relation.sourceId) && visibleEntityIds.has(relation.targetId),
+    ),
+  }
+}
+
+function getKgBookGraph(bookId, options = {}) {
+  const relationType = typeof options.relationType === 'string' ? options.relationType : ''
+  const entityType = typeof options.entityType === 'string' ? options.entityType : ''
+  const safeLimit = Math.max(1, Math.min(300, Number(options.limit) || 150))
+  const relations = listKgGraphRelationsStatement.all(
+    bookId,
+    relationType,
+    relationType,
+    entityType,
+    entityType,
+    entityType,
+    safeLimit,
+  )
+  const entityIds = new Set()
+
+  for (const relation of relations) {
+    entityIds.add(relation.sourceId)
+    entityIds.add(relation.targetId)
+  }
+
+  return {
+    entities: Array.from(entityIds)
+      .map((id) => getKgNeighborhoodEntityStatement.get(id))
+      .filter(Boolean)
+      .map(mapEntityRow),
+    relations,
+  }
+}
+
+function searchKgEvidence(bookId, options = {}) {
+  const query = typeof options.query === 'string' ? options.query.trim() : ''
+  const normalizedQuery = normalizeName(query)
+  const likeQuery = `%${query}%`
+  const normalizedLikeQuery = `%${normalizedQuery}%`
+  const kind = typeof options.kind === 'string' ? options.kind : 'all'
+  const entityType = typeof options.entityType === 'string' ? options.entityType : ''
+  const relationType = typeof options.relationType === 'string' ? options.relationType : ''
+  const safeLimit = Math.max(1, Math.min(200, Number(options.limit) || 80))
+
+  const entities =
+    kind === 'relations'
+      ? []
+      : searchKgEntityEvidenceStatement.all(
+          bookId,
+          entityType,
+          entityType,
+          query,
+          likeQuery,
+          normalizedLikeQuery,
+          likeQuery,
+          likeQuery,
+          likeQuery,
+          likeQuery,
+          safeLimit,
+        )
+  const relations =
+    kind === 'entities'
+      ? []
+      : searchKgRelationEvidenceStatement.all(
+          bookId,
+          relationType,
+          relationType,
+          query,
+          likeQuery,
+          likeQuery,
+          likeQuery,
+          likeQuery,
+          likeQuery,
+          likeQuery,
+          safeLimit,
+        )
+
+  return { entities, relations }
+}
+
+function getKgExportPayload(bookId) {
+  const book = getBookStatement.get(bookId)
+  if (!book) return null
+
+  const entities = listKgExportEntitiesStatement.all(bookId).map(mapEntityRow)
+  const entityMentions = listKgExportEntityMentionsStatement.all(bookId)
+  const relations = listKgExportRelationsStatement.all(bookId)
+  const relationMentions = listKgExportRelationMentionsStatement.all(bookId)
+
+  const entityMentionsById = new Map()
+  for (const mention of entityMentions) {
+    const mentions = entityMentionsById.get(mention.entityId) ?? []
+    mentions.push({
+      id: mention.id,
+      chapterId: mention.chapterId,
+      chapterIndex: mention.chapterIndex,
+      chapterTitle: mention.chapterTitle,
+      evidence: mention.evidence,
+      confidence: mention.confidence,
+    })
+    entityMentionsById.set(mention.entityId, mentions)
+  }
+
+  const relationMentionsById = new Map()
+  for (const mention of relationMentions) {
+    const mentions = relationMentionsById.get(mention.relationId) ?? []
+    mentions.push({
+      id: mention.id,
+      chapterId: mention.chapterId,
+      chapterIndex: mention.chapterIndex,
+      chapterTitle: mention.chapterTitle,
+      evidence: mention.evidence,
+      confidence: mention.confidence,
+    })
+    relationMentionsById.set(mention.relationId, mentions)
+  }
+
+  return {
+    book,
+    exportedAt: new Date().toISOString(),
+    schema: 'novel-reader-knowledge-graph-v1',
+    entities: entities.map((entity) => ({
+      ...entity,
+      mentions: entityMentionsById.get(entity.id) ?? [],
+    })),
+    relations: relations.map((relation) => ({
+      ...relation,
+      mentions: relationMentionsById.get(relation.id) ?? [],
+    })),
+  }
+}
+
+function graphMlData(key, value, indent = '      ') {
+  if (value == null || value === '') return ''
+  return `${indent}<data key="${key}">${escapeXml(value)}</data>\n`
+}
+
+function kgExportToGraphMl(payload) {
+  const lines = [
+    '<?xml version="1.0" encoding="UTF-8"?>',
+    '<graphml xmlns="http://graphml.graphdrawing.org/xmlns">',
+    '  <key id="label" for="all" attr.name="label" attr.type="string"/>',
+    '  <key id="type" for="all" attr.name="type" attr.type="string"/>',
+    '  <key id="description" for="all" attr.name="description" attr.type="string"/>',
+    '  <key id="confidence" for="all" attr.name="confidence" attr.type="double"/>',
+    '  <key id="mentionCount" for="all" attr.name="mentionCount" attr.type="int"/>',
+    '  <key id="firstChapterIndex" for="all" attr.name="firstChapterIndex" attr.type="int"/>',
+    '  <key id="lastChapterIndex" for="all" attr.name="lastChapterIndex" attr.type="int"/>',
+    `  <graph id="${escapeXml(payload.book.id)}" edgedefault="directed">`,
+  ]
+
+  for (const entity of payload.entities) {
+    lines.push(`    <node id="${escapeXml(entity.id)}">`)
+    lines.push(graphMlData('label', entity.name))
+    lines.push(graphMlData('type', entity.type))
+    lines.push(graphMlData('description', entity.description))
+    lines.push(graphMlData('confidence', entity.confidence))
+    lines.push(graphMlData('mentionCount', entity.mentionCount))
+    lines.push(graphMlData('firstChapterIndex', entity.firstChapterIndex))
+    lines.push(graphMlData('lastChapterIndex', entity.lastChapterIndex))
+    lines.push('    </node>')
+  }
+
+  for (const relation of payload.relations) {
+    lines.push(
+      `    <edge id="${escapeXml(relation.id)}" source="${escapeXml(relation.sourceId)}" target="${escapeXml(relation.targetId)}">`,
+    )
+    lines.push(graphMlData('label', relation.type))
+    lines.push(graphMlData('type', relation.type))
+    lines.push(graphMlData('description', relation.description))
+    lines.push(graphMlData('confidence', relation.confidence))
+    lines.push(graphMlData('mentionCount', relation.mentionCount))
+    lines.push(graphMlData('firstChapterIndex', relation.firstChapterIndex))
+    lines.push(graphMlData('lastChapterIndex', relation.lastChapterIndex))
+    lines.push('    </edge>')
+  }
+
+  lines.push('  </graph>')
+  lines.push('</graphml>')
+  return lines.join('\n')
 }
 
 function markKgReviewStatus(ids, kind, status) {
@@ -1135,6 +1697,125 @@ function saveChapterExtractionTransaction(bookId, chapterId, extraction, model) 
   } catch (error) {
     db.exec('ROLLBACK')
     throw error
+  }
+}
+
+function buildExtractionDiffItems(existingItems, nextItems) {
+  const existingByKey = new Map(existingItems.map((item) => [item.key, item]))
+  const nextByKey = new Map(nextItems.map((item) => [item.key, item]))
+  const added = []
+  const removed = []
+  const unchanged = []
+
+  for (const item of nextItems) {
+    if (existingByKey.has(item.key)) {
+      unchanged.push(item)
+    } else {
+      added.push(item)
+    }
+  }
+
+  for (const item of existingItems) {
+    if (!nextByKey.has(item.key)) {
+      removed.push(item)
+    }
+  }
+
+  return { added, removed, unchanged }
+}
+
+function getChapterExtractionDiff(bookId, chapterId, extraction) {
+  const chapter = getChapterStatement.get(chapterId)
+  if (!chapter || chapter.book_id !== bookId) {
+    throw new Error('Chapter does not belong to the requested book.')
+  }
+
+  const entities = Array.isArray(extraction?.entities) ? extraction.entities : []
+  const relations = Array.isArray(extraction?.relations) ? extraction.relations : []
+  const nextEntityByName = new Map()
+  const nextEntities = []
+
+  for (const entity of entities) {
+    const name = String(entity?.name ?? '').trim()
+    if (!name) continue
+
+    const type = normalizeEntityType(entity?.type)
+    const item = {
+      key: `${type}:${normalizeName(name)}`,
+      name,
+      type,
+      description: typeof entity?.description === 'string' ? entity.description.trim() : '',
+      evidence: firstEvidence(entity?.evidence),
+      confidence: normalizeConfidence(entity?.confidence),
+    }
+    nextEntities.push(item)
+    nextEntityByName.set(normalizeName(name), item)
+
+    for (const alias of uniqueStrings(Array.isArray(entity?.aliases) ? entity.aliases : [])) {
+      nextEntityByName.set(normalizeName(alias), item)
+    }
+  }
+
+  const existingEntities = listKgChapterEntityDiffRowsStatement.all(chapterId).map((row) => ({
+    key: `${normalizeEntityType(row.type)}:${normalizeName(row.name)}`,
+    name: row.name,
+    type: row.type,
+    description: row.description ?? '',
+    evidence: row.evidence ?? '',
+    confidence: normalizeConfidence(row.confidence),
+  }))
+
+  const nextRelations = []
+  for (const relation of relations) {
+    const source = nextEntityByName.get(normalizeName(relation?.source))
+    const target = nextEntityByName.get(normalizeName(relation?.target))
+    if (!source || !target) continue
+
+    const type = normalizeRelationType(relation?.type)
+    nextRelations.push({
+      key: `${source.key}->${target.key}:${type}`,
+      sourceName: source.name,
+      targetName: target.name,
+      sourceType: source.type,
+      targetType: target.type,
+      type,
+      description: typeof relation?.description === 'string' ? relation.description.trim() : '',
+      evidence: firstEvidence(relation?.evidence),
+      confidence: normalizeConfidence(relation?.confidence),
+    })
+  }
+
+  const existingRelations = listKgChapterRelationDiffRowsStatement.all(chapterId).map((row) => ({
+    key: `${normalizeEntityType(row.sourceType)}:${normalizeName(row.sourceName)}->${normalizeEntityType(row.targetType)}:${normalizeName(row.targetName)}:${normalizeRelationType(row.type)}`,
+    sourceName: row.sourceName,
+    targetName: row.targetName,
+    sourceType: row.sourceType,
+    targetType: row.targetType,
+    type: row.type,
+    description: row.description ?? '',
+    evidence: row.evidence ?? '',
+    confidence: normalizeConfidence(row.confidence),
+  }))
+
+  const entityDiff = buildExtractionDiffItems(existingEntities, nextEntities)
+  const relationDiff = buildExtractionDiffItems(existingRelations, nextRelations)
+
+  return {
+    chapter: {
+      id: chapter.id,
+      index: chapter.chapter_index,
+      title: chapter.title,
+    },
+    summary: {
+      entitiesAdded: entityDiff.added.length,
+      entitiesRemoved: entityDiff.removed.length,
+      entitiesUnchanged: entityDiff.unchanged.length,
+      relationsAdded: relationDiff.added.length,
+      relationsRemoved: relationDiff.removed.length,
+      relationsUnchanged: relationDiff.unchanged.length,
+    },
+    entities: entityDiff,
+    relations: relationDiff,
   }
 }
 
@@ -1776,6 +2457,53 @@ const server = createServer(async (request, response) => {
       return
     }
 
+    if (request.method === 'GET' && url.pathname === '/api/database/export') {
+      const backupPath = createDatabaseBackup()
+      const file = readFileSync(backupPath)
+      unlinkSync(backupPath)
+
+      sendFile(
+        response,
+        200,
+        file,
+        'application/vnd.sqlite3',
+        `novel_reader-backup-${new Date().toISOString().replace(/[:.]/g, '-')}.sqlite`,
+      )
+      return
+    }
+
+    if (request.method === 'POST' && url.pathname === '/api/database/import') {
+      const body = await readBinary(request)
+      if (!body.length) {
+        sendJson(response, 400, { error: 'Missing SQLite backup file.' })
+        return
+      }
+
+      const uploadPath = join(dataDir, `novel_reader-upload-${Date.now()}.sqlite`)
+
+      try {
+        writeFileSync(uploadPath, body)
+        validateDatabaseBackup(uploadPath)
+        const backupPath = createDatabaseBackup('novel_reader-before-import')
+
+        if (existsSync(pendingRestorePath)) unlinkSync(pendingRestorePath)
+        renameSync(uploadPath, pendingRestorePath)
+
+        sendJson(response, 200, {
+          ok: true,
+          backupPath,
+          pendingRestorePath,
+          requiresRestart: true,
+        })
+      } catch (error) {
+        if (existsSync(uploadPath)) unlinkSync(uploadPath)
+        sendJson(response, 400, {
+          error: error instanceof Error ? error.message : 'Import failed.',
+        })
+      }
+      return
+    }
+
     if (request.method === 'GET' && url.pathname === '/api/kg/overview') {
       const bookId = url.searchParams.get('bookId')
 
@@ -1841,6 +2569,72 @@ const server = createServer(async (request, response) => {
       sendJson(response, 200, {
         relations: listKgRelationsStatement.all(bookId, type, type, limit),
       })
+      return
+    }
+
+    if (request.method === 'GET' && url.pathname === '/api/kg/graph') {
+      const bookId = url.searchParams.get('bookId')
+
+      if (!bookId) {
+        sendJson(response, 400, { error: 'Missing bookId.' })
+        return
+      }
+
+      sendJson(response, 200, getKgBookGraph(bookId, {
+        entityType: url.searchParams.get('entityType') ?? '',
+        relationType: url.searchParams.get('relationType') ?? '',
+        limit: Number(url.searchParams.get('limit') ?? 150),
+      }))
+      return
+    }
+
+    if (request.method === 'GET' && url.pathname === '/api/kg/search') {
+      const bookId = url.searchParams.get('bookId')
+
+      if (!bookId) {
+        sendJson(response, 400, { error: 'Missing bookId.' })
+        return
+      }
+
+      sendJson(response, 200, searchKgEvidence(bookId, {
+        query: url.searchParams.get('q') ?? '',
+        kind: url.searchParams.get('kind') ?? 'all',
+        entityType: url.searchParams.get('entityType') ?? '',
+        relationType: url.searchParams.get('relationType') ?? '',
+        limit: Number(url.searchParams.get('limit') ?? 80),
+      }))
+      return
+    }
+
+    if (request.method === 'GET' && url.pathname === '/api/kg/export') {
+      const bookId = url.searchParams.get('bookId')
+
+      if (!bookId) {
+        sendJson(response, 400, { error: 'Missing bookId.' })
+        return
+      }
+
+      const payload = getKgExportPayload(bookId)
+      if (!payload) {
+        sendJson(response, 404, { error: 'Book not found.' })
+        return
+      }
+
+      const format = url.searchParams.get('format') ?? 'json'
+      const basename = safeFilename(`${payload.book.title}-knowledge-graph`)
+
+      if (format === 'graphml') {
+        sendFile(response, 200, kgExportToGraphMl(payload), 'application/graphml+xml', `${basename}.graphml`)
+        return
+      }
+
+      sendFile(
+        response,
+        200,
+        JSON.stringify(payload, null, 2),
+        'application/json',
+        `${basename}.json`,
+      )
       return
     }
 
@@ -1971,6 +2765,24 @@ const server = createServer(async (request, response) => {
         db.exec('ROLLBACK')
         sendJson(response, 400, { error: error instanceof Error ? error.message : 'Split failed.' })
       }
+      return
+    }
+
+    const entityNeighborhoodMatch = url.pathname.match(/^\/api\/kg\/entities\/([^/]+)\/neighborhood$/)
+    if (request.method === 'GET' && entityNeighborhoodMatch) {
+      const entityId = decodeURIComponent(entityNeighborhoodMatch[1])
+      const neighborhood = getKgEntityNeighborhood(entityId, {
+        entityType: url.searchParams.get('entityType') ?? '',
+        relationType: url.searchParams.get('relationType') ?? '',
+        limit: Number(url.searchParams.get('limit') ?? 100),
+      })
+
+      if (!neighborhood) {
+        sendJson(response, 404, { error: 'Entity not found.' })
+        return
+      }
+
+      sendJson(response, 200, neighborhood)
       return
     }
 
@@ -2125,6 +2937,31 @@ const server = createServer(async (request, response) => {
         }
         return
       }
+    }
+
+    const chapterExtractionDiffMatch = url.pathname.match(/^\/api\/kg\/chapters\/([^/]+)\/extraction\/diff$/)
+    if (request.method === 'POST' && chapterExtractionDiffMatch) {
+      const chapterId = decodeURIComponent(chapterExtractionDiffMatch[1])
+      const body = await readJson(request)
+      const bookId = body?.bookId
+      const extraction = body?.extraction
+
+      if (!bookId || typeof bookId !== 'string') {
+        sendJson(response, 400, { error: 'Missing bookId.' })
+        return
+      }
+
+      if (!extraction || typeof extraction !== 'object') {
+        sendJson(response, 400, { error: 'Missing extraction payload.' })
+        return
+      }
+
+      try {
+        sendJson(response, 200, getChapterExtractionDiff(bookId, chapterId, extraction))
+      } catch (error) {
+        sendJson(response, 400, { error: error instanceof Error ? error.message : 'Diff failed.' })
+      }
+      return
     }
 
     const chapterExtractionMatch = url.pathname.match(/^\/api\/kg\/chapters\/([^/]+)\/extraction$/)

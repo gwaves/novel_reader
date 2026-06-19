@@ -1,4 +1,14 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
+import {
+  Background,
+  Controls,
+  MarkerType,
+  MiniMap,
+  ReactFlow,
+  type Edge,
+  type Node,
+} from '@xyflow/react'
+import '@xyflow/react/dist/style.css'
 import { useReaderState } from './hooks/useReaderState.ts'
 import type { AIProvider, Chapter, ImportEncoding, OpenAIConfig } from './hooks/useReaderState.ts'
 import './App.css'
@@ -55,6 +65,121 @@ type KgEntityDetail = {
 type KgRelationDetail = {
   relation: KgRelation
   mentions: KgMention[]
+}
+
+type KgNeighborhood = {
+  centerId: string
+  entities: KgEntity[]
+  relations: KgRelation[]
+}
+
+type KgBookGraph = {
+  entities: KgEntity[]
+  relations: KgRelation[]
+}
+
+type KgEvidenceEntityHit = {
+  mentionId: string
+  entityId: string
+  entityName: string
+  entityType: string
+  entityDescription: string | null
+  chapterId: string
+  chapterIndex: number
+  chapterTitle: string
+  evidence: string | null
+  confidence: number
+}
+
+type KgEvidenceRelationHit = {
+  mentionId: string
+  relationId: string
+  relationType: string
+  relationDescription: string | null
+  sourceId: string
+  sourceName: string
+  sourceType: string
+  targetId: string
+  targetName: string
+  targetType: string
+  chapterId: string
+  chapterIndex: number
+  chapterTitle: string
+  evidence: string | null
+  confidence: number
+}
+
+type KgEvidenceSearchResponse = {
+  entities: KgEvidenceEntityHit[]
+  relations: KgEvidenceRelationHit[]
+}
+
+type KgExtractionDiffEntity = {
+  key: string
+  name: string
+  type: string
+  description: string
+  evidence: string
+  confidence: number
+}
+
+type KgExtractionDiffRelation = {
+  key: string
+  sourceName: string
+  targetName: string
+  sourceType: string
+  targetType: string
+  type: string
+  description: string
+  evidence: string
+  confidence: number
+}
+
+type KgExtractionDiff = {
+  chapter: {
+    id: string
+    index: number
+    title: string
+  }
+  summary: {
+    entitiesAdded: number
+    entitiesRemoved: number
+    entitiesUnchanged: number
+    relationsAdded: number
+    relationsRemoved: number
+    relationsUnchanged: number
+  }
+  entities: {
+    added: KgExtractionDiffEntity[]
+    removed: KgExtractionDiffEntity[]
+    unchanged: KgExtractionDiffEntity[]
+  }
+  relations: {
+    added: KgExtractionDiffRelation[]
+    removed: KgExtractionDiffRelation[]
+    unchanged: KgExtractionDiffRelation[]
+  }
+}
+
+type KgExtractionPreviewItem = {
+  chapter: Chapter
+  diff: KgExtractionDiff
+  extraction: unknown
+  model: string
+}
+
+type KgExtractionPreview = {
+  title: string
+  items: KgExtractionPreviewItem[]
+}
+
+type KgGraphNodeData = {
+  entity: KgEntity
+  label: string
+}
+
+type KgGraphEdgeData = {
+  relation: KgRelation
 }
 
 type KgReviewEntity = KgEntity & { reasons: string[] }
@@ -155,6 +280,48 @@ function formatLocalDateTime(timestamp: string): string {
   }).format(new Date(normalizedTimestamp))
 }
 
+function getKgEntityTypeLabel(type: string): string {
+  const labels: Record<string, string> = {
+    beast: '灵兽',
+    character: '人物',
+    event: '事件',
+    item: '道具',
+    location: '地点',
+    other: '其他',
+    sect: '组织',
+    skill: '功法',
+  }
+  return labels[type] ?? type
+}
+
+function getKgEntityColor(type: string): string {
+  const colors: Record<string, string> = {
+    beast: '#7f5a9b',
+    character: '#2c5b4b',
+    event: '#8b5e34',
+    item: '#9a6a22',
+    location: '#326d86',
+    other: '#6f6558',
+    sect: '#6f4f91',
+    skill: '#a94f64',
+  }
+  return colors[type] ?? colors.other
+}
+
+function normalizeGraphSearch(value: string): string {
+  return value.trim().replace(/\s+/g, '').toLowerCase()
+}
+
+function getKgEntityNodeWidth(entity: KgEntity): number {
+  const mentionCount = Math.max(0, Number(entity.mentionCount) || 0)
+  return Math.max(132, Math.min(190, 132 + Math.log2(mentionCount + 1) * 9))
+}
+
+function getKgRelationStrokeWidth(relation: KgRelation): number {
+  const mentionCount = Math.max(0, Number(relation.mentionCount) || 0)
+  return Math.max(1.25, Math.min(5, 1.25 + Math.log2(mentionCount + 1) * 0.75))
+}
+
 function formatReviewReason(reason: string): string {
   const labels: Record<string, string> = {
     alias_suspicious: '别名可疑',
@@ -240,6 +407,7 @@ function App() {
   const readerRef = useRef<HTMLElement | null>(null)
   const chapterListRef = useRef<HTMLDivElement | null>(null)
   const activeChapterButtonRef = useRef<HTMLButtonElement | null>(null)
+  const databaseImportInputRef = useRef<HTMLInputElement | null>(null)
   const shouldStopScanningRef = useRef(false)
   const [kgOverview, setKgOverview] = useState<KgOverview | null>(null)
   const [kgEntities, setKgEntities] = useState<KgEntity[]>([])
@@ -250,7 +418,10 @@ function App() {
   const [showKgEntities, setShowKgEntities] = useState(false)
   const [showKgRelations, setShowKgRelations] = useState(false)
   const [kgExtractionText, setKgExtractionText] = useState('')
+  const [kgExtractionPreview, setKgExtractionPreview] = useState<KgExtractionPreview | null>(null)
+  const [isKgApplyingPreview, setIsKgApplyingPreview] = useState(false)
   const [kgError, setKgError] = useState('')
+  const [showKgManualExtraction, setShowKgManualExtraction] = useState(false)
   const [kgScanMode, setKgScanMode] = useState<KgScanMode>('current')
   const [kgScanStart, setKgScanStart] = useState(1)
   const [kgScanEnd, setKgScanEnd] = useState(1)
@@ -261,6 +432,25 @@ function App() {
   const [kgScanProgress, setKgScanProgress] = useState('')
   const [kgScanJob, setKgScanJob] = useState<KgScanJob | null>(null)
   const [kgRelationDetail, setKgRelationDetail] = useState<KgRelationDetail | null>(null)
+  const [kgNeighborhood, setKgNeighborhood] = useState<KgNeighborhood | null>(null)
+  const [showKgGraph, setShowKgGraph] = useState(false)
+  const [kgGraphEntityTypeFilter, setKgGraphEntityTypeFilter] = useState('')
+  const [kgGraphRelationTypeFilter, setKgGraphRelationTypeFilter] = useState('')
+  const [kgBookGraph, setKgBookGraph] = useState<KgBookGraph | null>(null)
+  const [showKgBookGraph, setShowKgBookGraph] = useState(false)
+  const [kgBookGraphEntityTypeFilter, setKgBookGraphEntityTypeFilter] = useState('character')
+  const [kgBookGraphRelationTypeFilter, setKgBookGraphRelationTypeFilter] = useState('')
+  const [kgBookGraphSearch, setKgBookGraphSearch] = useState('')
+  const [kgBookGraphMaxNodes, setKgBookGraphMaxNodes] = useState('80')
+  const [showKgEvidenceSearch, setShowKgEvidenceSearch] = useState(false)
+  const [kgEvidenceSearchQuery, setKgEvidenceSearchQuery] = useState('')
+  const [kgEvidenceSearchKind, setKgEvidenceSearchKind] = useState<'all' | 'entities' | 'relations'>('all')
+  const [kgEvidenceEntityHits, setKgEvidenceEntityHits] = useState<KgEvidenceEntityHit[]>([])
+  const [kgEvidenceRelationHits, setKgEvidenceRelationHits] = useState<KgEvidenceRelationHit[]>([])
+  const [isKgEvidenceSearching, setIsKgEvidenceSearching] = useState(false)
+  const [isKgExporting, setIsKgExporting] = useState(false)
+  const [isDatabaseBackupBusy, setIsDatabaseBackupBusy] = useState(false)
+  const [databaseBackupStatus, setDatabaseBackupStatus] = useState('')
   const [kgEntitySearch, setKgEntitySearch] = useState('')
   const [kgEntityTypeFilter, setKgEntityTypeFilter] = useState('')
   const [kgRelationTypeFilter, setKgRelationTypeFilter] = useState('')
@@ -363,13 +553,6 @@ function App() {
   } = useReaderState()
 
   useEffect(() => {
-    if (!activeChapter) return
-
-    const activePage = Math.ceil(activeChapter.index / 100)
-    setChapterPage(activePage)
-  }, [activeChapter?.id, setChapterPage])
-
-  useEffect(() => {
     if (view !== 'reader' || !activeChapter) return
 
     window.requestAnimationFrame(() => {
@@ -378,7 +561,7 @@ function App() {
         inline: 'nearest',
       })
     })
-  }, [view, activeChapter?.id, chapterPage])
+  }, [view, activeChapter, activeChapter?.id, chapterPage])
 
   useEffect(() => {
     if (view !== 'reader' || !activeChapter) return
@@ -388,7 +571,7 @@ function App() {
         readerRef.current.scrollTop = 0
       }
     })
-  }, [view, activeChapter?.id])
+  }, [view, activeChapter, activeChapter?.id])
 
   useEffect(() => {
     if (view !== 'reader' || isConfigOpen) return
@@ -439,6 +622,7 @@ function App() {
 
     void refreshKnowledgeGraph()
     void checkKgScanStatus()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [view, state.book?.id])
 
   useEffect(() => {
@@ -449,6 +633,7 @@ function App() {
     }, 5000)
 
     return () => clearInterval(interval)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [view, state.book?.id])
 
   useEffect(() => {
@@ -470,48 +655,27 @@ function App() {
   }, [view, state.book?.id, showKgReviewQueue, kgReviewKind])
 
   useEffect(() => {
-    if (kgEntityEdit) {
-      setKgEntityEditName(kgEntityEdit.name)
-      setKgEntityEditType(kgEntityEdit.type)
-      setKgEntityEditAliases(kgEntityEdit.aliases.join('、'))
-      setKgEntityEditDescription(kgEntityEdit.description ?? '')
-    } else {
-      setKgEntityEditName('')
-      setKgEntityEditType('')
-      setKgEntityEditAliases('')
-      setKgEntityEditDescription('')
-    }
-  }, [kgEntityEdit])
+    if (!showKgGraph || !kgEntityDetail) return
+    void fetchKgNeighborhood(kgEntityDetail.entity.id)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [showKgGraph, kgEntityDetail?.entity.id, kgGraphEntityTypeFilter, kgGraphRelationTypeFilter])
 
   useEffect(() => {
-    if (kgRelationEdit) {
-      setKgRelationEditType(kgRelationEdit.type)
-      setKgRelationEditDescription(kgRelationEdit.description ?? '')
-      setKgRelationEditSourceId(kgRelationEdit.sourceId)
-      setKgRelationEditTargetId(kgRelationEdit.targetId)
-      setKgRelationEditSourceQuery('')
-      setKgRelationEditTargetQuery('')
-      void searchKgRelationEndpointCandidates('', 'source')
-      void searchKgRelationEndpointCandidates('', 'target')
-    } else {
-      setKgRelationEditType('')
-      setKgRelationEditDescription('')
-      setKgRelationEditSourceId('')
-      setKgRelationEditTargetId('')
-      setKgRelationEditSourceQuery('')
-      setKgRelationEditTargetQuery('')
-      setKgRelationEditSourceCandidates([])
-      setKgRelationEditTargetCandidates([])
-    }
+    if (view !== 'knowledge' || !state.book || !showKgBookGraph) return
+    void fetchKgBookGraph()
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [kgRelationEdit])
+  }, [view, state.book?.id, showKgBookGraph, kgBookGraphEntityTypeFilter, kgBookGraphRelationTypeFilter])
 
   useEffect(() => {
     if (!state.book) return
 
-    setKgScanStart(activeChapter?.index ?? 1)
-    setKgScanEnd(activeChapter?.index ?? 1)
-  }, [state.book?.id, activeChapter?.id])
+    const frame = window.requestAnimationFrame(() => {
+      setKgScanStart(activeChapter?.index ?? 1)
+      setKgScanEnd(activeChapter?.index ?? 1)
+    })
+
+    return () => window.cancelAnimationFrame(frame)
+  }, [state.book, activeChapter?.id, activeChapter?.index])
 
   async function checkKgScanStatus() {
     if (!state.book) return
@@ -629,30 +793,57 @@ function App() {
 
     try {
       const extraction = JSON.parse(kgExtractionText) as unknown
-      const response = await fetch(
-        `/api/kg/chapters/${encodeURIComponent(activeChapter.id)}/extraction`,
-        {
-          body: JSON.stringify({
-            bookId: state.book.id,
-            extraction,
-            model: 'manual-json',
-          }),
-          headers: {
-            'Content-Type': 'application/json',
-          },
-          method: 'PUT',
-        },
-      )
+      const diff = await fetchChapterExtractionDiff(activeChapter, extraction)
+      setKgExtractionPreview({
+        title: '保存当前章节前预览',
+        items: [{ chapter: activeChapter, diff, extraction, model: 'manual-json' }],
+      })
+    } catch (err) {
+      setKgError(err instanceof Error ? err.message : '保存章节抽取结果失败。')
+    }
+  }
 
-      if (!response.ok) {
-        const payload = (await response.json()) as { error?: string }
-        throw new Error(payload.error ?? '保存章节抽取结果失败。')
+  async function fetchChapterExtractionDiff(chapter: Chapter, extraction: unknown): Promise<KgExtractionDiff> {
+    if (!state.book) throw new Error('未选择书籍。')
+
+    const response = await fetch(`/api/kg/chapters/${encodeURIComponent(chapter.id)}/extraction/diff`, {
+      body: JSON.stringify({
+        bookId: state.book.id,
+        extraction,
+      }),
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      method: 'POST',
+    })
+
+    if (!response.ok) {
+      const payload = (await response.json()) as { error?: string }
+      throw new Error(payload.error ?? `预览第 ${chapter.index} 章图谱变化失败。`)
+    }
+
+    return (await response.json()) as KgExtractionDiff
+  }
+
+  async function applyKgExtractionPreview() {
+    if (!kgExtractionPreview) return
+
+    setKgError('')
+    setIsKgApplyingPreview(true)
+
+    try {
+      for (const item of kgExtractionPreview.items) {
+        await saveChapterExtraction(item.chapter, item.extraction, item.model)
       }
 
       setKgExtractionText('')
+      setKgExtractionPreview(null)
+      setKgScanProgress(`已应用 ${kgExtractionPreview.items.length} 章图谱变化。`)
       await refreshKnowledgeGraph()
     } catch (err) {
-      setKgError(err instanceof Error ? err.message : '保存章节抽取结果失败。')
+      setKgError(err instanceof Error ? err.message : '应用图谱变化失败。')
+    } finally {
+      setIsKgApplyingPreview(false)
     }
   }
 
@@ -667,8 +858,193 @@ function App() {
       }
 
       setKgEntityDetail((await response.json()) as KgEntityDetail)
+      setKgNeighborhood(null)
+      setShowKgGraph(false)
     } catch (err) {
       setKgError(err instanceof Error ? err.message : '读取实体详情失败。')
+    }
+  }
+
+  async function fetchKgNeighborhood(entityId: string) {
+    setKgError('')
+
+    try {
+      const response = await fetch(
+        `/api/kg/entities/${encodeURIComponent(entityId)}/neighborhood?entityType=${encodeURIComponent(kgGraphEntityTypeFilter)}&relationType=${encodeURIComponent(kgGraphRelationTypeFilter)}&limit=120`,
+      )
+
+      if (!response.ok) {
+        throw new Error('读取关系图失败。')
+      }
+
+      setKgNeighborhood((await response.json()) as KgNeighborhood)
+    } catch (err) {
+      setKgError(err instanceof Error ? err.message : '读取关系图失败。')
+    }
+  }
+
+  async function fetchKgBookGraph() {
+    if (!state.book) return
+
+    setKgError('')
+
+    try {
+      const response = await fetch(
+        `/api/kg/graph?bookId=${encodeURIComponent(state.book.id)}&entityType=${encodeURIComponent(kgBookGraphEntityTypeFilter)}&relationType=${encodeURIComponent(kgBookGraphRelationTypeFilter)}&limit=180`,
+      )
+
+      if (!response.ok) {
+        throw new Error('读取全局图谱失败。')
+      }
+
+      setKgBookGraph((await response.json()) as KgBookGraph)
+    } catch (err) {
+      setKgError(err instanceof Error ? err.message : '读取全局图谱失败。')
+    }
+  }
+
+  async function searchKgEvidence() {
+    if (!state.book) return
+
+    const query = kgEvidenceSearchQuery.trim()
+    if (!query) {
+      setKgEvidenceEntityHits([])
+      setKgEvidenceRelationHits([])
+      return
+    }
+
+    setKgError('')
+    setIsKgEvidenceSearching(true)
+
+    try {
+      const response = await fetch(
+        `/api/kg/search?bookId=${encodeURIComponent(state.book.id)}&q=${encodeURIComponent(query)}&kind=${encodeURIComponent(kgEvidenceSearchKind)}&limit=120`,
+      )
+
+      if (!response.ok) {
+        throw new Error('搜索图谱证据失败。')
+      }
+
+      const payload = (await response.json()) as KgEvidenceSearchResponse
+      setKgEvidenceEntityHits(payload.entities)
+      setKgEvidenceRelationHits(payload.relations)
+    } catch (err) {
+      setKgError(err instanceof Error ? err.message : '搜索图谱证据失败。')
+    } finally {
+      setIsKgEvidenceSearching(false)
+    }
+  }
+
+  async function exportKnowledgeGraph(format: 'json' | 'graphml') {
+    if (!state.book) return
+
+    setKgError('')
+    setIsKgExporting(true)
+
+    try {
+      const response = await fetch(
+        `/api/kg/export?bookId=${encodeURIComponent(state.book.id)}&format=${encodeURIComponent(format)}`,
+      )
+
+      if (!response.ok) {
+        const payload = (await response.json()) as { error?: string }
+        throw new Error(payload.error ?? '导出图谱失败。')
+      }
+
+      const blob = await response.blob()
+      const disposition = response.headers.get('Content-Disposition') ?? ''
+      const filenameMatch = disposition.match(/filename="([^"]+)"/)
+      const fallbackName = `${state.book.title.replace(/[^\w\u4e00-\u9fa5.-]+/g, '-')}-knowledge-graph.${format}`
+      const filename = filenameMatch?.[1] ?? fallbackName
+      const url = URL.createObjectURL(blob)
+      const link = document.createElement('a')
+      link.href = url
+      link.download = filename
+      document.body.append(link)
+      link.click()
+      link.remove()
+      URL.revokeObjectURL(url)
+    } catch (err) {
+      setKgError(err instanceof Error ? err.message : '导出图谱失败。')
+    } finally {
+      setIsKgExporting(false)
+    }
+  }
+
+  async function downloadDatabaseBackup() {
+    setKgError('')
+    setDatabaseBackupStatus('')
+    setIsDatabaseBackupBusy(true)
+
+    try {
+      const response = await fetch('/api/database/export')
+
+      if (!response.ok) {
+        const payload = (await response.json()) as { error?: string }
+        throw new Error(payload.error ?? '导出数据库失败。')
+      }
+
+      const blob = await response.blob()
+      const disposition = response.headers.get('Content-Disposition') ?? ''
+      const filenameMatch = disposition.match(/filename="([^"]+)"/)
+      const filename = filenameMatch?.[1] ?? `novel_reader-backup-${new Date().toISOString()}.sqlite`
+      const url = URL.createObjectURL(blob)
+      const link = document.createElement('a')
+      link.href = url
+      link.download = filename
+      document.body.append(link)
+      link.click()
+      link.remove()
+      URL.revokeObjectURL(url)
+      setDatabaseBackupStatus(`已开始下载：${filename}。保存位置由浏览器下载设置决定。`)
+    } catch (err) {
+      const message = err instanceof Error ? err.message : '导出数据库失败。'
+      setDatabaseBackupStatus(message)
+      setKgError(message)
+    } finally {
+      setIsDatabaseBackupBusy(false)
+    }
+  }
+
+  async function importDatabaseBackup(file: File) {
+    const confirmed = window.confirm(
+      '导入数据库备份会在下次启动本地服务时覆盖当前书架、概要和知识图谱。当前数据库会先自动备份。确定继续吗？',
+    )
+    if (!confirmed) return
+
+    setKgError('')
+    setDatabaseBackupStatus('')
+    setIsDatabaseBackupBusy(true)
+
+    try {
+      const response = await fetch('/api/database/import', {
+        body: await file.arrayBuffer(),
+        headers: { 'Content-Type': 'application/octet-stream' },
+        method: 'POST',
+      })
+
+      const payload = (await response.json()) as {
+        backupPath?: string
+        error?: string
+        requiresRestart?: boolean
+      }
+
+      if (!response.ok) {
+        throw new Error(payload.error ?? '导入数据库失败。')
+      }
+
+      setDatabaseBackupStatus(
+        `已排队恢复。当前数据库已备份到：${payload.backupPath ?? '已创建'}。请重启本地数据库服务后刷新页面。`,
+      )
+    } catch (err) {
+      const message = err instanceof Error ? err.message : '导入数据库失败。'
+      setDatabaseBackupStatus(message)
+      setKgError(message)
+    } finally {
+      setIsDatabaseBackupBusy(false)
+      if (databaseImportInputRef.current) {
+        databaseImportInputRef.current.value = ''
+      }
     }
   }
 
@@ -685,6 +1061,32 @@ function App() {
       setKgRelationDetail((await response.json()) as KgRelationDetail)
     } catch (err) {
       setKgError(err instanceof Error ? err.message : '读取关系详情失败。')
+    }
+  }
+
+  function openKgEntityEdit(entity: KgEntity | null) {
+    setKgEntityEdit(entity)
+    setKgEntityEditName(entity?.name ?? '')
+    setKgEntityEditType(entity?.type ?? '')
+    setKgEntityEditAliases(entity?.aliases.join('、') ?? '')
+    setKgEntityEditDescription(entity?.description ?? '')
+  }
+
+  function openKgRelationEdit(relation: KgRelation | null) {
+    setKgRelationEdit(relation)
+    setKgRelationEditType(relation?.type ?? '')
+    setKgRelationEditDescription(relation?.description ?? '')
+    setKgRelationEditSourceId(relation?.sourceId ?? '')
+    setKgRelationEditTargetId(relation?.targetId ?? '')
+    setKgRelationEditSourceQuery('')
+    setKgRelationEditTargetQuery('')
+
+    if (relation) {
+      void searchKgRelationEndpointCandidates('', 'source')
+      void searchKgRelationEndpointCandidates('', 'target')
+    } else {
+      setKgRelationEditSourceCandidates([])
+      setKgRelationEditTargetCandidates([])
     }
   }
 
@@ -705,7 +1107,7 @@ function App() {
         throw new Error(payload.error ?? '更新实体失败。')
       }
 
-      setKgEntityEdit(null)
+      openKgEntityEdit(null)
       await Promise.all([fetchKgEntities(), openKgEntityDetail(entityId), fetchKgReviewQueue()])
     } catch (err) {
       setKgError(err instanceof Error ? err.message : '更新实体失败。')
@@ -728,7 +1130,7 @@ function App() {
       }
 
       setKgEntityDetail(null)
-      setKgEntityEdit(null)
+      openKgEntityEdit(null)
       setKgMergeSource(null)
       await refreshKnowledgeGraph()
     } catch (err) {
@@ -831,7 +1233,7 @@ function App() {
       }
 
       const result = (await response.json()) as { relation: KgRelation }
-      setKgRelationEdit(null)
+      openKgRelationEdit(null)
       await Promise.all([fetchKgRelations(), openKgRelationDetail(result.relation.id), fetchKgReviewQueue()])
     } catch (err) {
       setKgError(err instanceof Error ? err.message : '更新关系失败。')
@@ -1253,6 +1655,11 @@ function App() {
       return
     }
 
+    if (!options?.forcePending && overwriteCompleted && chapters.length <= 10) {
+      await previewOverwriteKnowledgeGraphScan(chapters)
+      return
+    }
+
     if (
       !options?.forcePending &&
       chapters.length > 50 &&
@@ -1405,6 +1812,36 @@ function App() {
     }
   }
 
+  async function previewOverwriteKnowledgeGraphScan(chapters: Chapter[]) {
+    if (!state.book) return
+
+    setKgError('')
+    setIsKgScanning(true)
+    setKgScanProgress(`正在生成 ${chapters.length} 章重扫预览...`)
+
+    try {
+      const items: KgExtractionPreviewItem[] = []
+
+      for (const chapter of chapters) {
+        setKgScanProgress(`正在预览第 ${chapter.index} 章 ${chapter.title}`)
+        const { extraction, model } = await generateKnowledgeGraphExtraction(chapter)
+        const diff = await fetchChapterExtractionDiff(chapter, extraction)
+        items.push({ chapter, diff, extraction, model })
+      }
+
+      setKgExtractionPreview({
+        title: `覆盖重扫前预览（${chapters.length} 章）`,
+        items,
+      })
+      setKgScanProgress(`已生成 ${chapters.length} 章重扫预览，确认后才会写入图谱。`)
+    } catch (err) {
+      setKgError(err instanceof Error ? err.message : '生成重扫预览失败。')
+      setKgScanProgress('')
+    } finally {
+      setIsKgScanning(false)
+    }
+  }
+
   async function replaySelectedKnowledgeGraphChapters() {
     const selectedChapters = getSelectedKgScanChapters()
     const completedChapterIds = new Set(
@@ -1505,6 +1942,199 @@ function App() {
 
     await scanSelectedKnowledgeGraphChapters({ forcePending: true, pendingChapters })
   }
+
+  const kgGraphNodes = useMemo<Node<KgGraphNodeData>[]>(() => {
+    if (!kgNeighborhood) return []
+
+    const center = kgNeighborhood.entities.find((entity) => entity.id === kgNeighborhood.centerId)
+    const neighbors = kgNeighborhood.entities.filter((entity) => entity.id !== kgNeighborhood.centerId)
+    const radius = neighbors.length <= 6 ? 230 : 285
+    const nodes: Node<KgGraphNodeData>[] = []
+
+    if (center) {
+      nodes.push({
+        id: center.id,
+        position: { x: 0, y: 0 },
+        data: { entity: center, label: center.name },
+        style: {
+          background: getKgEntityColor(center.type),
+          border: '2px solid #1e332c',
+          borderRadius: 8,
+          color: '#fffaf2',
+          fontWeight: 800,
+          padding: 12,
+          width: Math.max(150, getKgEntityNodeWidth(center)),
+        },
+      })
+    }
+
+    neighbors.forEach((entity, index) => {
+      const angle = (Math.PI * 2 * index) / Math.max(1, neighbors.length) - Math.PI / 2
+      nodes.push({
+        id: entity.id,
+        position: {
+          x: Math.cos(angle) * radius,
+          y: Math.sin(angle) * radius,
+        },
+        data: { entity, label: entity.name },
+        style: {
+          background: '#fffdf8',
+          border: `2px solid ${getKgEntityColor(entity.type)}`,
+          borderRadius: 8,
+          color: '#24211c',
+          fontWeight: 750,
+          padding: 10,
+          width: getKgEntityNodeWidth(entity),
+        },
+      })
+    })
+
+    return nodes
+  }, [kgNeighborhood])
+
+  const kgGraphEdges = useMemo<Edge<KgGraphEdgeData>[]>(() => {
+    if (!kgNeighborhood) return []
+
+    return kgNeighborhood.relations.map((relation) => ({
+      id: relation.id,
+      source: relation.sourceId,
+      target: relation.targetId,
+      label: relation.type,
+      data: { relation },
+      markerEnd: { type: MarkerType.ArrowClosed },
+      style: {
+        stroke: '#8a6f45',
+        strokeWidth: getKgRelationStrokeWidth(relation),
+      },
+      labelStyle: {
+        fill: '#4d463d',
+        fontSize: 12,
+        fontWeight: 700,
+      },
+      labelBgStyle: {
+        fill: '#fffaf2',
+      },
+    }))
+  }, [kgNeighborhood])
+
+  const kgVisibleBookGraph = useMemo(() => {
+    if (!kgBookGraph) {
+      return {
+        entities: [] as KgEntity[],
+        relations: [] as KgRelation[],
+        matchingEntityIds: new Set<string>(),
+      }
+    }
+
+    const degreeById = new Map<string, number>()
+    for (const relation of kgBookGraph.relations) {
+      degreeById.set(relation.sourceId, (degreeById.get(relation.sourceId) ?? 0) + 1)
+      degreeById.set(relation.targetId, (degreeById.get(relation.targetId) ?? 0) + 1)
+    }
+
+    const query = normalizeGraphSearch(kgBookGraphSearch)
+    const matchingEntityIds = new Set<string>()
+
+    if (query) {
+      for (const entity of kgBookGraph.entities) {
+        const names = [entity.name, ...entity.aliases].map(normalizeGraphSearch)
+        if (names.some((name) => name.includes(query))) {
+          matchingEntityIds.add(entity.id)
+        }
+      }
+    }
+
+    let visibleEntityIds = new Set<string>()
+    if (query && matchingEntityIds.size) {
+      for (const relation of kgBookGraph.relations) {
+        if (matchingEntityIds.has(relation.sourceId) || matchingEntityIds.has(relation.targetId)) {
+          visibleEntityIds.add(relation.sourceId)
+          visibleEntityIds.add(relation.targetId)
+        }
+      }
+      for (const id of matchingEntityIds) visibleEntityIds.add(id)
+    } else if (!query) {
+      const maxNodes = kgBookGraphMaxNodes === 'all'
+        ? Number.POSITIVE_INFINITY
+        : Math.max(10, Number(kgBookGraphMaxNodes) || 80)
+      visibleEntityIds = new Set(
+        [...kgBookGraph.entities]
+          .sort((a, b) =>
+            ((b.mentionCount || 0) + (degreeById.get(b.id) ?? 0) * 2)
+            - ((a.mentionCount || 0) + (degreeById.get(a.id) ?? 0) * 2),
+          )
+          .slice(0, maxNodes)
+          .map((entity) => entity.id),
+      )
+    }
+
+    const visibleEntities = kgBookGraph.entities.filter((entity) => visibleEntityIds.has(entity.id))
+    const visibleRelations = kgBookGraph.relations.filter(
+      (relation) => visibleEntityIds.has(relation.sourceId) && visibleEntityIds.has(relation.targetId),
+    )
+
+    return {
+      entities: visibleEntities,
+      relations: visibleRelations,
+      matchingEntityIds,
+    }
+  }, [kgBookGraph, kgBookGraphMaxNodes, kgBookGraphSearch])
+
+  const kgBookGraphNodes = useMemo<Node<KgGraphNodeData>[]>(() => {
+    if (!kgBookGraph) return []
+
+    return kgVisibleBookGraph.entities.map((entity, index) => {
+      const ring = Math.floor(index / 12)
+      const ringIndex = index % 12
+      const ringSize = Math.min(12, kgVisibleBookGraph.entities.length - ring * 12)
+      const radius = ring === 0 ? 260 : 260 + ring * 170
+      const angle = (Math.PI * 2 * ringIndex) / Math.max(1, ringSize) - Math.PI / 2
+      const isMatch = kgVisibleBookGraph.matchingEntityIds.has(entity.id)
+
+      return {
+        id: entity.id,
+        position: {
+          x: Math.cos(angle) * radius,
+          y: Math.sin(angle) * radius,
+        },
+        data: { entity, label: entity.name },
+        style: {
+          background: isMatch ? '#f8efe0' : '#fffdf8',
+          border: `${isMatch ? 3 : 2}px solid ${getKgEntityColor(entity.type)}`,
+          borderRadius: 8,
+          color: '#24211c',
+          fontWeight: 750,
+          padding: Math.max(9, Math.min(14, 8 + Math.log2((entity.mentionCount || 0) + 1))),
+          width: getKgEntityNodeWidth(entity),
+        },
+      }
+    })
+  }, [kgBookGraph, kgVisibleBookGraph])
+
+  const kgBookGraphEdges = useMemo<Edge<KgGraphEdgeData>[]>(() => {
+    if (!kgBookGraph) return []
+
+    return kgVisibleBookGraph.relations.map((relation) => ({
+      id: relation.id,
+      source: relation.sourceId,
+      target: relation.targetId,
+      label: relation.type,
+      data: { relation },
+      markerEnd: { type: MarkerType.ArrowClosed },
+      style: {
+        stroke: '#8a6f45',
+        strokeWidth: getKgRelationStrokeWidth(relation),
+      },
+      labelStyle: {
+        fill: '#4d463d',
+        fontSize: 11,
+        fontWeight: 700,
+      },
+      labelBgStyle: {
+        fill: '#fffaf2',
+      },
+    }))
+  }, [kgBookGraph, kgVisibleBookGraph])
 
   function getDisplayKgScanJobStatus(): { label: string; isInterrupted: boolean } {
     if (!kgScanJob) return { label: '', isInterrupted: false }
@@ -1933,6 +2563,42 @@ function App() {
             <span>{state.books.length ? '导入新 txt 到书架' : '选择 txt 文件'}</span>
             <small>支持“第1章 / 第一章 / Chapter 1”等常见标题格式</small>
           </label>
+
+          <div className="database-backup-card">
+            <div>
+              <h3>数据库备份</h3>
+              <p>导出或恢复完整 SQLite 数据库，包含书架、章节、概要和知识图谱。</p>
+              {databaseBackupStatus && <p className="database-backup-status">{databaseBackupStatus}</p>}
+            </div>
+            <div className="book-actions">
+              <button
+                type="button"
+                className="ghost-button"
+                disabled={isDatabaseBackupBusy}
+                onClick={() => void downloadDatabaseBackup()}
+              >
+                备份数据库
+              </button>
+              <button
+                type="button"
+                className="ghost-button"
+                disabled={isDatabaseBackupBusy}
+                onClick={() => databaseImportInputRef.current?.click()}
+              >
+                恢复数据库
+              </button>
+            </div>
+            <input
+              ref={databaseImportInputRef}
+              type="file"
+              accept=".sqlite,.db,application/vnd.sqlite3,application/x-sqlite3"
+              hidden
+              onChange={(event) => {
+                const file = event.target.files?.[0]
+                if (file) void importDatabaseBackup(file)
+              }}
+            />
+          </div>
           {error && <p className="error">{error}</p>}
         </section>
       ) : view === 'knowledge' && state.book ? (
@@ -1945,9 +2611,27 @@ function App() {
                 第一阶段已接入 SQLite 图谱表和 API。现在可以保存章节级抽取 JSON，并查看实体和关系统计。
               </p>
             </div>
-            <button type="button" onClick={() => void refreshKnowledgeGraph()}>
-              刷新图谱
-            </button>
+            <div className="kg-heading-actions">
+              <button type="button" onClick={() => void refreshKnowledgeGraph()}>
+                刷新图谱
+              </button>
+              <button
+                type="button"
+                className="ghost-button"
+                disabled={isKgExporting}
+                onClick={() => void exportKnowledgeGraph('json')}
+              >
+                导出 JSON
+              </button>
+              <button
+                type="button"
+                className="ghost-button"
+                disabled={isKgExporting}
+                onClick={() => void exportKnowledgeGraph('graphml')}
+              >
+                导出 GraphML
+              </button>
+            </div>
           </div>
 
           {kgEntityEdit && (
@@ -1958,7 +2642,7 @@ function App() {
                     <p className="eyebrow">实体编辑</p>
                     <h2 id="kg-edit-title">编辑实体</h2>
                   </div>
-                  <button type="button" className="ghost-button" onClick={() => setKgEntityEdit(null)}>
+                  <button type="button" className="ghost-button" onClick={() => openKgEntityEdit(null)}>
                     取消
                   </button>
                 </div>
@@ -2006,7 +2690,7 @@ function App() {
                 </div>
 
                 <div className="modal-actions">
-                  <button type="button" className="ghost-button" onClick={() => setKgEntityEdit(null)}>
+                  <button type="button" className="ghost-button" onClick={() => openKgEntityEdit(null)}>
                     取消
                   </button>
                   <button
@@ -2039,7 +2723,7 @@ function App() {
                     <p className="eyebrow">关系编辑</p>
                     <h2 id="kg-relation-edit-title">编辑关系</h2>
                   </div>
-                  <button type="button" className="ghost-button" onClick={() => setKgRelationEdit(null)}>
+                  <button type="button" className="ghost-button" onClick={() => openKgRelationEdit(null)}>
                     取消
                   </button>
                 </div>
@@ -2162,7 +2846,7 @@ function App() {
                 </div>
 
                 <div className="modal-actions">
-                  <button type="button" className="ghost-button" onClick={() => setKgRelationEdit(null)}>
+                  <button type="button" className="ghost-button" onClick={() => openKgRelationEdit(null)}>
                     取消
                   </button>
                   <button
@@ -2586,6 +3270,110 @@ function App() {
             </div>
           )}
 
+          {kgExtractionPreview && (
+            <div className="modal-backdrop" role="presentation">
+              <section className="config-modal kg-diff-modal" role="dialog" aria-modal="true" aria-labelledby="kg-diff-title">
+                <div className="modal-heading">
+                  <div>
+                    <p className="eyebrow">图谱变化预览</p>
+                    <h2 id="kg-diff-title">{kgExtractionPreview.title}</h2>
+                  </div>
+                  <button
+                    type="button"
+                    className="ghost-button"
+                    disabled={isKgApplyingPreview}
+                    onClick={() => setKgExtractionPreview(null)}
+                  >
+                    取消
+                  </button>
+                </div>
+
+                <div className="kg-diff-summary">
+                  <span>
+                    实体 +{kgExtractionPreview.items.reduce((sum, item) => sum + item.diff.summary.entitiesAdded, 0)}
+                  </span>
+                  <span>
+                    实体 -{kgExtractionPreview.items.reduce((sum, item) => sum + item.diff.summary.entitiesRemoved, 0)}
+                  </span>
+                  <span>
+                    关系 +{kgExtractionPreview.items.reduce((sum, item) => sum + item.diff.summary.relationsAdded, 0)}
+                  </span>
+                  <span>
+                    关系 -{kgExtractionPreview.items.reduce((sum, item) => sum + item.diff.summary.relationsRemoved, 0)}
+                  </span>
+                </div>
+
+                <div className="kg-diff-list">
+                  {kgExtractionPreview.items.map((item) => (
+                    <article className="kg-diff-chapter" key={item.chapter.id}>
+                      <h3>
+                        第 {item.chapter.index} 章 · {item.chapter.title}
+                      </h3>
+                      <p>
+                        实体 +{item.diff.summary.entitiesAdded} / -{item.diff.summary.entitiesRemoved} / 不变 {item.diff.summary.entitiesUnchanged}
+                        {' · '}
+                        关系 +{item.diff.summary.relationsAdded} / -{item.diff.summary.relationsRemoved} / 不变 {item.diff.summary.relationsUnchanged}
+                      </p>
+
+                      <div className="kg-diff-columns">
+                        <div>
+                          <h4>新增实体</h4>
+                          {item.diff.entities.added.slice(0, 8).map((entity) => (
+                            <span className="tag" key={entity.key}>{entity.name} · {getKgEntityTypeLabel(entity.type)}</span>
+                          ))}
+                          {!item.diff.entities.added.length && <small>无</small>}
+                        </div>
+                        <div>
+                          <h4>移除实体证据</h4>
+                          {item.diff.entities.removed.slice(0, 8).map((entity) => (
+                            <span className="tag" key={entity.key}>{entity.name} · {getKgEntityTypeLabel(entity.type)}</span>
+                          ))}
+                          {!item.diff.entities.removed.length && <small>无</small>}
+                        </div>
+                        <div>
+                          <h4>新增关系</h4>
+                          {item.diff.relations.added.slice(0, 8).map((relation) => (
+                            <span className="tag" key={relation.key}>
+                              {relation.sourceName} -- {relation.type} -- {relation.targetName}
+                            </span>
+                          ))}
+                          {!item.diff.relations.added.length && <small>无</small>}
+                        </div>
+                        <div>
+                          <h4>移除关系证据</h4>
+                          {item.diff.relations.removed.slice(0, 8).map((relation) => (
+                            <span className="tag" key={relation.key}>
+                              {relation.sourceName} -- {relation.type} -- {relation.targetName}
+                            </span>
+                          ))}
+                          {!item.diff.relations.removed.length && <small>无</small>}
+                        </div>
+                      </div>
+                    </article>
+                  ))}
+                </div>
+
+                <div className="modal-actions">
+                  <button
+                    type="button"
+                    className="ghost-button"
+                    disabled={isKgApplyingPreview}
+                    onClick={() => setKgExtractionPreview(null)}
+                  >
+                    取消
+                  </button>
+                  <button
+                    type="button"
+                    disabled={isKgApplyingPreview}
+                    onClick={() => void applyKgExtractionPreview()}
+                  >
+                    {isKgApplyingPreview ? '应用中...' : '确认应用到图谱'}
+                  </button>
+                </div>
+              </section>
+            </div>
+          )}
+
           <div className="kg-stats">
             <button
               type="button"
@@ -2593,6 +3381,8 @@ function App() {
               onClick={() => {
                 setShowKgScannedChapters((current) => !current)
                 setShowKgReviewQueue(false)
+                setShowKgBookGraph(false)
+                setShowKgEvidenceSearch(false)
               }}
             >
               <span>已扫描章节</span>
@@ -2605,6 +3395,8 @@ function App() {
                 setShowKgEntities((current) => !current)
                 setShowKgRelations(false)
                 setShowKgReviewQueue(false)
+                setShowKgBookGraph(false)
+                setShowKgEvidenceSearch(false)
                 setKgEntityDetail(null)
                 setKgRelationDetail(null)
               }}
@@ -2619,6 +3411,8 @@ function App() {
                 setShowKgRelations((current) => !current)
                 setShowKgEntities(false)
                 setShowKgReviewQueue(false)
+                setShowKgBookGraph(false)
+                setShowKgEvidenceSearch(false)
                 setKgEntityDetail(null)
                 setKgRelationDetail(null)
               }}
@@ -2628,12 +3422,49 @@ function App() {
             </button>
             <button
               type="button"
+              className={showKgBookGraph ? 'active' : ''}
+              onClick={() => {
+                setShowKgBookGraph((current) => !current)
+                setShowKgEntities(false)
+                setShowKgRelations(false)
+                setShowKgReviewQueue(false)
+                setShowKgScannedChapters(false)
+                setShowKgEvidenceSearch(false)
+                setKgEntityDetail(null)
+                setKgRelationDetail(null)
+                if (!showKgBookGraph) void fetchKgBookGraph()
+              }}
+            >
+              <span>图谱视图</span>
+              <strong>{kgBookGraph?.relations.length ?? kgOverview?.relation_count ?? 0}</strong>
+            </button>
+            <button
+              type="button"
+              className={showKgEvidenceSearch ? 'active' : ''}
+              onClick={() => {
+                setShowKgEvidenceSearch((current) => !current)
+                setShowKgEntities(false)
+                setShowKgRelations(false)
+                setShowKgReviewQueue(false)
+                setShowKgScannedChapters(false)
+                setShowKgBookGraph(false)
+                setKgEntityDetail(null)
+                setKgRelationDetail(null)
+              }}
+            >
+              <span>证据搜索</span>
+              <strong>{kgEvidenceEntityHits.length + kgEvidenceRelationHits.length}</strong>
+            </button>
+            <button
+              type="button"
               className={showKgReviewQueue ? 'active' : ''}
               onClick={() => {
                 setShowKgReviewQueue((current) => !current)
                 setShowKgEntities(false)
                 setShowKgRelations(false)
                 setShowKgScannedChapters(false)
+                setShowKgBookGraph(false)
+                setShowKgEvidenceSearch(false)
                 setKgEntityDetail(null)
                 setKgRelationDetail(null)
               }}
@@ -2642,6 +3473,109 @@ function App() {
               <strong>{kgReviewEntities.length + kgReviewRelations.length}</strong>
             </button>
           </div>
+
+          {showKgEvidenceSearch && (
+            <section className="kg-card kg-scanned-card">
+              <div className="kg-card-heading">
+                <div>
+                  <h3>证据搜索</h3>
+                  <p>搜索实体、关系、证据文本、描述和章节标题，结果可跳转到对应详情或正文。</p>
+                </div>
+                <button type="button" className="ghost-button" onClick={() => setShowKgEvidenceSearch(false)}>
+                  收起
+                </button>
+              </div>
+
+              <div className="kg-filter-bar">
+                <input
+                  type="search"
+                  placeholder="搜索实体、关系或证据"
+                  value={kgEvidenceSearchQuery}
+                  onChange={(event) => setKgEvidenceSearchQuery(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter') void searchKgEvidence()
+                  }}
+                />
+                <select
+                  value={kgEvidenceSearchKind}
+                  onChange={(event) => setKgEvidenceSearchKind(event.target.value as 'all' | 'entities' | 'relations')}
+                >
+                  <option value="all">全部证据</option>
+                  <option value="entities">只看实体</option>
+                  <option value="relations">只看关系</option>
+                </select>
+                <button type="button" disabled={isKgEvidenceSearching} onClick={() => void searchKgEvidence()}>
+                  {isKgEvidenceSearching ? '搜索中...' : '搜索'}
+                </button>
+                {(kgEvidenceSearchQuery || kgEvidenceEntityHits.length || kgEvidenceRelationHits.length) && (
+                  <button
+                    type="button"
+                    className="ghost-button"
+                    onClick={() => {
+                      setKgEvidenceSearchQuery('')
+                      setKgEvidenceEntityHits([])
+                      setKgEvidenceRelationHits([])
+                    }}
+                  >
+                    清除
+                  </button>
+                )}
+              </div>
+
+              {kgEvidenceEntityHits.length || kgEvidenceRelationHits.length ? (
+                <div className="kg-search-results">
+                  {kgEvidenceEntityHits.length > 0 && (
+                    <div>
+                      <h4>实体证据 · {kgEvidenceEntityHits.length}</h4>
+                      <div className="kg-search-hit-list">
+                        {kgEvidenceEntityHits.map((hit) => (
+                          <article className="kg-search-hit" key={hit.mentionId}>
+                            <div>
+                              <button type="button" onClick={() => void openKgEntityDetail(hit.entityId)}>
+                                {hit.entityName}
+                              </button>
+                              <span>{getKgEntityTypeLabel(hit.entityType)}</span>
+                              <button type="button" className="ghost-button" onClick={() => openChapterFromKnowledgeGraph(hit.chapterId)}>
+                                第 {hit.chapterIndex} 章
+                              </button>
+                            </div>
+                            <strong>{hit.chapterTitle}</strong>
+                            <p>{hit.evidence || hit.entityDescription || '暂无证据文本。'}</p>
+                          </article>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+
+                  {kgEvidenceRelationHits.length > 0 && (
+                    <div>
+                      <h4>关系证据 · {kgEvidenceRelationHits.length}</h4>
+                      <div className="kg-search-hit-list">
+                        {kgEvidenceRelationHits.map((hit) => (
+                          <article className="kg-search-hit" key={hit.mentionId}>
+                            <div>
+                              <button type="button" onClick={() => void openKgRelationDetail(hit.relationId)}>
+                                {hit.sourceName} -- {hit.relationType} -- {hit.targetName}
+                              </button>
+                              <button type="button" className="ghost-button" onClick={() => openChapterFromKnowledgeGraph(hit.chapterId)}>
+                                第 {hit.chapterIndex} 章
+                              </button>
+                            </div>
+                            <strong>{hit.chapterTitle}</strong>
+                            <p>{hit.evidence || hit.relationDescription || '暂无证据文本。'}</p>
+                          </article>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              ) : (
+                <p className="empty-summary">
+                  {kgEvidenceSearchQuery.trim() ? '没有匹配的图谱证据。' : '输入关键词后搜索图谱证据。'}
+                </p>
+              )}
+            </section>
+          )}
 
           {showKgReviewQueue && (
             <section className="kg-card kg-scanned-card">
@@ -2745,8 +3679,8 @@ function App() {
                             className="ghost-button"
                             onClick={() =>
                               isEntity
-                                ? setKgEntityEdit(item)
-                                : setKgRelationEdit(item)
+                                ? openKgEntityEdit(item)
+                                : openKgRelationEdit(item)
                             }
                           >
                             编辑
@@ -2827,6 +3761,136 @@ function App() {
                 </div>
               ) : (
                 <p className="empty-summary">还没有已扫描章节。</p>
+              )}
+            </section>
+          )}
+
+          {showKgBookGraph && (
+            <section className="kg-card kg-scanned-card">
+              <div className="kg-card-heading">
+                <div>
+                  <h3>图谱视图</h3>
+                  <p>按实体类型和关系类型查看当前书的限量关系图，默认展示人物之间的高频关系。</p>
+                </div>
+                <button type="button" className="ghost-button" onClick={() => setShowKgBookGraph(false)}>
+                  收起
+                </button>
+              </div>
+
+              <div className="kg-filter-bar kg-graph-filters">
+                <select
+                  value={kgBookGraphEntityTypeFilter}
+                  onChange={(event) => setKgBookGraphEntityTypeFilter(event.target.value)}
+                >
+                  <option value="">全部实体类型</option>
+                  <option value="character">人物图</option>
+                  <option value="sect">门派/组织图</option>
+                  <option value="item">道具/法宝图</option>
+                  <option value="skill">功法/法术图</option>
+                  <option value="location">地点图</option>
+                  <option value="beast">灵兽/妖兽图</option>
+                  <option value="event">事件图</option>
+                </select>
+                <select
+                  value={kgBookGraphRelationTypeFilter}
+                  onChange={(event) => setKgBookGraphRelationTypeFilter(event.target.value)}
+                >
+                  <option value="">全部关系类型</option>
+                  <option value="knows">认识</option>
+                  <option value="ally_of">盟友</option>
+                  <option value="enemy_of">敌对</option>
+                  <option value="master_of">师父</option>
+                  <option value="disciple_of">徒弟</option>
+                  <option value="member_of">成员</option>
+                  <option value="belongs_to">属于</option>
+                  <option value="owns">拥有</option>
+                  <option value="uses">使用</option>
+                  <option value="learns">学习</option>
+                  <option value="created_by">创造者</option>
+                  <option value="located_in">位于</option>
+                  <option value="appears_with">一起出现</option>
+                  <option value="transforms_into">转化为</option>
+                  <option value="related_to">相关</option>
+                </select>
+                <input
+                  type="search"
+                  placeholder="定位实体名称或别名"
+                  value={kgBookGraphSearch}
+                  onChange={(event) => setKgBookGraphSearch(event.target.value)}
+                />
+                <select
+                  value={kgBookGraphMaxNodes}
+                  onChange={(event) => setKgBookGraphMaxNodes(event.target.value)}
+                  disabled={Boolean(kgBookGraphSearch.trim())}
+                >
+                  <option value="40">核心 40</option>
+                  <option value="80">核心 80</option>
+                  <option value="140">核心 140</option>
+                  <option value="all">全部</option>
+                </select>
+                {(kgBookGraphEntityTypeFilter !== 'character' || kgBookGraphRelationTypeFilter || kgBookGraphSearch || kgBookGraphMaxNodes !== '80') && (
+                  <button
+                    type="button"
+                    className="ghost-button"
+                    onClick={() => {
+                      setKgBookGraphEntityTypeFilter('character')
+                      setKgBookGraphRelationTypeFilter('')
+                      setKgBookGraphSearch('')
+                      setKgBookGraphMaxNodes('80')
+                    }}
+                  >
+                    重置
+                  </button>
+                )}
+              </div>
+
+              <div className="kg-graph-canvas kg-book-graph-canvas">
+                {kgBookGraph && kgBookGraphNodes.length > 0 ? (
+                  <ReactFlow
+                    key={`${kgBookGraphEntityTypeFilter}-${kgBookGraphRelationTypeFilter}-${kgBookGraphSearch}-${kgBookGraphMaxNodes}`}
+                    nodes={kgBookGraphNodes}
+                    edges={kgBookGraphEdges}
+                    fitView
+                    fitViewOptions={{ padding: 0.18 }}
+                    minZoom={0.12}
+                    maxZoom={1.4}
+                    nodesDraggable
+                    onNodeClick={(_, node) => void openKgEntityDetail(node.id)}
+                    onEdgeClick={(_, edge) => void openKgRelationDetail(edge.id)}
+                  >
+                    <Background color="#e2d8ca" gap={24} />
+                    <Controls showInteractive={false} />
+                    <MiniMap
+                      nodeColor={(node) => getKgEntityColor((node.data as KgGraphNodeData).entity.type)}
+                      pannable
+                      zoomable
+                    />
+                  </ReactFlow>
+                ) : (
+                  <p className="empty-summary">当前筛选下没有可展示的关系。</p>
+                )}
+              </div>
+
+              {kgBookGraph && (
+                <div className="kg-graph-legend">
+                  <span>
+                    节点 {kgVisibleBookGraph.entities.length}/{kgBookGraph.entities.length}
+                  </span>
+                  <span>
+                    关系 {kgVisibleBookGraph.relations.length}/{kgBookGraph.relations.length}
+                  </span>
+                  {kgBookGraphSearch.trim() && (
+                    <span>
+                      匹配 {kgVisibleBookGraph.matchingEntityIds.size}
+                    </span>
+                  )}
+                  {Array.from(new Set(kgBookGraph.entities.map((entity) => entity.type))).map((type) => (
+                    <span key={type}>
+                      <i style={{ background: getKgEntityColor(type) }} />
+                      {getKgEntityTypeLabel(type)}
+                    </span>
+                  ))}
+                </div>
               )}
             </section>
           )}
@@ -2970,7 +4034,7 @@ function App() {
                   <button
                     type="button"
                     className="ghost-button"
-                    onClick={() => setKgEntityEdit(kgEntityDetail.entity)}
+                    onClick={() => openKgEntityEdit(kgEntityDetail.entity)}
                   >
                     编辑
                   </button>
@@ -2980,6 +4044,16 @@ function App() {
                     onClick={() => openKgMergeModal(kgEntityDetail.entity)}
                   >
                     合并
+                  </button>
+                  <button
+                    type="button"
+                    className="ghost-button"
+                    onClick={() => {
+                      setShowKgGraph((current) => !current)
+                      if (!showKgGraph) void fetchKgNeighborhood(kgEntityDetail.entity.id)
+                    }}
+                  >
+                    关系图
                   </button>
                   <button
                     type="button"
@@ -3008,6 +4082,94 @@ function App() {
                 </div>
               </div>
               {kgEntityDetail.entity.description && <p>{kgEntityDetail.entity.description}</p>}
+              {showKgGraph && (
+                <div className="kg-graph-panel">
+                  <div className="kg-filter-bar kg-graph-filters">
+                    <select
+                      value={kgGraphEntityTypeFilter}
+                      onChange={(event) => setKgGraphEntityTypeFilter(event.target.value)}
+                    >
+                      <option value="">全部实体类型</option>
+                      <option value="character">人物</option>
+                      <option value="sect">门派/组织</option>
+                      <option value="item">道具/法宝</option>
+                      <option value="skill">功法/法术</option>
+                      <option value="location">地点</option>
+                      <option value="beast">灵兽/妖兽</option>
+                      <option value="event">事件</option>
+                      <option value="other">其他</option>
+                    </select>
+                    <select
+                      value={kgGraphRelationTypeFilter}
+                      onChange={(event) => setKgGraphRelationTypeFilter(event.target.value)}
+                    >
+                      <option value="">全部关系类型</option>
+                      <option value="knows">认识</option>
+                      <option value="ally_of">盟友</option>
+                      <option value="enemy_of">敌对</option>
+                      <option value="master_of">师父</option>
+                      <option value="disciple_of">徒弟</option>
+                      <option value="member_of">成员</option>
+                      <option value="belongs_to">属于</option>
+                      <option value="owns">拥有</option>
+                      <option value="uses">使用</option>
+                      <option value="learns">学习</option>
+                      <option value="created_by">创造者</option>
+                      <option value="located_in">位于</option>
+                      <option value="appears_with">一起出现</option>
+                      <option value="transforms_into">转化为</option>
+                      <option value="related_to">相关</option>
+                    </select>
+                    {(kgGraphEntityTypeFilter || kgGraphRelationTypeFilter) && (
+                      <button
+                        type="button"
+                        className="ghost-button"
+                        onClick={() => {
+                          setKgGraphEntityTypeFilter('')
+                          setKgGraphRelationTypeFilter('')
+                        }}
+                      >
+                        清除
+                      </button>
+                    )}
+                  </div>
+                  <div className="kg-graph-canvas">
+                    {kgNeighborhood && kgGraphNodes.length > 0 ? (
+                      <ReactFlow
+                        nodes={kgGraphNodes}
+                        edges={kgGraphEdges}
+                        fitView
+                        fitViewOptions={{ padding: 0.25 }}
+                        minZoom={0.25}
+                        maxZoom={1.6}
+                        nodesDraggable
+                        onNodeClick={(_, node) => void openKgEntityDetail(node.id)}
+                        onEdgeClick={(_, edge) => void openKgRelationDetail(edge.id)}
+                      >
+                        <Background color="#e2d8ca" gap={20} />
+                        <Controls showInteractive={false} />
+                        <MiniMap
+                          nodeColor={(node) => getKgEntityColor((node.data as KgGraphNodeData).entity.type)}
+                          pannable
+                          zoomable
+                        />
+                      </ReactFlow>
+                    ) : (
+                      <p className="empty-summary">没有可展示的关系。</p>
+                    )}
+                  </div>
+                  {kgNeighborhood && (
+                    <div className="kg-graph-legend">
+                      {kgNeighborhood.entities.map((entity) => (
+                        <span key={entity.id}>
+                          <i style={{ background: getKgEntityColor(entity.type) }} />
+                          {getKgEntityTypeLabel(entity.type)}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
               <div className="kg-detail-grid">
                 <div>
                   <h4>出现章节</h4>
@@ -3134,7 +4296,7 @@ function App() {
                   <button
                     type="button"
                     className="ghost-button"
-                    onClick={() => setKgRelationEdit(kgRelationDetail.relation)}
+                    onClick={() => openKgRelationEdit(kgRelationDetail.relation)}
                   >
                     编辑关系
                   </button>
@@ -3320,7 +4482,7 @@ function App() {
                     onClick={() => void scanSelectedKnowledgeGraphChapters({ overwriteCompleted: kgScanOverwriteCompleted })}
                   >
                     {kgScanOverwriteCompleted
-                      ? `覆盖重扫 ${getSelectedKgScanChapters().length} 章`
+                      ? `预览覆盖重扫 ${getSelectedKgScanChapters().length} 章`
                       : `开始扫描 ${getPendingKgScanChapters().length} 章`}
                   </button>
                   <button
@@ -3368,88 +4530,39 @@ function App() {
               <p>“重放已保存 JSON”不会调用模型，只会用现有章节抽取结果重建图谱写入。</p>
               {kgScanProgress && <p>{kgScanProgress}</p>}
             </div>
-          </section>
 
-          <div className="kg-grid">
-            <section className="kg-card">
-              <h3>当前章节中间结果</h3>
-              <p>
-                当前章节：{activeChapter ? `${activeChapter.title}（第 ${activeChapter.index} 章）` : '未选择'}
-              </p>
-              <textarea
-                value={kgExtractionText}
-                placeholder={`粘贴章节抽取 JSON，例如：\n{\n  "entities": [\n    {"name": "韩立", "type": "character", "aliases": [], "description": "本章人物", "confidence": 0.9, "evidence": ["原文短句"]}\n  ],\n  "relations": []\n}`}
-                onChange={(event) => setKgExtractionText(event.target.value)}
-              />
+            <div className="kg-advanced-actions">
               <button
                 type="button"
-                disabled={!activeChapter || !kgExtractionText.trim()}
-                onClick={() => void saveCurrentChapterExtraction()}
+                className="ghost-button"
+                onClick={() => setShowKgManualExtraction((current) => !current)}
               >
-                保存到图谱
+                {showKgManualExtraction ? '收起手动 JSON' : '手动 JSON'}
               </button>
-              {kgError && <p className="error">{kgError}</p>}
-            </section>
+            </div>
 
-            <section className="kg-card">
-              <h3>实体列表</h3>
-              <div className="kg-filter-bar">
-                <input
-                  type="text"
-                  placeholder="搜索实体名称或别名"
-                  value={kgEntitySearch}
-                  onChange={(event) => setKgEntitySearch(event.target.value)}
+            {showKgManualExtraction && (
+              <div className="kg-manual-extraction">
+                <h4>当前章节 JSON</h4>
+                <p>
+                  当前章节：{activeChapter ? `${activeChapter.title}（第 ${activeChapter.index} 章）` : '未选择'}
+                </p>
+                <textarea
+                  value={kgExtractionText}
+                  placeholder={`粘贴章节抽取 JSON，例如：\n{\n  "entities": [\n    {"name": "韩立", "type": "character", "aliases": [], "description": "本章人物", "confidence": 0.9, "evidence": ["原文短句"]}\n  ],\n  "relations": []\n}`}
+                  onChange={(event) => setKgExtractionText(event.target.value)}
                 />
-                <select
-                  value={kgEntityTypeFilter}
-                  onChange={(event) => setKgEntityTypeFilter(event.target.value)}
+                <button
+                  type="button"
+                  disabled={!activeChapter || !kgExtractionText.trim()}
+                  onClick={() => void saveCurrentChapterExtraction()}
                 >
-                  <option value="">全部类型</option>
-                  <option value="character">人物</option>
-                  <option value="sect">门派/组织</option>
-                  <option value="item">道具/法宝</option>
-                  <option value="skill">功法/法术</option>
-                  <option value="location">地点</option>
-                  <option value="beast">灵兽/妖兽</option>
-                </select>
-                {(kgEntitySearch || kgEntityTypeFilter) && (
-                  <button
-                    type="button"
-                    className="ghost-button"
-                    onClick={() => {
-                      setKgEntitySearch('')
-                      setKgEntityTypeFilter('')
-                    }}
-                  >
-                    清除
-                  </button>
-                )}
+                  预览并保存到图谱
+                </button>
+                {kgError && <p className="error">{kgError}</p>}
               </div>
-              {kgEntities.length ? (
-                <div className="kg-entity-list">
-                  {kgEntities.map((entity) => (
-                    <button
-                      type="button"
-                      className="kg-entity-row kg-clickable-row"
-                      key={entity.id}
-                      onClick={() => void openKgEntityDetail(entity.id)}
-                    >
-                      <div>
-                        <strong>{entity.name}</strong>
-                        <span>{entity.type}</span>
-                      </div>
-                      <p>
-                        出现 {entity.mentionCount} 次
-                        {entity.aliases.length ? ` · 别名 ${entity.aliases.join('、')}` : ''}
-                      </p>
-                    </button>
-                  ))}
-                </div>
-              ) : (
-                <p className="empty-summary">还没有实体。先保存一个章节抽取 JSON，后续会接入自动扫描。</p>
-              )}
-            </section>
-          </div>
+            )}
+          </section>
         </section>
       ) : state.book ? (
         <section className="reader-layout">
