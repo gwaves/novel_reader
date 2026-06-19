@@ -218,6 +218,36 @@ type KgScanJob = {
   updatedAt: string
 }
 
+type RagSearchResult = {
+  chapterId: string
+  chapterIndex: number
+  chapterTitle: string
+  summary: {
+    short: string
+    detail: string
+    keyPoints: string[]
+  }
+  similarity: number
+  matchType: 'vector' | 'entity' | 'both'
+  matchedEntities: string[]
+  contentSnippet: string | null
+}
+
+type RagEntityMatch = {
+  entityId: string
+  entityName: string
+  entityType: string
+  firstChapterIndex: number | null
+  lastChapterIndex: number | null
+}
+
+type EmbeddingStatus = {
+  totalChapters: number
+  embeddedChapters: number
+  missingChapters: number
+  model: string
+}
+
 function buildKnowledgeGraphPrompt(chapter: Chapter): string {
   return `你是长篇小说知识图谱抽取器。请从章节中抽取人物、门派/组织、道具/法宝、功法/法术、地点、灵兽/妖兽、重要事件，以及它们之间的关系。
 
@@ -495,6 +525,19 @@ function App() {
   const [kgReviewKind, setKgReviewKind] = useState<'all' | 'entity' | 'relation'>('all')
   const [kgReviewSelectedIds, setKgReviewSelectedIds] = useState<string[]>([])
 
+  const [ragQuery, setRagQuery] = useState('')
+  const [ragResults, setRagResults] = useState<RagSearchResult[]>([])
+  const [ragEntityMatches, setRagEntityMatches] = useState<RagEntityMatch[]>([])
+  const [ragAnswer, setRagAnswer] = useState('')
+  const [ragIsSearching, setRagIsSearching] = useState(false)
+  const [ragIsGeneratingAnswer, setRagIsGeneratingAnswer] = useState(false)
+  const [ragTopK, setRagTopK] = useState(10)
+  const [ragIncludeSnippets, setRagIncludeSnippets] = useState(true)
+  const [embeddingStatus, setEmbeddingStatus] = useState<EmbeddingStatus | null>(null)
+  const [isGeneratingEmbeddings, setIsGeneratingEmbeddings] = useState(false)
+  const [embeddingProgress, setEmbeddingProgress] = useState('')
+  const [ragError, setRagError] = useState('')
+
   const {
     state,
     setState,
@@ -676,6 +719,13 @@ function App() {
 
     return () => window.cancelAnimationFrame(frame)
   }, [state.book, activeChapter?.id, activeChapter?.index])
+
+  useEffect(() => {
+    if (view !== 'search' || !state.book) return
+
+    void fetchEmbeddingStatus()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [view, state.book?.id])
 
   async function checkKgScanStatus() {
     if (!state.book) return
@@ -1601,6 +1651,244 @@ function App() {
     }
   }
 
+  function getEmbeddingConfig() {
+    const provider = state.embeddingProvider
+    const model = state.embeddingModel.trim()
+    if (provider === 'openai') {
+      const config = activeOpenAIConfig
+      if (!config) return null
+      return {
+        provider: 'openai' as const,
+        model: config.embeddingModel?.trim() || config.model.trim(),
+        baseUrl: config.baseUrl.trim(),
+        apiKey: config.apiKey,
+      }
+    }
+    return {
+      provider: 'ollama' as const,
+      model,
+      baseUrl: 'http://localhost:11434',
+      apiKey: '',
+    }
+  }
+
+  async function fetchEmbeddingStatus() {
+    if (!state.book) return
+
+    const config = getEmbeddingConfig()
+    if (!config) {
+      setEmbeddingStatus(null)
+      return
+    }
+
+    try {
+      const response = await fetch(
+        `/api/rag/embeddings/status?bookId=${encodeURIComponent(state.book.id)}&model=${encodeURIComponent(config.model)}`,
+      )
+      if (!response.ok) throw new Error('读取 embedding 状态失败。')
+      setEmbeddingStatus((await response.json()) as EmbeddingStatus)
+    } catch (err) {
+      setRagError(err instanceof Error ? err.message : '读取 embedding 状态失败。')
+    }
+  }
+
+  async function handleGenerateEmbeddings() {
+    if (!state.book) return
+
+    const config = getEmbeddingConfig()
+    if (!config) {
+      setRagError('请先配置 embedding 模型。')
+      return
+    }
+
+    setIsGeneratingEmbeddings(true)
+    setRagError('')
+    setEmbeddingProgress('准备生成 embedding...')
+
+    try {
+      const response = await fetch('/api/rag/embeddings/batch', {
+        body: JSON.stringify({
+          bookId: state.book.id,
+          provider: config.provider,
+          model: config.model,
+          baseUrl: config.baseUrl,
+          apiKey: config.apiKey,
+        }),
+        headers: { 'Content-Type': 'application/json' },
+        method: 'POST',
+      })
+
+      const payload = (await response.json()) as { completed: number; failed: number; total: number; error?: string }
+      if (!response.ok) {
+        throw new Error(payload.error ?? '生成 embedding 失败。')
+      }
+
+      setEmbeddingProgress(`已生成 ${payload.completed}/${payload.total}，失败 ${payload.failed} 个。`)
+      await fetchEmbeddingStatus()
+    } catch (err) {
+      setRagError(err instanceof Error ? err.message : '生成 embedding 失败。')
+    } finally {
+      setIsGeneratingEmbeddings(false)
+    }
+  }
+
+  async function handleRagSearch() {
+    if (!state.book || !ragQuery.trim()) return
+
+    const config = getEmbeddingConfig()
+    if (!config) {
+      setRagError('请先配置 embedding 模型。')
+      return
+    }
+
+    setRagIsSearching(true)
+    setRagError('')
+    setRagResults([])
+    setRagEntityMatches([])
+    setRagAnswer('')
+
+    try {
+      const response = await fetch('/api/rag/search', {
+        body: JSON.stringify({
+          bookId: state.book.id,
+          query: ragQuery.trim(),
+          topK: ragTopK,
+          includeSnippets: ragIncludeSnippets,
+          provider: config.provider,
+          model: config.model,
+          baseUrl: config.baseUrl,
+          apiKey: config.apiKey,
+        }),
+        headers: { 'Content-Type': 'application/json' },
+        method: 'POST',
+      })
+
+      if (response.status === 409) {
+        const payload = (await response.json()) as { error?: string; embeddedCount?: number; totalChapters?: number }
+        setRagError(
+          `${payload.error ?? 'embedding 未就绪'}（${payload.embeddedCount ?? 0}/${payload.totalChapters ?? 0}）。请先点击「生成 embedding」。`,
+        )
+        return
+      }
+
+      if (!response.ok) {
+        const payload = (await response.json()) as { error?: string }
+        throw new Error(payload.error ?? '搜索失败。')
+      }
+
+      const payload = (await response.json()) as { results: RagSearchResult[]; entityMatches: RagEntityMatch[] }
+      setRagResults(payload.results)
+      setRagEntityMatches(payload.entityMatches)
+    } catch (err) {
+      setRagError(err instanceof Error ? err.message : '搜索失败。')
+    } finally {
+      setRagIsSearching(false)
+    }
+  }
+
+  function buildRagAnswerPrompt(question: string, results: RagSearchResult[]): string {
+    const sorted = [...results].sort((a, b) => a.chapterIndex - b.chapterIndex)
+    const context = sorted
+      .map((result) => {
+        const lines = [`[第 ${result.chapterIndex} 章] ${result.chapterTitle}`]
+        if (result.summary.detail) lines.push(`摘要：${result.summary.detail}`)
+        if (result.contentSnippet) lines.push(`原文片段：${result.contentSnippet}`)
+        return lines.join('\n')
+      })
+      .join('\n\n')
+
+    return `你是长篇小说阅读助手。请根据以下按章节顺序排列的相关内容回答问题。回答要简洁准确，并引用章节号。如果信息不足，请明确说明。
+
+问题：${question}
+
+相关内容：
+${context}
+
+请给出回答：`
+  }
+
+  async function generateRagAnswerWithOllama(prompt: string, model: string, temperature: number): Promise<string> {
+    const response = await fetch('http://localhost:11434/api/generate', {
+      body: JSON.stringify({
+        model: model.trim(),
+        prompt,
+        stream: false,
+        options: { temperature },
+      }),
+      headers: { 'Content-Type': 'application/json' },
+      method: 'POST',
+    })
+
+    if (!response.ok) {
+      const body = await response.text()
+      throw new Error(`Ollama 返回 ${response.status}：${body || '请求失败'}`)
+    }
+
+    const data = (await response.json()) as { response?: string }
+    return (data.response ?? '').trim()
+  }
+
+  async function generateRagAnswerWithOpenAI(prompt: string, config: OpenAIConfig): Promise<string> {
+    const normalizedBaseUrl = config.baseUrl.trim().replace(/\/+$/, '')
+    if (!normalizedBaseUrl) throw new Error('请先填写 OpenAI-compatible Base URL。')
+    if (!config.model.trim()) throw new Error('请先填写 OpenAI-compatible Model Name。')
+
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+    if (config.apiKey.trim()) {
+      headers.Authorization = `Bearer ${config.apiKey.trim()}`
+    }
+
+    const requestBody: Record<string, unknown> = {
+      model: config.model.trim(),
+      messages: [
+        { role: 'system', content: '你是长篇网络小说陪读助手。请直接回答问题，不需要输出 JSON。' },
+        { role: 'user', content: prompt },
+      ],
+      temperature: config.temperature,
+    }
+
+    if (!config.thinkingEnabled) {
+      requestBody.chat_template_kwargs = { enable_thinking: false }
+    }
+
+    const response = await fetch(`${normalizedBaseUrl}/chat/completions`, {
+      body: JSON.stringify(requestBody),
+      headers,
+      method: 'POST',
+    })
+
+    if (!response.ok) {
+      const body = await response.text()
+      throw new Error(`OpenAI 返回 ${response.status}：${body || '请求失败'}`)
+    }
+
+    const data = (await response.json()) as { choices?: { message?: { content?: string } }[] }
+    return (data.choices?.[0]?.message?.content ?? '').trim()
+  }
+
+  async function handleGenerateRagAnswer() {
+    if (!ragQuery.trim() || ragResults.length === 0) return
+
+    setRagIsGeneratingAnswer(true)
+    setRagError('')
+
+    try {
+      const prompt = buildRagAnswerPrompt(ragQuery.trim(), ragResults)
+      let answer = ''
+      if (state.aiProvider === 'openai') {
+        if (!activeOpenAIConfig) throw new Error('请先配置外部模型。')
+        answer = await generateRagAnswerWithOpenAI(prompt, activeOpenAIConfig)
+      } else {
+        answer = await generateRagAnswerWithOllama(prompt, state.ollamaModel, state.ollamaTemperature)
+      }
+      setRagAnswer(answer)
+    } catch (err) {
+      setRagError(err instanceof Error ? err.message : '生成答案失败。')
+    } finally {
+      setRagIsGeneratingAnswer(false)
+    }
+  }
+
   async function generateKnowledgeGraphExtraction(chapter: Chapter): Promise<{ extraction: unknown; model: string }> {
     if (state.aiProvider === 'openai') {
       if (!activeOpenAIConfig) throw new Error('请先配置外部模型。')
@@ -2183,6 +2471,9 @@ function App() {
               <button type="button" className="ghost-button home-button" onClick={() => setView('knowledge')}>
                 知识图谱
               </button>
+              <button type="button" className="ghost-button home-button" onClick={() => setView('search')}>
+                智能搜索
+              </button>
             </div>
           )}
           <span>{activeProviderLabel}</span>
@@ -2320,6 +2611,36 @@ function App() {
                       ? `已发现 ${ollamaModels.length} 个本地模型。保存前会实际测试一次。`
                       : '未自动发现模型，可手动填写；保存前会实际测试一次。'}
                   </small>
+                  <label htmlFor="draft-embedding-provider">Embedding 提供商</label>
+                  <select
+                    id="draft-embedding-provider"
+                    value={modelConfigDraft.embeddingProvider}
+                    disabled={isTestingConfig}
+                    onChange={(event) =>
+                      setModelConfigDraft((current) => ({
+                        ...current,
+                        embeddingProvider: event.target.value as AIProvider,
+                      }))
+                    }
+                  >
+                    <option value="ollama">Ollama 本地</option>
+                    <option value="openai">OpenAI-compatible</option>
+                  </select>
+                  <small>生成章节摘要 embedding 使用的提供商。</small>
+                  <label htmlFor="draft-ollama-embedding-model">Embedding 模型</label>
+                  <input
+                    id="draft-ollama-embedding-model"
+                    value={modelConfigDraft.embeddingModel}
+                    disabled={isTestingConfig}
+                    placeholder="例如 nomic-embed-text"
+                    onChange={(event) =>
+                      setModelConfigDraft((current) => ({
+                        ...current,
+                        embeddingModel: event.target.value,
+                      }))
+                    }
+                  />
+                  <small>用于 RAG 搜索的 embedding 模型。</small>
                 </>
               ) : (
                 <>
@@ -2430,6 +2751,15 @@ function App() {
                       ? '当前外部模型会发送 /think，但最终仍要求只输出 JSON'
                       : '当前外部模型会发送 /no_think，适合不需要思考模式的模型'}
                   </small>
+                  <label htmlFor="draft-openai-embedding-model">当前外部模型 Embedding 模型（可选）</label>
+                  <input
+                    id="draft-openai-embedding-model"
+                    value={draftActiveOpenAIConfig?.embeddingModel ?? ''}
+                    disabled={isTestingConfig}
+                    placeholder="例如 text-embedding-3-small"
+                    onChange={(event) => updateActiveOpenAIConfig({ embeddingModel: event.target.value })}
+                  />
+                  <small>用于 RAG 搜索的 embedding 模型；留空则使用上面的 Model Name。</small>
                   <button
                     type="button"
                     className="ghost-button danger-button"
@@ -4563,6 +4893,136 @@ function App() {
               </div>
             )}
           </section>
+        </section>
+      ) : view === 'search' && state.book ? (
+        <section className="search-panel">
+          <div className="search-heading">
+            <div>
+              <p className="eyebrow">智能搜索</p>
+              <h2>{state.book.title}</h2>
+              <p>基于章节摘要和知识图谱，回答跨章节问题。</p>
+            </div>
+          </div>
+
+          {embeddingStatus && (
+            <div className="embedding-status">
+              <span>
+                Embedding 覆盖：{embeddingStatus.embeddedChapters}/{embeddingStatus.totalChapters} 章
+                {embeddingStatus.missingChapters > 0 && `（还差 ${embeddingStatus.missingChapters} 章）`}
+              </span>
+              {embeddingStatus.missingChapters > 0 && (
+                <button
+                  type="button"
+                  onClick={() => void handleGenerateEmbeddings()}
+                  disabled={isGeneratingEmbeddings}
+                >
+                  {isGeneratingEmbeddings ? '生成中...' : '生成 embedding'}
+                </button>
+              )}
+              {embeddingProgress && <small>{embeddingProgress}</small>}
+            </div>
+          )}
+
+          <div className="search-input-area">
+            <input
+              type="text"
+              placeholder="例如：某某功法第一次出现在哪里"
+              value={ragQuery}
+              onChange={(event) => setRagQuery(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') void handleRagSearch()
+              }}
+            />
+            <button type="button" onClick={() => void handleRagSearch()} disabled={ragIsSearching}>
+              {ragIsSearching ? '搜索中...' : '搜索'}
+            </button>
+          </div>
+
+          <div className="search-options">
+            <label>
+              Top-K
+              <input
+                type="number"
+                min={3}
+                max={50}
+                value={ragTopK}
+                onChange={(event) => setRagTopK(Number(event.target.value))}
+              />
+            </label>
+            <label>
+              <input
+                type="checkbox"
+                checked={ragIncludeSnippets}
+                onChange={(event) => setRagIncludeSnippets(event.target.checked)}
+              />
+              包含原文片段
+            </label>
+          </div>
+
+          {ragEntityMatches.length > 0 && (
+            <div className="entity-tags">
+              <span style={{ color: '#5e5549', fontSize: '14px' }}>识别到实体：</span>
+              {ragEntityMatches.map((entity) => (
+                <span className="entity-tag" key={entity.entityId}>
+                  {entity.entityName}
+                </span>
+              ))}
+            </div>
+          )}
+
+          {ragError && <p className="error">{ragError}</p>}
+
+          {ragAnswer && (
+            <div className="search-answer">
+              <p className="eyebrow">AI 回答</p>
+              <div className="search-answer-content">{ragAnswer}</div>
+            </div>
+          )}
+
+          {ragResults.length > 0 && (
+            <div className="search-results">
+              <div className="search-results-header">
+                <h3>相关章节（{ragResults.length}）</h3>
+                <button
+                  type="button"
+                  onClick={() => void handleGenerateRagAnswer()}
+                  disabled={ragIsGeneratingAnswer}
+                >
+                  {ragIsGeneratingAnswer ? '生成中...' : '生成答案'}
+                </button>
+              </div>
+              {ragResults.map((result) => (
+                <div className="search-result-card" key={result.chapterId}>
+                  <div className="search-result-header">
+                    <button
+                      type="button"
+                      className="ghost-button"
+                      onClick={() => {
+                        updateActiveChapter(result.chapterId)
+                        setView('reader')
+                      }}
+                    >
+                      第 {result.chapterIndex} 章：{result.chapterTitle}
+                    </button>
+                    <span className={`match-type ${result.matchType}`}>
+                      {result.matchType === 'vector' ? '语义' : result.matchType === 'entity' ? '实体' : '混合'}
+                    </span>
+                  </div>
+                  {result.matchedEntities.length > 0 && (
+                    <div className="entity-tags">
+                      {result.matchedEntities.map((name) => (
+                        <span className="entity-tag" key={name}>
+                          {name}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                  <p className="search-result-summary">{result.summary.detail}</p>
+                  {result.contentSnippet && <p className="search-result-snippet">{result.contentSnippet}...</p>}
+                </div>
+              ))}
+            </div>
+          )}
         </section>
       ) : state.book ? (
         <section className="reader-layout">

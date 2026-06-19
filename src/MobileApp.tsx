@@ -1,7 +1,37 @@
 import { useEffect, useRef, useState } from 'react'
 import { useReaderState } from './hooks/useReaderState.ts'
-import type { AIProvider, ImportEncoding } from './hooks/useReaderState.ts'
+import type { AIProvider, ImportEncoding, OpenAIConfig } from './hooks/useReaderState.ts'
 import './MobileApp.css'
+
+type RagSearchResult = {
+  chapterId: string
+  chapterIndex: number
+  chapterTitle: string
+  summary: {
+    short: string
+    detail: string
+    keyPoints: string[]
+  }
+  similarity: number
+  matchType: 'vector' | 'entity' | 'both'
+  matchedEntities: string[]
+  contentSnippet: string | null
+}
+
+type RagEntityMatch = {
+  entityId: string
+  entityName: string
+  entityType: string
+  firstChapterIndex: number | null
+  lastChapterIndex: number | null
+}
+
+type EmbeddingStatus = {
+  totalChapters: number
+  embeddedChapters: number
+  missingChapters: number
+  model: string
+}
 
 function MobileApp() {
   const readerRef = useRef<HTMLDivElement | null>(null)
@@ -59,6 +89,19 @@ function MobileApp() {
 
   const [showSearch, setShowSearch] = useState(false)
 
+  const [ragQuery, setRagQuery] = useState('')
+  const [ragResults, setRagResults] = useState<RagSearchResult[]>([])
+  const [ragEntityMatches, setRagEntityMatches] = useState<RagEntityMatch[]>([])
+  const [ragAnswer, setRagAnswer] = useState('')
+  const [ragIsSearching, setRagIsSearching] = useState(false)
+  const [ragIsGeneratingAnswer, setRagIsGeneratingAnswer] = useState(false)
+  const [ragTopK, setRagTopK] = useState(10)
+  const [ragIncludeSnippets, setRagIncludeSnippets] = useState(true)
+  const [embeddingStatus, setEmbeddingStatus] = useState<EmbeddingStatus | null>(null)
+  const [isGeneratingEmbeddings, setIsGeneratingEmbeddings] = useState(false)
+  const [embeddingProgress, setEmbeddingProgress] = useState('')
+  const [ragError, setRagError] = useState('')
+
   useEffect(() => {
     if (mobileTab === 'reader' && activeChapter) {
       requestAnimationFrame(() => {
@@ -81,6 +124,251 @@ function MobileApp() {
   function handleNavigateNext() {
     navigateToNextChapter()
   }
+
+  function getEmbeddingConfig() {
+    const provider = state.embeddingProvider
+    const model = state.embeddingModel.trim()
+    if (provider === 'openai') {
+      const config = draftActiveOpenAIConfig
+      if (!config) return null
+      return {
+        provider: 'openai' as const,
+        model: config.embeddingModel?.trim() || config.model.trim(),
+        baseUrl: config.baseUrl.trim(),
+        apiKey: config.apiKey,
+      }
+    }
+    return {
+      provider: 'ollama' as const,
+      model,
+      baseUrl: 'http://localhost:11434',
+      apiKey: '',
+    }
+  }
+
+  async function fetchEmbeddingStatus() {
+    if (!state.book) return
+
+    const config = getEmbeddingConfig()
+    if (!config) {
+      setEmbeddingStatus(null)
+      return
+    }
+
+    try {
+      const response = await fetch(
+        `/api/rag/embeddings/status?bookId=${encodeURIComponent(state.book.id)}&model=${encodeURIComponent(config.model)}`,
+      )
+      if (!response.ok) throw new Error('读取 embedding 状态失败。')
+      setEmbeddingStatus((await response.json()) as EmbeddingStatus)
+    } catch (err) {
+      setRagError(err instanceof Error ? err.message : '读取 embedding 状态失败。')
+    }
+  }
+
+  async function handleGenerateEmbeddings() {
+    if (!state.book) return
+
+    const config = getEmbeddingConfig()
+    if (!config) {
+      setRagError('请先配置 embedding 模型。')
+      return
+    }
+
+    setIsGeneratingEmbeddings(true)
+    setRagError('')
+    setEmbeddingProgress('准备生成 embedding...')
+
+    try {
+      const response = await fetch('/api/rag/embeddings/batch', {
+        body: JSON.stringify({
+          bookId: state.book.id,
+          provider: config.provider,
+          model: config.model,
+          baseUrl: config.baseUrl,
+          apiKey: config.apiKey,
+        }),
+        headers: { 'Content-Type': 'application/json' },
+        method: 'POST',
+      })
+
+      const payload = (await response.json()) as { completed: number; failed: number; total: number; error?: string }
+      if (!response.ok) {
+        throw new Error(payload.error ?? '生成 embedding 失败。')
+      }
+
+      setEmbeddingProgress(`已生成 ${payload.completed}/${payload.total}，失败 ${payload.failed} 个。`)
+      await fetchEmbeddingStatus()
+    } catch (err) {
+      setRagError(err instanceof Error ? err.message : '生成 embedding 失败。')
+    } finally {
+      setIsGeneratingEmbeddings(false)
+    }
+  }
+
+  async function handleRagSearch() {
+    if (!state.book || !ragQuery.trim()) return
+
+    const config = getEmbeddingConfig()
+    if (!config) {
+      setRagError('请先配置 embedding 模型。')
+      return
+    }
+
+    setRagIsSearching(true)
+    setRagError('')
+    setRagResults([])
+    setRagEntityMatches([])
+    setRagAnswer('')
+
+    try {
+      const response = await fetch('/api/rag/search', {
+        body: JSON.stringify({
+          bookId: state.book.id,
+          query: ragQuery.trim(),
+          topK: ragTopK,
+          includeSnippets: ragIncludeSnippets,
+          provider: config.provider,
+          model: config.model,
+          baseUrl: config.baseUrl,
+          apiKey: config.apiKey,
+        }),
+        headers: { 'Content-Type': 'application/json' },
+        method: 'POST',
+      })
+
+      if (response.status === 409) {
+        const payload = (await response.json()) as { error?: string; embeddedCount?: number; totalChapters?: number }
+        setRagError(
+          `${payload.error ?? 'embedding 未就绪'}（${payload.embeddedCount ?? 0}/${payload.totalChapters ?? 0}）。请先点击「生成 embedding」。`,
+        )
+        return
+      }
+
+      if (!response.ok) {
+        const payload = (await response.json()) as { error?: string }
+        throw new Error(payload.error ?? '搜索失败。')
+      }
+
+      const payload = (await response.json()) as { results: RagSearchResult[]; entityMatches: RagEntityMatch[] }
+      setRagResults(payload.results)
+      setRagEntityMatches(payload.entityMatches)
+    } catch (err) {
+      setRagError(err instanceof Error ? err.message : '搜索失败。')
+    } finally {
+      setRagIsSearching(false)
+    }
+  }
+
+  function buildRagAnswerPrompt(question: string, results: RagSearchResult[]): string {
+    const sorted = [...results].sort((a, b) => a.chapterIndex - b.chapterIndex)
+    const context = sorted
+      .map((result) => {
+        const lines = [`[第 ${result.chapterIndex} 章] ${result.chapterTitle}`]
+        if (result.summary.detail) lines.push(`摘要：${result.summary.detail}`)
+        if (result.contentSnippet) lines.push(`原文片段：${result.contentSnippet}`)
+        return lines.join('\n')
+      })
+      .join('\n\n')
+
+    return `你是长篇小说阅读助手。请根据以下按章节顺序排列的相关内容回答问题。回答要简洁准确，并引用章节号。如果信息不足，请明确说明。
+
+问题：${question}
+
+相关内容：
+${context}
+
+请给出回答：`
+  }
+
+  async function generateRagAnswerWithOllama(prompt: string, model: string, temperature: number): Promise<string> {
+    const response = await fetch('http://localhost:11434/api/generate', {
+      body: JSON.stringify({
+        model: model.trim(),
+        prompt,
+        stream: false,
+        options: { temperature },
+      }),
+      headers: { 'Content-Type': 'application/json' },
+      method: 'POST',
+    })
+
+    if (!response.ok) {
+      const body = await response.text()
+      throw new Error(`Ollama 返回 ${response.status}：${body || '请求失败'}`)
+    }
+
+    const data = (await response.json()) as { response?: string }
+    return (data.response ?? '').trim()
+  }
+
+  async function generateRagAnswerWithOpenAI(prompt: string, config: OpenAIConfig): Promise<string> {
+    const normalizedBaseUrl = config.baseUrl.trim().replace(/\/+$/, '')
+    if (!normalizedBaseUrl) throw new Error('请先填写 OpenAI-compatible Base URL。')
+    if (!config.model.trim()) throw new Error('请先填写 OpenAI-compatible Model Name。')
+
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' }
+    if (config.apiKey.trim()) {
+      headers.Authorization = `Bearer ${config.apiKey.trim()}`
+    }
+
+    const requestBody: Record<string, unknown> = {
+      model: config.model.trim(),
+      messages: [
+        { role: 'system', content: '你是长篇网络小说陪读助手。请直接回答问题，不需要输出 JSON。' },
+        { role: 'user', content: prompt },
+      ],
+      temperature: config.temperature,
+    }
+
+    if (!config.thinkingEnabled) {
+      requestBody.chat_template_kwargs = { enable_thinking: false }
+    }
+
+    const response = await fetch(`${normalizedBaseUrl}/chat/completions`, {
+      body: JSON.stringify(requestBody),
+      headers,
+      method: 'POST',
+    })
+
+    if (!response.ok) {
+      const body = await response.text()
+      throw new Error(`OpenAI 返回 ${response.status}：${body || '请求失败'}`)
+    }
+
+    const data = (await response.json()) as { choices?: { message?: { content?: string } }[] }
+    return (data.choices?.[0]?.message?.content ?? '').trim()
+  }
+
+  async function handleGenerateRagAnswer() {
+    if (!ragQuery.trim() || ragResults.length === 0) return
+
+    setRagIsGeneratingAnswer(true)
+    setRagError('')
+
+    try {
+      const prompt = buildRagAnswerPrompt(ragQuery.trim(), ragResults)
+      let answer = ''
+      if (state.aiProvider === 'openai') {
+        if (!draftActiveOpenAIConfig) throw new Error('请先配置外部模型。')
+        answer = await generateRagAnswerWithOpenAI(prompt, draftActiveOpenAIConfig)
+      } else {
+        answer = await generateRagAnswerWithOllama(prompt, state.ollamaModel, state.ollamaTemperature)
+      }
+      setRagAnswer(answer)
+    } catch (err) {
+      setRagError(err instanceof Error ? err.message : '生成答案失败。')
+    } finally {
+      setRagIsGeneratingAnswer(false)
+    }
+  }
+
+  useEffect(() => {
+    if (mobileTab !== 'search' || !state.book) return
+
+    void fetchEmbeddingStatus()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [mobileTab, state.book?.id])
 
   if (!isHydrated) {
     return (
@@ -540,6 +828,134 @@ function MobileApp() {
             )}
           </section>
         )}
+
+        {mobileTab === 'search' && state.book && (
+          <section className="mobile-panel mobile-search-panel">
+            <div className="mobile-section">
+              <h2>智能搜索</h2>
+              <p className="mobile-hint">基于章节摘要和知识图谱回答问题</p>
+            </div>
+
+            {embeddingStatus && (
+              <div className="mobile-embedding-status">
+                <span>
+                  Embedding {embeddingStatus.embeddedChapters}/{embeddingStatus.totalChapters}
+                </span>
+                {embeddingStatus.missingChapters > 0 && (
+                  <button
+                    type="button"
+                    className="mobile-ghost-button"
+                    onClick={() => void handleGenerateEmbeddings()}
+                    disabled={isGeneratingEmbeddings}
+                  >
+                    {isGeneratingEmbeddings ? '生成中...' : '生成'}
+                  </button>
+                )}
+                {embeddingProgress && <small>{embeddingProgress}</small>}
+              </div>
+            )}
+
+            <input
+              className="mobile-search-input"
+              type="text"
+              placeholder="例如：某某功法第一次出现在哪里"
+              value={ragQuery}
+              onChange={(event) => setRagQuery(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') void handleRagSearch()
+              }}
+            />
+
+            <div className="mobile-search-options">
+              <label>
+                Top-K
+                <input
+                  type="number"
+                  min={3}
+                  max={50}
+                  value={ragTopK}
+                  onChange={(event) => setRagTopK(Number(event.target.value))}
+                />
+              </label>
+              <label>
+                <input
+                  type="checkbox"
+                  checked={ragIncludeSnippets}
+                  onChange={(event) => setRagIncludeSnippets(event.target.checked)}
+                />
+                原文片段
+              </label>
+            </div>
+
+            <button
+              type="button"
+              className="mobile-primary-button"
+              onClick={() => void handleRagSearch()}
+              disabled={ragIsSearching}
+            >
+              {ragIsSearching ? '搜索中...' : '搜索'}
+            </button>
+
+            {ragError && <p className="mobile-error">{ragError}</p>}
+
+            {ragEntityMatches.length > 0 && (
+              <div className="mobile-entity-tags">
+                {ragEntityMatches.map((entity) => (
+                  <span className="mobile-entity-tag" key={entity.entityId}>
+                    {entity.entityName}
+                  </span>
+                ))}
+              </div>
+            )}
+
+            {ragAnswer && (
+              <div className="mobile-search-answer">
+                <h3>AI 回答</h3>
+                <div className="mobile-search-answer-content">{ragAnswer}</div>
+              </div>
+            )}
+
+            {ragResults.length > 0 && (
+              <div className="mobile-search-results">
+                <div className="mobile-search-results-header">
+                  <h3>相关章节（{ragResults.length}）</h3>
+                  <button
+                    type="button"
+                    className="mobile-ghost-button"
+                    onClick={() => void handleGenerateRagAnswer()}
+                    disabled={ragIsGeneratingAnswer}
+                  >
+                    {ragIsGeneratingAnswer ? '生成中...' : '生成答案'}
+                  </button>
+                </div>
+                {ragResults.map((result) => (
+                  <div className="mobile-search-result" key={result.chapterId}>
+                    <div className="mobile-search-result-header">
+                      <button
+                        type="button"
+                        className="mobile-ghost-button"
+                        onClick={() => {
+                          updateActiveChapter(result.chapterId)
+                          setMobileTab('reader')
+                        }}
+                      >
+                        第 {result.chapterIndex} 章
+                      </button>
+                      <span className={`mobile-match-type ${result.matchType}`}>
+                        {result.matchType === 'vector' ? '语义' : result.matchType === 'entity' ? '实体' : '混合'}
+                      </span>
+                    </div>
+                    <h4>{result.chapterTitle}</h4>
+                    <p className="mobile-search-result-summary">{result.summary.detail}</p>
+                    {result.contentSnippet && (
+                      <p className="mobile-search-result-snippet">{result.contentSnippet}...</p>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+          </section>
+        )}
       </main>
 
       {isConfigOpen && (
@@ -653,6 +1069,36 @@ function MobileApp() {
                       />
                     )}
                   </label>
+                  <label className="mobile-field">
+                    Embedding 提供商
+                    <select
+                      value={modelConfigDraft.embeddingProvider}
+                      disabled={isTestingConfig}
+                      onChange={(event) =>
+                        setModelConfigDraft((current) => ({
+                          ...current,
+                          embeddingProvider: event.target.value as AIProvider,
+                        }))
+                      }
+                    >
+                      <option value="ollama">Ollama 本地</option>
+                      <option value="openai">OpenAI-compatible</option>
+                    </select>
+                  </label>
+                  <label className="mobile-field">
+                    Embedding 模型
+                    <input
+                      value={modelConfigDraft.embeddingModel}
+                      disabled={isTestingConfig}
+                      placeholder="例如 nomic-embed-text"
+                      onChange={(event) =>
+                        setModelConfigDraft((current) => ({
+                          ...current,
+                          embeddingModel: event.target.value,
+                        }))
+                      }
+                    />
+                  </label>
                 </>
               ) : (
                 <>
@@ -762,6 +1208,15 @@ function MobileApp() {
                     />
                     启用 Thinking
                   </label>
+                  <label className="mobile-field">
+                    Embedding 模型（可选）
+                    <input
+                      value={draftActiveOpenAIConfig?.embeddingModel ?? ''}
+                      disabled={isTestingConfig}
+                      placeholder="例如 text-embedding-3-small"
+                      onChange={(event) => updateActiveOpenAIConfig({ embeddingModel: event.target.value })}
+                    />
+                  </label>
                   <button
                     type="button"
                     className="mobile-ghost-button danger-button"
@@ -820,6 +1275,14 @@ function MobileApp() {
         >
           <span>✨</span>
           <span>概要</span>
+        </button>
+        <button
+          type="button"
+          className={mobileTab === 'search' ? 'active' : ''}
+          onClick={() => setMobileTab('search')}
+        >
+          <span>🔍</span>
+          <span>搜索</span>
         </button>
       </nav>
     </div>

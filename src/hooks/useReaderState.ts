@@ -44,11 +44,13 @@ export type StoredState = {
   thinkingEnabled: boolean
   importEncoding: ImportEncoding
   readerFontSize: number
+  embeddingProvider: AIProvider
+  embeddingModel: string
 }
 
 export type AIProvider = 'ollama' | 'openai'
 export type ImportEncoding = 'auto' | 'utf-8' | 'gb18030'
-export type AppView = 'home' | 'reader' | 'knowledge'
+export type AppView = 'home' | 'reader' | 'knowledge' | 'search'
 export type OllamaModel = {
   name: string
 }
@@ -61,6 +63,7 @@ export type OpenAIConfig = {
   thinkingEnabled: boolean
   temperature: number
   concurrency: number
+  embeddingModel?: string
 }
 export type ModelConfigDraft = Pick<
   StoredState,
@@ -71,6 +74,8 @@ export type ModelConfigDraft = Pick<
   | 'openaiConfigs'
   | 'activeOpenAIConfigId'
   | 'thinkingEnabled'
+  | 'embeddingProvider'
+  | 'embeddingModel'
 >
 
 const STORAGE_KEY = 'novel-reader-mvp-state'
@@ -99,12 +104,15 @@ const initialState: StoredState = {
       thinkingEnabled: false,
       temperature: 1,
       concurrency: 3,
+      embeddingModel: 'text-embedding-3-small',
     },
   ],
   activeOpenAIConfigId: 'default-openai',
   thinkingEnabled: false,
   importEncoding: 'auto',
   readerFontSize: 18,
+  embeddingProvider: 'ollama',
+  embeddingModel: 'nomic-embed-text',
 }
 
 const OLLAMA_BASE_URL = 'http://localhost:11434'
@@ -290,6 +298,11 @@ export function normalizeStoredState(
       typeof storedState.readerFontSize === 'number'
         ? Math.max(14, Math.min(28, storedState.readerFontSize))
         : initialState.readerFontSize,
+    embeddingProvider: storedState.embeddingProvider === 'openai' ? 'openai' : 'ollama',
+    embeddingModel:
+      typeof storedState.embeddingModel === 'string'
+        ? storedState.embeddingModel
+        : initialState.embeddingModel,
   }
 }
 
@@ -327,6 +340,10 @@ export function sanitizeOpenAIConfigs(
       typeof (config as OpenAIConfig).concurrency === 'number'
         ? (config as OpenAIConfig).concurrency
         : fallbackConfigs[0].concurrency,
+    embeddingModel:
+      typeof (config as OpenAIConfig).embeddingModel === 'string'
+        ? (config as OpenAIConfig).embeddingModel
+        : fallbackConfigs[0].embeddingModel,
   }))
 }
 
@@ -810,10 +827,12 @@ export function getModelConfigDraft(state: StoredState): ModelConfigDraft {
     openaiConfigs: state.openaiConfigs,
     activeOpenAIConfigId: state.activeOpenAIConfigId,
     thinkingEnabled: state.thinkingEnabled,
+    embeddingProvider: state.embeddingProvider,
+    embeddingModel: state.embeddingModel,
   }
 }
 
-export type MobileTab = 'bookshelf' | 'chapters' | 'reader' | 'summary'
+export type MobileTab = 'bookshelf' | 'chapters' | 'reader' | 'summary' | 'search'
 
 export interface UseReaderStateReturn {
   state: StoredState
