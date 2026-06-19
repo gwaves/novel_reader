@@ -113,6 +113,7 @@ novel_reader/
 - 扫描流程：`章节文本 -> LLM 抽取 -> 原始 JSON -> 归一化 -> 写入实体/关系`
 - 扫描任务可断点续传。应用启动时会自动恢复 pending 任务。
 - 低置信度的实体和关系会在 UI 中标记为待复审。
+- 已保存的章节 extraction 可通过重放接口重新写入图谱，用于局部重建；覆盖重扫会重新调用模型并替换对应章节证据。
 
 完整路线图见 [knowledge-graph-roadmap.md](knowledge-graph-roadmap.md)。
 

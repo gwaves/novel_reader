@@ -513,6 +513,36 @@ const deleteKgRelationMentionsForChapterStatement = db.prepare(`
   DELETE FROM kg_relation_mentions
   WHERE chapter_id = ?
 `)
+const listKgEntityIdsForChapterStatement = db.prepare(`
+  SELECT DISTINCT entity_id AS entityId
+  FROM kg_entity_mentions
+  WHERE chapter_id = ?
+`)
+const listKgRelationIdsForChapterStatement = db.prepare(`
+  SELECT DISTINCT relation_id AS relationId
+  FROM kg_relation_mentions
+  WHERE chapter_id = ?
+`)
+const getKgRelationEndpointsStatement = db.prepare(`
+  SELECT source_entity_id AS sourceEntityId, target_entity_id AS targetEntityId
+  FROM kg_relations
+  WHERE id = ?
+`)
+const getKgRelationMentionCountStatement = db.prepare(`
+  SELECT COUNT(*) AS count
+  FROM kg_relation_mentions
+  WHERE relation_id = ?
+`)
+const getKgEntityMentionCountStatement = db.prepare(`
+  SELECT COUNT(*) AS count
+  FROM kg_entity_mentions
+  WHERE entity_id = ?
+`)
+const getKgEntityRelationCountStatement = db.prepare(`
+  SELECT COUNT(*) AS count
+  FROM kg_relations
+  WHERE source_entity_id = ? OR target_entity_id = ?
+`)
 const findKgEntityStatement = db.prepare(`
   SELECT id, aliases_json AS aliasesJson, description, confidence, first_chapter_index AS firstChapterIndex, last_chapter_index AS lastChapterIndex
   FROM kg_entities
@@ -1015,6 +1045,9 @@ function applyChapterExtraction(bookId, chapterId, extraction, model) {
   const entities = Array.isArray(extraction?.entities) ? extraction.entities : []
   const relations = Array.isArray(extraction?.relations) ? extraction.relations : []
   const entityIdByKey = new Map()
+  const beforeTouchSet = getChapterGraphTouchSet(chapterId)
+  const touchedEntityIds = new Set(beforeTouchSet.entityIds)
+  const touchedRelationIds = new Set(beforeTouchSet.relationIds)
 
   deleteKgRelationMentionsForChapterStatement.run(chapterId)
   deleteKgEntityMentionsForChapterStatement.run(chapterId)
@@ -1031,6 +1064,7 @@ function applyChapterExtraction(bookId, chapterId, extraction, model) {
     const entityId = upsertKgEntity(bookId, chapter, entity)
     if (!entityId) continue
 
+    touchedEntityIds.add(entityId)
     entityIdByKey.set(`${normalizeEntityType(entity.type)}:${normalizeName(entity.name)}`, entityId)
     entityIdByKey.set(normalizeName(entity.name), entityId)
 
@@ -1077,6 +1111,7 @@ function applyChapterExtraction(bookId, chapterId, extraction, model) {
       )
     }
 
+    touchedRelationIds.add(relationId)
     insertKgRelationMentionStatement.run(
       randomUUID(),
       relationId,
@@ -1087,6 +1122,8 @@ function applyChapterExtraction(bookId, chapterId, extraction, model) {
       confidence,
     )
   }
+
+  reconcileTouchedGraphRows(touchedEntityIds, touchedRelationIds)
 }
 
 function saveChapterExtractionTransaction(bookId, chapterId, extraction, model) {
@@ -1094,6 +1131,33 @@ function saveChapterExtractionTransaction(bookId, chapterId, extraction, model) 
 
   try {
     applyChapterExtraction(bookId, chapterId, extraction, model)
+    db.exec('COMMIT')
+  } catch (error) {
+    db.exec('ROLLBACK')
+    throw error
+  }
+}
+
+function replayChapterExtractionTransaction(bookId, chapterId) {
+  const row = getKgChapterExtractionStatement.get(chapterId)
+
+  if (!row || row.bookId !== bookId) {
+    throw new Error('No saved extraction found for this chapter.')
+  }
+
+  if (row.status !== 'completed') {
+    throw new Error('Only completed chapter extractions can be replayed.')
+  }
+
+  const extraction = safeJsonParse(row.extractionJson, null)
+  if (!extraction || typeof extraction !== 'object') {
+    throw new Error('Saved extraction JSON is invalid.')
+  }
+
+  db.exec('BEGIN')
+
+  try {
+    applyChapterExtraction(bookId, chapterId, extraction, row.model)
     db.exec('COMMIT')
   } catch (error) {
     db.exec('ROLLBACK')
@@ -1155,6 +1219,55 @@ function recomputeRelationChapterRange(relationId) {
     result?.lastChapterIndex ?? null,
     relationId,
   )
+}
+
+function getChapterGraphTouchSet(chapterId) {
+  const entityIds = new Set(
+    listKgEntityIdsForChapterStatement.all(chapterId).map((row) => row.entityId),
+  )
+  const relationIds = new Set(
+    listKgRelationIdsForChapterStatement.all(chapterId).map((row) => row.relationId),
+  )
+
+  for (const relationId of relationIds) {
+    const endpoints = getKgRelationEndpointsStatement.get(relationId)
+    if (endpoints?.sourceEntityId) entityIds.add(endpoints.sourceEntityId)
+    if (endpoints?.targetEntityId) entityIds.add(endpoints.targetEntityId)
+  }
+
+  return { entityIds, relationIds }
+}
+
+function reconcileTouchedGraphRows(entityIds, relationIds) {
+  const entitiesToCheck = new Set(entityIds)
+
+  for (const relationId of relationIds) {
+    const endpoints = getKgRelationEndpointsStatement.get(relationId)
+    const mentionCount = getKgRelationMentionCountStatement.get(relationId)?.count ?? 0
+
+    if (mentionCount === 0) {
+      deleteKgRelationStatement.run(relationId)
+    } else {
+      recomputeRelationChapterRange(relationId)
+      resetKgRelationReviewStatusStatement.run(relationId)
+    }
+
+    if (endpoints?.sourceEntityId) entitiesToCheck.add(endpoints.sourceEntityId)
+    if (endpoints?.targetEntityId) entitiesToCheck.add(endpoints.targetEntityId)
+  }
+
+  for (const entityId of entitiesToCheck) {
+    const mentionCount = getKgEntityMentionCountStatement.get(entityId)?.count ?? 0
+    const relationCount = getKgEntityRelationCountStatement.get(entityId, entityId)?.count ?? 0
+
+    if (mentionCount === 0 && relationCount === 0) {
+      deleteKgEntityStatement.run(entityId)
+      continue
+    }
+
+    recomputeEntityChapterRange(entityId)
+    resetKgEntityReviewStatusStatement.run(entityId)
+  }
 }
 
 function updateKgEntityTransaction(entityId, payload) {
@@ -2051,6 +2164,26 @@ const server = createServer(async (request, response) => {
         sendJson(response, 200, { ok: true })
         return
       }
+    }
+
+    const chapterReplayMatch = url.pathname.match(/^\/api\/kg\/chapters\/([^/]+)\/replay$/)
+    if (request.method === 'POST' && chapterReplayMatch) {
+      const chapterId = decodeURIComponent(chapterReplayMatch[1])
+      const body = await readJson(request)
+      const bookId = body?.bookId
+
+      if (!bookId || typeof bookId !== 'string') {
+        sendJson(response, 400, { error: 'Missing bookId.' })
+        return
+      }
+
+      try {
+        replayChapterExtractionTransaction(bookId, chapterId)
+        sendJson(response, 200, { ok: true })
+      } catch (error) {
+        sendJson(response, 400, { error: error instanceof Error ? error.message : 'Replay failed.' })
+      }
+      return
     }
 
     sendJson(response, 404, { error: 'Not found.' })

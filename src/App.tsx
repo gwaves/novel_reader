@@ -255,6 +255,7 @@ function App() {
   const [kgScanStart, setKgScanStart] = useState(1)
   const [kgScanEnd, setKgScanEnd] = useState(1)
   const [kgScanConcurrency, setKgScanConcurrency] = useState(10)
+  const [kgScanOverwriteCompleted, setKgScanOverwriteCompleted] = useState(false)
   const [isKgScanning, setIsKgScanning] = useState(false)
   const [isStoppingKgScan, setIsStoppingKgScan] = useState(false)
   const [kgScanProgress, setKgScanProgress] = useState('')
@@ -1120,13 +1121,13 @@ function App() {
     setView('reader')
   }
 
-  function getKgScanScopeDescription(selectedCount: number, pendingCount: number): string {
-    if (kgScanMode === 'current') return `当前章节（${pendingCount}/${selectedCount}）`
-    if (kgScanMode === 'page') return `当前页 ${selectedCount} 章（${pendingCount} 待扫）`
-    if (kgScanMode === 'all') return `全书 ${selectedCount} 章（${pendingCount} 待扫）`
+  function getKgScanScopeDescription(selectedCount: number, pendingCount: number, overwriteCompleted = false): string {
+    if (kgScanMode === 'current') return overwriteCompleted ? '覆盖重扫当前章节' : `当前章节（${pendingCount}/${selectedCount}）`
+    if (kgScanMode === 'page') return overwriteCompleted ? `覆盖重扫当前页 ${selectedCount} 章` : `当前页 ${selectedCount} 章（${pendingCount} 待扫）`
+    if (kgScanMode === 'all') return overwriteCompleted ? `覆盖重扫全书 ${selectedCount} 章` : `全书 ${selectedCount} 章（${pendingCount} 待扫）`
     const start = Math.min(kgScanStart, kgScanEnd)
     const end = Math.max(kgScanStart, kgScanEnd)
-    return `范围 ${start}-${end}（${pendingCount} 待扫）`
+    return overwriteCompleted ? `覆盖重扫范围 ${start}-${end}` : `范围 ${start}-${end}（${pendingCount} 待扫）`
   }
 
   function getSelectedKgScanChapters(): Chapter[] {
@@ -1181,6 +1182,23 @@ function App() {
     }
   }
 
+  async function replayChapterExtraction(chapter: Chapter) {
+    if (!state.book) return
+
+    const response = await fetch(`/api/kg/chapters/${encodeURIComponent(chapter.id)}/replay`, {
+      body: JSON.stringify({ bookId: state.book.id }),
+      headers: {
+        'Content-Type': 'application/json',
+      },
+      method: 'POST',
+    })
+
+    if (!response.ok) {
+      const payload = (await response.json()) as { error?: string }
+      throw new Error(payload.error ?? `重放第 ${chapter.index} 章抽取结果失败。`)
+    }
+  }
+
   async function generateKnowledgeGraphExtraction(chapter: Chapter): Promise<{ extraction: unknown; model: string }> {
     if (state.aiProvider === 'openai') {
       if (!activeOpenAIConfig) throw new Error('请先配置外部模型。')
@@ -1213,11 +1231,17 @@ function App() {
     return state.book.chapters.filter((chapter) => !completedChapterIds.has(chapter.id))
   }
 
-  async function scanSelectedKnowledgeGraphChapters(options?: { forcePending?: boolean; pendingChapters?: Chapter[] }) {
+  async function scanSelectedKnowledgeGraphChapters(options?: { forcePending?: boolean; pendingChapters?: Chapter[]; overwriteCompleted?: boolean }) {
+    const overwriteCompleted = Boolean(options?.overwriteCompleted)
     const selectedChapters = options?.forcePending
       ? state.book?.chapters ?? []
       : getSelectedKgScanChapters()
-    const chapters = options?.pendingChapters ?? (options?.forcePending ? getAllPendingKgScanChapters() : getPendingKgScanChapters())
+    const chapters = options?.pendingChapters
+      ?? (overwriteCompleted
+        ? selectedChapters
+        : options?.forcePending
+          ? getAllPendingKgScanChapters()
+          : getPendingKgScanChapters())
 
     if (!state.book || !selectedChapters.length) {
       setKgError('没有可扫描的章节。')
@@ -1233,8 +1257,18 @@ function App() {
       !options?.forcePending &&
       chapters.length > 50 &&
       !window.confirm(
-        `已跳过 ${selectedChapters.length - chapters.length} 个已完成章节，将扫描剩余 ${chapters.length} 章，可能耗时较长并产生模型调用成本。确定开始吗？`,
+        overwriteCompleted
+          ? `将覆盖重扫 ${chapters.length} 章，会重新调用模型并替换对应章节的图谱证据。确定开始吗？`
+          : `已跳过 ${selectedChapters.length - chapters.length} 个已完成章节，将扫描剩余 ${chapters.length} 章，可能耗时较长并产生模型调用成本。确定开始吗？`,
       )
+    ) {
+      return
+    }
+
+    if (
+      overwriteCompleted &&
+      chapters.length <= 50 &&
+      !window.confirm(`将覆盖重扫 ${chapters.length} 章，会重新调用模型并替换对应章节的图谱证据。确定开始吗？`)
     ) {
       return
     }
@@ -1270,7 +1304,7 @@ function App() {
     try {
       const scope = options?.forcePending
         ? `恢复：全书 ${chapters.length} 个未完成章节`
-        : getKgScanScopeDescription(selectedChapters.length, chapters.length)
+        : getKgScanScopeDescription(selectedChapters.length, chapters.length, overwriteCompleted)
 
       const createResponse = await fetch('/api/kg/scan/jobs', {
         body: JSON.stringify({
@@ -1364,6 +1398,85 @@ function App() {
       setKgError(err instanceof Error ? err.message : '章节扫描失败。')
       await updateJobProgress('failed', '章节扫描失败')
       setKgScanJob((prev) => (prev ? { ...prev, status: 'failed' } : null))
+    } finally {
+      setIsKgScanning(false)
+      setIsStoppingKgScan(false)
+      shouldStopScanningRef.current = false
+    }
+  }
+
+  async function replaySelectedKnowledgeGraphChapters() {
+    const selectedChapters = getSelectedKgScanChapters()
+    const completedChapterIds = new Set(
+      kgScannedChapters
+        .filter((chapter) => chapter.status === 'completed')
+        .map((chapter) => chapter.chapterId),
+    )
+    const chapters = selectedChapters.filter((chapter) => completedChapterIds.has(chapter.id))
+
+    if (!state.book || !selectedChapters.length) {
+      setKgError('没有可重放的章节。')
+      return
+    }
+
+    if (!chapters.length) {
+      setKgScanProgress('选中范围内没有已保存的章节抽取 JSON。')
+      return
+    }
+
+    if (
+      chapters.length > 50 &&
+      !window.confirm(`将从已保存 JSON 重放 ${chapters.length} 章，不会调用模型，但会重建这些章节的图谱证据。确定开始吗？`)
+    ) {
+      return
+    }
+
+    setKgError('')
+    setIsKgScanning(true)
+    setIsStoppingKgScan(false)
+    shouldStopScanningRef.current = false
+
+    let completedCount = 0
+    let failedCount = 0
+    let nextIndex = 0
+    const concurrency = Math.max(1, Math.min(10, Math.floor(kgScanConcurrency)))
+
+    try {
+      async function worker() {
+        while (nextIndex < chapters.length) {
+          if (shouldStopScanningRef.current) break
+
+          const chapter = chapters[nextIndex]
+          nextIndex += 1
+          setKgScanProgress(
+            `并发 ${concurrency}，正在重放 ${completedCount + failedCount + 1}/${chapters.length}：第 ${chapter.index} 章 ${chapter.title}`,
+          )
+
+          try {
+            await replayChapterExtraction(chapter)
+            completedCount += 1
+          } catch {
+            failedCount += 1
+          }
+
+          setKgScanProgress(`并发 ${concurrency}，已重放 ${completedCount}/${chapters.length}，失败 ${failedCount} 章`)
+        }
+      }
+
+      await Promise.all(
+        Array.from({ length: Math.min(concurrency, chapters.length) }, () => worker()),
+      )
+
+      setKgScanProgress(
+        shouldStopScanningRef.current
+          ? `重放已停止，已完成 ${completedCount}/${chapters.length} 章。`
+          : failedCount > 0
+            ? `重放结束，成功 ${completedCount} 章，失败 ${failedCount} 章。`
+            : `已完成 ${chapters.length} 章重放。`,
+      )
+      await refreshKnowledgeGraph()
+    } catch (err) {
+      setKgError(err instanceof Error ? err.message : '重放章节抽取失败。')
     } finally {
       setIsKgScanning(false)
       setIsStoppingKgScan(false)
@@ -3174,11 +3287,21 @@ function App() {
               </label>
             </div>
 
+            <label className="kg-inline-toggle" htmlFor="kg-scan-overwrite">
+              <input
+                id="kg-scan-overwrite"
+                type="checkbox"
+                checked={kgScanOverwriteCompleted}
+                onChange={(event) => setKgScanOverwriteCompleted(event.target.checked)}
+              />
+              覆盖已完成章节
+            </label>
+
             <div className="kg-scan-actions">
               {isKgScanning ? (
                 <>
                   <button type="button" disabled>
-                    扫描中...
+                    任务进行中...
                   </button>
                   <button
                     type="button"
@@ -3186,17 +3309,29 @@ function App() {
                     disabled={isStoppingKgScan}
                     onClick={() => void stopKnowledgeGraphScan()}
                   >
-                    {isStoppingKgScan ? '停止中...' : '停止扫描'}
+                    {isStoppingKgScan ? '停止中...' : '停止任务'}
                   </button>
                 </>
               ) : (
-                <button
-                  type="button"
-                  disabled={getSelectedKgScanChapters().length === 0}
-                  onClick={() => void scanSelectedKnowledgeGraphChapters()}
-                >
-                  开始扫描 {getPendingKgScanChapters().length} 章
-                </button>
+                <>
+                  <button
+                    type="button"
+                    disabled={getSelectedKgScanChapters().length === 0}
+                    onClick={() => void scanSelectedKnowledgeGraphChapters({ overwriteCompleted: kgScanOverwriteCompleted })}
+                  >
+                    {kgScanOverwriteCompleted
+                      ? `覆盖重扫 ${getSelectedKgScanChapters().length} 章`
+                      : `开始扫描 ${getPendingKgScanChapters().length} 章`}
+                  </button>
+                  <button
+                    type="button"
+                    className="ghost-button"
+                    disabled={getSelectedKgScanChapters().length === 0}
+                    onClick={() => void replaySelectedKnowledgeGraphChapters()}
+                  >
+                    重放已保存 JSON
+                  </button>
+                </>
               )}
               {kgScanJob && !isKgScanning && (
                 <div className="kg-scan-status">
@@ -3225,9 +3360,12 @@ function App() {
                 </div>
               )}
               <p>
-                已选 {getSelectedKgScanChapters().length} 章，已完成将自动跳过{' '}
-                {getSelectedKgScanChapters().length - getPendingKgScanChapters().length} 章。
+                已选 {getSelectedKgScanChapters().length} 章，
+                {kgScanOverwriteCompleted
+                  ? '将覆盖已完成章节并重新调用模型。'
+                  : `已完成将自动跳过 ${getSelectedKgScanChapters().length - getPendingKgScanChapters().length} 章。`}
               </p>
+              <p>“重放已保存 JSON”不会调用模型，只会用现有章节抽取结果重建图谱写入。</p>
               {kgScanProgress && <p>{kgScanProgress}</p>}
             </div>
           </section>
