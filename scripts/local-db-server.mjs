@@ -288,6 +288,24 @@ const getEmbeddingForChapterStatement = db.prepare(`
   FROM summary_embeddings
   WHERE chapter_id = ? AND model = ?
 `)
+const getMissingEmbeddingChapterIdsStatement = db.prepare(`
+  SELECT s.chapter_id AS chapterId
+  FROM summaries s
+  JOIN chapters c ON c.id = s.chapter_id
+  WHERE c.book_id = ?
+    AND NOT EXISTS (
+      SELECT 1 FROM summary_embeddings se
+      WHERE se.chapter_id = s.chapter_id AND se.model = ?
+    )
+  ORDER BY c.chapter_index ASC
+`)
+const getSummaryChapterIdsForBookStatement = db.prepare(`
+  SELECT s.chapter_id AS chapterId
+  FROM summaries s
+  JOIN chapters c ON c.id = s.chapter_id
+  WHERE c.book_id = ?
+  ORDER BY c.chapter_index ASC
+`)
 const upsertEmbeddingStatement = db.prepare(`
   INSERT INTO summary_embeddings (chapter_id, book_id, model, dimension, embedding_json, generated_at)
   VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
@@ -343,6 +361,16 @@ const insertKgScanJobStatement = db.prepare(`
 const updateKgScanJobStatement = db.prepare(`
   UPDATE kg_scan_jobs
   SET completed_chapters = ?, failed_chapters = ?, error = ?, status = ?, updated_at = CURRENT_TIMESTAMP
+  WHERE id = ?
+`)
+const updateKgScanJobProgressStatement = db.prepare(`
+  UPDATE kg_scan_jobs
+  SET total_chapters = ?,
+      completed_chapters = ?,
+      failed_chapters = ?,
+      error = ?,
+      status = ?,
+      updated_at = CURRENT_TIMESTAMP
   WHERE id = ?
 `)
 const getLatestKgScanJobStatement = db.prepare(`
@@ -413,6 +441,47 @@ const getKgEntityMentionsStatement = db.prepare(`
   WHERE m.entity_id = ?
   ORDER BY m.chapter_index ASC
   LIMIT 100
+`)
+const listKgCharacterEntitiesForCoreferenceStatement = db.prepare(`
+  SELECT
+    id,
+    name,
+    aliases_json AS aliasesJson,
+    description,
+    first_chapter_index AS firstChapterIndex,
+    last_chapter_index AS lastChapterIndex
+  FROM kg_entities
+  WHERE book_id = ? AND type = 'character'
+`)
+const listKgEntityOrganizationsStatement = db.prepare(`
+  SELECT
+    target.id AS organizationId,
+    target.name AS organizationName
+  FROM kg_relations r
+  JOIN kg_entities target ON target.id = r.target_entity_id
+  WHERE r.source_entity_id = ? AND r.type = 'member_of'
+`)
+const listKgEntityOrganizationMembersStatement = db.prepare(`
+  SELECT
+    e.id,
+    e.name,
+    e.aliases_json AS aliasesJson,
+    e.first_chapter_index AS firstChapterIndex,
+    e.last_chapter_index AS lastChapterIndex,
+    e.description
+  FROM kg_relations r
+  JOIN kg_entities e ON e.id = r.source_entity_id
+  WHERE r.target_entity_id = ? AND r.type = 'member_of' AND e.id != ?
+`)
+const listKgEntityRelationSummariesStatement = db.prepare(`
+  SELECT r.type, target.name AS targetName
+  FROM kg_relations r
+  JOIN kg_entities target ON target.id = r.target_entity_id
+  WHERE r.source_entity_id = ?
+  LIMIT 12
+`)
+const bulkUpdateKgEntityMentionsEntityStatement = db.prepare(`
+  UPDATE kg_entity_mentions SET entity_id = ? WHERE entity_id = ?
 `)
 const getKgEntityRelationsStatement = db.prepare(`
   SELECT
@@ -1183,6 +1252,30 @@ function safeJsonParse(value, fallback) {
   }
 }
 
+function parseJsonObject(text) {
+  let str = String(text ?? '').trim()
+  str = str.replace(/<think>[\s\S]*?<\/think>/gi, '').trim()
+  const cleaned = str
+    .replace(/^```json\s*/i, '')
+    .replace(/\s*```$/, '')
+    .trim()
+  try {
+    return JSON.parse(cleaned)
+  } catch {
+    // ignore
+  }
+  const start = cleaned.indexOf('{')
+  const end = cleaned.lastIndexOf('}')
+  if (start !== -1 && end > start) {
+    try {
+      return JSON.parse(cleaned.slice(start, end + 1))
+    } catch {
+      // ignore
+    }
+  }
+  return null
+}
+
 function escapeXml(value) {
   return String(value ?? '')
     .replaceAll('&', '&amp;')
@@ -1309,6 +1402,10 @@ function rrfScore(rankVector, rankEntity, k = 60) {
   return scoreVector + scoreEntity
 }
 
+function isTemporalAppearanceQuery(query) {
+  return /(?:什么时候|何时|首次|第一次|最早|哪一?章|第几章|出现在?第?几?章)/.test(query)
+}
+
 function buildSummaryText(summary) {
   const parts = []
   if (summary?.short) parts.push(summary.short)
@@ -1403,6 +1500,453 @@ async function generateEmbedding(text, config) {
     return callOpenAIEmbedding(text, config)
   }
   return callOllamaEmbedding(text, config)
+}
+
+const LLM_CHAT_TIMEOUT_MS = 300000
+
+async function callOllamaChat(messages, config) {
+  const baseUrl = (config?.baseUrl || 'http://127.0.0.1:11434').trim().replace(/\/+$/, '')
+  const model = (config?.model || '').trim()
+  if (!model) {
+    throw new Error('Missing Ollama model for coreference.')
+  }
+
+  const controller = new AbortController()
+  const timeoutId = setTimeout(() => controller.abort(), LLM_CHAT_TIMEOUT_MS)
+
+  try {
+    const response = await fetch(`${baseUrl}/api/chat`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model,
+        messages,
+        stream: false,
+        format: 'json',
+        options: {
+          temperature: typeof config?.temperature === 'number' ? config.temperature : 0.2,
+        },
+      }),
+      signal: controller.signal,
+    })
+
+    clearTimeout(timeoutId)
+
+    if (!response.ok) {
+      throw new Error(`Ollama chat failed: ${response.status} ${response.statusText}`)
+    }
+
+    const data = await response.json()
+    return data.message?.content ?? ''
+  } catch (error) {
+    clearTimeout(timeoutId)
+    throw error
+  }
+}
+
+async function callOpenAIChat(messages, config) {
+  const baseUrl = (config?.baseUrl || '').trim().replace(/\/+$/, '')
+  const model = (config?.model || '').trim()
+  const apiKey = config?.apiKey || ''
+  if (!baseUrl || !model) {
+    throw new Error('OpenAI-compatible chat requires baseUrl and model.')
+  }
+
+  const headers = { 'Content-Type': 'application/json' }
+  if (apiKey.trim()) {
+    headers.Authorization = `Bearer ${apiKey.trim()}`
+  }
+
+  const controller = new AbortController()
+  const timeoutId = setTimeout(() => controller.abort(), LLM_CHAT_TIMEOUT_MS)
+
+  try {
+    const body = {
+      model,
+      messages,
+      temperature: typeof config?.temperature === 'number' ? config.temperature : 0,
+    }
+    if (config?.thinkingEnabled === false) {
+      body.extra_body = { enable_thinking: false }
+    }
+    if (config?.jsonMode) {
+      body.response_format = { type: 'json_object' }
+    }
+
+    const response = await fetch(`${baseUrl}/chat/completions`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    })
+
+    clearTimeout(timeoutId)
+
+    if (!response.ok) {
+      throw new Error(`OpenAI chat failed: ${response.status} ${response.statusText}`)
+    }
+
+    const data = await response.json()
+    return data.choices?.[0]?.message?.content ?? ''
+  } catch (error) {
+    clearTimeout(timeoutId)
+    throw error
+  }
+}
+
+async function generateChatCompletion(messages, config) {
+  const provider = config?.provider
+  if (provider === 'openai') {
+    return callOpenAIChat(messages, config)
+  }
+  return callOllamaChat(messages, config)
+}
+
+const COREFERENCE_ALIAS_FREQ_THRESHOLD = 2
+const COREFERENCE_ORG_LOOKBACK_CHAPTERS = 120
+const COREFERENCE_MAX_LLM_COMPONENT_SIZE = 80
+
+const COREFERENCE_GENERIC_NAMES = new Set(
+  [
+    '老者', '少年', '女子', '男子', '少女', '青年', '中年人', '大汉', '道士', '和尚', '修士', '前辈',
+    '道友', '师兄', '师姐', '师弟', '师妹', '师祖', '师傅', '师父', '弟子', '长老', '门主', '家主',
+    '主人', '丫头', '姑娘', '公子', '小姐', '夫人', '妇人', '道姑', '儒生', '尼姑', '妖兽', '凡人',
+    '陌生人', '某人', '此人', '那人', '一人', '之人', '女修', '男修', '男女', '黑袍人', '白袍人',
+    '灰袍人', '青袍人', '黄袍人', '红袍人', '蓝袍人', '紫袍人', '绿袍人', '金袍人', '银袍人', '黑衣人',
+    '白衣人', '灰衣人', '青衣人', '黄衣人', '红衣人', '蓝衣人', '紫衣人', '绿衣人', '金衣人', '银衣人',
+    '结丹修士', '元婴修士', '元婴期修士', '元婴期前辈', '元婴期高人', '元婴女修', '合体老怪', '老怪',
+    '老魔', '老祖', '祖师', '师叔', '师伯', '师侄', '徒弟', '徒孙', '中年人', '中年男子', '中年女子',
+    '中年修士', '中年大汉', '青年男子', '青年修士', '年轻女子', '年轻男子', '白衣女子', '白衣少女',
+    '黑袍少女', '白袍少女', '黄衫女子', '黄衫女修', '黄衣女子', '红衣女子', '蓝衣女子', '紫衣女子',
+    '绿衣女子', '灰衣女子', '为首老者', '中年道士', '清秀青年', '貌美少妇', '妩媚少妇', '娇媚女子',
+    '俊美青年', '儒衫老者', '儒装老者', '白发老者', '银发老者', '枯瘦老者', '灰袍老者', '青袍老者',
+    '白袍老者', '黑袍老者', '红袍老者', '蓝袍老者', '紫袍老者', '绿袍老者', '金袍老者', '黄袍老者',
+  ].map(normalizeName),
+)
+
+function buildCoreferenceAliasComponents(bookId) {
+  const entities = listKgCharacterEntitiesForCoreferenceStatement.all(bookId)
+  const keysByEntity = new Map()
+  const keyFrequency = new Map()
+
+  for (const entity of entities) {
+    const keys = uniqueStrings([entity.name, ...safeJsonParse(entity.aliasesJson, [])])
+      .map(normalizeName)
+      .filter((key) => key.length >= 2 && !COREFERENCE_GENERIC_NAMES.has(key))
+    keysByEntity.set(entity.id, new Set(keys))
+    for (const key of keys) {
+      keyFrequency.set(key, (keyFrequency.get(key) || 0) + 1)
+    }
+  }
+
+  const parent = new Map()
+  function find(id) {
+    if (parent.get(id) === id) return id
+    const root = find(parent.get(id))
+    parent.set(id, root)
+    return root
+  }
+  function union(a, b) {
+    const ra = find(a)
+    const rb = find(b)
+    if (ra !== rb) parent.set(ra, rb)
+  }
+  for (const entity of entities) parent.set(entity.id, entity.id)
+
+  for (let i = 0; i < entities.length; i++) {
+    const keysA = keysByEntity.get(entities[i].id)
+    if (!keysA || keysA.size === 0) continue
+    for (let j = i + 1; j < entities.length; j++) {
+      const keysB = keysByEntity.get(entities[j].id)
+      if (!keysB || keysB.size === 0) continue
+      let shared = false
+      for (const key of keysA) {
+        if (keysB.has(key) && keyFrequency.get(key) <= COREFERENCE_ALIAS_FREQ_THRESHOLD) {
+          shared = true
+          break
+        }
+      }
+      if (shared) union(entities[i].id, entities[j].id)
+    }
+  }
+
+  const groups = new Map()
+  for (const entity of entities) {
+    const root = find(entity.id)
+    if (!groups.has(root)) groups.set(root, [])
+    groups.get(root).push(entity)
+  }
+
+  return Array.from(groups.values()).filter((group) => group.length > 1)
+}
+
+function chooseCanonicalCandidate(component) {
+  const entityByName = new Map(component.map((entity) => [normalizeName(entity.name), entity]))
+  const inDegree = new Map(component.map((entity) => [entity.id, 0]))
+
+  for (const entity of component) {
+    const aliases = uniqueStrings(safeJsonParse(entity.aliasesJson, [])).map(normalizeName)
+    for (const alias of aliases) {
+      const target = entityByName.get(alias)
+      if (target && target.id !== entity.id) {
+        inDegree.set(target.id, (inDegree.get(target.id) || 0) + 1)
+      }
+    }
+  }
+
+  const sorted = [...component].sort((a, b) => {
+    const diff = inDegree.get(b.id) - inDegree.get(a.id)
+    if (diff !== 0) return diff
+    return (b.firstChapterIndex ?? 0) - (a.firstChapterIndex ?? 0)
+  })
+  return sorted[0]
+}
+
+function expandComponentWithOrganizationCandidates(component, bookId) {
+  const canonical = chooseCanonicalCandidate(component)
+  if (!canonical) return component
+
+  const canonicalFirst = canonical.firstChapterIndex
+  if (canonicalFirst == null) return component
+
+  const inComponent = new Set(component.map((entity) => entity.id))
+  const added = new Map()
+
+  const organizations = listKgEntityOrganizationsStatement.all(canonical.id)
+  for (const org of organizations) {
+    const members = listKgEntityOrganizationMembersStatement.all(org.organizationId, canonical.id)
+    for (const member of members) {
+      if (inComponent.has(member.id)) continue
+      const first = member.firstChapterIndex
+      if (
+        first != null &&
+        first <= canonicalFirst + 5 &&
+        first >= canonicalFirst - COREFERENCE_ORG_LOOKBACK_CHAPTERS
+      ) {
+        added.set(member.id, member)
+      }
+    }
+  }
+
+  return [...component, ...added.values()]
+}
+
+function buildCoreferencePrompt(component) {
+  const lines = []
+  for (const entity of component) {
+    const aliases = uniqueStrings(safeJsonParse(entity.aliasesJson, [])).filter(
+      (alias) => !COREFERENCE_GENERIC_NAMES.has(normalizeName(alias)),
+    )
+    const relations = listKgEntityRelationSummariesStatement
+      .all(entity.id)
+      .map((row) => `${row.type} ${row.targetName}`)
+      .join('、')
+    const parts = [
+      `- 名称：${entity.name}`,
+      `  章节：第 ${entity.firstChapterIndex ?? '?'} 章 到 第 ${entity.lastChapterIndex ?? '?'} 章`,
+    ]
+    if (aliases.length > 0) parts.push(`  别名：${aliases.join('、')}`)
+    if (entity.description) parts.push(`  描述：${entity.description}`)
+    if (relations) parts.push(`  关系：${relations}`)
+    lines.push(parts.join('\n'))
+  }
+
+  return `你是长篇小说人物实体消歧专家。下面是一组从小说知识图谱中抽取的“人物”实体，它们可能因为使用了化名、代号、头衔或外形描述而被拆成了多个节点。
+请根据实体名、别名、出现章节、描述和相关关系，判断哪些节点指向同一个人。
+注意：
+1. 如果多个节点是同一个人的不同阶段/化名/伪装，请合并为一组。
+2. 如果一个节点明显是另一个人（即使名字相似或同门派），请单独成组。
+3. 选择 canonical_name 为该组最正式/真实的姓名（通常是后期揭示的真名）。
+4. 只输出 JSON，不要解释。
+
+输出格式：
+{
+  "clusters": [
+    {
+      "canonical_name": "南宫婉",
+      "members": ["精灵少女", "南宫师祖", "南宫婉", "南宫屏"],
+      "confidence": 0.95,
+      "reason": "同属掩月宗，精灵少女/南宫师祖是功法导致的年幼形态，南宫屏是后期化名"
+    }
+  ]
+}
+
+实体列表：
+${lines.join('\n\n')}`
+}
+
+async function resolveCoreferenceComponent(component, config) {
+  if (component.length < 2) return { clusters: [] }
+  const prompt = buildCoreferencePrompt(component)
+  const messages = [
+    {
+      role: 'system',
+      content:
+        '你是长篇小说阅读助手，擅长人物身份识别。请严格按要求的 JSON 格式输出，不要添加 Markdown 代码块标记。',
+    },
+    { role: 'user', content: `/no_think\n${prompt}` },
+  ]
+  const text = await generateChatCompletion(messages, config)
+  const parsed = parseJsonObject(text)
+  const clusters = Array.isArray(parsed?.clusters) ? parsed.clusters : []
+  return { clusters, raw: text }
+}
+
+function mergeKgEntityInto(bookId, targetId, sourceId) {
+  const target = getKgEntityStatement.get(targetId)
+  const source = getKgEntityStatement.get(sourceId)
+  if (!target || !source) return
+
+  // Move mentions to the canonical entity.
+  bulkUpdateKgEntityMentionsEntityStatement.run(targetId, sourceId)
+
+  // Move or merge relations.
+  const relations = listKgRelationsForMergeStatement.all(sourceId, sourceId)
+  for (const relation of relations) {
+    const newSourceId = relation.sourceEntityId === sourceId ? targetId : relation.sourceEntityId
+    const newTargetId = relation.targetEntityId === sourceId ? targetId : relation.targetEntityId
+
+    if (newSourceId === newTargetId) {
+      deleteKgRelationMentionsByRelationStatement.run(relation.id)
+      deleteKgRelationStatement.run(relation.id)
+      continue
+    }
+
+    const conflict = findKgRelationByEndpointsStatement.get(bookId, newSourceId, newTargetId, relation.type)
+    if (conflict) {
+      mergeKgRelationIntoStatement.run(relation.description, relation.confidence, conflict.id)
+      updateKgRelationMentionsRelationIdStatement.run(conflict.id, relation.id)
+      deleteKgRelationStatement.run(relation.id)
+    } else {
+      updateKgRelationEndpointStatement.run(newSourceId, newTargetId, relation.id)
+    }
+  }
+
+  // Merge aliases and chapter range.
+  const targetAliases = safeJsonParse(target.aliasesJson, [])
+  const sourceAliases = safeJsonParse(source.aliasesJson, [])
+  const mergedAliases = uniqueStrings([...targetAliases, ...sourceAliases, source.name])
+  const mergedDescription = [target.description, source.description]
+    .filter((value) => typeof value === 'string' && value.trim().length > 0)
+    .join('\n')
+  updateKgEntityStatement.run(
+    JSON.stringify(mergedAliases),
+    mergedDescription,
+    source.confidence,
+    source.firstChapterIndex,
+    source.firstChapterIndex,
+    source.lastChapterIndex,
+    source.lastChapterIndex,
+    targetId,
+  )
+
+  deleteKgEntityStatement.run(sourceId)
+}
+
+function applyCoreferenceClusters(bookId, component, clusters) {
+  const entityByName = new Map(component.map((entity) => [normalizeName(entity.name), entity]))
+  let merged = 0
+
+  for (const cluster of clusters) {
+    const memberNames = Array.isArray(cluster?.members) ? cluster.members : []
+    const canonicalName = typeof cluster?.canonical_name === 'string' ? cluster.canonical_name : ''
+    const canonical =
+      entityByName.get(normalizeName(canonicalName)) ||
+      memberNames
+        .map((name) => entityByName.get(normalizeName(name)))
+        .find(Boolean)
+    if (!canonical) continue
+
+    const validMembers = memberNames
+      .map((name) => entityByName.get(normalizeName(name)))
+      .filter(Boolean)
+      .filter((entity) => entity.id !== canonical.id)
+
+    for (const member of validMembers) {
+      mergeKgEntityInto(bookId, canonical.id, member.id)
+      merged++
+    }
+  }
+
+  return merged
+}
+
+async function runKgCoreferenceJob(bookId, jobId, config, components, totalComponents) {
+  const total = totalComponents ?? components.length
+  updateKgScanJobProgressStatement.run(total, 0, 0, null, 'running', jobId)
+
+  let completed = 0
+  let totalMerged = 0
+  let hasError = false
+  let errorReason = null
+  const concurrency = Math.max(1, Math.min(10, Number(config?.concurrency) || 1))
+
+  async function processComponent(component) {
+    if (component.length < 2) {
+      completed++
+      updateKgScanJobProgressStatement.run(total, completed, 0, null, 'running', jobId)
+      return
+    }
+
+    const expanded = expandComponentWithOrganizationCandidates(component, bookId)
+    const limited =
+      expanded.length > COREFERENCE_MAX_LLM_COMPONENT_SIZE
+        ? expanded.slice(0, COREFERENCE_MAX_LLM_COMPONENT_SIZE)
+        : expanded
+
+    const { clusters } = await resolveCoreferenceComponent(limited, config)
+
+    db.exec('BEGIN')
+    try {
+      const merged = applyCoreferenceClusters(bookId, limited, clusters)
+      totalMerged += merged
+      db.exec('COMMIT')
+    } catch (error) {
+      db.exec('ROLLBACK')
+      throw error
+    }
+
+    completed++
+    updateKgScanJobProgressStatement.run(total, completed, 0, null, 'running', jobId)
+  }
+
+  // Use a shared atomic index to dispatch components to workers.
+  let nextIndex = 0
+  async function runWorker() {
+    while (!hasError) {
+      const index = nextIndex++
+      if (index >= components.length) break
+      try {
+        await processComponent(components[index])
+      } catch (error) {
+        hasError = true
+        errorReason = error
+      }
+    }
+  }
+
+  try {
+    const workers = Array.from({ length: concurrency }, () => runWorker())
+    await Promise.all(workers)
+
+    if (hasError) {
+      throw errorReason || new Error('Job failed.')
+    }
+
+    updateKgScanJobProgressStatement.run(total, completed, 0, null, 'completed', jobId)
+  } catch (error) {
+    updateKgScanJobProgressStatement.run(
+      total,
+      completed,
+      0,
+      String(error?.message || 'Job failed.'),
+      'failed',
+      jobId,
+    )
+    throw error
+  }
+
+  return { totalMerged, componentsProcessed: completed }
 }
 
 function linkEntitiesFromQuery(query, entities) {
@@ -1572,6 +2116,56 @@ async function searchRag(bookId, query, topK, includeSnippets, embeddingConfig) 
     })
   }
 
+  // For appearance/time queries, make sure the earliest mention of each matched entity is included,
+  // even if vector ranking pushed it out of the top-K (e.g. a character first appeared under a code name).
+  if (isTemporalAppearanceQuery(query) && matchedEntities.length > 0) {
+    const includedChapterIds = new Set(results.map((result) => result.chapterId))
+    const earliestHits = []
+
+    for (const entity of matchedEntities) {
+      const mentions = listEntityMentionsForEntityStatement.all(entity.id)
+      const earliest = mentions.reduce(
+        (min, mention) =>
+          !min || mention.chapterIndex < min.chapterIndex ? mention : min,
+        null,
+      )
+      if (!earliest || includedChapterIds.has(earliest.chapterId)) continue
+
+      const chapter = getChapterStatement.get(earliest.chapterId)
+      const summary = getSummaryForChapterStatement.get(earliest.chapterId)
+      if (!summary) continue
+
+      let contentSnippet = null
+      if (includeSnippets) {
+        const snippetRow = getChapterContentSnippetStatement.get(earliest.chapterId)
+        contentSnippet = snippetRow?.snippet || null
+      }
+
+      earliestHits.push({
+        chapterId: earliest.chapterId,
+        chapterIndex: earliest.chapterIndex,
+        chapterTitle: chapter?.title || '',
+        summary: {
+          short: summary.short,
+          detail: summary.detail,
+          keyPoints: safeJsonParse(summary.keyPointsJson, []),
+        },
+        similarity: 0,
+        matchType: 'entity-first',
+        matchedEntities: [entity.name],
+        contentSnippet,
+      })
+      includedChapterIds.add(earliest.chapterId)
+    }
+
+    earliestHits.sort((a, b) => a.chapterIndex - b.chapterIndex)
+    results.push(...earliestHits.slice(0, 3))
+  }
+
+  if (isTemporalAppearanceQuery(query)) {
+    results.sort((a, b) => a.chapterIndex - b.chapterIndex)
+  }
+
   return {
     results,
     entityMatches: matchedEntities.map((entity) => ({
@@ -1580,6 +2174,7 @@ async function searchRag(bookId, query, topK, includeSnippets, embeddingConfig) 
       entityType: entity.type,
       firstChapterIndex: entity.firstChapterIndex,
       lastChapterIndex: entity.lastChapterIndex,
+      aliases: safeJsonParse(entity.aliasesJson, []),
     })),
   }
 }
@@ -3411,6 +4006,7 @@ const server = createServer(async (request, response) => {
       const baseUrl = body?.baseUrl
       const apiKey = body?.apiKey || ''
       const requestedChapterIds = Array.isArray(body?.chapterIds) ? body.chapterIds : null
+      const force = body?.force === true
 
       if (!bookId || typeof bookId !== 'string') {
         sendJson(response, 400, { error: 'Missing bookId.' })
@@ -3434,18 +4030,20 @@ const server = createServer(async (request, response) => {
         summaries = getSummariesForBookStatement.all(bookId)
       }
 
-      const missingSummaries = summaries.filter((summary) => {
-        const existing = getEmbeddingForChapterStatement.get(summary.chapterId, model)
-        return !existing
-      })
+      const targetSummaries = force
+        ? summaries
+        : summaries.filter((summary) => {
+            const existing = getEmbeddingForChapterStatement.get(summary.chapterId, model)
+            return !existing
+          })
 
       const embeddingConfig = { provider, model, baseUrl, apiKey }
       const batchSize = provider === 'ollama' ? EMBEDDING_BATCH_SIZE_OLLAMA : EMBEDDING_BATCH_SIZE_OPENAI
       let completed = 0
       let failed = 0
 
-      for (let i = 0; i < missingSummaries.length; i += batchSize) {
-        const batch = missingSummaries.slice(i, i + batchSize)
+      for (let i = 0; i < targetSummaries.length; i += batchSize) {
+        const batch = targetSummaries.slice(i, i + batchSize)
         await Promise.all(
           batch.map(async (summary) => {
             const text = buildSummaryText(summary)
@@ -3474,7 +4072,7 @@ const server = createServer(async (request, response) => {
       sendJson(response, 200, {
         completed,
         failed,
-        total: missingSummaries.length,
+        total: targetSummaries.length,
       })
       return
     }
@@ -3535,6 +4133,37 @@ const server = createServer(async (request, response) => {
       return
     }
 
+    if (request.method === 'GET' && url.pathname === '/api/rag/embeddings/missing') {
+      const bookId = url.searchParams.get('bookId')
+      const model = url.searchParams.get('model') || ''
+
+      if (!bookId) {
+        sendJson(response, 400, { error: 'Missing bookId.' })
+        return
+      }
+      if (!model) {
+        sendJson(response, 400, { error: 'Missing model.' })
+        return
+      }
+
+      const rows = getMissingEmbeddingChapterIdsStatement.all(bookId, model)
+      sendJson(response, 200, { chapterIds: rows.map((row) => row.chapterId) })
+      return
+    }
+
+    if (request.method === 'GET' && url.pathname === '/api/rag/embeddings/summary-chapters') {
+      const bookId = url.searchParams.get('bookId')
+
+      if (!bookId) {
+        sendJson(response, 400, { error: 'Missing bookId.' })
+        return
+      }
+
+      const rows = getSummaryChapterIdsForBookStatement.all(bookId)
+      sendJson(response, 200, { chapterIds: rows.map((row) => row.chapterId) })
+      return
+    }
+
     if (request.method === 'POST' && url.pathname === '/api/rag/search') {
       const body = await readJson(request)
       const bookId = body?.bookId
@@ -3579,6 +4208,55 @@ const server = createServer(async (request, response) => {
         }
         sendJson(response, 400, { error: error instanceof Error ? error.message : 'Search failed.' })
       }
+      return
+    }
+
+    if (request.method === 'POST' && url.pathname === '/api/kg/coreference/resolve') {
+      const body = await readJson(request)
+      const bookId = body?.bookId
+      const provider = body?.provider
+      const model = body?.model
+      const baseUrl = body?.baseUrl
+      const apiKey = body?.apiKey || ''
+      const limit = typeof body?.limit === 'number' ? Math.max(1, body.limit) : 0
+
+      if (!bookId || typeof bookId !== 'string') {
+        sendJson(response, 400, { error: 'Missing bookId.' })
+        return
+      }
+      if (provider !== 'ollama' && provider !== 'openai') {
+        sendJson(response, 400, { error: 'provider must be ollama or openai.' })
+        return
+      }
+      if (!model || typeof model !== 'string') {
+        sendJson(response, 400, { error: 'Missing model.' })
+        return
+      }
+
+      const allComponents = buildCoreferenceAliasComponents(bookId)
+      const totalComponents = allComponents.length
+      const componentsToProcess = limit > 0 ? allComponents.slice(0, limit) : allComponents
+
+      const jobId = randomUUID()
+      insertKgScanJobStatement.run(jobId, bookId, 'coreference', 'running', totalComponents, 0, 0, null)
+      const llmConfig = { provider, model, baseUrl, apiKey }
+      runKgCoreferenceJob(bookId, jobId, llmConfig, componentsToProcess, totalComponents).catch((error) => {
+        console.error('Coreference job failed:', error)
+        updateKgScanJobProgressStatement.run(
+          totalComponents,
+          0,
+          0,
+          String(error?.message || 'Job failed.'),
+          'failed',
+          jobId,
+        )
+      })
+      sendJson(response, 202, {
+        jobId,
+        totalComponents,
+        processedThisRun: componentsToProcess.length,
+        hasMore: componentsToProcess.length < totalComponents,
+      })
       return
     }
 

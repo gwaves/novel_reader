@@ -140,6 +140,28 @@
   line-height: 1.5;
 }
 
+.config-tabs {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.config-tabs button {
+  flex: 1;
+  border: 1px solid #d6cbbd;
+  background: #fffaf2;
+  color: #4d463d;
+  border-radius: 6px;
+  padding: 8px 12px;
+  font-weight: 650;
+}
+
+.config-tabs button.active {
+  background: #2c5b4b;
+  color: #fff;
+  border-color: #2c5b4b;
+}
+
 .config-section-divider {
   border-top: 1px solid #ded6ca;
   margin-top: 16px;
@@ -566,6 +588,11 @@ button:disabled {
   color: #8a5a2b;
 }
 
+.match-type.entity-first {
+  background: #e6f7ff;
+  color: #2a5d8a;
+}
+
 .match-type.both {
   background: #e8e4f3;
   color: #5b4a7a;
@@ -671,6 +698,28 @@ button:disabled {
   margin-top: 6px;
   color: #24211c;
   font-size: 28px;
+}
+
+.kg-coreference-chunk {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  color: #786d60;
+}
+
+.kg-coreference-chunk input {
+  width: 64px;
+  padding: 6px 8px;
+  border: 1px solid #ded6ca;
+  border-radius: 6px;
+  background: #fff;
+  color: #24211c;
+  font-size: 13px;
+}
+
+.kg-coreference-chunk input:disabled {
+  background: #f0ece6;
 }
 
 .kg-card {

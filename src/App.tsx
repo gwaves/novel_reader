@@ -228,7 +228,7 @@ type RagSearchResult = {
     keyPoints: string[]
   }
   similarity: number
-  matchType: 'vector' | 'entity' | 'both'
+  matchType: 'vector' | 'entity' | 'both' | 'entity-first'
   matchedEntities: string[]
   contentSnippet: string | null
 }
@@ -239,6 +239,7 @@ type RagEntityMatch = {
   entityType: string
   firstChapterIndex: number | null
   lastChapterIndex: number | null
+  aliases?: string[]
 }
 
 type EmbeddingStatus = {
@@ -461,6 +462,10 @@ function App() {
   const [isKgScanning, setIsKgScanning] = useState(false)
   const [isStoppingKgScan, setIsStoppingKgScan] = useState(false)
   const [kgScanProgress, setKgScanProgress] = useState('')
+  const [isKgCoreferencing, setIsKgCoreferencing] = useState(false)
+  const [kgCoreferenceProgress, setKgCoreferenceProgress] = useState('')
+  const [kgCoreferenceChunkSize, setKgCoreferenceChunkSize] = useState(50)
+  const [kgCoreferenceHasMore, setKgCoreferenceHasMore] = useState(false)
   const [kgScanJob, setKgScanJob] = useState<KgScanJob | null>(null)
   const [kgRelationDetail, setKgRelationDetail] = useState<KgRelationDetail | null>(null)
   const [kgNeighborhood, setKgNeighborhood] = useState<KgNeighborhood | null>(null)
@@ -538,6 +543,7 @@ function App() {
   const [isGeneratingEmbeddings, setIsGeneratingEmbeddings] = useState(false)
   const [embeddingProgress, setEmbeddingProgress] = useState('')
   const [ragError, setRagError] = useState('')
+  const [configTab, setConfigTab] = useState<'llm' | 'embedding'>('llm')
 
   const {
     state,
@@ -595,6 +601,12 @@ function App() {
     removeActiveOpenAIConfig,
     saveModelConfig,
   } = useReaderState()
+
+  useEffect(() => {
+    if (isConfigOpen) {
+      setConfigTab('llm')
+    }
+  }, [isConfigOpen])
 
   useEffect(() => {
     if (view !== 'reader' || !activeChapter) return
@@ -737,7 +749,7 @@ function App() {
       const payload = (await response.json()) as { job: KgScanJob | null }
       setKgScanJob(payload.job)
 
-      if (payload.job?.status === 'running' && !isKgScanning) {
+      if (payload.job?.status === 'running' && !isKgScanning && payload.job?.scope !== 'coreference') {
         const staleThresholdMs = 30_000
         const lastUpdate = new Date(payload.job.updatedAt).getTime()
         if (Date.now() - lastUpdate > staleThresholdMs) {
@@ -746,6 +758,101 @@ function App() {
       }
     } catch {
       // ignore non-fatal errors
+    }
+  }
+
+  async function resolveKgCoreferences() {
+    if (!state.book) return
+    if (!window.confirm('全局人物实体消歧会根据别名和门派关系调用大模型合并同一人节点，可能耗时较长并产生模型调用成本。确定开始吗？')) {
+      return
+    }
+
+    setIsKgCoreferencing(true)
+    setKgCoreferenceProgress('准备中...')
+    setKgError('')
+
+    try {
+      const provider = state.aiProvider === 'openai' ? 'openai' : 'ollama'
+
+      const llmConfig =
+        state.aiProvider === 'openai'
+          ? {
+              model: activeOpenAIConfig?.model ?? '',
+              baseUrl: activeOpenAIConfig?.baseUrl ?? '',
+              apiKey: activeOpenAIConfig?.apiKey ?? '',
+              temperature: 0,
+              jsonMode: true,
+              thinkingEnabled: activeOpenAIConfig?.thinkingEnabled,
+            }
+          : {
+              model: state.ollamaModel,
+              baseUrl: '',
+              apiKey: '',
+              temperature: state.ollamaTemperature,
+            }
+
+      if (!llmConfig.model) throw new Error('请先配置 LLM 模型。')
+
+      const response = await fetch('/api/kg/coreference/resolve', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          bookId: state.book.id,
+          provider,
+          ...llmConfig,
+          limit: kgCoreferenceChunkSize,
+        }),
+      })
+      if (!response.ok) {
+        const body = (await response.json().catch(() => ({}))) as { error?: string }
+        throw new Error(body.error || '启动消歧任务失败。')
+      }
+      const startPayload = (await response.json()) as {
+        jobId: string
+        totalComponents: number
+        processedThisRun: number
+        hasMore: boolean
+      }
+      setKgCoreferenceHasMore(startPayload.hasMore)
+
+      setKgCoreferenceProgress(
+        `消歧进行中：0 / ${startPayload.totalComponents} 组（本次 ${startPayload.processedThisRun} 组）...`,
+      )
+      const poll = setInterval(async () => {
+        try {
+          const statusResponse = await fetch(
+            `/api/kg/scan/status?bookId=${encodeURIComponent(state.book.id)}`,
+          )
+          if (!statusResponse.ok) return
+          const payload = (await statusResponse.json()) as { job: KgScanJob | null }
+          const job = payload.job
+          setKgScanJob(job)
+          if (job?.id === startPayload.jobId && job?.status === 'running') {
+            setKgCoreferenceProgress(
+              `消歧进行中：${job.completedChapters} / ${job.totalChapters} 组...`,
+            )
+          }
+          if (job?.id === startPayload.jobId && (job.status === 'completed' || job.status === 'failed')) {
+            clearInterval(poll)
+            setIsKgCoreferencing(false)
+            if (job.status === 'completed') {
+              setKgCoreferenceProgress(
+                `消歧完成：本段 ${job.completedChapters} / ${job.totalChapters} 组${
+                  kgCoreferenceHasMore ? '，还有剩余组可继续处理' : ''
+                }。`,
+              )
+              await refreshKnowledgeGraph()
+            } else {
+              setKgCoreferenceProgress(`消歧失败：${job.error || '未知错误'}`)
+            }
+          }
+        } catch {
+          // ignore polling errors
+        }
+      }, 1500)
+    } catch (err) {
+      setKgError(err instanceof Error ? err.message : '消歧任务失败。')
+      setIsKgCoreferencing(false)
     }
   }
 
@@ -1693,7 +1800,7 @@ function App() {
     }
   }
 
-  async function handleGenerateEmbeddings() {
+  async function handleGenerateEmbeddings(force = false) {
     if (!state.book) return
 
     const config = getEmbeddingConfig()
@@ -1704,27 +1811,63 @@ function App() {
 
     setIsGeneratingEmbeddings(true)
     setRagError('')
-    setEmbeddingProgress('准备生成 embedding...')
+    setEmbeddingProgress(force ? '准备重新生成 embedding...' : '准备生成 embedding...')
 
     try {
-      const response = await fetch('/api/rag/embeddings/batch', {
-        body: JSON.stringify({
-          bookId: state.book.id,
-          provider: config.provider,
-          model: config.model,
-          baseUrl: config.baseUrl,
-          apiKey: config.apiKey,
-        }),
-        headers: { 'Content-Type': 'application/json' },
-        method: 'POST',
-      })
-
-      const payload = (await response.json()) as { completed: number; failed: number; total: number; error?: string }
-      if (!response.ok) {
-        throw new Error(payload.error ?? '生成 embedding 失败。')
+      const listUrl = force
+        ? `/api/rag/embeddings/summary-chapters?bookId=${encodeURIComponent(state.book.id)}`
+        : `/api/rag/embeddings/missing?bookId=${encodeURIComponent(state.book.id)}&model=${encodeURIComponent(config.model)}`
+      const listResponse = await fetch(listUrl)
+      const listPayload = (await listResponse.json()) as {
+        chapterIds?: string[]
+        error?: string
+      }
+      if (!listResponse.ok) {
+        throw new Error(listPayload.error ?? '获取章节列表失败。')
       }
 
-      setEmbeddingProgress(`已生成 ${payload.completed}/${payload.total}，失败 ${payload.failed} 个。`)
+      const chapterIds = listPayload.chapterIds ?? []
+      if (chapterIds.length === 0) {
+        setEmbeddingProgress(force ? '没有可重新生成的摘要。' : '所有章节的 embedding 已生成。')
+        return
+      }
+
+      const batchSize = config.provider === 'ollama' ? 5 : 50
+      let completed = 0
+      let failed = 0
+
+      for (let i = 0; i < chapterIds.length; i += batchSize) {
+        const batch = chapterIds.slice(i, i + batchSize)
+        setEmbeddingProgress(`正在生成 embedding：${completed + failed}/${chapterIds.length}...`)
+
+        const response = await fetch('/api/rag/embeddings/batch', {
+          body: JSON.stringify({
+            bookId: state.book.id,
+            provider: config.provider,
+            model: config.model,
+            baseUrl: config.baseUrl,
+            apiKey: config.apiKey,
+            chapterIds: batch,
+            force,
+          }),
+          headers: { 'Content-Type': 'application/json' },
+          method: 'POST',
+        })
+
+        const payload = (await response.json()) as {
+          completed: number
+          failed: number
+          total: number
+          error?: string
+        }
+        if (!response.ok) {
+          throw new Error(payload.error ?? '生成 embedding 失败。')
+        }
+        completed += payload.completed
+        failed += payload.failed
+      }
+
+      setEmbeddingProgress(`已生成 ${completed}/${chapterIds.length}，失败 ${failed} 个。`)
       const status = await fetchEmbeddingStatus()
       if (status?.dimension) {
         setState((current) => ({
@@ -1797,8 +1940,48 @@ function App() {
     }
   }
 
-  function buildRagAnswerPrompt(question: string, results: RagSearchResult[]): string {
+  function buildRagAnswerPrompt(
+    question: string,
+    results: RagSearchResult[],
+    entityMatches: RagEntityMatch[] = [],
+  ): string {
     const sorted = [...results].sort((a, b) => a.chapterIndex - b.chapterIndex)
+    const normalizedQuestion = normalizeGraphSearch(question)
+
+    const entitySection =
+      entityMatches.length > 0
+        ? `相关实体：\n${entityMatches
+            .map((entity) => {
+              const parts = [
+                `- ${entity.entityName}（${getKgEntityTypeLabel(entity.entityType)}）`,
+              ]
+              if (entity.firstChapterIndex != null) {
+                parts.push(`首次出现：第 ${entity.firstChapterIndex} 章`)
+              }
+              if (
+                entity.lastChapterIndex != null &&
+                entity.lastChapterIndex !== entity.firstChapterIndex
+              ) {
+                parts.push(`末次出现：第 ${entity.lastChapterIndex} 章`)
+              }
+              const relevantAliases = (entity.aliases || [])
+                .filter((alias) => {
+                  const normalizedAlias = normalizeGraphSearch(alias)
+                  return (
+                    normalizedAlias.length >= 2 &&
+                    (normalizedQuestion.includes(normalizedAlias) ||
+                      normalizedAlias.includes(normalizedQuestion))
+                  )
+                })
+                .slice(0, 5)
+              if (relevantAliases.length > 0) {
+                parts.push(`与问题相关的别名：${relevantAliases.join('、')}`)
+              }
+              return parts.join('，')
+            })
+            .join('\n')}\n\n`
+        : ''
+
     const context = sorted
       .map((result) => {
         const lines = [`[第 ${result.chapterIndex} 章] ${result.chapterTitle}`]
@@ -1812,7 +1995,7 @@ function App() {
 
 问题：${question}
 
-相关内容：
+${entitySection}相关内容：
 ${context}
 
 请给出回答：`
@@ -1884,7 +2067,7 @@ ${context}
     setRagError('')
 
     try {
-      const prompt = buildRagAnswerPrompt(ragQuery.trim(), ragResults)
+      const prompt = buildRagAnswerPrompt(ragQuery.trim(), ragResults, ragEntityMatches)
       let answer = ''
       if (state.aiProvider === 'openai') {
         if (!activeOpenAIConfig) throw new Error('请先配置外部模型。')
@@ -2441,7 +2624,7 @@ ${context}
     if (kgScanJob.status === 'running') {
       const staleThresholdMs = 30_000
       const lastUpdate = new Date(kgScanJob.updatedAt).getTime()
-      if (Date.now() - lastUpdate > staleThresholdMs) {
+      if (Date.now() - lastUpdate > staleThresholdMs && kgScanJob.scope !== 'coreference') {
         return { label: '已中断', isInterrupted: true }
       }
       return { label: '进行中', isInterrupted: false }
@@ -2512,323 +2695,264 @@ ${context}
             </div>
 
             <div className="config-form">
-              <label htmlFor="draft-ai-provider">AI 提供商</label>
-              <select
-                id="draft-ai-provider"
-                value={modelConfigDraft.aiProvider}
-                disabled={isTestingConfig}
-                onChange={(event) =>
-                  setModelConfigDraft((current) => ({
-                    ...current,
-                    aiProvider: event.target.value as AIProvider,
-                  }))
-                }
-              >
-                <option value="ollama">Ollama 本地</option>
-                <option value="openai">OpenAI-compatible</option>
-              </select>
+              <div className="config-tabs">
+                <button
+                  type="button"
+                  className={configTab === 'llm' ? 'active' : ''}
+                  onClick={() => setConfigTab('llm')}
+                  disabled={isTestingConfig}
+                >
+                  LLM
+                </button>
+                <button
+                  type="button"
+                  className={configTab === 'embedding' ? 'active' : ''}
+                  onClick={() => setConfigTab('embedding')}
+                  disabled={isTestingConfig}
+                >
+                  Embedding
+                </button>
+              </div>
 
-              {modelConfigDraft.aiProvider === 'ollama' ? (
+              {configTab === 'llm' && (
                 <>
-                  <label htmlFor="draft-ollama-temperature">Ollama Temperature</label>
-                  <input
-                    id="draft-ollama-temperature"
-                    type="number"
-                    min="0"
-                    max="2"
-                    step="0.1"
-                    value={modelConfigDraft.ollamaTemperature}
-                    disabled={isTestingConfig}
-                    onChange={(event) =>
-                      setModelConfigDraft((current) => ({
-                        ...current,
-                        ollamaTemperature: Number(event.target.value),
-                      }))
-                    }
-                  />
-                  <small>默认 1。保存前会用当前值验证本地模型。</small>
-                  <label htmlFor="draft-ollama-concurrency">Ollama 并发度</label>
-                  <input
-                    id="draft-ollama-concurrency"
-                    type="number"
-                    min="1"
-                    max="10"
-                    step="1"
-                    value={modelConfigDraft.ollamaConcurrency}
-                    disabled={isTestingConfig}
-                    onChange={(event) =>
-                      setModelConfigDraft((current) => ({
-                        ...current,
-                        ollamaConcurrency: Number(event.target.value),
-                      }))
-                    }
-                  />
-                  <small>默认 1。本地模型通常建议保持低并发。</small>
-                  <label className="thinking-toggle" htmlFor="draft-thinking-enabled">
-                    <input
-                      id="draft-thinking-enabled"
-                      type="checkbox"
-                      checked={modelConfigDraft.thinkingEnabled}
-                      disabled={isTestingConfig}
-                      onChange={(event) =>
-                        setModelConfigDraft((current) => ({
-                          ...current,
-                          thinkingEnabled: event.target.checked,
-                        }))
-                      }
-                    />
-                    Thinking 模式
-                  </label>
-                  <small>
-                    {modelConfigDraft.thinkingEnabled
-                      ? '开启：适合本地推理模型，最终仍要求只输出 JSON'
-                      : '关闭：会发送 /no_think，摘要更快更干净'}
-                  </small>
-                  <label htmlFor="draft-ollama-model">Ollama 模型</label>
-                  {ollamaModels.length ? (
-                    <select
-                      id="draft-ollama-model"
-                      value={modelConfigDraft.ollamaModel}
-                      disabled={isTestingConfig}
-                      onChange={(event) =>
-                        setModelConfigDraft((current) => ({
-                          ...current,
-                          ollamaModel: event.target.value,
-                        }))
-                      }
-                    >
-                      {ollamaModels.map((model) => (
-                        <option key={model.name} value={model.name}>
-                          {model.name}
-                        </option>
-                      ))}
-                    </select>
-                  ) : (
-                    <input
-                      id="draft-ollama-model"
-                      value={modelConfigDraft.ollamaModel}
-                      disabled={isTestingConfig}
-                      placeholder={isCheckingOllama ? '正在读取模型...' : '例如 qwen2.5:7b'}
-                      onChange={(event) =>
-                        setModelConfigDraft((current) => ({
-                          ...current,
-                          ollamaModel: event.target.value,
-                        }))
-                      }
-                    />
-                  )}
-                  <small>
-                    {ollamaModels.length
-                      ? `已发现 ${ollamaModels.length} 个本地模型。保存前会实际测试一次。`
-                      : '未自动发现模型，可手动填写；保存前会实际测试一次。'}
-                  </small>
-
-                  <div className="config-section-divider">
-                    <h3>Embedding 配置</h3>
-                    <p>用于 RAG 智能搜索的 embedding 模型，可与上方 LLM 不同。</p>
-                  </div>
-                  <label htmlFor="draft-embedding-provider">Embedding 提供商</label>
+                  <label htmlFor="draft-ai-provider">AI 提供商</label>
                   <select
-                    id="draft-embedding-provider"
-                    value={modelConfigDraft.embeddingConfig.provider}
+                    id="draft-ai-provider"
+                    value={modelConfigDraft.aiProvider}
                     disabled={isTestingConfig}
                     onChange={(event) =>
                       setModelConfigDraft((current) => ({
                         ...current,
-                        embeddingConfig: {
-                          ...current.embeddingConfig,
-                          provider: event.target.value as EmbeddingProvider,
-                        },
+                        aiProvider: event.target.value as AIProvider,
                       }))
                     }
                   >
                     <option value="ollama">Ollama 本地</option>
                     <option value="openai">OpenAI-compatible</option>
                   </select>
-                  <small>生成章节摘要 embedding 使用的提供商，可与上方 LLM 提供商不同。</small>
 
-                  <label htmlFor="draft-embedding-base-url">Embedding Base URL</label>
-                  <input
-                    id="draft-embedding-base-url"
-                    value={modelConfigDraft.embeddingConfig.baseUrl}
-                    disabled={isTestingConfig}
-                    placeholder={
-                      modelConfigDraft.embeddingConfig.provider === 'ollama'
-                        ? 'http://localhost:11434'
-                        : 'https://api.openai.com/v1'
-                    }
-                    onChange={(event) =>
-                      setModelConfigDraft((current) => ({
-                        ...current,
-                        embeddingConfig: {
-                          ...current.embeddingConfig,
-                          baseUrl: event.target.value,
-                        },
-                      }))
-                    }
-                  />
-
-                  <label htmlFor="draft-embedding-model">Embedding 模型名</label>
-                  <input
-                    id="draft-embedding-model"
-                    value={modelConfigDraft.embeddingConfig.model}
-                    disabled={isTestingConfig}
-                    placeholder={
-                      modelConfigDraft.embeddingConfig.provider === 'ollama'
-                        ? 'nomic-embed-text'
-                        : 'text-embedding-3-small'
-                    }
-                    onChange={(event) =>
-                      setModelConfigDraft((current) => ({
-                        ...current,
-                        embeddingConfig: {
-                          ...current.embeddingConfig,
-                          model: event.target.value,
-                        },
-                      }))
-                    }
-                  />
-
-                  {modelConfigDraft.embeddingConfig.provider === 'openai' && (
+                  {modelConfigDraft.aiProvider === 'ollama' ? (
                     <>
-                      <label htmlFor="draft-embedding-api-key">Embedding API Key</label>
+                      <label htmlFor="draft-ollama-temperature">Ollama Temperature</label>
                       <input
-                        id="draft-embedding-api-key"
-                        type="password"
-                        value={modelConfigDraft.embeddingConfig.apiKey}
+                        id="draft-ollama-temperature"
+                        type="number"
+                        min="0"
+                        max="2"
+                        step="0.1"
+                        value={modelConfigDraft.ollamaTemperature}
                         disabled={isTestingConfig}
-                        placeholder="sk-..."
                         onChange={(event) =>
                           setModelConfigDraft((current) => ({
                             ...current,
-                            embeddingConfig: {
-                              ...current.embeddingConfig,
-                              apiKey: event.target.value,
-                            },
+                            ollamaTemperature: Number(event.target.value),
                           }))
                         }
                       />
+                      <small>默认 1。保存前会用当前值验证本地模型。</small>
+                      <label htmlFor="draft-ollama-concurrency">Ollama 并发度</label>
+                      <input
+                        id="draft-ollama-concurrency"
+                        type="number"
+                        min="1"
+                        max="10"
+                        step="1"
+                        value={modelConfigDraft.ollamaConcurrency}
+                        disabled={isTestingConfig}
+                        onChange={(event) =>
+                          setModelConfigDraft((current) => ({
+                            ...current,
+                            ollamaConcurrency: Number(event.target.value),
+                          }))
+                        }
+                      />
+                      <small>默认 1。本地模型通常建议保持低并发。</small>
+                      <label className="thinking-toggle" htmlFor="draft-thinking-enabled">
+                        <input
+                          id="draft-thinking-enabled"
+                          type="checkbox"
+                          checked={modelConfigDraft.thinkingEnabled}
+                          disabled={isTestingConfig}
+                          onChange={(event) =>
+                            setModelConfigDraft((current) => ({
+                              ...current,
+                              thinkingEnabled: event.target.checked,
+                            }))
+                          }
+                        />
+                        Thinking 模式
+                      </label>
+                      <small>
+                        {modelConfigDraft.thinkingEnabled
+                          ? '开启：适合本地推理模型，最终仍要求只输出 JSON'
+                          : '关闭：会发送 /no_think，摘要更快更干净'}
+                      </small>
+                      <label htmlFor="draft-ollama-model">Ollama 模型</label>
+                      {ollamaModels.length ? (
+                        <select
+                          id="draft-ollama-model"
+                          value={modelConfigDraft.ollamaModel}
+                          disabled={isTestingConfig}
+                          onChange={(event) =>
+                            setModelConfigDraft((current) => ({
+                              ...current,
+                              ollamaModel: event.target.value,
+                            }))
+                          }
+                        >
+                          {ollamaModels.map((model) => (
+                            <option key={model.name} value={model.name}>
+                              {model.name}
+                            </option>
+                          ))}
+                        </select>
+                      ) : (
+                        <input
+                          id="draft-ollama-model"
+                          value={modelConfigDraft.ollamaModel}
+                          disabled={isTestingConfig}
+                          placeholder={isCheckingOllama ? '正在读取模型...' : '例如 qwen2.5:7b'}
+                          onChange={(event) =>
+                            setModelConfigDraft((current) => ({
+                              ...current,
+                              ollamaModel: event.target.value,
+                            }))
+                          }
+                        />
+                      )}
+                      <small>
+                        {ollamaModels.length
+                          ? `已发现 ${ollamaModels.length} 个本地模型。保存前会实际测试一次。`
+                          : '未自动发现模型，可手动填写；保存前会实际测试一次。'}
+                      </small>
                     </>
-                  )}
+                  ) : (
+                    <>
+                      <div className="external-model-row">
+                        <label htmlFor="draft-openai-config">选择外部模型</label>
+                        <button
+                          type="button"
+                          className="ghost-button"
+                          disabled={isTestingConfig}
+                          onClick={addOpenAIConfig}
+                        >
+                          新增模型
+                        </button>
+                      </div>
+                      <select
+                        id="draft-openai-config"
+                        value={modelConfigDraft.activeOpenAIConfigId}
+                        disabled={isTestingConfig}
+                        onChange={(event) =>
+                          setModelConfigDraft((current) => ({
+                            ...current,
+                            activeOpenAIConfigId: event.target.value,
+                          }))
+                        }
+                      >
+                        {modelConfigDraft.openaiConfigs.map((config) => (
+                          <option key={config.id} value={config.id}>
+                            {config.name || config.model || '未命名外部模型'}
+                          </option>
+                        ))}
+                      </select>
 
-                  {typeof modelConfigDraft.embeddingConfig.dimension === 'number' && (
-                    <small>当前已生成 embedding 的维度：{modelConfigDraft.embeddingConfig.dimension}</small>
+                      <label htmlFor="draft-openai-name">配置名称</label>
+                      <input
+                        id="draft-openai-name"
+                        value={draftActiveOpenAIConfig?.name ?? ''}
+                        disabled={isTestingConfig}
+                        placeholder="例如 Moonshot K2"
+                        onChange={(event) => updateActiveOpenAIConfig({ name: event.target.value })}
+                      />
+                      <label htmlFor="draft-openai-base-url">Base URL</label>
+                      <input
+                        id="draft-openai-base-url"
+                        value={draftActiveOpenAIConfig?.baseUrl ?? ''}
+                        disabled={isTestingConfig}
+                        placeholder="https://api.openai.com/v1"
+                        onChange={(event) => updateActiveOpenAIConfig({ baseUrl: event.target.value })}
+                      />
+                      <label htmlFor="draft-openai-api-key">API Key</label>
+                      <input
+                        id="draft-openai-api-key"
+                        type="password"
+                        value={draftActiveOpenAIConfig?.apiKey ?? ''}
+                        disabled={isTestingConfig}
+                        placeholder="sk-..."
+                        onChange={(event) => updateActiveOpenAIConfig({ apiKey: event.target.value })}
+                      />
+                      <label htmlFor="draft-openai-model">Model Name</label>
+                      <input
+                        id="draft-openai-model"
+                        value={draftActiveOpenAIConfig?.model ?? ''}
+                        disabled={isTestingConfig}
+                        placeholder="gpt-4.1-mini"
+                        onChange={(event) => updateActiveOpenAIConfig({ model: event.target.value })}
+                      />
+                      <label htmlFor="draft-openai-temperature">当前外部模型 Temperature</label>
+                      <input
+                        id="draft-openai-temperature"
+                        type="number"
+                        min="0"
+                        max="2"
+                        step="0.1"
+                        value={draftActiveOpenAIConfig?.temperature ?? 1}
+                        disabled={isTestingConfig}
+                        onChange={(event) =>
+                          updateActiveOpenAIConfig({ temperature: Number(event.target.value) })
+                        }
+                      />
+                      <small>默认 1。部分兼容接口只接受特定值，保存前会用当前值验证。</small>
+                      <label htmlFor="draft-openai-concurrency">当前外部模型并发度</label>
+                      <input
+                        id="draft-openai-concurrency"
+                        type="number"
+                        min="1"
+                        max="10"
+                        step="1"
+                        value={draftActiveOpenAIConfig?.concurrency ?? 3}
+                        disabled={isTestingConfig}
+                        onChange={(event) =>
+                          updateActiveOpenAIConfig({ concurrency: Number(event.target.value) })
+                        }
+                      />
+                      <small>默认 3。批量生成当前章节页时会同时请求这么多章节。</small>
+                      <label className="thinking-toggle" htmlFor="draft-openai-thinking-enabled">
+                        <input
+                          id="draft-openai-thinking-enabled"
+                          type="checkbox"
+                          checked={Boolean(draftActiveOpenAIConfig?.thinkingEnabled)}
+                          disabled={isTestingConfig}
+                          onChange={(event) =>
+                            updateActiveOpenAIConfig({ thinkingEnabled: event.target.checked })
+                          }
+                        />
+                        当前外部模型启用 Thinking
+                      </label>
+                      <small>
+                        {draftActiveOpenAIConfig?.thinkingEnabled
+                          ? '当前外部模型会发送 /think，但最终仍要求只输出 JSON'
+                          : '当前外部模型会发送 /no_think，适合不需要思考模式的模型'}
+                      </small>
+
+                      <button
+                        type="button"
+                        className="ghost-button danger-button"
+                        disabled={isTestingConfig || modelConfigDraft.openaiConfigs.length <= 1}
+                        onClick={removeActiveOpenAIConfig}
+                      >
+                        删除当前外部模型
+                      </button>
+                      <small>支持 /chat/completions 兼容接口。保存前会实际测试一次。</small>
+                    </>
                   )}
                 </>
-              ) : (
+              )}
+
+              {configTab === 'embedding' && (
                 <>
-                  <div className="external-model-row">
-                    <label htmlFor="draft-openai-config">选择外部模型</label>
-                    <button
-                      type="button"
-                      className="ghost-button"
-                      disabled={isTestingConfig}
-                      onClick={addOpenAIConfig}
-                    >
-                      新增模型
-                    </button>
-                  </div>
-                  <select
-                    id="draft-openai-config"
-                    value={modelConfigDraft.activeOpenAIConfigId}
-                    disabled={isTestingConfig}
-                    onChange={(event) =>
-                      setModelConfigDraft((current) => ({
-                        ...current,
-                        activeOpenAIConfigId: event.target.value,
-                      }))
-                    }
-                  >
-                    {modelConfigDraft.openaiConfigs.map((config) => (
-                      <option key={config.id} value={config.id}>
-                        {config.name || config.model || '未命名外部模型'}
-                      </option>
-                    ))}
-                  </select>
-
-                  <label htmlFor="draft-openai-name">配置名称</label>
-                  <input
-                    id="draft-openai-name"
-                    value={draftActiveOpenAIConfig?.name ?? ''}
-                    disabled={isTestingConfig}
-                    placeholder="例如 Moonshot K2"
-                    onChange={(event) => updateActiveOpenAIConfig({ name: event.target.value })}
-                  />
-                  <label htmlFor="draft-openai-base-url">Base URL</label>
-                  <input
-                    id="draft-openai-base-url"
-                    value={draftActiveOpenAIConfig?.baseUrl ?? ''}
-                    disabled={isTestingConfig}
-                    placeholder="https://api.openai.com/v1"
-                    onChange={(event) => updateActiveOpenAIConfig({ baseUrl: event.target.value })}
-                  />
-                  <label htmlFor="draft-openai-api-key">API Key</label>
-                  <input
-                    id="draft-openai-api-key"
-                    type="password"
-                    value={draftActiveOpenAIConfig?.apiKey ?? ''}
-                    disabled={isTestingConfig}
-                    placeholder="sk-..."
-                    onChange={(event) => updateActiveOpenAIConfig({ apiKey: event.target.value })}
-                  />
-                  <label htmlFor="draft-openai-model">Model Name</label>
-                  <input
-                    id="draft-openai-model"
-                    value={draftActiveOpenAIConfig?.model ?? ''}
-                    disabled={isTestingConfig}
-                    placeholder="gpt-4.1-mini"
-                    onChange={(event) => updateActiveOpenAIConfig({ model: event.target.value })}
-                  />
-                  <label htmlFor="draft-openai-temperature">当前外部模型 Temperature</label>
-                  <input
-                    id="draft-openai-temperature"
-                    type="number"
-                    min="0"
-                    max="2"
-                    step="0.1"
-                    value={draftActiveOpenAIConfig?.temperature ?? 1}
-                    disabled={isTestingConfig}
-                    onChange={(event) =>
-                      updateActiveOpenAIConfig({ temperature: Number(event.target.value) })
-                    }
-                  />
-                  <small>默认 1。部分兼容接口只接受特定值，保存前会用当前值验证。</small>
-                  <label htmlFor="draft-openai-concurrency">当前外部模型并发度</label>
-                  <input
-                    id="draft-openai-concurrency"
-                    type="number"
-                    min="1"
-                    max="10"
-                    step="1"
-                    value={draftActiveOpenAIConfig?.concurrency ?? 3}
-                    disabled={isTestingConfig}
-                    onChange={(event) =>
-                      updateActiveOpenAIConfig({ concurrency: Number(event.target.value) })
-                    }
-                  />
-                  <small>默认 3。批量生成当前章节页时会同时请求这么多章节。</small>
-                  <label className="thinking-toggle" htmlFor="draft-openai-thinking-enabled">
-                    <input
-                      id="draft-openai-thinking-enabled"
-                      type="checkbox"
-                      checked={Boolean(draftActiveOpenAIConfig?.thinkingEnabled)}
-                      disabled={isTestingConfig}
-                      onChange={(event) =>
-                        updateActiveOpenAIConfig({ thinkingEnabled: event.target.checked })
-                      }
-                    />
-                    当前外部模型启用 Thinking
-                  </label>
-                  <small>
-                    {draftActiveOpenAIConfig?.thinkingEnabled
-                      ? '当前外部模型会发送 /think，但最终仍要求只输出 JSON'
-                      : '当前外部模型会发送 /no_think，适合不需要思考模式的模型'}
-                  </small>
-
-                  <div className="config-section-divider">
-                    <h3>Embedding 配置</h3>
-                    <p>用于 RAG 智能搜索的 embedding 模型，可与上方 LLM 不同。</p>
-                  </div>
                   <label htmlFor="draft-embedding-provider">Embedding 提供商</label>
                   <select
                     id="draft-embedding-provider"
@@ -2847,7 +2971,7 @@ ${context}
                     <option value="ollama">Ollama 本地</option>
                     <option value="openai">OpenAI-compatible</option>
                   </select>
-                  <small>生成章节摘要 embedding 使用的提供商，可与上方 LLM 提供商不同。</small>
+                  <small>生成章节摘要 embedding 使用的提供商，可与 LLM 提供商不同。</small>
 
                   <label htmlFor="draft-embedding-base-url">Embedding Base URL</label>
                   <input
@@ -2916,16 +3040,6 @@ ${context}
                   {typeof modelConfigDraft.embeddingConfig.dimension === 'number' && (
                     <small>当前已生成 embedding 的维度：{modelConfigDraft.embeddingConfig.dimension}</small>
                   )}
-
-                  <button
-                    type="button"
-                    className="ghost-button danger-button"
-                    disabled={isTestingConfig || modelConfigDraft.openaiConfigs.length <= 1}
-                    onClick={removeActiveOpenAIConfig}
-                  >
-                    删除当前外部模型
-                  </button>
-                  <small>支持 /chat/completions 兼容接口。保存前会实际测试一次。</small>
                 </>
               )}
 
@@ -3959,6 +4073,27 @@ ${context}
               <span>待复审</span>
               <strong>{kgReviewEntities.length + kgReviewRelations.length}</strong>
             </button>
+            <button
+              type="button"
+              disabled={isKgCoreferencing}
+              onClick={() => void resolveKgCoreferences()}
+            >
+              <span>{isKgCoreferencing ? '消歧中...' : kgCoreferenceHasMore ? '继续人物消歧' : '人物消歧'}</span>
+            </button>
+            <label className="kg-coreference-chunk">
+              每次
+              <input
+                type="number"
+                min={1}
+                max={500}
+                value={kgCoreferenceChunkSize}
+                disabled={isKgCoreferencing}
+                onChange={(event) =>
+                  setKgCoreferenceChunkSize(Math.max(1, Math.min(500, Number(event.target.value))))
+                }
+              />
+              组
+            </label>
           </div>
 
           {showKgEvidenceSearch && (
@@ -5016,6 +5151,7 @@ ${context}
               </p>
               <p>“重放已保存 JSON”不会调用模型，只会用现有章节抽取结果重建图谱写入。</p>
               {kgScanProgress && <p>{kgScanProgress}</p>}
+              {kgCoreferenceProgress && <p>{kgCoreferenceProgress}</p>}
             </div>
 
             <div className="kg-advanced-actions">
@@ -5068,13 +5204,17 @@ ${context}
                 {embeddingStatus.missingChapters > 0 && `（还差 ${embeddingStatus.missingChapters} 章）`}
                 {typeof embeddingStatus.dimension === 'number' && ` · 维度 ${embeddingStatus.dimension}`}
               </span>
-              {embeddingStatus.missingChapters > 0 && (
+              {embeddingStatus && (
                 <button
                   type="button"
-                  onClick={() => void handleGenerateEmbeddings()}
+                  onClick={() => void handleGenerateEmbeddings(embeddingStatus.missingChapters === 0)}
                   disabled={isGeneratingEmbeddings}
                 >
-                  {isGeneratingEmbeddings ? '生成中...' : '生成 embedding'}
+                  {isGeneratingEmbeddings
+                    ? '生成中...'
+                    : embeddingStatus.missingChapters > 0
+                      ? '生成 embedding'
+                      : '重新生成 embedding'}
                 </button>
               )}
               {embeddingProgress && <small>{embeddingProgress}</small>}
@@ -5163,7 +5303,13 @@ ${context}
                       第 {result.chapterIndex} 章：{result.chapterTitle}
                     </button>
                     <span className={`match-type ${result.matchType}`}>
-                      {result.matchType === 'vector' ? '语义' : result.matchType === 'entity' ? '实体' : '混合'}
+                      {result.matchType === 'vector'
+                        ? '语义'
+                        : result.matchType === 'entity'
+                          ? '实体'
+                          : result.matchType === 'entity-first'
+                            ? '实体（首次）'
+                            : '混合'}
                     </span>
                   </div>
                   {result.matchedEntities.length > 0 && (
