@@ -119,6 +119,8 @@ novel_reader/
 - 章节重扫可先预览新 extraction 与当前图谱之间的差异，确认后再写入。
 - 实体一跳关系图和全局过滤图使用 React Flow（`@xyflow/react`）渲染。
 - 图谱证据支持关键词搜索，并可导出为 JSON 或 GraphML。
+- 全局共指合并会先分组疑似重复的人物实体，再调用当前生成模型判断同一身份簇，最后合并别名、出现证据和冲突关系。
+- 复审队列维护支持批量标记已审、忽略和删除。
 
 完整路线图见 [knowledge-graph-roadmap.md](knowledge-graph-roadmap.md)。
 后端 API 参考见 [backend-api.md](backend-api.md)。
@@ -128,6 +130,7 @@ novel_reader/
 RAG 搜索结合章节概要 embedding 与知识图谱实体匹配。
 
 - `/api/rag/embeddings/batch` 生成 embedding，并保存到 `summary_embeddings`。
+- embedding 配置和文本生成模型配置彼此独立，并通过 `/api/rag/embeddings/validate` 走本地后端校验，避免浏览器 CORS 阻断 Ollama/OpenAI-compatible 检查。
 - `/api/rag/search` 融合向量召回和实体召回，并用类似 reciprocal-rank 的方式排序。
 - 搜索结果包含章节概要、匹配实体、相似度、匹配类型和可选原文片段。
 - 如果所选模型的 embedding 覆盖率低于 80%，API 会返回 `409 EMBEDDINGS_NOT_READY`。

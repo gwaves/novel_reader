@@ -10,8 +10,8 @@ A local-first web reader for long Chinese web novels, with AI-powered summaries,
 - Split long novels into chapters and paginate the chapter list by 100 chapters.
 - Persist imported chapters, reading progress, summaries, knowledge graph data, embeddings, and settings in a local SQLite database under `~/.novel_reader`.
 - Generate single-chapter, current-page, or all-missing chapter summaries.
-- Configure local Ollama models and OpenAI-compatible external models.
-- Support multiple external model profiles, each with its own model name, base URL, API key, temperature, thinking mode, and optional embedding model.
+- Configure local Ollama models and OpenAI-compatible external models, with separate validation for generation and embedding models.
+- Support multiple external model profiles, each with its own model name, base URL, API key, temperature, thinking mode, and an independent embedding configuration.
 - Adjust reader font size.
 - Navigate chapters from both the top and bottom of the desktop reader.
 - Export or restore the full SQLite database from the web UI.
@@ -22,8 +22,9 @@ A local-first web reader for long Chinese web novels, with AI-powered summaries,
 - **Knowledge Graph**:
   - Extract entities (characters, sects, items, skills, locations, beasts, events) and relations from each chapter.
   - Batch scan the whole book with resumable jobs, override rescans, saved-JSON replay, and graph change previews.
-  - Review low-confidence entities and relations in a review queue.
+  - Review low-confidence entities and relations in a review queue, including batch deletes.
   - Merge, edit, split, and delete entities and relations.
+  - Run an LLM-assisted global coreference pass to merge duplicate character identities.
   - Browse entity/relation lists with filters and search.
   - Search evidence, visualize entity neighborhoods/global graph slices, and export JSON or GraphML.
 - **Offline Scanner CLI** (`scripts/offline-scanner.mjs`):

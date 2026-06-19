@@ -172,6 +172,22 @@ Response:
 }
 ```
 
+### `PUT /api/books/:bookId`
+
+Updates a book title and mirrors the title into persisted app state so refreshes do not revert to the old name.
+
+Request:
+
+```json
+{ "title": "New title" }
+```
+
+Response:
+
+```json
+{ "ok": true }
+```
+
 ## Database Backup APIs
 
 ### `GET /api/database/export`
@@ -684,6 +700,96 @@ Response:
 { "marked": 2 }
 ```
 
+### `POST /api/kg/review-queue/delete`
+
+Deletes review queue entities or relations in batches.
+
+Request:
+
+```json
+{
+  "ids": ["id-a", "id-b"],
+  "kind": "entities"
+}
+```
+
+Allowed values:
+
+- `kind`: `entities`, `relations`
+
+Response:
+
+```json
+{ "deleted": 2 }
+```
+
+## Coreference APIs
+
+### `GET /api/kg/coreference/components`
+
+Returns candidate character-identity components for the global coreference pass.
+
+Query parameters:
+
+| Name | Required | Description |
+|---|---:|---|
+| `bookId` | yes | Book ID |
+
+Response:
+
+```ts
+{
+  totalComponents: number
+  components: Array<Array<{
+    id: string
+    name: string
+    aliases: string[]
+    firstChapterIndex: number | null
+    lastChapterIndex: number | null
+    description: string | null
+  }>>
+}
+```
+
+### `POST /api/kg/coreference/resolve`
+
+Starts an LLM-assisted global coreference job. The job groups likely duplicate character entities, asks the configured generation model to decide identity clusters, and merges matching entities.
+
+Request:
+
+```json
+{
+  "bookId": "book-id",
+  "provider": "ollama",
+  "model": "qwen3:8b",
+  "baseUrl": "http://127.0.0.1:11434",
+  "apiKey": "",
+  "limit": 10,
+  "concurrency": 1,
+  "temperature": 0,
+  "jsonMode": true,
+  "thinkingEnabled": false
+}
+```
+
+Response:
+
+```json
+{
+  "jobId": "job-id",
+  "totalComponents": 42,
+  "processedThisRun": 10,
+  "hasMore": true
+}
+```
+
+Behavior:
+
+- The job is recorded in `kg_scan_jobs` with scope `coreference`.
+- A recent running coreference job for the same book returns `409`.
+- `limit` can be used to process a small batch before running the whole book.
+- Merges move mentions and aliases, merge conflicting relations, and recompute affected chapter ranges.
+
 ## Scan Job APIs
 
 The web frontend creates and updates scan jobs while LLM calls happen in the browser. The API persists job state so interrupted scans can be resumed.
@@ -892,6 +998,30 @@ Validation:
 - Saved extraction JSON must parse to an object.
 
 ## RAG APIs
+
+### `POST /api/rag/embeddings/validate`
+
+Validates the selected embedding provider and model through the local backend.
+
+Request:
+
+```json
+{
+  "provider": "ollama",
+  "model": "nomic-embed-text",
+  "baseUrl": "http://127.0.0.1:11434",
+  "apiKey": ""
+}
+```
+
+Response:
+
+```json
+{
+  "ok": true,
+  "dimension": 768
+}
+```
 
 ### `POST /api/rag/embeddings/batch`
 

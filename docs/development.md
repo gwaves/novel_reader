@@ -119,6 +119,8 @@ The knowledge graph is implemented as a property graph on top of SQLite.
 - Chapter rescan previews can diff the new extraction against the current graph before applying changes.
 - Entity neighborhood and filtered global graph views are rendered with React Flow (`@xyflow/react`).
 - Knowledge graph evidence can be searched and exported as JSON or GraphML.
+- The global coreference pass groups likely duplicate character entities, asks the configured LLM to resolve identity clusters, and then merges aliases, mentions, and conflicting relations.
+- Review queue maintenance supports batch approval, ignore, and delete actions.
 
 See [knowledge-graph-roadmap.md](knowledge-graph-roadmap.md) for the full roadmap.
 See [backend-api.md](backend-api.md) for the backend API reference.
@@ -128,6 +130,7 @@ See [backend-api.md](backend-api.md) for the backend API reference.
 RAG search combines summary embeddings with knowledge graph entity matching.
 
 - Embeddings are generated through `/api/rag/embeddings/batch` and stored in `summary_embeddings`.
+- Embedding configuration is separate from the text-generation model configuration and is validated through `/api/rag/embeddings/validate` so browser CORS does not block Ollama/OpenAI-compatible checks.
 - Search calls `/api/rag/search`, which fuses vector recall and entity recall with reciprocal-rank-style scoring.
 - Search results include chapter summaries, matched entity names, similarity, match type, and optional chapter snippets.
 - If fewer than 80% of chapters have embeddings for the selected model, the API returns `409 EMBEDDINGS_NOT_READY`.
