@@ -854,6 +854,64 @@ button:disabled {
   line-height: 1.5;
 }
 
+.kg-graph-panel {
+  display: grid;
+  gap: 12px;
+  margin-top: 16px;
+}
+
+.kg-graph-filters {
+  margin-top: 0;
+}
+
+.kg-graph-canvas {
+  height: min(620px, 68vh);
+  min-height: 420px;
+  overflow: hidden;
+  border: 1px solid #ded6ca;
+  border-radius: 8px;
+  background: #fffdf8;
+}
+
+.kg-book-graph-canvas {
+  height: min(760px, 72vh);
+  min-height: 520px;
+}
+
+.kg-graph-canvas .react-flow__node {
+  box-shadow: 0 6px 18px rgba(36, 33, 28, 0.12);
+  text-align: center;
+}
+
+.kg-graph-canvas .react-flow__edge-textbg {
+  fill-opacity: 0.92;
+}
+
+.kg-graph-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.kg-graph-legend span {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: 1px solid #e4dbcf;
+  border-radius: 999px;
+  padding: 5px 9px;
+  background: #fffdf8;
+  color: #5e5549;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.kg-graph-legend i {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+}
+
 .kg-detail-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;

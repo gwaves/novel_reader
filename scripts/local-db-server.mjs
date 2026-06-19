@@ -329,6 +329,73 @@ const getKgEntityRelationsStatement = db.prepare(`
   ORDER BY r.confidence DESC, r.updated_at DESC
   LIMIT 100
 `)
+const getKgNeighborhoodEntityStatement = db.prepare(`
+  SELECT
+    e.id,
+    e.book_id AS bookId,
+    e.type,
+    e.name,
+    e.aliases_json AS aliasesJson,
+    e.description,
+    e.confidence,
+    e.first_chapter_index AS firstChapterIndex,
+    e.last_chapter_index AS lastChapterIndex,
+    COUNT(m.id) AS mentionCount
+  FROM kg_entities e
+  LEFT JOIN kg_entity_mentions m ON m.entity_id = e.id
+  WHERE e.id = ?
+  GROUP BY e.id
+`)
+const listKgNeighborhoodRelationsStatement = db.prepare(`
+  SELECT
+    r.id,
+    r.type,
+    r.description,
+    r.confidence,
+    r.first_chapter_index AS firstChapterIndex,
+    r.last_chapter_index AS lastChapterIndex,
+    source.id AS sourceId,
+    source.name AS sourceName,
+    source.type AS sourceType,
+    target.id AS targetId,
+    target.name AS targetName,
+    target.type AS targetType,
+    COUNT(mention.id) AS mentionCount
+  FROM kg_relations r
+  JOIN kg_entities source ON source.id = r.source_entity_id
+  JOIN kg_entities target ON target.id = r.target_entity_id
+  LEFT JOIN kg_relation_mentions mention ON mention.relation_id = r.id
+  WHERE r.source_entity_id = ? OR r.target_entity_id = ?
+  GROUP BY r.id
+  ORDER BY mentionCount DESC, r.confidence DESC, r.updated_at DESC
+  LIMIT ?
+`)
+const listKgGraphRelationsStatement = db.prepare(`
+  SELECT
+    r.id,
+    r.type,
+    r.description,
+    r.confidence,
+    r.first_chapter_index AS firstChapterIndex,
+    r.last_chapter_index AS lastChapterIndex,
+    source.id AS sourceId,
+    source.name AS sourceName,
+    source.type AS sourceType,
+    target.id AS targetId,
+    target.name AS targetName,
+    target.type AS targetType,
+    COUNT(mention.id) AS mentionCount
+  FROM kg_relations r
+  JOIN kg_entities source ON source.id = r.source_entity_id
+  JOIN kg_entities target ON target.id = r.target_entity_id
+  LEFT JOIN kg_relation_mentions mention ON mention.relation_id = r.id
+  WHERE r.book_id = ?
+    AND (? = '' OR r.type = ?)
+    AND (? = '' OR (source.type = ? AND target.type = ?))
+  GROUP BY r.id
+  ORDER BY mentionCount DESC, r.confidence DESC, r.updated_at DESC
+  LIMIT ?
+`)
 const listKgRelationsStatement = db.prepare(`
   SELECT
     r.id,
@@ -951,6 +1018,76 @@ function getKgReviewQueue(bookId, kind, limit) {
   return {
     entities: entities.filter((entity) => entity.reasons.length > 0),
     relations: relations.filter((relation) => relation.reasons.length > 0),
+  }
+}
+
+function getKgEntityNeighborhood(entityId, options = {}) {
+  const center = getKgNeighborhoodEntityStatement.get(entityId)
+  if (!center) return null
+
+  const relationType = typeof options.relationType === 'string' ? options.relationType : ''
+  const entityType = typeof options.entityType === 'string' ? options.entityType : ''
+  const safeLimit = Math.max(1, Math.min(200, Number(options.limit) || 100))
+  const relations = listKgNeighborhoodRelationsStatement
+    .all(entityId, entityId, safeLimit)
+    .filter((relation) => !relationType || relation.type === relationType)
+
+  const entityIds = new Set([entityId])
+  for (const relation of relations) {
+    entityIds.add(relation.sourceId)
+    entityIds.add(relation.targetId)
+  }
+
+  const entitiesById = new Map()
+  for (const id of entityIds) {
+    const row = getKgNeighborhoodEntityStatement.get(id)
+    if (row) entitiesById.set(id, mapEntityRow(row))
+  }
+
+  const visibleEntityIds = new Set([entityId])
+  for (const [id, entity] of entitiesById) {
+    if (id === entityId || !entityType || entity.type === entityType) {
+      visibleEntityIds.add(id)
+    }
+  }
+
+  return {
+    centerId: entityId,
+    entities: Array.from(visibleEntityIds)
+      .map((id) => entitiesById.get(id))
+      .filter(Boolean),
+    relations: relations.filter(
+      (relation) => visibleEntityIds.has(relation.sourceId) && visibleEntityIds.has(relation.targetId),
+    ),
+  }
+}
+
+function getKgBookGraph(bookId, options = {}) {
+  const relationType = typeof options.relationType === 'string' ? options.relationType : ''
+  const entityType = typeof options.entityType === 'string' ? options.entityType : ''
+  const safeLimit = Math.max(1, Math.min(300, Number(options.limit) || 150))
+  const relations = listKgGraphRelationsStatement.all(
+    bookId,
+    relationType,
+    relationType,
+    entityType,
+    entityType,
+    entityType,
+    safeLimit,
+  )
+  const entityIds = new Set()
+
+  for (const relation of relations) {
+    entityIds.add(relation.sourceId)
+    entityIds.add(relation.targetId)
+  }
+
+  return {
+    entities: Array.from(entityIds)
+      .map((id) => getKgNeighborhoodEntityStatement.get(id))
+      .filter(Boolean)
+      .map(mapEntityRow),
+    relations,
   }
 }
 
@@ -1844,6 +1981,22 @@ const server = createServer(async (request, response) => {
       return
     }
 
+    if (request.method === 'GET' && url.pathname === '/api/kg/graph') {
+      const bookId = url.searchParams.get('bookId')
+
+      if (!bookId) {
+        sendJson(response, 400, { error: 'Missing bookId.' })
+        return
+      }
+
+      sendJson(response, 200, getKgBookGraph(bookId, {
+        entityType: url.searchParams.get('entityType') ?? '',
+        relationType: url.searchParams.get('relationType') ?? '',
+        limit: Number(url.searchParams.get('limit') ?? 150),
+      }))
+      return
+    }
+
     if (request.method === 'GET' && url.pathname === '/api/kg/review-queue') {
       const bookId = url.searchParams.get('bookId')
 
@@ -1971,6 +2124,24 @@ const server = createServer(async (request, response) => {
         db.exec('ROLLBACK')
         sendJson(response, 400, { error: error instanceof Error ? error.message : 'Split failed.' })
       }
+      return
+    }
+
+    const entityNeighborhoodMatch = url.pathname.match(/^\/api\/kg\/entities\/([^/]+)\/neighborhood$/)
+    if (request.method === 'GET' && entityNeighborhoodMatch) {
+      const entityId = decodeURIComponent(entityNeighborhoodMatch[1])
+      const neighborhood = getKgEntityNeighborhood(entityId, {
+        entityType: url.searchParams.get('entityType') ?? '',
+        relationType: url.searchParams.get('relationType') ?? '',
+        limit: Number(url.searchParams.get('limit') ?? 100),
+      })
+
+      if (!neighborhood) {
+        sendJson(response, 404, { error: 'Entity not found.' })
+        return
+      }
+
+      sendJson(response, 200, neighborhood)
       return
     }
 
