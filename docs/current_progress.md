@@ -101,6 +101,16 @@ SQLite 图谱表
 - UI：知识图谱统计区新增“证据搜索”，可搜索全部/实体/关系证据，并从结果跳转实体详情、关系详情或阅读器章节。
 - 策略：先使用 SQLite LIKE 查询，不新增迁移；后续数据量继续扩大时可替换为 FTS5。
 
+2026-06-19 更新：Phase 5 图谱导出 v1 已完成。
+- 后端：新增 `GET /api/kg/export`，支持导出完整知识图谱 JSON 或 GraphML。
+- JSON：包含书籍信息、实体、关系和章节级证据 mentions，便于备份或后续二次处理。
+- GraphML：导出节点/边及 label、type、description、confidence、mentionCount、first/last chapter 等属性，可导入 Gephi 等图分析工具。
+
+2026-06-19 更新：数据库整体备份/恢复 v1 已完成。
+- 后端：新增 `GET /api/database/export`，使用 SQLite `VACUUM INTO` 生成一致性 `.sqlite` 备份下载。
+- 后端：新增 `POST /api/database/import`，上传 `.sqlite` 后校验完整性和关键表，先备份当前数据库，再把恢复文件排队到下次服务启动替换。
+- UI：首页新增“数据库备份”，支持备份完整数据库和选择备份文件恢复；恢复会提示重启本地数据库服务后生效。
+
 2026-06-19 更新：章节重扫与 raw extraction 重放已完成。
 - 后端：`PUT /api/kg/chapters/:id/extraction` 覆盖保存时会重写该章节图谱证据，并重新计算受影响实体/关系的 first/last seen。
 - 后端：新增 `POST /api/kg/chapters/:id/replay`，可从 `kg_chapter_extractions.extraction_json` 重放写入图谱，不重新调用模型。

@@ -346,7 +346,7 @@ export function getActiveOpenAIConfig(
 }
 
 const CHAPTER_PATTERN =
-  /^\s*(?:第\s*[0-9零一二三四五六七八九十百千万亿]+\s*[章卷节回][^\n]*|Chapter\s*\d+[^\n]*|\d+[\.、]\s*[^\n]+)\s*$/gim
+  /^\s*(?:第\s*[0-9零一二三四五六七八九十百千万亿]+\s*[章卷节回][^\n]*|Chapter\s*\d+[^\n]*|\d+[.、]\s*[^\n]+)\s*$/gim
 
 export function splitChapters(rawText: string): Chapter[] {
   const matches = Array.from(rawText.matchAll(CHAPTER_PATTERN))
@@ -379,7 +379,7 @@ function chunkFallback(text: string): Chapter[] {
   let currentTitle = '正文开始'
   let currentLines: string[] = []
 
-  const fallbackPattern = /^(第\s*[0-9零一二三四五六七八九十百千万亿]+\s*[章卷节回]|Chapter\s*\d+|\d+[\.、])/
+  const fallbackPattern = /^(第\s*[0-9零一二三四五六七八九十百千万亿]+\s*[章卷节回]|Chapter\s*\d+|\d+[.、])/
 
   for (let index = 0; index < lines.length; index += 1) {
     const line = lines[index].trim()
@@ -892,6 +892,13 @@ function syncActiveLibraryBook(
   }
 }
 
+function getChapterPageForState(state: StoredState): number {
+  if (!state.book || !state.activeChapterId) return 1
+
+  const chapter = state.book.chapters.find((item) => item.id === state.activeChapterId)
+  return chapter ? Math.ceil(chapter.index / CHAPTERS_PER_PAGE) : 1
+}
+
 export function useReaderState(): UseReaderStateReturn {
   const [state, setState] = useState<StoredState>(initialState)
   const [view, setView] = useState<AppView>('home')
@@ -955,7 +962,9 @@ export function useReaderState(): UseReaderStateReturn {
     loadStateFromLocalDb()
       .then((storedState) => {
         if (storedState) {
-          setState(normalizeStoredState(storedState as Partial<StoredState> & Record<string, unknown>))
+          const nextState = normalizeStoredState(storedState as Partial<StoredState> & Record<string, unknown>)
+          setState(nextState)
+          setChapterPage(getChapterPageForState(nextState))
           return
         }
 
@@ -966,6 +975,7 @@ export function useReaderState(): UseReaderStateReturn {
             legacyState as Partial<StoredState> & Record<string, unknown>,
           )
           setState(migratedState)
+          setChapterPage(getChapterPageForState(migratedState))
           return saveStateToLocalDb(migratedState)
         })
       })
@@ -986,27 +996,36 @@ export function useReaderState(): UseReaderStateReturn {
   useEffect(() => {
     if (!isHydrated) return
 
-    setIsCheckingOllama(true)
-    fetchOllamaModels()
-      .then((models) => {
+    let isCancelled = false
+
+    async function checkOllamaModels() {
+      setIsCheckingOllama(true)
+
+      try {
+        const models = await fetchOllamaModels()
+        if (isCancelled) return
+
         setOllamaModels(models)
 
         if (models.length && !models.some((model) => model.name === state.ollamaModel)) {
           setState((current) => ({ ...current, ollamaModel: models[0].name }))
         }
-      })
-      .catch(() => {
+      } catch {
+        if (isCancelled) return
         setOllamaModels([])
-      })
-      .finally(() => setIsCheckingOllama(false))
-  }, [isHydrated])
+      } finally {
+        if (!isCancelled) {
+          setIsCheckingOllama(false)
+        }
+      }
+    }
 
-  useEffect(() => {
-    if (!activeChapter) return
+    void checkOllamaModels()
 
-    const activePage = Math.ceil(activeChapter.index / CHAPTERS_PER_PAGE)
-    setChapterPage(activePage)
-  }, [activeChapter?.id])
+    return () => {
+      isCancelled = true
+    }
+  }, [isHydrated, state.ollamaModel])
 
   async function handleImport(file: File) {
     setError('')
@@ -1247,6 +1266,10 @@ export function useReaderState(): UseReaderStateReturn {
   }
 
   function updateActiveChapter(id: string) {
+    const chapter = state.book?.chapters.find((item) => item.id === id)
+    if (chapter) {
+      setChapterPage(Math.ceil(chapter.index / CHAPTERS_PER_PAGE))
+    }
     setState((current) => syncActiveLibraryBook(current, { activeChapterId: id }))
   }
 
@@ -1273,7 +1296,13 @@ export function useReaderState(): UseReaderStateReturn {
       activeChapterId: nextBook.activeChapterId ?? nextBook.book.chapters[0]?.id ?? null,
       summaries: nextBook.summaries,
     }))
-    setChapterPage(1)
+    setChapterPage(getChapterPageForState({
+      ...state,
+      activeBookId: nextBook.book.id,
+      book: nextBook.book,
+      activeChapterId: nextBook.activeChapterId ?? nextBook.book.chapters[0]?.id ?? null,
+      summaries: nextBook.summaries,
+    }))
     setChapterSearch('')
     setView('reader')
     setMobileTab('reader')

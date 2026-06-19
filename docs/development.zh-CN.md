@@ -116,6 +116,7 @@ novel_reader/
 - 已保存的章节 extraction 可通过重放接口重新写入图谱，用于局部重建；覆盖重扫会重新调用模型并替换对应章节证据。
 
 完整路线图见 [knowledge-graph-roadmap.md](knowledge-graph-roadmap.md)。
+后端 API 参考见 [backend-api.md](backend-api.md)。
 
 ## 离线扫描器
 

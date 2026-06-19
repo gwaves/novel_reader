@@ -334,6 +334,7 @@ function App() {
   const readerRef = useRef<HTMLElement | null>(null)
   const chapterListRef = useRef<HTMLDivElement | null>(null)
   const activeChapterButtonRef = useRef<HTMLButtonElement | null>(null)
+  const databaseImportInputRef = useRef<HTMLInputElement | null>(null)
   const shouldStopScanningRef = useRef(false)
   const [kgOverview, setKgOverview] = useState<KgOverview | null>(null)
   const [kgEntities, setKgEntities] = useState<KgEntity[]>([])
@@ -369,6 +370,8 @@ function App() {
   const [kgEvidenceEntityHits, setKgEvidenceEntityHits] = useState<KgEvidenceEntityHit[]>([])
   const [kgEvidenceRelationHits, setKgEvidenceRelationHits] = useState<KgEvidenceRelationHit[]>([])
   const [isKgEvidenceSearching, setIsKgEvidenceSearching] = useState(false)
+  const [isKgExporting, setIsKgExporting] = useState(false)
+  const [isDatabaseBackupBusy, setIsDatabaseBackupBusy] = useState(false)
   const [kgEntitySearch, setKgEntitySearch] = useState('')
   const [kgEntityTypeFilter, setKgEntityTypeFilter] = useState('')
   const [kgRelationTypeFilter, setKgRelationTypeFilter] = useState('')
@@ -471,13 +474,6 @@ function App() {
   } = useReaderState()
 
   useEffect(() => {
-    if (!activeChapter) return
-
-    const activePage = Math.ceil(activeChapter.index / 100)
-    setChapterPage(activePage)
-  }, [activeChapter?.id, setChapterPage])
-
-  useEffect(() => {
     if (view !== 'reader' || !activeChapter) return
 
     window.requestAnimationFrame(() => {
@@ -486,7 +482,7 @@ function App() {
         inline: 'nearest',
       })
     })
-  }, [view, activeChapter?.id, chapterPage])
+  }, [view, activeChapter, activeChapter?.id, chapterPage])
 
   useEffect(() => {
     if (view !== 'reader' || !activeChapter) return
@@ -496,7 +492,7 @@ function App() {
         readerRef.current.scrollTop = 0
       }
     })
-  }, [view, activeChapter?.id])
+  }, [view, activeChapter, activeChapter?.id])
 
   useEffect(() => {
     if (view !== 'reader' || isConfigOpen) return
@@ -547,6 +543,7 @@ function App() {
 
     void refreshKnowledgeGraph()
     void checkKgScanStatus()
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [view, state.book?.id])
 
   useEffect(() => {
@@ -557,6 +554,7 @@ function App() {
     }, 5000)
 
     return () => clearInterval(interval)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [view, state.book?.id])
 
   useEffect(() => {
@@ -590,48 +588,15 @@ function App() {
   }, [view, state.book?.id, showKgBookGraph, kgBookGraphEntityTypeFilter, kgBookGraphRelationTypeFilter])
 
   useEffect(() => {
-    if (kgEntityEdit) {
-      setKgEntityEditName(kgEntityEdit.name)
-      setKgEntityEditType(kgEntityEdit.type)
-      setKgEntityEditAliases(kgEntityEdit.aliases.join('、'))
-      setKgEntityEditDescription(kgEntityEdit.description ?? '')
-    } else {
-      setKgEntityEditName('')
-      setKgEntityEditType('')
-      setKgEntityEditAliases('')
-      setKgEntityEditDescription('')
-    }
-  }, [kgEntityEdit])
-
-  useEffect(() => {
-    if (kgRelationEdit) {
-      setKgRelationEditType(kgRelationEdit.type)
-      setKgRelationEditDescription(kgRelationEdit.description ?? '')
-      setKgRelationEditSourceId(kgRelationEdit.sourceId)
-      setKgRelationEditTargetId(kgRelationEdit.targetId)
-      setKgRelationEditSourceQuery('')
-      setKgRelationEditTargetQuery('')
-      void searchKgRelationEndpointCandidates('', 'source')
-      void searchKgRelationEndpointCandidates('', 'target')
-    } else {
-      setKgRelationEditType('')
-      setKgRelationEditDescription('')
-      setKgRelationEditSourceId('')
-      setKgRelationEditTargetId('')
-      setKgRelationEditSourceQuery('')
-      setKgRelationEditTargetQuery('')
-      setKgRelationEditSourceCandidates([])
-      setKgRelationEditTargetCandidates([])
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [kgRelationEdit])
-
-  useEffect(() => {
     if (!state.book) return
 
-    setKgScanStart(activeChapter?.index ?? 1)
-    setKgScanEnd(activeChapter?.index ?? 1)
-  }, [state.book?.id, activeChapter?.id])
+    const frame = window.requestAnimationFrame(() => {
+      setKgScanStart(activeChapter?.index ?? 1)
+      setKgScanEnd(activeChapter?.index ?? 1)
+    })
+
+    return () => window.cancelAnimationFrame(frame)
+  }, [state.book, activeChapter?.id, activeChapter?.index])
 
   async function checkKgScanStatus() {
     if (!state.book) return
@@ -864,6 +829,112 @@ function App() {
     }
   }
 
+  async function exportKnowledgeGraph(format: 'json' | 'graphml') {
+    if (!state.book) return
+
+    setKgError('')
+    setIsKgExporting(true)
+
+    try {
+      const response = await fetch(
+        `/api/kg/export?bookId=${encodeURIComponent(state.book.id)}&format=${encodeURIComponent(format)}`,
+      )
+
+      if (!response.ok) {
+        const payload = (await response.json()) as { error?: string }
+        throw new Error(payload.error ?? '导出图谱失败。')
+      }
+
+      const blob = await response.blob()
+      const disposition = response.headers.get('Content-Disposition') ?? ''
+      const filenameMatch = disposition.match(/filename="([^"]+)"/)
+      const fallbackName = `${state.book.title.replace(/[^\w\u4e00-\u9fa5.-]+/g, '-')}-knowledge-graph.${format}`
+      const filename = filenameMatch?.[1] ?? fallbackName
+      const url = URL.createObjectURL(blob)
+      const link = document.createElement('a')
+      link.href = url
+      link.download = filename
+      document.body.append(link)
+      link.click()
+      link.remove()
+      URL.revokeObjectURL(url)
+    } catch (err) {
+      setKgError(err instanceof Error ? err.message : '导出图谱失败。')
+    } finally {
+      setIsKgExporting(false)
+    }
+  }
+
+  async function downloadDatabaseBackup() {
+    setKgError('')
+    setIsDatabaseBackupBusy(true)
+
+    try {
+      const response = await fetch('/api/database/export')
+
+      if (!response.ok) {
+        const payload = (await response.json()) as { error?: string }
+        throw new Error(payload.error ?? '导出数据库失败。')
+      }
+
+      const blob = await response.blob()
+      const disposition = response.headers.get('Content-Disposition') ?? ''
+      const filenameMatch = disposition.match(/filename="([^"]+)"/)
+      const filename = filenameMatch?.[1] ?? `novel_reader-backup-${new Date().toISOString()}.sqlite`
+      const url = URL.createObjectURL(blob)
+      const link = document.createElement('a')
+      link.href = url
+      link.download = filename
+      document.body.append(link)
+      link.click()
+      link.remove()
+      URL.revokeObjectURL(url)
+    } catch (err) {
+      setKgError(err instanceof Error ? err.message : '导出数据库失败。')
+    } finally {
+      setIsDatabaseBackupBusy(false)
+    }
+  }
+
+  async function importDatabaseBackup(file: File) {
+    const confirmed = window.confirm(
+      '导入数据库备份会在下次启动本地服务时覆盖当前书架、概要和知识图谱。当前数据库会先自动备份。确定继续吗？',
+    )
+    if (!confirmed) return
+
+    setKgError('')
+    setIsDatabaseBackupBusy(true)
+
+    try {
+      const response = await fetch('/api/database/import', {
+        body: await file.arrayBuffer(),
+        headers: { 'Content-Type': 'application/octet-stream' },
+        method: 'POST',
+      })
+
+      const payload = (await response.json()) as {
+        backupPath?: string
+        error?: string
+        requiresRestart?: boolean
+      }
+
+      if (!response.ok) {
+        throw new Error(payload.error ?? '导入数据库失败。')
+      }
+
+      window.alert(
+        `数据库备份已校验并排队恢复。\n当前数据库备份：${payload.backupPath ?? '已创建'}\n请重启本地数据库服务，然后刷新页面完成恢复。`,
+      )
+    } catch (err) {
+      setKgError(err instanceof Error ? err.message : '导入数据库失败。')
+    } finally {
+      setIsDatabaseBackupBusy(false)
+      if (databaseImportInputRef.current) {
+        databaseImportInputRef.current.value = ''
+      }
+    }
+  }
+
   async function openKgRelationDetail(relationId: string) {
     setKgError('')
 
@@ -877,6 +948,32 @@ function App() {
       setKgRelationDetail((await response.json()) as KgRelationDetail)
     } catch (err) {
       setKgError(err instanceof Error ? err.message : '读取关系详情失败。')
+    }
+  }
+
+  function openKgEntityEdit(entity: KgEntity | null) {
+    setKgEntityEdit(entity)
+    setKgEntityEditName(entity?.name ?? '')
+    setKgEntityEditType(entity?.type ?? '')
+    setKgEntityEditAliases(entity?.aliases.join('、') ?? '')
+    setKgEntityEditDescription(entity?.description ?? '')
+  }
+
+  function openKgRelationEdit(relation: KgRelation | null) {
+    setKgRelationEdit(relation)
+    setKgRelationEditType(relation?.type ?? '')
+    setKgRelationEditDescription(relation?.description ?? '')
+    setKgRelationEditSourceId(relation?.sourceId ?? '')
+    setKgRelationEditTargetId(relation?.targetId ?? '')
+    setKgRelationEditSourceQuery('')
+    setKgRelationEditTargetQuery('')
+
+    if (relation) {
+      void searchKgRelationEndpointCandidates('', 'source')
+      void searchKgRelationEndpointCandidates('', 'target')
+    } else {
+      setKgRelationEditSourceCandidates([])
+      setKgRelationEditTargetCandidates([])
     }
   }
 
@@ -897,7 +994,7 @@ function App() {
         throw new Error(payload.error ?? '更新实体失败。')
       }
 
-      setKgEntityEdit(null)
+      openKgEntityEdit(null)
       await Promise.all([fetchKgEntities(), openKgEntityDetail(entityId), fetchKgReviewQueue()])
     } catch (err) {
       setKgError(err instanceof Error ? err.message : '更新实体失败。')
@@ -920,7 +1017,7 @@ function App() {
       }
 
       setKgEntityDetail(null)
-      setKgEntityEdit(null)
+      openKgEntityEdit(null)
       setKgMergeSource(null)
       await refreshKnowledgeGraph()
     } catch (err) {
@@ -1023,7 +1120,7 @@ function App() {
       }
 
       const result = (await response.json()) as { relation: KgRelation }
-      setKgRelationEdit(null)
+      openKgRelationEdit(null)
       await Promise.all([fetchKgRelations(), openKgRelationDetail(result.relation.id), fetchKgReviewQueue()])
     } catch (err) {
       setKgError(err instanceof Error ? err.message : '更新关系失败。')
@@ -2254,6 +2351,41 @@ function App() {
             <span>{state.books.length ? '导入新 txt 到书架' : '选择 txt 文件'}</span>
             <small>支持“第1章 / 第一章 / Chapter 1”等常见标题格式</small>
           </label>
+
+          <div className="database-backup-card">
+            <div>
+              <h3>数据库备份</h3>
+              <p>导出或恢复完整 SQLite 数据库，包含书架、章节、概要和知识图谱。</p>
+            </div>
+            <div className="book-actions">
+              <button
+                type="button"
+                className="ghost-button"
+                disabled={isDatabaseBackupBusy}
+                onClick={() => void downloadDatabaseBackup()}
+              >
+                备份数据库
+              </button>
+              <button
+                type="button"
+                className="ghost-button"
+                disabled={isDatabaseBackupBusy}
+                onClick={() => databaseImportInputRef.current?.click()}
+              >
+                恢复数据库
+              </button>
+            </div>
+            <input
+              ref={databaseImportInputRef}
+              type="file"
+              accept=".sqlite,.db,application/vnd.sqlite3,application/x-sqlite3"
+              hidden
+              onChange={(event) => {
+                const file = event.target.files?.[0]
+                if (file) void importDatabaseBackup(file)
+              }}
+            />
+          </div>
           {error && <p className="error">{error}</p>}
         </section>
       ) : view === 'knowledge' && state.book ? (
@@ -2266,9 +2398,27 @@ function App() {
                 第一阶段已接入 SQLite 图谱表和 API。现在可以保存章节级抽取 JSON，并查看实体和关系统计。
               </p>
             </div>
-            <button type="button" onClick={() => void refreshKnowledgeGraph()}>
-              刷新图谱
-            </button>
+            <div className="kg-heading-actions">
+              <button type="button" onClick={() => void refreshKnowledgeGraph()}>
+                刷新图谱
+              </button>
+              <button
+                type="button"
+                className="ghost-button"
+                disabled={isKgExporting}
+                onClick={() => void exportKnowledgeGraph('json')}
+              >
+                导出 JSON
+              </button>
+              <button
+                type="button"
+                className="ghost-button"
+                disabled={isKgExporting}
+                onClick={() => void exportKnowledgeGraph('graphml')}
+              >
+                导出 GraphML
+              </button>
+            </div>
           </div>
 
           {kgEntityEdit && (
@@ -2279,7 +2429,7 @@ function App() {
                     <p className="eyebrow">实体编辑</p>
                     <h2 id="kg-edit-title">编辑实体</h2>
                   </div>
-                  <button type="button" className="ghost-button" onClick={() => setKgEntityEdit(null)}>
+                  <button type="button" className="ghost-button" onClick={() => openKgEntityEdit(null)}>
                     取消
                   </button>
                 </div>
@@ -2327,7 +2477,7 @@ function App() {
                 </div>
 
                 <div className="modal-actions">
-                  <button type="button" className="ghost-button" onClick={() => setKgEntityEdit(null)}>
+                  <button type="button" className="ghost-button" onClick={() => openKgEntityEdit(null)}>
                     取消
                   </button>
                   <button
@@ -2360,7 +2510,7 @@ function App() {
                     <p className="eyebrow">关系编辑</p>
                     <h2 id="kg-relation-edit-title">编辑关系</h2>
                   </div>
-                  <button type="button" className="ghost-button" onClick={() => setKgRelationEdit(null)}>
+                  <button type="button" className="ghost-button" onClick={() => openKgRelationEdit(null)}>
                     取消
                   </button>
                 </div>
@@ -2483,7 +2633,7 @@ function App() {
                 </div>
 
                 <div className="modal-actions">
-                  <button type="button" className="ghost-button" onClick={() => setKgRelationEdit(null)}>
+                  <button type="button" className="ghost-button" onClick={() => openKgRelationEdit(null)}>
                     取消
                   </button>
                   <button
@@ -3212,8 +3362,8 @@ function App() {
                             className="ghost-button"
                             onClick={() =>
                               isEntity
-                                ? setKgEntityEdit(item)
-                                : setKgRelationEdit(item)
+                                ? openKgEntityEdit(item)
+                                : openKgRelationEdit(item)
                             }
                           >
                             编辑
@@ -3543,7 +3693,7 @@ function App() {
                   <button
                     type="button"
                     className="ghost-button"
-                    onClick={() => setKgEntityEdit(kgEntityDetail.entity)}
+                    onClick={() => openKgEntityEdit(kgEntityDetail.entity)}
                   >
                     编辑
                   </button>
@@ -3805,7 +3955,7 @@ function App() {
                   <button
                     type="button"
                     className="ghost-button"
-                    onClick={() => setKgRelationEdit(kgRelationDetail.relation)}
+                    onClick={() => openKgRelationEdit(kgRelationDetail.relation)}
                   >
                     编辑关系
                   </button>
@@ -4273,6 +4423,26 @@ function App() {
                     <p key={`${activeChapter.id}-${index}`}>{line || ' '}</p>
                   ))}
                 </div>
+                <nav className="chapter-bottom-nav" aria-label="章节底部导航">
+                  <button
+                    type="button"
+                    className="ghost-button"
+                    disabled={!previousChapter}
+                    onClick={navigateToPreviousChapter}
+                  >
+                    <span>上一章</span>
+                    <strong>{previousChapter?.title ?? '已经是第一章'}</strong>
+                  </button>
+                  <button
+                    type="button"
+                    className="ghost-button"
+                    disabled={!nextChapter}
+                    onClick={navigateToNextChapter}
+                  >
+                    <span>下一章</span>
+                    <strong>{nextChapter?.title ?? '已经是最后一章'}</strong>
+                  </button>
+                </nav>
               </>
             )}
           </article>

@@ -116,6 +116,7 @@ The knowledge graph is implemented as a property graph on top of SQLite.
 - Saved chapter extractions can be replayed into the graph for local rebuilds. Override rescans call the model again and replace the selected chapter evidence.
 
 See [knowledge-graph-roadmap.md](knowledge-graph-roadmap.md) for the full roadmap.
+See [backend-api.md](backend-api.md) for the backend API reference.
 
 ## Offline Scanner
 

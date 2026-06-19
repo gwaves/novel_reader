@@ -60,13 +60,6 @@ function MobileApp() {
   const [showSearch, setShowSearch] = useState(false)
 
   useEffect(() => {
-    if (!activeChapter) return
-
-    const activePage = Math.ceil(activeChapter.index / 100)
-    setChapterPage(activePage)
-  }, [activeChapter?.id, setChapterPage])
-
-  useEffect(() => {
     if (mobileTab === 'reader' && activeChapter) {
       requestAnimationFrame(() => {
         if (readerRef.current) {
@@ -74,7 +67,7 @@ function MobileApp() {
         }
       })
     }
-  }, [activeChapter?.id, mobileTab])
+  }, [activeChapter, activeChapter?.id, mobileTab])
 
   function handleChapterClick(id: string) {
     updateActiveChapter(id)
