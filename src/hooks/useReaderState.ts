@@ -44,11 +44,11 @@ export type StoredState = {
   thinkingEnabled: boolean
   importEncoding: ImportEncoding
   readerFontSize: number
-  embeddingProvider: AIProvider
-  embeddingModel: string
+  embeddingConfig: EmbeddingConfig
 }
 
 export type AIProvider = 'ollama' | 'openai'
+export type EmbeddingProvider = 'ollama' | 'openai'
 export type ImportEncoding = 'auto' | 'utf-8' | 'gb18030'
 export type AppView = 'home' | 'reader' | 'knowledge' | 'search'
 export type OllamaModel = {
@@ -63,7 +63,13 @@ export type OpenAIConfig = {
   thinkingEnabled: boolean
   temperature: number
   concurrency: number
-  embeddingModel?: string
+}
+export type EmbeddingConfig = {
+  provider: EmbeddingProvider
+  baseUrl: string
+  model: string
+  apiKey: string
+  dimension: number | null
 }
 export type ModelConfigDraft = Pick<
   StoredState,
@@ -74,8 +80,7 @@ export type ModelConfigDraft = Pick<
   | 'openaiConfigs'
   | 'activeOpenAIConfigId'
   | 'thinkingEnabled'
-  | 'embeddingProvider'
-  | 'embeddingModel'
+  | 'embeddingConfig'
 >
 
 const STORAGE_KEY = 'novel-reader-mvp-state'
@@ -104,15 +109,19 @@ const initialState: StoredState = {
       thinkingEnabled: false,
       temperature: 1,
       concurrency: 3,
-      embeddingModel: 'text-embedding-3-small',
     },
   ],
   activeOpenAIConfigId: 'default-openai',
   thinkingEnabled: false,
   importEncoding: 'auto',
   readerFontSize: 18,
-  embeddingProvider: 'ollama',
-  embeddingModel: 'nomic-embed-text',
+  embeddingConfig: {
+    provider: 'ollama',
+    baseUrl: 'http://localhost:11434',
+    model: 'nomic-embed-text',
+    apiKey: '',
+    dimension: null,
+  },
 }
 
 const OLLAMA_BASE_URL = 'http://localhost:11434'
@@ -298,12 +307,34 @@ export function normalizeStoredState(
       typeof storedState.readerFontSize === 'number'
         ? Math.max(14, Math.min(28, storedState.readerFontSize))
         : initialState.readerFontSize,
-    embeddingProvider: storedState.embeddingProvider === 'openai' ? 'openai' : 'ollama',
-    embeddingModel:
-      typeof storedState.embeddingModel === 'string'
-        ? storedState.embeddingModel
-        : initialState.embeddingModel,
+    embeddingConfig: sanitizeEmbeddingConfig(storedState.embeddingConfig),
   }
+}
+
+export function sanitizeEmbeddingConfig(value: unknown): EmbeddingConfig {
+  const fallback = initialState.embeddingConfig
+
+  if (!value || typeof value !== 'object') {
+    return fallback
+  }
+
+  const config = value as EmbeddingConfig
+  const provider = config.provider === 'openai' ? 'openai' : 'ollama'
+  const baseUrl =
+    typeof config.baseUrl === 'string' && config.baseUrl.trim()
+      ? config.baseUrl.trim()
+      : fallback.baseUrl
+  const model =
+    typeof config.model === 'string' && config.model.trim()
+      ? config.model.trim()
+      : fallback.model
+  const apiKey = typeof config.apiKey === 'string' ? config.apiKey : fallback.apiKey
+  const dimension =
+    typeof config.dimension === 'number' && Number.isFinite(config.dimension)
+      ? config.dimension
+      : fallback.dimension
+
+  return { provider, baseUrl, model, apiKey, dimension }
 }
 
 export function sanitizeOpenAIConfigs(
@@ -340,10 +371,6 @@ export function sanitizeOpenAIConfigs(
       typeof (config as OpenAIConfig).concurrency === 'number'
         ? (config as OpenAIConfig).concurrency
         : fallbackConfigs[0].concurrency,
-    embeddingModel:
-      typeof (config as OpenAIConfig).embeddingModel === 'string'
-        ? (config as OpenAIConfig).embeddingModel
-        : fallbackConfigs[0].embeddingModel,
   }))
 }
 
@@ -723,17 +750,22 @@ async function fetchOllamaModels(): Promise<OllamaModel[]> {
 }
 
 export async function validateModelConfig(config: ModelConfigDraft): Promise<void> {
+  await validateLlmConfig(config)
+  await validateEmbeddingConfig(config.embeddingConfig)
+}
+
+async function validateLlmConfig(config: ModelConfigDraft): Promise<void> {
   if (config.aiProvider === 'ollama') {
     if (!config.ollamaModel.trim()) {
-      throw new Error('请先选择或填写 Ollama 模型。')
+      throw new Error('[LLM] 请先选择或填写 Ollama 模型。')
     }
 
     if (!Number.isFinite(config.ollamaTemperature)) {
-      throw new Error('Ollama Temperature 必须是数字。')
+      throw new Error('[LLM] Ollama Temperature 必须是数字。')
     }
 
     if (normalizeConcurrency(config.ollamaConcurrency, 1) !== config.ollamaConcurrency) {
-      throw new Error('Ollama 并发度必须是 1 到 10 的整数。')
+      throw new Error('[LLM] Ollama 并发度必须是 1 到 10 的整数。')
     }
 
     const response = await fetch(`${OLLAMA_BASE_URL}/api/generate`, {
@@ -752,7 +784,7 @@ export async function validateModelConfig(config: ModelConfigDraft): Promise<voi
 
     if (!response.ok) {
       const body = await response.text()
-      throw new Error(`Ollama 验证失败 ${response.status}：${body || '请求失败'}`)
+      throw new Error(`[LLM] Ollama 验证失败 ${response.status}：${body || '请求失败'}`)
     }
 
     return
@@ -761,25 +793,25 @@ export async function validateModelConfig(config: ModelConfigDraft): Promise<voi
   const activeConfig = getActiveOpenAIConfig(config)
 
   if (!activeConfig) {
-    throw new Error('请先新增一个外部模型配置。')
+    throw new Error('[LLM] 请先新增一个外部模型配置。')
   }
 
   const normalizedBaseUrl = activeConfig.baseUrl.trim().replace(/\/+$/, '')
 
   if (!normalizedBaseUrl) {
-    throw new Error('请填写 Base URL。')
+    throw new Error('[LLM] 请填写 Base URL。')
   }
 
   if (!activeConfig.model.trim()) {
-    throw new Error('请填写 Model Name。')
+    throw new Error('[LLM] 请填写 Model Name。')
   }
 
   if (!Number.isFinite(activeConfig.temperature)) {
-    throw new Error('当前外部模型的 Temperature 必须是数字。')
+    throw new Error('[LLM] 当前外部模型的 Temperature 必须是数字。')
   }
 
   if (normalizeConcurrency(activeConfig.concurrency, 3) !== activeConfig.concurrency) {
-    throw new Error('当前外部模型的并发度必须是 1 到 10 的整数。')
+    throw new Error('[LLM] 当前外部模型的并发度必须是 1 到 10 的整数。')
   }
 
   const headers: Record<string, string> = {
@@ -814,7 +846,36 @@ export async function validateModelConfig(config: ModelConfigDraft): Promise<voi
 
   if (!response.ok) {
     const body = await response.text()
-    throw new Error(`OpenAI-compatible 验证失败 ${response.status}：${body || '请求失败'}`)
+    throw new Error(`[LLM] OpenAI-compatible 验证失败 ${response.status}：${body || '请求失败'}`)
+  }
+}
+
+async function validateEmbeddingConfig(embeddingConfig: EmbeddingConfig): Promise<void> {
+  const baseUrl = embeddingConfig.baseUrl.trim().replace(/\/+$/, '')
+  const model = embeddingConfig.model.trim()
+
+  if (!baseUrl) {
+    throw new Error('[Embedding] 请填写 Base URL。')
+  }
+
+  if (!model) {
+    throw new Error('[Embedding] 请填写模型名。')
+  }
+
+  const response = await fetch('/api/rag/embeddings/validate', {
+    body: JSON.stringify({
+      provider: embeddingConfig.provider,
+      model,
+      baseUrl,
+      apiKey: embeddingConfig.apiKey,
+    }),
+    headers: { 'Content-Type': 'application/json' },
+    method: 'POST',
+  })
+
+  if (!response.ok) {
+    const payload = (await response.json()) as { error?: string }
+    throw new Error(`[Embedding] 验证失败：${payload.error ?? response.statusText}`)
   }
 }
 
@@ -827,8 +888,7 @@ export function getModelConfigDraft(state: StoredState): ModelConfigDraft {
     openaiConfigs: state.openaiConfigs,
     activeOpenAIConfigId: state.activeOpenAIConfigId,
     thinkingEnabled: state.thinkingEnabled,
-    embeddingProvider: state.embeddingProvider,
-    embeddingModel: state.embeddingModel,
+    embeddingConfig: sanitizeEmbeddingConfig(state.embeddingConfig),
   }
 }
 

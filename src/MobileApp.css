@@ -144,6 +144,24 @@
   line-height: 1.5;
 }
 
+.mobile-config-section-divider {
+  border-top: 1px solid var(--mobile-border);
+  margin-top: 16px;
+  padding-top: 16px;
+}
+
+.mobile-config-section-divider h3 {
+  margin: 0 0 6px;
+  font-size: 15px;
+  color: var(--mobile-text);
+}
+
+.mobile-config-section-divider p {
+  margin: 0 0 12px;
+  font-size: 13px;
+  color: var(--mobile-text-secondary);
+}
+
 .mobile-search-panel {
   padding-bottom: calc(var(--mobile-bottom-nav-height) + 24px);
 }
