@@ -218,6 +218,17 @@ type KgScanJob = {
   updatedAt: string
 }
 
+type KgCoreferenceCandidate = {
+  id: string
+  name: string
+  aliases: string[]
+  firstChapterIndex?: number
+  lastChapterIndex?: number
+  description: string | null
+}
+
+type KgCoreferenceComponent = KgCoreferenceCandidate[]
+
 type RagSearchResult = {
   chapterId: string
   chapterIndex: number
@@ -466,6 +477,11 @@ function App() {
   const [kgCoreferenceProgress, setKgCoreferenceProgress] = useState('')
   const [kgCoreferenceChunkSize, setKgCoreferenceChunkSize] = useState(50)
   const [kgCoreferenceHasMore, setKgCoreferenceHasMore] = useState(false)
+  const [kgCoreferenceTotalComponents, setKgCoreferenceTotalComponents] = useState<number | null>(null)
+  const [kgCoreferenceComponents, setKgCoreferenceComponents] = useState<KgCoreferenceComponent[]>([])
+  const [visibleCoreferenceCount, setVisibleCoreferenceCount] = useState(20)
+  const [showKgCoreference, setShowKgCoreference] = useState(false)
+  const [showKgScan, setShowKgScan] = useState(false)
   const [kgScanJob, setKgScanJob] = useState<KgScanJob | null>(null)
   const [kgRelationDetail, setKgRelationDetail] = useState<KgRelationDetail | null>(null)
   const [kgNeighborhood, setKgNeighborhood] = useState<KgNeighborhood | null>(null)
@@ -487,6 +503,10 @@ function App() {
   const [isKgExporting, setIsKgExporting] = useState(false)
   const [isDatabaseBackupBusy, setIsDatabaseBackupBusy] = useState(false)
   const [databaseBackupStatus, setDatabaseBackupStatus] = useState('')
+  const [editingBookTitle, setEditingBookTitle] = useState(false)
+  const [bookTitleDraft, setBookTitleDraft] = useState('')
+  const [editingBookListId, setEditingBookListId] = useState<string | null>(null)
+  const [bookListTitleDraft, setBookListTitleDraft] = useState('')
   const [kgEntitySearch, setKgEntitySearch] = useState('')
   const [kgEntityTypeFilter, setKgEntityTypeFilter] = useState('')
   const [kgRelationTypeFilter, setKgRelationTypeFilter] = useState('')
@@ -678,6 +698,7 @@ function App() {
 
     void refreshKnowledgeGraph()
     void checkKgScanStatus()
+    void fetchKgCoreferenceComponents()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [view, state.book?.id])
 
@@ -761,35 +782,64 @@ function App() {
     }
   }
 
+  async function fetchKgCoreferenceComponents() {
+    if (!state.book) return
+    try {
+      const response = await fetch(`/api/kg/coreference/components?bookId=${encodeURIComponent(state.book.id)}`)
+      if (!response.ok) return
+      const payload = (await response.json()) as {
+        totalComponents: number
+        components: KgCoreferenceComponent[]
+      }
+      setKgCoreferenceTotalComponents(payload.totalComponents)
+      setKgCoreferenceComponents(payload.components)
+      setVisibleCoreferenceCount(20)
+    } catch {
+      // ignore
+    }
+  }
+
   async function resolveKgCoreferences() {
     if (!state.book) return
+    const bookId = state.book.id
     if (!window.confirm('全局人物实体消歧会根据别名和门派关系调用大模型合并同一人节点，可能耗时较长并产生模型调用成本。确定开始吗？')) {
       return
     }
 
+    if (state.aiProvider !== 'openai') {
+      window.alert(`当前 LLM 提供商是“${activeProviderLabel}”。消歧任务需要调用外部 OpenAI 兼容模型，请先在模型配置中切换到外部模型。`)
+      return
+    }
+
     setIsKgCoreferencing(true)
-    setKgCoreferenceProgress('准备中...')
+    setKgCoreferenceProgress('检查任务状态...')
     setKgError('')
 
     try {
-      const provider = state.aiProvider === 'openai' ? 'openai' : 'ollama'
+      const statusResponse = await fetch(`/api/kg/scan/status?bookId=${encodeURIComponent(bookId)}`)
+      if (statusResponse.ok) {
+        const statusPayload = (await statusResponse.json()) as { job: KgScanJob | null }
+        const existing = statusPayload.job
+        if (existing?.scope === 'coreference' && existing.status === 'running') {
+          const staleThresholdMs = 5 * 60 * 1000
+          const lastUpdate = new Date(existing.updatedAt).getTime()
+          if (Date.now() - lastUpdate < staleThresholdMs) {
+            throw new Error('已有正在运行的人物消歧任务，请等待完成或刷新页面后再试。')
+          }
+        }
+      }
 
-      const llmConfig =
-        state.aiProvider === 'openai'
-          ? {
-              model: activeOpenAIConfig?.model ?? '',
-              baseUrl: activeOpenAIConfig?.baseUrl ?? '',
-              apiKey: activeOpenAIConfig?.apiKey ?? '',
-              temperature: 0,
-              jsonMode: true,
-              thinkingEnabled: activeOpenAIConfig?.thinkingEnabled,
-            }
-          : {
-              model: state.ollamaModel,
-              baseUrl: '',
-              apiKey: '',
-              temperature: state.ollamaTemperature,
-            }
+      setKgCoreferenceProgress('准备中...')
+      const llmConfig = {
+        provider: 'openai' as const,
+        model: activeOpenAIConfig?.model ?? '',
+        baseUrl: activeOpenAIConfig?.baseUrl ?? '',
+        apiKey: activeOpenAIConfig?.apiKey ?? '',
+        temperature: 0,
+        jsonMode: true,
+        thinkingEnabled: false,
+        concurrency: activeConcurrency,
+      }
 
       if (!llmConfig.model) throw new Error('请先配置 LLM 模型。')
 
@@ -797,8 +847,7 @@ function App() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          bookId: state.book.id,
-          provider,
+          bookId,
           ...llmConfig,
           limit: kgCoreferenceChunkSize,
         }),
@@ -821,7 +870,7 @@ function App() {
       const poll = setInterval(async () => {
         try {
           const statusResponse = await fetch(
-            `/api/kg/scan/status?bookId=${encodeURIComponent(state.book.id)}`,
+            `/api/kg/scan/status?bookId=${encodeURIComponent(bookId)}`,
           )
           if (!statusResponse.ok) return
           const payload = (await statusResponse.json()) as { job: KgScanJob | null }
@@ -829,7 +878,7 @@ function App() {
           setKgScanJob(job)
           if (job?.id === startPayload.jobId && job?.status === 'running') {
             setKgCoreferenceProgress(
-              `消歧进行中：${job.completedChapters} / ${job.totalChapters} 组...`,
+              `消歧进行中：${job.completedChapters} / ${job.totalChapters} 组${job.failedChapters ? `（失败 ${job.failedChapters} 组）` : ''}...`,
             )
           }
           if (job?.id === startPayload.jobId && (job.status === 'completed' || job.status === 'failed')) {
@@ -837,11 +886,12 @@ function App() {
             setIsKgCoreferencing(false)
             if (job.status === 'completed') {
               setKgCoreferenceProgress(
-                `消歧完成：本段 ${job.completedChapters} / ${job.totalChapters} 组${
+                `消歧完成：本段 ${job.completedChapters} / ${job.totalChapters} 组${job.failedChapters ? `，失败 ${job.failedChapters} 组` : ''}${
                   kgCoreferenceHasMore ? '，还有剩余组可继续处理' : ''
                 }。`,
               )
               await refreshKnowledgeGraph()
+              await fetchKgCoreferenceComponents()
             } else {
               setKgCoreferenceProgress(`消歧失败：${job.error || '未知错误'}`)
             }
@@ -878,6 +928,40 @@ function App() {
       await Promise.all([fetchKgEntities(), fetchKgRelations(), fetchKgReviewQueue()])
     } catch (err) {
       setKgError(err instanceof Error ? err.message : '读取知识图谱失败。')
+    }
+  }
+
+  async function updateBookTitle(bookId: string, newTitle: string, onDone?: () => void) {
+    const trimmed = newTitle.trim()
+    const targetBook = state.books.find((entry) => entry.book.id === bookId)?.book
+    if (!targetBook || !trimmed || trimmed === targetBook.title) {
+      onDone?.()
+      return
+    }
+
+    try {
+      const response = await fetch(`/api/books/${encodeURIComponent(bookId)}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title: trimmed }),
+      })
+      if (!response.ok) throw new Error('更新书名失败。')
+
+      setState((current) => {
+        const nextBooks = current.books.map((entry) =>
+          entry.book.id === bookId
+            ? { ...entry, book: { ...entry.book, title: trimmed } }
+            : entry,
+        )
+        return {
+          ...current,
+          books: nextBooks,
+          book: current.book?.id === bookId ? { ...current.book, title: trimmed } : current.book,
+        }
+      })
+      onDone?.()
+    } catch (err) {
+      window.alert(err instanceof Error ? err.message : '更新书名失败。')
     }
   }
 
@@ -1673,6 +1757,47 @@ function App() {
       await Promise.all([fetchKgReviewQueue(), refreshKnowledgeGraph()])
     } catch (err) {
       setKgError(err instanceof Error ? err.message : '标记失败。')
+    }
+  }
+
+  async function deleteKgReviewItems(ids: string[]) {
+    if (ids.length === 0) return
+    if (!window.confirm(`确定删除选中的 ${ids.length} 项吗？删除后无法恢复。`)) return
+
+    setKgError('')
+
+    const entityIds = ids.filter((id) => kgReviewEntities.some((entity) => entity.id === id))
+    const relationIds = ids.filter((id) => kgReviewRelations.some((relation) => relation.id === id))
+
+    try {
+      if (entityIds.length > 0) {
+        const response = await fetch('/api/kg/review-queue/delete', {
+          body: JSON.stringify({ ids: entityIds, kind: 'entities' }),
+          headers: { 'Content-Type': 'application/json' },
+          method: 'POST',
+        })
+        if (!response.ok) {
+          const payload = (await response.json()) as { error?: string }
+          throw new Error(payload.error ?? '删除实体失败。')
+        }
+      }
+
+      if (relationIds.length > 0) {
+        const response = await fetch('/api/kg/review-queue/delete', {
+          body: JSON.stringify({ ids: relationIds, kind: 'relations' }),
+          headers: { 'Content-Type': 'application/json' },
+          method: 'POST',
+        })
+        if (!response.ok) {
+          const payload = (await response.json()) as { error?: string }
+          throw new Error(payload.error ?? '删除关系失败。')
+        }
+      }
+
+      setKgReviewSelectedIds([])
+      await Promise.all([fetchKgReviewQueue(), refreshKnowledgeGraph()])
+    } catch (err) {
+      setKgError(err instanceof Error ? err.message : '删除失败。')
     }
   }
 
@@ -3088,7 +3213,58 @@ ${context}
           {state.book && (
             <div className="book-card">
               <p className="eyebrow">当前书籍</p>
-              <h2>{state.book.title}</h2>
+              {editingBookTitle ? (
+                <div className="book-title-edit">
+                  <input
+                    type="text"
+                    value={bookTitleDraft}
+                    onChange={(event) => setBookTitleDraft(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter') {
+                        event.preventDefault()
+                        void updateBookTitle(state.book!.id, bookTitleDraft, () => setEditingBookTitle(false))
+                      } else if (event.key === 'Escape') {
+                        setEditingBookTitle(false)
+                        setBookTitleDraft(state.book!.title)
+                      }
+                    }}
+                    autoFocus
+                  />
+                  <div className="book-title-edit-actions">
+                    <button type="button" onClick={() => void updateBookTitle(state.book!.id, bookTitleDraft, () => setEditingBookTitle(false))}>
+                      保存
+                    </button>
+                    <button
+                      type="button"
+                      className="ghost-button"
+                      onClick={() => {
+                        setEditingBookTitle(false)
+                        setBookTitleDraft(state.book!.title)
+                      }}
+                    >
+                      取消
+                    </button>
+                  </div>
+                </div>
+              ) : (
+                <div className="book-title-display">
+                  <h2>{state.book.title}</h2>
+                  <button
+                    type="button"
+                    className="icon-button"
+                    title="编辑书名"
+                    onClick={() => {
+                      setBookTitleDraft(state.book!.title)
+                      setEditingBookTitle(true)
+                    }}
+                  >
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                      <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
+                      <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
+                    </svg>
+                  </button>
+                </div>
+              )}
               <dl>
                 <div>
                   <dt>章节</dt>
@@ -3127,12 +3303,66 @@ ${context}
 
                   return (
                     <div className={isActive ? 'book-row active' : 'book-row'} key={libraryBook.book.id}>
-                      <div>
-                        <h3>{libraryBook.book.title}</h3>
-                        <p>
-                          {libraryBook.book.chapters.length} 章 · 概要 {Object.keys(libraryBook.summaries).length} 章
-                        </p>
-                      </div>
+                      {editingBookListId === libraryBook.book.id ? (
+                        <div className="book-title-edit book-row-title-edit">
+                          <input
+                            type="text"
+                            value={bookListTitleDraft}
+                            onChange={(event) => setBookListTitleDraft(event.target.value)}
+                            onKeyDown={(event) => {
+                              if (event.key === 'Enter') {
+                                event.preventDefault()
+                                void updateBookTitle(libraryBook.book.id, bookListTitleDraft, () =>
+                                  setEditingBookListId(null),
+                                )
+                              } else if (event.key === 'Escape') {
+                                setEditingBookListId(null)
+                              }
+                            }}
+                            autoFocus
+                          />
+                          <div className="book-title-edit-actions">
+                            <button
+                              type="button"
+                              onClick={() =>
+                                void updateBookTitle(libraryBook.book.id, bookListTitleDraft, () =>
+                                  setEditingBookListId(null),
+                                )
+                              }
+                            >
+                              保存
+                            </button>
+                            <button
+                              type="button"
+                              className="ghost-button"
+                              onClick={() => setEditingBookListId(null)}
+                            >
+                              取消
+                            </button>
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="book-row-title">
+                          <h3>{libraryBook.book.title}</h3>
+                          <button
+                            type="button"
+                            className="icon-button"
+                            title="编辑书名"
+                            onClick={() => {
+                              setBookListTitleDraft(libraryBook.book.title)
+                              setEditingBookListId(libraryBook.book.id)
+                            }}
+                          >
+                            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                              <path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7" />
+                              <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
+                            </svg>
+                          </button>
+                          <p>
+                            {libraryBook.book.chapters.length} 章 · 概要 {Object.keys(libraryBook.summaries).length} 章
+                          </p>
+                        </div>
+                      )}
                       <div className="book-row-actions">
                         <button type="button" onClick={() => selectBook(libraryBook.book.id)}>
                           {isActive ? '继续阅读' : '打开'}
@@ -3978,12 +4208,35 @@ ${context}
           <div className="kg-stats">
             <button
               type="button"
-              className={showKgScannedChapters ? 'active' : ''}
+              className={showKgScan ? 'active' : ''}
               onClick={() => {
-                setShowKgScannedChapters((current) => !current)
+                setShowKgScan((current) => !current)
+                setShowKgScannedChapters(false)
+                setShowKgEntities(false)
+                setShowKgRelations(false)
                 setShowKgReviewQueue(false)
                 setShowKgBookGraph(false)
                 setShowKgEvidenceSearch(false)
+                setShowKgCoreference(false)
+                setKgEntityDetail(null)
+                setKgRelationDetail(null)
+              }}
+            >
+              <span>章节扫描</span>
+              <strong>{state.book.chapters.length}</strong>
+            </button>
+            <button
+              type="button"
+              className={showKgScannedChapters ? 'active' : ''}
+              onClick={() => {
+                setShowKgScannedChapters((current) => !current)
+                setShowKgScan(false)
+                setShowKgEntities(false)
+                setShowKgRelations(false)
+                setShowKgReviewQueue(false)
+                setShowKgBookGraph(false)
+                setShowKgEvidenceSearch(false)
+                setShowKgCoreference(false)
               }}
             >
               <span>已扫描章节</span>
@@ -3994,10 +4247,13 @@ ${context}
               className={showKgEntities ? 'active' : ''}
               onClick={() => {
                 setShowKgEntities((current) => !current)
+                setShowKgScan(false)
+                setShowKgScannedChapters(false)
                 setShowKgRelations(false)
                 setShowKgReviewQueue(false)
                 setShowKgBookGraph(false)
                 setShowKgEvidenceSearch(false)
+                setShowKgCoreference(false)
                 setKgEntityDetail(null)
                 setKgRelationDetail(null)
               }}
@@ -4010,10 +4266,13 @@ ${context}
               className={showKgRelations ? 'active' : ''}
               onClick={() => {
                 setShowKgRelations((current) => !current)
+                setShowKgScan(false)
+                setShowKgScannedChapters(false)
                 setShowKgEntities(false)
                 setShowKgReviewQueue(false)
                 setShowKgBookGraph(false)
                 setShowKgEvidenceSearch(false)
+                setShowKgCoreference(false)
                 setKgEntityDetail(null)
                 setKgRelationDetail(null)
               }}
@@ -4026,11 +4285,13 @@ ${context}
               className={showKgBookGraph ? 'active' : ''}
               onClick={() => {
                 setShowKgBookGraph((current) => !current)
+                setShowKgScan(false)
+                setShowKgScannedChapters(false)
                 setShowKgEntities(false)
                 setShowKgRelations(false)
                 setShowKgReviewQueue(false)
-                setShowKgScannedChapters(false)
                 setShowKgEvidenceSearch(false)
+                setShowKgCoreference(false)
                 setKgEntityDetail(null)
                 setKgRelationDetail(null)
                 if (!showKgBookGraph) void fetchKgBookGraph()
@@ -4044,11 +4305,13 @@ ${context}
               className={showKgEvidenceSearch ? 'active' : ''}
               onClick={() => {
                 setShowKgEvidenceSearch((current) => !current)
+                setShowKgScan(false)
+                setShowKgScannedChapters(false)
                 setShowKgEntities(false)
                 setShowKgRelations(false)
                 setShowKgReviewQueue(false)
-                setShowKgScannedChapters(false)
                 setShowKgBookGraph(false)
+                setShowKgCoreference(false)
                 setKgEntityDetail(null)
                 setKgRelationDetail(null)
               }}
@@ -4061,11 +4324,13 @@ ${context}
               className={showKgReviewQueue ? 'active' : ''}
               onClick={() => {
                 setShowKgReviewQueue((current) => !current)
+                setShowKgScan(false)
+                setShowKgScannedChapters(false)
                 setShowKgEntities(false)
                 setShowKgRelations(false)
-                setShowKgScannedChapters(false)
                 setShowKgBookGraph(false)
                 setShowKgEvidenceSearch(false)
+                setShowKgCoreference(false)
                 setKgEntityDetail(null)
                 setKgRelationDetail(null)
               }}
@@ -4075,26 +4340,126 @@ ${context}
             </button>
             <button
               type="button"
-              disabled={isKgCoreferencing}
-              onClick={() => void resolveKgCoreferences()}
+              className={showKgCoreference ? 'active' : ''}
+              onClick={() => {
+                setShowKgCoreference((current) => !current)
+                setShowKgScan(false)
+                setShowKgScannedChapters(false)
+                setShowKgEntities(false)
+                setShowKgRelations(false)
+                setShowKgReviewQueue(false)
+                setShowKgBookGraph(false)
+                setShowKgEvidenceSearch(false)
+                setKgEntityDetail(null)
+                setKgRelationDetail(null)
+              }}
             >
-              <span>{isKgCoreferencing ? '消歧中...' : kgCoreferenceHasMore ? '继续人物消歧' : '人物消歧'}</span>
+              <span>人物消歧</span>
+              <strong>{kgCoreferenceTotalComponents ?? '-'}</strong>
             </button>
-            <label className="kg-coreference-chunk">
-              每次
-              <input
-                type="number"
-                min={1}
-                max={500}
-                value={kgCoreferenceChunkSize}
-                disabled={isKgCoreferencing}
-                onChange={(event) =>
-                  setKgCoreferenceChunkSize(Math.max(1, Math.min(500, Number(event.target.value))))
-                }
-              />
-              组
-            </label>
           </div>
+
+          {showKgCoreference && (
+            <section className="kg-card kg-coreference-panel">
+              <div className="kg-card-heading">
+                <div>
+                  <h3>人物消歧</h3>
+                  <p>
+                    根据别名重叠和门派关系，调用大模型判断哪些人物实体其实是同一个人，然后合并节点。
+                    当前待处理 <strong>{kgCoreferenceTotalComponents ?? '-'}</strong> 组。
+                  </p>
+                </div>
+              </div>
+
+              <div className="kg-coreference-actions">
+                <label className="kg-coreference-chunk">
+                  每次
+                  <input
+                    type="number"
+                    min={1}
+                    max={500}
+                    value={kgCoreferenceChunkSize}
+                    disabled={isKgCoreferencing}
+                    onChange={(event) =>
+                      setKgCoreferenceChunkSize(Math.max(1, Math.min(500, Number(event.target.value))))
+                    }
+                  />
+                  组
+                </label>
+                <button
+                  type="button"
+                  disabled={isKgCoreferencing}
+                  onClick={() => void resolveKgCoreferences()}
+                >
+                  {isKgCoreferencing ? '消歧中...' : '开始消歧'}
+                </button>
+              </div>
+
+              {(isKgCoreferencing || kgCoreferenceProgress) && (
+                <div className="kg-coreference-progress">
+                  <div className="kg-coreference-progress-header">
+                    <h4>{isKgCoreferencing ? '人物消歧进行中' : '人物消歧状态'}</h4>
+                    <span>{kgCoreferenceProgress}</span>
+                  </div>
+                  {isKgCoreferencing && kgScanJob?.status === 'running' && (
+                    <div className="kg-coreference-progress-bar">
+                      <div
+                        className="kg-coreference-progress-fill"
+                        style={{
+                          width: `${Math.min(
+                            100,
+                            ((kgScanJob.completedChapters / (kgScanJob.totalChapters || 1)) * 100),
+                          )}%`,
+                        }}
+                      />
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {!isKgCoreferencing && kgCoreferenceComponents.length > 0 && (
+                <div className="kg-coreference-component-list">
+                  <h4>待消歧人物组</h4>
+                  {kgCoreferenceComponents.slice(0, visibleCoreferenceCount).map((component, index) => (
+                    <div className="kg-coreference-component" key={index}>
+                      <div className="kg-coreference-component-header">
+                        第 {index + 1} 组 · {component.length} 个实体
+                      </div>
+                      <div className="kg-coreference-component-entities">
+                        {component.map((entity) => (
+                          <div className="kg-coreference-entity" key={entity.id}>
+                            <strong>{entity.name}</strong>
+                            {entity.aliases.length > 0 && (
+                              <span>（别名：{entity.aliases.join('、')}）</span>
+                            )}
+                            <small>
+                              第 {entity.firstChapterIndex ?? '?'} 章
+                              {entity.lastChapterIndex && entity.lastChapterIndex !== entity.firstChapterIndex
+                                ? ` ~ 第 ${entity.lastChapterIndex} 章`
+                                : ''}
+                            </small>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ))}
+                  {visibleCoreferenceCount < kgCoreferenceComponents.length && (
+                    <button
+                      type="button"
+                      className="ghost-button"
+                      onClick={() =>
+                        setVisibleCoreferenceCount((current) =>
+                          Math.min(current + 20, kgCoreferenceComponents.length),
+                        )
+                      }
+                    >
+                      显示更多（还剩 {kgCoreferenceComponents.length - visibleCoreferenceCount} 组）
+                    </button>
+                  )}
+                </div>
+              )}
+            </section>
+          )}
 
           {showKgEvidenceSearch && (
             <section className="kg-card kg-scanned-card">
@@ -4233,6 +4598,14 @@ ${context}
                   onClick={() => void markKgReviewItems(kgReviewSelectedIds, 'ignored')}
                 >
                   忽略
+                </button>
+                <button
+                  type="button"
+                  className="ghost-button danger-button"
+                  disabled={kgReviewSelectedIds.length === 0}
+                  onClick={() => void deleteKgReviewItems(kgReviewSelectedIds)}
+                >
+                  批量删除
                 </button>
               </div>
 
@@ -4985,13 +5358,14 @@ ${context}
             </section>
           )}
 
-          <section className="kg-card kg-scan-card">
-            <div>
-              <h3>章节扫描</h3>
-              <p>
-                选择要扫描的章节范围。扫描会使用当前模型配置，逐章提取实体和关系，并把每章中间结果保存到 SQLite。
-              </p>
-            </div>
+          {showKgScan && (
+            <section className="kg-card kg-scan-panel">
+              <div>
+                <h3>章节扫描</h3>
+                <p>
+                  选择要扫描的章节范围。扫描会使用当前模型配置，逐章提取实体和关系，并把每章中间结果保存到 SQLite。
+                </p>
+              </div>
 
             <div className="kg-scan-options">
               <label>
@@ -5117,7 +5491,7 @@ ${context}
                   </button>
                 </>
               )}
-              {kgScanJob && !isKgScanning && (
+              {kgScanJob && !isKgScanning && kgScanJob.scope === 'chapter' && (
                 <div className="kg-scan-status">
                   <p>
                     上次任务：{getDisplayKgScanJobStatus().label}
@@ -5151,7 +5525,6 @@ ${context}
               </p>
               <p>“重放已保存 JSON”不会调用模型，只会用现有章节抽取结果重建图谱写入。</p>
               {kgScanProgress && <p>{kgScanProgress}</p>}
-              {kgCoreferenceProgress && <p>{kgCoreferenceProgress}</p>}
             </div>
 
             <div className="kg-advanced-actions">
@@ -5186,6 +5559,7 @@ ${context}
               </div>
             )}
           </section>
+          )}
         </section>
       ) : view === 'search' && state.book ? (
         <section className="search-panel">

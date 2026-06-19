@@ -358,6 +358,12 @@ const insertKgScanJobStatement = db.prepare(`
   INSERT INTO kg_scan_jobs (id, book_id, scope, status, total_chapters, completed_chapters, failed_chapters, error, created_at, updated_at)
   VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
 `)
+const updateBookTitleStatement = db.prepare(`
+  UPDATE books
+  SET title = ?, updated_at = CURRENT_TIMESTAMP
+  WHERE id = ?
+`)
+
 const updateKgScanJobStatement = db.prepare(`
   UPDATE kg_scan_jobs
   SET completed_chapters = ?, failed_chapters = ?, error = ?, status = ?, updated_at = CURRENT_TIMESTAMP
@@ -1503,6 +1509,7 @@ async function generateEmbedding(text, config) {
 }
 
 const LLM_CHAT_TIMEOUT_MS = 300000
+const COREFERENCE_CHAT_TIMEOUT_MS = 600000
 
 async function callOllamaChat(messages, config) {
   const baseUrl = (config?.baseUrl || 'http://127.0.0.1:11434').trim().replace(/\/+$/, '')
@@ -1512,7 +1519,8 @@ async function callOllamaChat(messages, config) {
   }
 
   const controller = new AbortController()
-  const timeoutId = setTimeout(() => controller.abort(), LLM_CHAT_TIMEOUT_MS)
+  const timeoutMs = config?.timeout || LLM_CHAT_TIMEOUT_MS
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs)
 
   try {
     const response = await fetch(`${baseUrl}/api/chat`, {
@@ -1558,7 +1566,8 @@ async function callOpenAIChat(messages, config) {
   }
 
   const controller = new AbortController()
-  const timeoutId = setTimeout(() => controller.abort(), LLM_CHAT_TIMEOUT_MS)
+  const timeoutMs = config?.timeout || LLM_CHAT_TIMEOUT_MS
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs)
 
   try {
     const body = {
@@ -1604,7 +1613,7 @@ async function generateChatCompletion(messages, config) {
 
 const COREFERENCE_ALIAS_FREQ_THRESHOLD = 2
 const COREFERENCE_ORG_LOOKBACK_CHAPTERS = 120
-const COREFERENCE_MAX_LLM_COMPONENT_SIZE = 80
+const COREFERENCE_MAX_LLM_COMPONENT_SIZE = 50
 
 const COREFERENCE_GENERIC_NAMES = new Set(
   [
@@ -1786,7 +1795,7 @@ async function resolveCoreferenceComponent(component, config) {
     },
     { role: 'user', content: `/no_think\n${prompt}` },
   ]
-  const text = await generateChatCompletion(messages, config)
+  const text = await generateChatCompletion(messages, { ...config, timeout: COREFERENCE_CHAT_TIMEOUT_MS })
   const parsed = parseJsonObject(text)
   const clusters = Array.isArray(parsed?.clusters) ? parsed.clusters : []
   return { clusters, raw: text }
@@ -1876,15 +1885,14 @@ async function runKgCoreferenceJob(bookId, jobId, config, components, totalCompo
   updateKgScanJobProgressStatement.run(total, 0, 0, null, 'running', jobId)
 
   let completed = 0
+  let failed = 0
   let totalMerged = 0
-  let hasError = false
-  let errorReason = null
-  const concurrency = Math.max(1, Math.min(10, Number(config?.concurrency) || 1))
+  const concurrency = Math.max(1, Math.min(5, Number(config?.concurrency) || 1))
 
-  async function processComponent(component) {
+  async function processComponent(component, index) {
     if (component.length < 2) {
       completed++
-      updateKgScanJobProgressStatement.run(total, completed, 0, null, 'running', jobId)
+      updateKgScanJobProgressStatement.run(total, completed, failed, null, 'running', jobId)
       return
     }
 
@@ -1894,34 +1902,38 @@ async function runKgCoreferenceJob(bookId, jobId, config, components, totalCompo
         ? expanded.slice(0, COREFERENCE_MAX_LLM_COMPONENT_SIZE)
         : expanded
 
-    const { clusters } = await resolveCoreferenceComponent(limited, config)
+    console.log(`[coreference ${jobId}] component ${index + 1}/${components.length}: ${limited.length} entities`)
 
-    db.exec('BEGIN')
     try {
-      const merged = applyCoreferenceClusters(bookId, limited, clusters)
-      totalMerged += merged
-      db.exec('COMMIT')
+      const { clusters } = await resolveCoreferenceComponent(limited, config)
+
+      db.exec('BEGIN')
+      try {
+        const merged = applyCoreferenceClusters(bookId, limited, clusters)
+        totalMerged += merged
+        db.exec('COMMIT')
+      } catch (error) {
+        db.exec('ROLLBACK')
+        throw error
+      }
+
+      completed++
+      console.log(`[coreference ${jobId}] component ${index + 1} done, merged ${merged} entities`)
     } catch (error) {
-      db.exec('ROLLBACK')
-      throw error
+      failed++
+      console.error(`[coreference ${jobId}] component ${index + 1} failed:`, error?.message || error)
     }
 
-    completed++
-    updateKgScanJobProgressStatement.run(total, completed, 0, null, 'running', jobId)
+    updateKgScanJobProgressStatement.run(total, completed, failed, null, 'running', jobId)
   }
 
   // Use a shared atomic index to dispatch components to workers.
   let nextIndex = 0
   async function runWorker() {
-    while (!hasError) {
+    while (true) {
       const index = nextIndex++
       if (index >= components.length) break
-      try {
-        await processComponent(components[index])
-      } catch (error) {
-        hasError = true
-        errorReason = error
-      }
+      await processComponent(components[index], index)
     }
   }
 
@@ -1929,16 +1941,25 @@ async function runKgCoreferenceJob(bookId, jobId, config, components, totalCompo
     const workers = Array.from({ length: concurrency }, () => runWorker())
     await Promise.all(workers)
 
-    if (hasError) {
-      throw errorReason || new Error('Job failed.')
+    if (failed > 0 && completed === 0) {
+      updateKgScanJobProgressStatement.run(total, completed, failed, `全部 ${failed} 组失败`, 'failed', jobId)
+    } else if (failed > 0) {
+      updateKgScanJobProgressStatement.run(
+        total,
+        completed,
+        failed,
+        `完成 ${completed} 组，失败 ${failed} 组`,
+        'completed',
+        jobId,
+      )
+    } else {
+      updateKgScanJobProgressStatement.run(total, completed, 0, null, 'completed', jobId)
     }
-
-    updateKgScanJobProgressStatement.run(total, completed, 0, null, 'completed', jobId)
   } catch (error) {
     updateKgScanJobProgressStatement.run(
       total,
       completed,
-      0,
+      failed,
       String(error?.message || 'Job failed.'),
       'failed',
       jobId,
@@ -1946,7 +1967,7 @@ async function runKgCoreferenceJob(bookId, jobId, config, components, totalCompo
     throw error
   }
 
-  return { totalMerged, componentsProcessed: completed }
+  return { totalMerged, componentsProcessed: completed, componentsFailed: failed }
 }
 
 function linkEntitiesFromQuery(query, entities) {
@@ -3427,6 +3448,52 @@ const server = createServer(async (request, response) => {
       return
     }
 
+    const bookUpdateMatch = url.pathname.match(/^\/api\/books\/([^/]+)$/)
+    if (request.method === 'PUT' && bookUpdateMatch) {
+      const bookId = decodeURIComponent(bookUpdateMatch[1])
+      const body = await readJson(request)
+      const title = typeof body?.title === 'string' ? body.title.trim() : ''
+      if (!title) {
+        sendJson(response, 400, { error: 'Missing title.' })
+        return
+      }
+      const book = getBookStatement.get(bookId)
+      if (!book) {
+        sendJson(response, 404, { error: 'Book not found.' })
+        return
+      }
+      updateBookTitleStatement.run(title, bookId)
+
+      // 同步更新持久化 state 中的书名，避免前端刷新后回退到旧标题。
+      const row = getStateStatement.get(stateKey)
+      if (row?.value_json) {
+        try {
+          const persistedState = JSON.parse(row.value_json)
+          if (persistedState && Array.isArray(persistedState.books)) {
+            let changed = false
+            for (const libraryBook of persistedState.books) {
+              if (libraryBook?.book?.id === bookId) {
+                libraryBook.book.title = title
+                changed = true
+              }
+            }
+            if (persistedState.book?.id === bookId) {
+              persistedState.book.title = title
+              changed = true
+            }
+            if (changed) {
+              saveStateTransaction(persistedState)
+            }
+          }
+        } catch {
+          // 忽略 state JSON 解析失败；数据库层面的书名已更新。
+        }
+      }
+
+      sendJson(response, 200, { ok: true })
+      return
+    }
+
     if (request.method === 'GET' && url.pathname === '/api/storage') {
       sendJson(response, 200, { dataDir, dbPath })
       return
@@ -3654,6 +3721,40 @@ const server = createServer(async (request, response) => {
       } catch (error) {
         db.exec('ROLLBACK')
         sendJson(response, 400, { error: error instanceof Error ? error.message : 'Mark failed.' })
+      }
+      return
+    }
+
+    if (request.method === 'POST' && url.pathname === '/api/kg/review-queue/delete') {
+      const body = await readJson(request)
+      const ids = body?.ids
+      const kind = body?.kind
+
+      if (!Array.isArray(ids) || ids.length === 0 || !ids.every((id) => typeof id === 'string')) {
+        sendJson(response, 400, { error: 'ids must be a non-empty array of strings.' })
+        return
+      }
+      if (kind !== 'entities' && kind !== 'relations') {
+        sendJson(response, 400, { error: 'kind must be entities or relations.' })
+        return
+      }
+
+      db.exec('BEGIN')
+      try {
+        let deleted = 0
+        for (const id of ids) {
+          if (kind === 'entities') {
+            deleteKgEntityTransaction(id)
+          } else {
+            deleteKgRelationTransaction(id)
+          }
+          deleted++
+        }
+        db.exec('COMMIT')
+        sendJson(response, 200, { deleted })
+      } catch (error) {
+        db.exec('ROLLBACK')
+        sendJson(response, 400, { error: error instanceof Error ? error.message : 'Delete failed.' })
       }
       return
     }
@@ -4211,6 +4312,30 @@ const server = createServer(async (request, response) => {
       return
     }
 
+    if (request.method === 'GET' && url.pathname === '/api/kg/coreference/components') {
+      const bookId = url.searchParams.get('bookId')
+      if (!bookId) {
+        sendJson(response, 400, { error: 'Missing bookId.' })
+        return
+      }
+      const components = buildCoreferenceAliasComponents(bookId)
+      const payloadComponents = components.map((component) =>
+        component.map((entity) => ({
+          id: entity.id,
+          name: entity.name,
+          aliases: safeJsonParse(entity.aliasesJson, []),
+          firstChapterIndex: entity.firstChapterIndex,
+          lastChapterIndex: entity.lastChapterIndex,
+          description: entity.description,
+        }))
+      )
+      sendJson(response, 200, {
+        totalComponents: components.length,
+        components: payloadComponents,
+      })
+      return
+    }
+
     if (request.method === 'POST' && url.pathname === '/api/kg/coreference/resolve') {
       const body = await readJson(request)
       const bookId = body?.bookId
@@ -4219,6 +4344,10 @@ const server = createServer(async (request, response) => {
       const baseUrl = body?.baseUrl
       const apiKey = body?.apiKey || ''
       const limit = typeof body?.limit === 'number' ? Math.max(1, body.limit) : 0
+      const concurrency = typeof body?.concurrency === 'number' ? Math.max(1, Math.min(20, body.concurrency)) : 1
+      const temperature = typeof body?.temperature === 'number' ? body.temperature : 0
+      const jsonMode = body?.jsonMode === true
+      const thinkingEnabled = body?.thinkingEnabled === false ? false : undefined
 
       if (!bookId || typeof bookId !== 'string') {
         sendJson(response, 400, { error: 'Missing bookId.' })
@@ -4233,13 +4362,24 @@ const server = createServer(async (request, response) => {
         return
       }
 
+      const runningJob = db.prepare(`
+        SELECT id FROM kg_scan_jobs
+        WHERE book_id = ? AND scope = 'coreference' AND status = 'running'
+          AND updated_at > datetime('now', '-5 minutes')
+        LIMIT 1
+      `).get(bookId)
+      if (runningJob) {
+        sendJson(response, 409, { error: 'A coreference job is already running for this book.' })
+        return
+      }
+
       const allComponents = buildCoreferenceAliasComponents(bookId)
       const totalComponents = allComponents.length
       const componentsToProcess = limit > 0 ? allComponents.slice(0, limit) : allComponents
 
       const jobId = randomUUID()
       insertKgScanJobStatement.run(jobId, bookId, 'coreference', 'running', totalComponents, 0, 0, null)
-      const llmConfig = { provider, model, baseUrl, apiKey }
+      const llmConfig = { provider, model, baseUrl, apiKey, concurrency, temperature, jsonMode, thinkingEnabled }
       runKgCoreferenceJob(bookId, jobId, llmConfig, componentsToProcess, totalComponents).catch((error) => {
         console.error('Coreference job failed:', error)
         updateKgScanJobProgressStatement.run(
@@ -4268,7 +4408,27 @@ const server = createServer(async (request, response) => {
   }
 })
 
+function cleanupStaleKgScanJobs() {
+  try {
+    const result = db.exec(`
+      UPDATE kg_scan_jobs
+      SET status = 'failed',
+          error = '任务中断（服务重启或超时）',
+          updated_at = CURRENT_TIMESTAMP
+      WHERE status = 'running'
+        AND updated_at < datetime('now', '-10 minutes')
+    `)
+    const changed = result?.[0]?.changes ?? 0
+    if (changed > 0) {
+      console.log(`Cleaned up ${changed} stale running kg_scan_jobs.`)
+    }
+  } catch (error) {
+    console.error('Failed to clean up stale kg_scan_jobs:', error)
+  }
+}
+
 server.listen(port, host, () => {
+  cleanupStaleKgScanJobs()
   console.log(`Novel Reader API listening on http://${host}:${port}`)
   console.log(`SQLite database: ${dbPath}`)
 })

@@ -357,6 +357,70 @@ button:disabled {
   gap: 10px;
 }
 
+.book-title-display {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 18px;
+}
+
+.book-title-display h2 {
+  margin: 0;
+}
+
+.book-title-display .icon-button {
+  color: #5c5348;
+  border-color: #d8d0c4;
+  background: #fff;
+}
+
+.book-title-display .icon-button:hover {
+  color: #24211c;
+  background: #f1eadf;
+  border-color: #c4bbae;
+}
+
+.book-title-edit {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 18px;
+}
+
+.book-title-edit input {
+  flex: 1;
+  min-width: 0;
+  border: 1px solid #c4bbae;
+  border-radius: 6px;
+  background: #fff;
+  padding: 8px 12px;
+  font-size: 20px;
+  font-weight: 700;
+  color: #24211c;
+}
+
+.book-title-edit-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.icon-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  cursor: pointer;
+  transition: background 0.2s, color 0.2s, border-color 0.2s;
+}
+
+.icon-button:hover {
+  background: #f1eadf;
+}
+
 .database-backup-card {
   grid-column: 1 / -1;
   display: flex;
@@ -418,6 +482,41 @@ button:disabled {
   margin: 0 0 4px;
   color: #24211c;
   font-size: 17px;
+}
+
+.book-row-title {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.book-row-title h3 {
+  margin: 0;
+}
+
+.book-row-title .icon-button {
+  width: 26px;
+  height: 26px;
+  color: #5c5348;
+  border-color: #d8d0c4;
+  background: #fff;
+}
+
+.book-row-title .icon-button:hover {
+  color: #24211c;
+  background: #f1eadf;
+  border-color: #c4bbae;
+}
+
+.book-row-title-edit {
+  flex: 1;
+  margin: 0;
+}
+
+.book-row-title-edit input {
+  font-size: 16px;
+  font-weight: 650;
 }
 
 .book-row p {
@@ -722,7 +821,126 @@ button:disabled {
   background: #f0ece6;
 }
 
-.kg-card {
+.kg-coreference-chunk small {
+  color: #786d60;
+  font-size: 12px;
+}
+
+.kg-coreference-panel .kg-card-heading p strong {
+  color: #24211c;
+}
+
+.kg-coreference-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-top: 14px;
+  flex-wrap: wrap;
+}
+
+.kg-coreference-actions button {
+  width: auto;
+}
+
+.kg-coreference-panel .kg-coreference-progress {
+  margin-top: 18px;
+  margin-bottom: 0;
+}
+
+.kg-coreference-component-list {
+  margin-top: 18px;
+}
+
+.kg-coreference-component-list h4 {
+  margin: 0 0 12px;
+  font-size: 15px;
+  color: #211e19;
+}
+
+.kg-coreference-component-list > button {
+  margin-top: 10px;
+}
+
+.kg-coreference-component {
+  border: 1px solid #e4dbcf;
+  border-radius: 8px;
+  background: #fffdf8;
+  padding: 12px;
+  margin-bottom: 10px;
+}
+
+.kg-coreference-component-header {
+  font-size: 13px;
+  font-weight: 650;
+  color: #5e5549;
+  margin-bottom: 8px;
+}
+
+.kg-coreference-component-entities {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.kg-coreference-entity {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  font-size: 13px;
+  color: #342f28;
+}
+
+.kg-coreference-entity strong {
+  font-weight: 650;
+}
+
+.kg-coreference-entity span {
+  color: #786d60;
+}
+
+.kg-coreference-entity small {
+  color: #9a8f80;
+  font-size: 12px;
+}
+
+.kg-coreference-progress {
+  margin-bottom: 20px;
+}
+
+.kg-coreference-progress-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+
+.kg-coreference-progress-header h3,
+.kg-coreference-progress-header h4 {
+  margin: 0;
+  font-size: 16px;
+  color: #211e19;
+}
+
+.kg-coreference-progress-header span {
+  color: #5e5549;
+  font-size: 14px;
+}
+
+.kg-coreference-progress-bar {
+  height: 8px;
+  margin-top: 12px;
+  border-radius: 4px;
+  background: #e8e2d8;
+  overflow: hidden;
+}
+
+.kg-coreference-progress-fill {
+  height: 100%;
+  background: #b88947;
+  transition: width 0.3s ease;
+}
   border: 1px solid #ded6ca;
   border-radius: 8px;
   background: #fffaf2;
@@ -883,17 +1101,17 @@ button:disabled {
   font-size: 13px;
 }
 
-.kg-scan-card {
+.kg-scan-panel {
   display: grid;
   gap: 16px;
   margin-bottom: 20px;
 }
 
-.kg-scan-card h3 {
+.kg-scan-panel h3 {
   margin-bottom: 6px;
 }
 
-.kg-scan-card p {
+.kg-scan-panel p {
   margin: 0;
 }
 
