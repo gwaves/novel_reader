@@ -3602,6 +3602,26 @@ function App() {
                     <p key={`${activeChapter.id}-${index}`}>{line || ' '}</p>
                   ))}
                 </div>
+                <nav className="chapter-bottom-nav" aria-label="章节底部导航">
+                  <button
+                    type="button"
+                    className="ghost-button"
+                    disabled={!previousChapter}
+                    onClick={navigateToPreviousChapter}
+                  >
+                    <span>上一章</span>
+                    <strong>{previousChapter?.title ?? '已经是第一章'}</strong>
+                  </button>
+                  <button
+                    type="button"
+                    className="ghost-button"
+                    disabled={!nextChapter}
+                    onClick={navigateToNextChapter}
+                  >
+                    <span>下一章</span>
+                    <strong>{nextChapter?.title ?? '已经是最后一章'}</strong>
+                  </button>
+                </nav>
               </>
             )}
           </article>
