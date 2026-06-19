@@ -267,6 +267,9 @@ const countChaptersForBookStatement = db.prepare(`
 const countEmbeddingsForBookStatement = db.prepare(`
   SELECT COUNT(*) AS count FROM summary_embeddings WHERE book_id = ? AND model = ?
 `)
+const getEmbeddingDimensionStatement = db.prepare(`
+  SELECT dimension FROM summary_embeddings WHERE book_id = ? AND model = ? LIMIT 1
+`)
 const listEmbeddingsForBookStatement = db.prepare(`
   SELECT
     se.chapter_id AS chapterId,
@@ -3491,12 +3494,14 @@ const server = createServer(async (request, response) => {
 
       const totalChapters = countChaptersForBookStatement.get(bookId)?.count ?? 0
       const embeddedChapters = countEmbeddingsForBookStatement.get(bookId, model)?.count ?? 0
+      const dimensionRow = getEmbeddingDimensionStatement.get(bookId, model)
 
       sendJson(response, 200, {
         totalChapters,
         embeddedChapters,
         missingChapters: Math.max(0, totalChapters - embeddedChapters),
         model,
+        dimension: dimensionRow?.dimension ?? null,
       })
       return
     }

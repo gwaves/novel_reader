@@ -10,7 +10,7 @@ import {
 } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
 import { useReaderState } from './hooks/useReaderState.ts'
-import type { AIProvider, Chapter, ImportEncoding, OpenAIConfig } from './hooks/useReaderState.ts'
+import type { AIProvider, Chapter, EmbeddingProvider, ImportEncoding, OpenAIConfig } from './hooks/useReaderState.ts'
 import './App.css'
 
 type KgOverview = {
@@ -246,6 +246,7 @@ type EmbeddingStatus = {
   embeddedChapters: number
   missingChapters: number
   model: string
+  dimension: number | null
 }
 
 function buildKnowledgeGraphPrompt(chapter: Chapter): string {
@@ -1652,33 +1653,30 @@ function App() {
   }
 
   function getEmbeddingConfig() {
-    const provider = state.embeddingProvider
-    const model = state.embeddingModel.trim()
-    if (provider === 'openai') {
-      const config = activeOpenAIConfig
-      if (!config) return null
-      return {
-        provider: 'openai' as const,
-        model: config.embeddingModel?.trim() || config.model.trim(),
-        baseUrl: config.baseUrl.trim(),
-        apiKey: config.apiKey,
-      }
-    }
+    const { embeddingConfig } = state
+    const provider = embeddingConfig.provider
+    const model = embeddingConfig.model.trim()
+    const baseUrl = embeddingConfig.baseUrl.trim()
+    const apiKey = embeddingConfig.apiKey
+
+    if (!model) return null
+    if (!baseUrl) return null
+
     return {
-      provider: 'ollama' as const,
+      provider,
       model,
-      baseUrl: 'http://localhost:11434',
-      apiKey: '',
+      baseUrl,
+      apiKey,
     }
   }
 
-  async function fetchEmbeddingStatus() {
-    if (!state.book) return
+  async function fetchEmbeddingStatus(): Promise<EmbeddingStatus | null> {
+    if (!state.book) return null
 
     const config = getEmbeddingConfig()
     if (!config) {
       setEmbeddingStatus(null)
-      return
+      return null
     }
 
     try {
@@ -1686,9 +1684,12 @@ function App() {
         `/api/rag/embeddings/status?bookId=${encodeURIComponent(state.book.id)}&model=${encodeURIComponent(config.model)}`,
       )
       if (!response.ok) throw new Error('读取 embedding 状态失败。')
-      setEmbeddingStatus((await response.json()) as EmbeddingStatus)
+      const payload = (await response.json()) as EmbeddingStatus
+      setEmbeddingStatus(payload)
+      return payload
     } catch (err) {
       setRagError(err instanceof Error ? err.message : '读取 embedding 状态失败。')
+      return null
     }
   }
 
@@ -1724,7 +1725,17 @@ function App() {
       }
 
       setEmbeddingProgress(`已生成 ${payload.completed}/${payload.total}，失败 ${payload.failed} 个。`)
-      await fetchEmbeddingStatus()
+      const status = await fetchEmbeddingStatus()
+      if (status?.dimension) {
+        setState((current) => ({
+          ...current,
+          embeddingConfig: { ...current.embeddingConfig, dimension: status.dimension },
+        }))
+        setModelConfigDraft((current) => ({
+          ...current,
+          embeddingConfig: { ...current.embeddingConfig, dimension: status.dimension },
+        }))
+      }
     } catch (err) {
       setRagError(err instanceof Error ? err.message : '生成 embedding 失败。')
     } finally {
@@ -2611,36 +2622,94 @@ ${context}
                       ? `已发现 ${ollamaModels.length} 个本地模型。保存前会实际测试一次。`
                       : '未自动发现模型，可手动填写；保存前会实际测试一次。'}
                   </small>
+
                   <label htmlFor="draft-embedding-provider">Embedding 提供商</label>
                   <select
                     id="draft-embedding-provider"
-                    value={modelConfigDraft.embeddingProvider}
+                    value={modelConfigDraft.embeddingConfig.provider}
                     disabled={isTestingConfig}
                     onChange={(event) =>
                       setModelConfigDraft((current) => ({
                         ...current,
-                        embeddingProvider: event.target.value as AIProvider,
+                        embeddingConfig: {
+                          ...current.embeddingConfig,
+                          provider: event.target.value as EmbeddingProvider,
+                        },
                       }))
                     }
                   >
                     <option value="ollama">Ollama 本地</option>
                     <option value="openai">OpenAI-compatible</option>
                   </select>
-                  <small>生成章节摘要 embedding 使用的提供商。</small>
-                  <label htmlFor="draft-ollama-embedding-model">Embedding 模型</label>
+                  <small>生成章节摘要 embedding 使用的提供商，可与上方 LLM 提供商不同。</small>
+
+                  <label htmlFor="draft-embedding-base-url">Embedding Base URL</label>
                   <input
-                    id="draft-ollama-embedding-model"
-                    value={modelConfigDraft.embeddingModel}
+                    id="draft-embedding-base-url"
+                    value={modelConfigDraft.embeddingConfig.baseUrl}
                     disabled={isTestingConfig}
-                    placeholder="例如 nomic-embed-text"
+                    placeholder={
+                      modelConfigDraft.embeddingConfig.provider === 'ollama'
+                        ? 'http://localhost:11434'
+                        : 'https://api.openai.com/v1'
+                    }
                     onChange={(event) =>
                       setModelConfigDraft((current) => ({
                         ...current,
-                        embeddingModel: event.target.value,
+                        embeddingConfig: {
+                          ...current.embeddingConfig,
+                          baseUrl: event.target.value,
+                        },
                       }))
                     }
                   />
-                  <small>用于 RAG 搜索的 embedding 模型。</small>
+
+                  <label htmlFor="draft-embedding-model">Embedding 模型名</label>
+                  <input
+                    id="draft-embedding-model"
+                    value={modelConfigDraft.embeddingConfig.model}
+                    disabled={isTestingConfig}
+                    placeholder={
+                      modelConfigDraft.embeddingConfig.provider === 'ollama'
+                        ? 'nomic-embed-text'
+                        : 'text-embedding-3-small'
+                    }
+                    onChange={(event) =>
+                      setModelConfigDraft((current) => ({
+                        ...current,
+                        embeddingConfig: {
+                          ...current.embeddingConfig,
+                          model: event.target.value,
+                        },
+                      }))
+                    }
+                  />
+
+                  {modelConfigDraft.embeddingConfig.provider === 'openai' && (
+                    <>
+                      <label htmlFor="draft-embedding-api-key">Embedding API Key</label>
+                      <input
+                        id="draft-embedding-api-key"
+                        type="password"
+                        value={modelConfigDraft.embeddingConfig.apiKey}
+                        disabled={isTestingConfig}
+                        placeholder="sk-..."
+                        onChange={(event) =>
+                          setModelConfigDraft((current) => ({
+                            ...current,
+                            embeddingConfig: {
+                              ...current.embeddingConfig,
+                              apiKey: event.target.value,
+                            },
+                          }))
+                        }
+                      />
+                    </>
+                  )}
+
+                  {typeof modelConfigDraft.embeddingConfig.dimension === 'number' && (
+                    <small>当前已生成 embedding 的维度：{modelConfigDraft.embeddingConfig.dimension}</small>
+                  )}
                 </>
               ) : (
                 <>
@@ -2751,15 +2820,95 @@ ${context}
                       ? '当前外部模型会发送 /think，但最终仍要求只输出 JSON'
                       : '当前外部模型会发送 /no_think，适合不需要思考模式的模型'}
                   </small>
-                  <label htmlFor="draft-openai-embedding-model">当前外部模型 Embedding 模型（可选）</label>
-                  <input
-                    id="draft-openai-embedding-model"
-                    value={draftActiveOpenAIConfig?.embeddingModel ?? ''}
+
+                  <label htmlFor="draft-embedding-provider">Embedding 提供商</label>
+                  <select
+                    id="draft-embedding-provider"
+                    value={modelConfigDraft.embeddingConfig.provider}
                     disabled={isTestingConfig}
-                    placeholder="例如 text-embedding-3-small"
-                    onChange={(event) => updateActiveOpenAIConfig({ embeddingModel: event.target.value })}
+                    onChange={(event) =>
+                      setModelConfigDraft((current) => ({
+                        ...current,
+                        embeddingConfig: {
+                          ...current.embeddingConfig,
+                          provider: event.target.value as EmbeddingProvider,
+                        },
+                      }))
+                    }
+                  >
+                    <option value="ollama">Ollama 本地</option>
+                    <option value="openai">OpenAI-compatible</option>
+                  </select>
+                  <small>生成章节摘要 embedding 使用的提供商，可与上方 LLM 提供商不同。</small>
+
+                  <label htmlFor="draft-embedding-base-url">Embedding Base URL</label>
+                  <input
+                    id="draft-embedding-base-url"
+                    value={modelConfigDraft.embeddingConfig.baseUrl}
+                    disabled={isTestingConfig}
+                    placeholder={
+                      modelConfigDraft.embeddingConfig.provider === 'ollama'
+                        ? 'http://localhost:11434'
+                        : 'https://api.openai.com/v1'
+                    }
+                    onChange={(event) =>
+                      setModelConfigDraft((current) => ({
+                        ...current,
+                        embeddingConfig: {
+                          ...current.embeddingConfig,
+                          baseUrl: event.target.value,
+                        },
+                      }))
+                    }
                   />
-                  <small>用于 RAG 搜索的 embedding 模型；留空则使用上面的 Model Name。</small>
+
+                  <label htmlFor="draft-embedding-model">Embedding 模型名</label>
+                  <input
+                    id="draft-embedding-model"
+                    value={modelConfigDraft.embeddingConfig.model}
+                    disabled={isTestingConfig}
+                    placeholder={
+                      modelConfigDraft.embeddingConfig.provider === 'ollama'
+                        ? 'nomic-embed-text'
+                        : 'text-embedding-3-small'
+                    }
+                    onChange={(event) =>
+                      setModelConfigDraft((current) => ({
+                        ...current,
+                        embeddingConfig: {
+                          ...current.embeddingConfig,
+                          model: event.target.value,
+                        },
+                      }))
+                    }
+                  />
+
+                  {modelConfigDraft.embeddingConfig.provider === 'openai' && (
+                    <>
+                      <label htmlFor="draft-embedding-api-key">Embedding API Key</label>
+                      <input
+                        id="draft-embedding-api-key"
+                        type="password"
+                        value={modelConfigDraft.embeddingConfig.apiKey}
+                        disabled={isTestingConfig}
+                        placeholder="sk-..."
+                        onChange={(event) =>
+                          setModelConfigDraft((current) => ({
+                            ...current,
+                            embeddingConfig: {
+                              ...current.embeddingConfig,
+                              apiKey: event.target.value,
+                            },
+                          }))
+                        }
+                      />
+                    </>
+                  )}
+
+                  {typeof modelConfigDraft.embeddingConfig.dimension === 'number' && (
+                    <small>当前已生成 embedding 的维度：{modelConfigDraft.embeddingConfig.dimension}</small>
+                  )}
+
                   <button
                     type="button"
                     className="ghost-button danger-button"
@@ -4909,6 +5058,7 @@ ${context}
               <span>
                 Embedding 覆盖：{embeddingStatus.embeddedChapters}/{embeddingStatus.totalChapters} 章
                 {embeddingStatus.missingChapters > 0 && `（还差 ${embeddingStatus.missingChapters} 章）`}
+                {typeof embeddingStatus.dimension === 'number' && ` · 维度 ${embeddingStatus.dimension}`}
               </span>
               {embeddingStatus.missingChapters > 0 && (
                 <button
