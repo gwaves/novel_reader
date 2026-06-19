@@ -470,12 +470,6 @@ button:disabled {
   font-size: 28px;
 }
 
-.kg-grid {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) 380px;
-  gap: 20px;
-}
-
 .kg-card {
   border: 1px solid #ded6ca;
   border-radius: 8px;
@@ -735,6 +729,30 @@ button:disabled {
 
 .kg-scan-status .error {
   color: #d32f2f;
+}
+
+.kg-advanced-actions {
+  padding-top: 2px;
+}
+
+.kg-advanced-actions button {
+  width: auto;
+}
+
+.kg-manual-extraction {
+  display: grid;
+  gap: 10px;
+  border-top: 1px solid #e4dbcf;
+  padding-top: 16px;
+}
+
+.kg-manual-extraction h4 {
+  margin: 0;
+  color: #211e19;
+}
+
+.kg-manual-extraction button {
+  width: fit-content;
 }
 
 .kg-card textarea {
@@ -1058,6 +1076,9 @@ button:disabled {
 .kg-graph-canvas .react-flow__node {
   box-shadow: 0 6px 18px rgba(36, 33, 28, 0.12);
   text-align: center;
+  line-height: 1.35;
+  white-space: normal;
+  word-break: break-word;
 }
 
 .kg-graph-canvas .react-flow__edge-textbg {
