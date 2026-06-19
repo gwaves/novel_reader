@@ -1,7 +1,7 @@
 # Backend API Reference
 
 This document describes the local SQLite HTTP API served by `scripts/local-db-server.mjs`.
-It is intended for development and iteration, not as a public network contract.
+It is a development reference for the local app backend, not a public network API contract.
 
 ## Server
 
@@ -28,20 +28,7 @@ All responses are JSON. Errors generally use:
 
 CORS is open for local development. The server supports `OPTIONS` preflight.
 
-## Data Shapes
-
-### Book State
-
-The app keeps the full client state snapshot in `app_state`, and mirrors core records into normalized tables.
-
-```ts
-type AppState = {
-  books?: Array<{ book: Book; summaries: Record<string, Summary> }>
-  activeBookId?: string
-  book?: Book
-  summaries?: Record<string, Summary>
-}
-```
+## Common Data Shapes
 
 ### Knowledge Graph Entity
 
@@ -118,9 +105,9 @@ type ChapterExtraction = {
 }
 ```
 
-When an extraction is saved, the server rewrites that chapter's entity and relation mentions, upserts graph rows, recomputes touched first/last chapter ranges, and removes empty graph rows.
+Saving an extraction rewrites that chapter's graph mentions, upserts entities and relations, recomputes touched chapter ranges, and removes empty graph rows left by local rebuilds.
 
-## Core App State
+## Core State APIs
 
 ### `GET /api/state`
 
@@ -139,7 +126,7 @@ Notes:
 
 ### `PUT /api/state`
 
-Persists app state and mirrors books, chapters, and summaries into normalized SQLite tables.
+Persists app state and mirrors books, chapters, and summaries into normalized tables.
 
 Request:
 
@@ -190,7 +177,7 @@ Response:
 
 ### `GET /api/kg/chapters`
 
-Lists scanned/extracted chapters for a book.
+Lists saved chapter extraction rows for a book.
 
 Query parameters:
 
@@ -229,7 +216,7 @@ Query parameters:
 |---|---:|---:|---|
 | `bookId` | yes | - | Book ID |
 | `type` | no | `''` | Entity type filter |
-| `q` | no | `''` | Name, normalized name, or alias search |
+| `q` | no | `''` | Normalized name or alias search |
 | `limit` | no | `100` | Clamped to `1..200` |
 
 Response:
@@ -318,13 +305,6 @@ Response:
 }
 ```
 
-Behavior:
-
-- Source aliases, mentions, and relations are migrated into target.
-- Relation endpoint conflicts are merged.
-- Self-loop relations created by merging are deleted.
-- Target first/last chapter range is recomputed.
-
 ### `POST /api/kg/entities/merge-batch`
 
 Merges multiple source entities into one target entity.
@@ -391,28 +371,6 @@ Validation:
 - At least one `mentionId` or `relationId` is required.
 - Existing target must belong to the same book and cannot be the source.
 - New target name is required and cannot duplicate same-book same-type normalized name.
-
-### `GET /api/kg/entities/:entityId/neighborhood`
-
-Returns a one-hop graph around an entity. Used by Phase 3 relation graph visualization.
-
-Query parameters:
-
-| Name | Required | Default | Description |
-|---|---:|---:|---|
-| `entityType` | no | `''` | Neighbor entity type filter. Center entity is always retained. |
-| `relationType` | no | `''` | Relation type filter |
-| `limit` | no | `100` | Relation limit, clamped to `1..200` |
-
-Response:
-
-```ts
-{
-  centerId: string
-  entities: KgEntity[]
-  relations: KgRelation[]
-}
-```
 
 ## Relation APIs
 
@@ -490,81 +448,6 @@ Response:
 
 ```json
 { "ok": true }
-```
-
-## Graph And Search APIs
-
-### `GET /api/kg/graph`
-
-Returns a filtered global graph slice for a book.
-
-Query parameters:
-
-| Name | Required | Default | Description |
-|---|---:|---:|---|
-| `bookId` | yes | - | Book ID |
-| `entityType` | no | `''` | Requires both source and target to match this type when set |
-| `relationType` | no | `''` | Relation type filter |
-| `limit` | no | `150` | Relation limit, clamped to `1..300` |
-
-Response:
-
-```ts
-{
-  entities: KgEntity[]
-  relations: KgRelation[]
-}
-```
-
-### `GET /api/kg/search`
-
-Searches entity mentions and relation mentions/evidence.
-
-Query parameters:
-
-| Name | Required | Default | Description |
-|---|---:|---:|---|
-| `bookId` | yes | - | Book ID |
-| `q` | no | `''` | Search text. Empty string returns latest limited rows by query shape. |
-| `kind` | no | `all` | `all`, `entities`, or `relations` |
-| `entityType` | no | `''` | Entity mention type filter |
-| `relationType` | no | `''` | Relation mention type filter |
-| `limit` | no | `80` | Per-kind limit, clamped to `1..200` |
-
-Response:
-
-```ts
-{
-  entities: Array<{
-    mentionId: string
-    entityId: string
-    entityName: string
-    entityType: string
-    entityDescription: string | null
-    chapterId: string
-    chapterIndex: number
-    chapterTitle: string
-    evidence: string | null
-    confidence: number
-  }>
-  relations: Array<{
-    mentionId: string
-    relationId: string
-    relationType: string
-    relationDescription: string | null
-    sourceId: string
-    sourceName: string
-    sourceType: string
-    targetId: string
-    targetName: string
-    targetType: string
-    chapterId: string
-    chapterIndex: number
-    chapterTitle: string
-    evidence: string | null
-    confidence: number
-  }>
-}
 ```
 
 ## Review Queue APIs
@@ -648,23 +531,6 @@ Response:
 
 ```json
 { "job": {} }
-```
-
-Job shape:
-
-```ts
-type KgScanJob = {
-  id: string
-  bookId: string
-  scope: string
-  status: 'running' | 'completed' | 'failed' | 'cancelled'
-  totalChapters: number
-  completedChapters: number
-  failedChapters: number
-  error: string | null
-  createdAt: string
-  updatedAt: string
-}
 ```
 
 ### `GET /api/kg/scan/status`
