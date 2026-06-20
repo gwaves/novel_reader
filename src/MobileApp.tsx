@@ -13,9 +13,10 @@ type RagSearchResult = {
     keyPoints: string[]
   }
   similarity: number
-  matchType: 'vector' | 'entity' | 'both'
+  matchType: 'vector' | 'chunk' | 'entity' | 'both' | 'entity-first'
   matchedEntities: string[]
   contentSnippet: string | null
+  chunkIndex?: number | null
 }
 
 type RagEntityMatch = {
@@ -28,8 +29,13 @@ type RagEntityMatch = {
 
 type EmbeddingStatus = {
   totalChapters: number
+  summarizedChapters?: number
+  missingSummaries?: number
   embeddedChapters: number
   missingChapters: number
+  totalChunks?: number
+  embeddedChunks?: number
+  missingChunks?: number
   model: string
   dimension: number | null
 }
@@ -232,7 +238,7 @@ function MobileApp() {
 
     setIsGeneratingEmbeddings(true)
     setRagError('')
-    setEmbeddingProgress('准备生成 embedding...')
+    setEmbeddingProgress('准备生成概要与正文片段 embedding...')
 
     try {
       const response = await fetch('/api/rag/embeddings/batch', {
@@ -247,12 +253,21 @@ function MobileApp() {
         method: 'POST',
       })
 
-      const payload = (await response.json()) as { completed: number; failed: number; total: number; error?: string }
+      const payload = (await response.json()) as {
+        completed: number
+        failed: number
+        total: number
+        chunkCompleted?: number
+        chunkFailed?: number
+        error?: string
+      }
       if (!response.ok) {
         throw new Error(payload.error ?? '生成 embedding 失败。')
       }
 
-      setEmbeddingProgress(`已生成 ${payload.completed}/${payload.total}，失败 ${payload.failed} 个。`)
+      setEmbeddingProgress(
+        `已处理 ${payload.completed}/${payload.total} 章，失败 ${payload.failed} 章；正文片段 ${payload.chunkCompleted ?? 0} 个。`,
+      )
       const status = await fetchEmbeddingStatus()
       if (status?.dimension) {
         setState((current) => ({
@@ -967,15 +982,25 @@ ${context}
           <section className="mobile-panel mobile-search-panel">
             <div className="mobile-section">
               <h2>智能搜索</h2>
-              <p className="mobile-hint">基于章节摘要和知识图谱回答问题</p>
+              <p className="mobile-hint">基于章节摘要、正文片段和知识图谱回答问题</p>
             </div>
 
             {embeddingStatus && (
               <div className="mobile-embedding-status">
                 <span>
                   Embedding {embeddingStatus.embeddedChapters}/{embeddingStatus.totalChapters}
+                  {typeof embeddingStatus.summarizedChapters === 'number' &&
+                    ` · 概要 ${embeddingStatus.summarizedChapters}/${embeddingStatus.totalChapters}`}
+                  {typeof embeddingStatus.embeddedChunks === 'number' &&
+                    typeof embeddingStatus.totalChunks === 'number' &&
+                    ` · 片段 ${embeddingStatus.embeddedChunks}/${embeddingStatus.totalChunks}`}
                   {typeof embeddingStatus.dimension === 'number' && ` · 维度 ${embeddingStatus.dimension}`}
                 </span>
+                {Boolean(embeddingStatus.missingSummaries) && (
+                  <small>
+                    还有 {embeddingStatus.missingSummaries} 章没有概要，建议先补齐概要再生成全书 embedding。
+                  </small>
+                )}
                 {embeddingStatus.missingChapters > 0 && (
                   <button
                     type="button"
@@ -1077,7 +1102,15 @@ ${context}
                         第 {result.chapterIndex} 章
                       </button>
                       <span className={`mobile-match-type ${result.matchType}`}>
-                        {result.matchType === 'vector' ? '语义' : result.matchType === 'entity' ? '实体' : '混合'}
+                        {result.matchType === 'vector'
+                          ? '语义'
+                          : result.matchType === 'chunk'
+                            ? '原文'
+                            : result.matchType === 'entity'
+                              ? '实体'
+                              : result.matchType === 'entity-first'
+                                ? '实体（首次）'
+                                : '混合'}
                       </span>
                     </div>
                     <h4>{result.chapterTitle}</h4>

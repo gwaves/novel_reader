@@ -1025,7 +1025,7 @@ Response:
 
 ### `POST /api/rag/embeddings/batch`
 
-Generates embeddings for chapter summaries that do not already have an embedding for the selected model.
+Generates embeddings for chapter summaries and chapter-content chunks that do not already have embeddings for the selected model.
 
 Request:
 
@@ -1051,14 +1051,17 @@ Response:
 {
   "completed": 10,
   "failed": 0,
-  "total": 10
+  "total": 10,
+  "chunkCompleted": 84,
+  "chunkFailed": 0
 }
 ```
 
 Notes:
 
 - If `chapterIds` is omitted, all summaries for the book are considered.
-- Existing embeddings for the same `(chapter_id, model)` are skipped.
+- Existing summary embeddings for the same `(chapter_id, model)` are skipped.
+- Chapter content is split into paragraph-aware chunks of roughly 1200 characters with overlap, then stored in `chapter_chunk_embeddings`.
 - Embeddings are L2-normalized before storage.
 
 ### `GET /api/rag/embeddings/status`
@@ -1077,15 +1080,21 @@ Response:
 ```json
 {
   "totalChapters": 100,
+  "summarizedChapters": 90,
+  "missingSummaries": 10,
   "embeddedChapters": 95,
   "missingChapters": 5,
-  "model": "nomic-embed-text"
+  "totalChunks": 620,
+  "embeddedChunks": 588,
+  "missingChunks": 32,
+  "model": "nomic-embed-text",
+  "dimension": 1024
 }
 ```
 
 ### `POST /api/rag/search`
 
-Runs RAG search using summary embeddings plus knowledge graph entity recall.
+Runs RAG search using summary embeddings, chapter chunk embeddings, and knowledge graph entity recall.
 
 Request:
 

@@ -133,12 +133,12 @@ novel_reader/
 
 ## RAG 搜索
 
-RAG 搜索结合章节概要 embedding 与知识图谱实体匹配。
+RAG 搜索结合章节概要 embedding、正文片段 embedding 与知识图谱实体匹配。
 
-- `/api/rag/embeddings/batch` 生成 embedding，并保存到 `summary_embeddings`。
+- `/api/rag/embeddings/batch` 生成 embedding，并保存到 `summary_embeddings` 和 `chapter_chunk_embeddings`。
 - embedding 配置和文本生成模型配置彼此独立，并通过 `/api/rag/embeddings/validate` 走本地后端校验，避免浏览器 CORS 阻断 Ollama/OpenAI-compatible 检查。
-- `/api/rag/search` 融合向量召回和实体召回，并用类似 reciprocal-rank 的方式排序。
-- 搜索结果包含章节概要、匹配实体、相似度、匹配类型和可选原文片段。
+- `/api/rag/search` 融合概要向量召回、每章最佳正文片段召回和实体召回，并用类似 reciprocal-rank 的方式排序。
+- 搜索结果包含章节概要、匹配实体、相似度、匹配类型和可选最佳正文片段。
 - 如果所选模型的 embedding 覆盖率低于 80%，API 会返回 `409 EMBEDDINGS_NOT_READY`。
 - 桌面端和移动端都支持生成 embedding、搜索，并用当前生成模型基于检索结果生成回答。
 
