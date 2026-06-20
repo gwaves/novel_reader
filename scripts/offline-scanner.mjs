@@ -1,9 +1,11 @@
 #!/usr/bin/env node
+import { writeFileSync } from 'node:fs'
 import { validateModel } from './offline-scanner/llm.mjs'
 import { getConfig } from './offline-scanner/config.mjs'
 import {
   importBookFromMain,
   exportResultsToMain,
+  createBookDataPackage,
   listJobs,
   getSourceBook,
   getSourceChaptersByBook,
@@ -31,8 +33,16 @@ import {
 } from './offline-scanner/config.mjs'
 
 const COMMANDS = [
-  'import', 'list', 'scan', 'resume', 'status', 'export', 'help', 'config', 'sync', 'stop'
+  'import', 'list', 'scan', 'resume', 'status', 'export', 'bundle', 'help', 'config', 'sync', 'stop'
 ]
+
+function toSafeFilename(value) {
+  return String(value || 'book')
+    .trim()
+    .replace(/[\\/:*?"<>|]+/g, '-')
+    .replace(/\s+/g, '-')
+    .slice(0, 80) || 'book'
+}
 
 function printHelp() {
   console.log(`
@@ -51,6 +61,7 @@ function printHelp() {
                            type: summary | kg | all
   status [bookId]          查看所有任务或指定书籍的状态
   export <bookId>          将离线扫描结果导入主数据库
+  bundle <bookId> [path]   导出某本书的离线扫描数据包，供网页导入
   sync                     同步主项目模型配置到离线配置文件
   config                   显示当前模型配置
   stop                     发送停止信号（需要另一个终端执行）
@@ -103,6 +114,9 @@ function printHelp() {
 
   # 9. 导出到主数据库
   node scripts/offline-scanner.mjs export <bookId>
+
+  # 10. 导出为网页可导入的数据包
+  node scripts/offline-scanner.mjs bundle <bookId>
 `)
 }
 
@@ -142,6 +156,22 @@ async function runExport(bookId) {
   console.log(`      KG 提取: ${result.extractionCount}`)
   console.log(`      KG 实体: ${result.entityCount}`)
   console.log(`      KG 关系: ${result.relationCount}`)
+}
+
+async function runBundle(bookId, outputPath) {
+  console.log(`📦 生成离线扫描数据包...`)
+  const dataPackage = createBookDataPackage(bookId)
+  const filename = outputPath || `novel-reader-${toSafeFilename(dataPackage.book.title)}-${bookId}-offline-data.json`
+
+  writeFileSync(filename, `${JSON.stringify(dataPackage, null, 2)}\n`, 'utf8')
+
+  console.log(`   ✅ 数据包已生成：${filename}`)
+  console.log(`      书名: ${dataPackage.book.title}`)
+  console.log(`      章节: ${dataPackage.counts.chapters}`)
+  console.log(`      Summary: ${dataPackage.counts.summaries}`)
+  console.log(`      KG 提取: ${dataPackage.counts.kgChapterExtractions}`)
+  console.log(`      KG 实体: ${dataPackage.counts.kgEntities}`)
+  console.log(`      KG 关系: ${dataPackage.counts.kgRelations}`)
 }
 
 async function runStatus(bookId) {
@@ -352,6 +382,15 @@ async function main() {
       process.exit(1)
     }
     await runExport(args[0])
+    return
+  }
+
+  if (command === 'bundle') {
+    if (!args[0]) {
+      console.error('❌ 需要 bookId。用法: bundle <bookId> [path]')
+      process.exit(1)
+    }
+    await runBundle(args[0], args[1])
     return
   }
 

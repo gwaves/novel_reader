@@ -151,6 +151,11 @@ SQLite 图谱表
 - 后端：新增 `POST /api/database/import`，上传 `.sqlite` 后校验完整性和关键表，先备份当前数据库，再把恢复文件排队到下次服务启动替换。
 - UI：首页新增“数据库备份”，支持备份完整数据库和选择备份文件恢复；恢复会提示重启本地数据库服务后生效。
 
+2026-06-20 更新：离线扫描单书数据包导入 v1 已完成。
+- CLI：`node scripts/offline-scanner.mjs bundle <bookId> [path]` 可把某本书的概要、章节级 KG extraction、实体、关系和证据导出为 JSON 数据包。
+- 后端：新增 `POST /api/offline/import`，校验数据包格式、书籍 ID 与章节归属后，将该书概要 upsert，并全量替换该书知识图谱数据。
+- UI：首页新增“离线扫描数据”入口，可选择单书 JSON 数据包导入，导入后刷新书架概要快照和当前图谱统计。
+
 2026-06-19 更新：章节图谱 diff 预览 v1 已完成。
 - 后端：新增章节 extraction diff 预览接口，对比当前章节已写入图谱证据和候选 extraction JSON。
 - UI：手动保存当前章节 JSON 前会先显示新增/移除/不变实体和关系证据，确认后才写入。

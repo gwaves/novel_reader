@@ -638,6 +638,94 @@ export function exportResultsToMain(mainDbPath, bookId) {
   }
 }
 
+export function createBookDataPackage(bookId) {
+  const book = getSourceBook(bookId)
+  if (!book) {
+    throw new Error(`Book ${bookId} is not imported into the offline database.`)
+  }
+
+  const chapters = db.prepare(`
+    SELECT id, book_id, chapter_index, title, word_count
+    FROM source_chapters
+    WHERE book_id = ?
+    ORDER BY chapter_index ASC
+  `).all(bookId)
+
+  const summaries = db.prepare(`
+    SELECT chapter_id, short, detail, key_points_json, skippable, generated_by
+    FROM summaries
+    WHERE chapter_id IN (
+      SELECT id FROM source_chapters WHERE book_id = ?
+    )
+    ORDER BY chapter_id ASC
+  `).all(bookId)
+
+  const kgChapterExtractions = db.prepare(`
+    SELECT chapter_id, book_id, status, extraction_json, error, model, scanned_at
+    FROM kg_chapter_extractions
+    WHERE book_id = ?
+    ORDER BY chapter_id ASC
+  `).all(bookId)
+
+  const kgEntities = db.prepare(`
+    SELECT id, book_id, type, name, normalized_name, aliases_json, description, confidence,
+           first_chapter_index, last_chapter_index, created_at, updated_at
+    FROM kg_entities
+    WHERE book_id = ?
+    ORDER BY name ASC
+  `).all(bookId)
+
+  const kgEntityMentions = db.prepare(`
+    SELECT id, entity_id, book_id, chapter_id, chapter_index, evidence, confidence, created_at
+    FROM kg_entity_mentions
+    WHERE book_id = ?
+    ORDER BY chapter_index ASC
+  `).all(bookId)
+
+  const kgRelations = db.prepare(`
+    SELECT id, book_id, source_entity_id, target_entity_id, type, description, confidence,
+           first_chapter_index, last_chapter_index, created_at, updated_at
+    FROM kg_relations
+    WHERE book_id = ?
+    ORDER BY type ASC
+  `).all(bookId)
+
+  const kgRelationMentions = db.prepare(`
+    SELECT id, relation_id, book_id, chapter_id, chapter_index, evidence, confidence, created_at
+    FROM kg_relation_mentions
+    WHERE book_id = ?
+    ORDER BY chapter_index ASC
+  `).all(bookId)
+
+  return {
+    kind: 'novel-reader-offline-book-data',
+    version: 1,
+    exportedAt: new Date().toISOString(),
+    book: {
+      id: book.id,
+      title: book.title,
+      imported_at: book.imported_at,
+      chapter_count: chapters.length,
+    },
+    chapters,
+    summaries,
+    kgChapterExtractions,
+    kgEntities,
+    kgEntityMentions,
+    kgRelations,
+    kgRelationMentions,
+    counts: {
+      chapters: chapters.length,
+      summaries: summaries.length,
+      kgChapterExtractions: kgChapterExtractions.length,
+      kgEntities: kgEntities.length,
+      kgEntityMentions: kgEntityMentions.length,
+      kgRelations: kgRelations.length,
+      kgRelationMentions: kgRelationMentions.length,
+    },
+  }
+}
+
 // --- summary store ---
 
 export function saveSummary(chapterId, summary) {
@@ -756,4 +844,3 @@ export function listMainBooks() {
 }
 
 export { db }
-

@@ -224,6 +224,9 @@ node scripts/offline-scanner.mjs status <bookId>
 
 # 6. 将结果导回主数据库
 node scripts/offline-scanner.mjs export <bookId>
+
+# 7. 或生成单本书数据包，再在首页“离线扫描数据”中导入
+node scripts/offline-scanner.mjs bundle <bookId>
 ```
 
 #### 命令列表
@@ -236,6 +239,7 @@ node scripts/offline-scanner.mjs export <bookId>
 | `resume` | `<summary\|kg\|all> <bookId>` | 恢复中断的扫描任务 |
 | `status` | `[bookId]` | 查看进度 |
 | `export` | `<bookId>` | 导出结果到主数据库 |
+| `bundle` | `<bookId> [path]` | 生成单本书离线扫描数据包，供网页导入 |
 | `sync` | — | 从主项目同步模型配置 |
 | `config` | — | 显示当前模型配置 |
 | `stop` | — | 发送优雅停止信号 |
