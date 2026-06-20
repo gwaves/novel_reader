@@ -228,16 +228,6 @@ select {
   padding: 9px 11px;
 }
 
-.encoding-field {
-  display: grid;
-  gap: 8px;
-  max-width: 260px;
-  margin-top: 24px;
-  color: #6b6256;
-  font-size: 14px;
-  font-weight: 650;
-}
-
 button {
   border: 0;
   border-radius: 8px;

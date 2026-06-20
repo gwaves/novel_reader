@@ -10,7 +10,7 @@ import {
 } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
 import { countBookWords, formatWordCount, normalizeStoredState, useReaderState } from './hooks/useReaderState.ts'
-import type { AIProvider, Chapter, EmbeddingProvider, ImportEncoding, OpenAIConfig } from './hooks/useReaderState.ts'
+import type { AIProvider, Chapter, EmbeddingProvider, OpenAIConfig } from './hooks/useReaderState.ts'
 import './App.css'
 
 type KgOverview = {
@@ -3445,23 +3445,6 @@ ${context}
             <p>
               章节切分结果、每本书的阅读位置和已生成概要都会保存在本机 SQLite 数据库里。导入新 txt 会新增到书架，不会替换已有书籍。
             </p>
-            <label className="encoding-field" htmlFor="import-encoding">
-              文本编码
-              <select
-                id="import-encoding"
-                value={state.importEncoding}
-                onChange={(event) =>
-                  setState((current) => ({
-                    ...current,
-                    importEncoding: event.target.value as ImportEncoding,
-                  }))
-                }
-              >
-                <option value="auto">自动识别</option>
-                <option value="gb18030">GBK / GB18030</option>
-                <option value="utf-8">UTF-8</option>
-              </select>
-            </label>
           </div>
 
           {state.book && (

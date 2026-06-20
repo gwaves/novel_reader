@@ -42,7 +42,6 @@ export type StoredState = {
   openaiConfigs: OpenAIConfig[]
   activeOpenAIConfigId: string
   thinkingEnabled: boolean
-  importEncoding: ImportEncoding
   readerFontSize: number
   readerLineHeight: number
   readerContentWidth: number
@@ -54,7 +53,6 @@ export type StoredState = {
 
 export type AIProvider = 'ollama' | 'openai'
 export type EmbeddingProvider = 'ollama' | 'openai'
-export type ImportEncoding = 'auto' | 'utf-8' | 'gb18030'
 export type ReaderTheme = 'paper' | 'night' | 'green'
 export type AppView = 'home' | 'reader' | 'knowledge' | 'search'
 export type OllamaModel = {
@@ -130,7 +128,6 @@ const initialState: StoredState = {
   ],
   activeOpenAIConfigId: 'default-openai',
   thinkingEnabled: false,
-  importEncoding: 'auto',
   readerFontSize: 18,
   readerLineHeight: 2.05,
   readerContentWidth: 820,
@@ -304,12 +301,6 @@ export function normalizeStoredState(
     typeof storedState.ollamaConcurrency === 'number'
       ? storedState.ollamaConcurrency
       : initialState.ollamaConcurrency
-  const fallbackImportEncoding =
-    storedState.importEncoding === 'auto' ||
-    storedState.importEncoding === 'utf-8' ||
-    storedState.importEncoding === 'gb18030'
-      ? storedState.importEncoding
-      : initialState.importEncoding
 
   const fallbackOpenAIConfigs = Array.isArray(storedState.openaiConfigs)
     ? sanitizeOpenAIConfigs(storedState.openaiConfigs as unknown[])
@@ -334,7 +325,6 @@ export function normalizeStoredState(
     openaiConfigs: fallbackOpenAIConfigs,
     activeOpenAIConfigId: fallbackActiveOpenAIConfigId,
     thinkingEnabled: fallbackThinking,
-    importEncoding: fallbackImportEncoding,
     readerFontSize:
       typeof storedState.readerFontSize === 'number'
         ? Math.max(14, Math.min(28, storedState.readerFontSize))
@@ -593,40 +583,26 @@ function getChapterTitleNumber(title: string) {
   return match ? parseChineseNumber(match[1]) : null
 }
 
-function decodeTextFile(file: File, encoding: ImportEncoding): Promise<string> {
+function decodeTextFile(file: File): Promise<string> {
   return new Promise((resolve, reject) => {
     const reader = new FileReader()
 
     reader.onload = () => {
       const buffer = reader.result as ArrayBuffer
 
-      if (encoding === 'utf-8') {
-        resolve(new TextDecoder('utf-8').decode(buffer))
+      // Try UTF-8 first; only fall back to GB18030 if the bytes are not valid UTF-8.
+      try {
+        const utf8 = new TextDecoder('utf-8', { fatal: true }).decode(buffer)
+        resolve(utf8)
         return
-      }
-
-      if (encoding === 'gb18030') {
+      } catch {
         resolve(new TextDecoder('gb18030').decode(buffer))
-        return
       }
-
-      const utf8 = new TextDecoder('utf-8').decode(buffer)
-      const gb18030 = new TextDecoder('gb18030').decode(buffer)
-
-      resolve(scoreDecodedText(gb18030) > scoreDecodedText(utf8) ? gb18030 : utf8)
     }
 
     reader.onerror = () => reject(reader.error)
     reader.readAsArrayBuffer(file)
   })
-}
-
-function scoreDecodedText(text: string) {
-  const chineseCount = (text.match(/[一-龥]/g) ?? []).length
-  const chapterHeadingCount = (text.match(/第[0-9零一二三四五六七八九十百千万亿]+章/g) ?? []).length
-  const replacementCount = (text.match(/�/g) ?? []).length
-
-  return chineseCount + chapterHeadingCount * 80 - replacementCount * 160
 }
 
 function decodeZipName(bytes: Uint8Array, useUtf8: boolean) {
@@ -823,12 +799,12 @@ async function parseEpubFile(file: File): Promise<ImportedBookContent> {
   return { title: metadataTitle, chapters }
 }
 
-async function parseImportedBook(file: File, encoding: ImportEncoding): Promise<ImportedBookContent> {
+async function parseImportedBook(file: File): Promise<ImportedBookContent> {
   if (/\.epub$/i.test(file.name) || file.type === 'application/epub+zip') {
     return parseEpubFile(file)
   }
 
-  const text = await decodeTextFile(file, encoding)
+  const text = await decodeTextFile(file)
   return {
     title: inferTitle(file.name),
     chapters: splitChapters(text),
@@ -1377,7 +1353,7 @@ export function useReaderState(): UseReaderStateReturn {
     setError('')
 
     try {
-      const imported = await parseImportedBook(file, state.importEncoding)
+      const imported = await parseImportedBook(file)
       const { chapters } = imported
 
       if (!chapters.length) {

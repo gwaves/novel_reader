@@ -1,6 +1,6 @@
 import { type CSSProperties, type MouseEvent, useEffect, useRef, useState } from 'react'
 import { countBookWords, formatWordCount, useReaderState } from './hooks/useReaderState.ts'
-import type { AIProvider, EmbeddingProvider, ImportEncoding, OpenAIConfig } from './hooks/useReaderState.ts'
+import type { AIProvider, EmbeddingProvider, OpenAIConfig } from './hooks/useReaderState.ts'
 import './MobileApp.css'
 
 type RagSearchResult = {
@@ -615,23 +615,6 @@ ${context}
                 />
                 <span className="mobile-primary-button">{state.books.length ? '导入新书到书架' : '选择 txt / epub 文件'}</span>
                 <small>txt 自动拆章，epub 按 spine 导入</small>
-              </label>
-
-              <label className="mobile-field">
-                文本编码
-                <select
-                  value={state.importEncoding}
-                  onChange={(event) =>
-                    setState((current) => ({
-                      ...current,
-                      importEncoding: event.target.value as ImportEncoding,
-                    }))
-                  }
-                >
-                  <option value="auto">自动识别</option>
-                  <option value="gb18030">GBK / GB18030</option>
-                  <option value="utf-8">UTF-8</option>
-                </select>
               </label>
 
               <label className="mobile-field mobile-font-field">
