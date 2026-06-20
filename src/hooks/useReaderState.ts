@@ -824,25 +824,6 @@ async function parseImportedBook(file: File): Promise<ImportedBookContent> {
   }
 }
 
-function makeLocalSummary(chapter: Chapter): Summary {
-  const sentences = chapter.content
-    .replace(/\s+/g, ' ')
-    .split(/[。！？]/)
-    .filter((sentence) => sentence.trim().length >= 10)
-
-  const short = sentences.slice(0, 2).join('。') || '本章内容较短，未提取到明显情节。'
-  const detail = sentences.slice(0, 5).join('。') || short
-  const keyPoints = sentences.slice(0, 3).map((sentence) => sentence.trim())
-
-  return {
-    short,
-    detail,
-    keyPoints,
-    skippable: '本地粗略概要仅供参考，不能作为跳读依据。',
-    generatedBy: 'local',
-  }
-}
-
 function buildSummaryPrompt(chapter: Chapter, thinkingEnabled: boolean): string {
   const thinkingInstruction = thinkingEnabled
     ? '请先用 /think 进行推理，但最终输出必须是 JSON，不要输出任何其他内容。'
@@ -1162,8 +1143,8 @@ export interface UseReaderStateReturn {
   chapterSearch: string
   setChapterSearch: React.Dispatch<React.SetStateAction<string>>
   isHydrated: boolean
-  isGenerating: boolean
-  batchProgress: string
+  generatingBookId: string | null
+  generatingBookProgress: string
   isConfigOpen: boolean
   modelConfigDraft: ModelConfigDraft
   setModelConfigDraft: React.Dispatch<React.SetStateAction<ModelConfigDraft>>
@@ -1194,9 +1175,7 @@ export interface UseReaderStateReturn {
   draftActiveOpenAIConfig: OpenAIConfig | undefined
   importedDate: string
   handleImport: (file: File) => Promise<void>
-  handleGenerateSummary: (useOllama: boolean) => Promise<void>
-  handleBatchGenerateCurrentPage: () => Promise<void>
-  handleBatchGenerateAllMissingSummaries: () => Promise<void>
+  generateMissingSummariesForBook: (bookId: string) => Promise<void>
   selectBook: (bookId: string) => void
   deleteBook: (bookId: string) => void
   updateActiveChapter: (id: string) => void
@@ -1227,6 +1206,23 @@ function syncActiveLibraryBook(
   }
 }
 
+function getLibraryBookSummaries(current: StoredState, bookId: string): Record<string, Summary> {
+  return current.books.find((entry) => entry.book.id === bookId)?.summaries ?? {}
+}
+
+function syncLibraryBook(
+  current: StoredState,
+  bookId: string,
+  updates: Partial<Pick<LibraryBook, 'activeChapterId' | 'summaries'>>,
+): StoredState {
+  return {
+    ...current,
+    books: current.books.map((entry) =>
+      entry.book.id === bookId ? { ...entry, ...updates } : entry,
+    ),
+  }
+}
+
 function getChapterPageForState(state: StoredState): number {
   if (!state.book || !state.activeChapterId) return 1
 
@@ -1241,8 +1237,8 @@ export function useReaderState(): UseReaderStateReturn {
   const [chapterPage, setChapterPage] = useState(1)
   const [chapterSearch, setChapterSearch] = useState('')
   const [isHydrated, setIsHydrated] = useState(false)
-  const [isGenerating, setIsGenerating] = useState(false)
-  const [batchProgress, setBatchProgress] = useState('')
+  const [generatingBookId, setGeneratingBookId] = useState<string | null>(null)
+  const [generatingBookProgress, setGeneratingBookProgress] = useState('')
   const [isConfigOpen, setIsConfigOpen] = useState(false)
   const [modelConfigDraft, setModelConfigDraft] = useState<ModelConfigDraft>(() =>
     getModelConfigDraft(initialState),
@@ -1402,36 +1398,101 @@ export function useReaderState(): UseReaderStateReturn {
     }
   }
 
-  async function handleGenerateSummary(useOllama: boolean) {
-    if (!activeChapter) return
+  async function generateMissingSummariesForBook(bookId: string) {
+    const libraryBook = state.books.find((entry) => entry.book.id === bookId)
 
-    setIsGenerating(true)
-    setBatchProgress('')
+    if (!libraryBook) return
+
+    const pendingChapters = libraryBook.book.chapters.filter(
+      (chapter) => !libraryBook.summaries[chapter.id],
+    )
+    const totalChapters = libraryBook.book.chapters.length
+    const missingCount = pendingChapters.length
+
+    if (!missingCount) {
+      setGeneratingBookId(bookId)
+      setGeneratingBookProgress('概要已经全部生成。')
+      setTimeout(() => {
+        setGeneratingBookId((current) => (current === bookId ? null : current))
+      }, 2000)
+      return
+    }
+
+    if (
+      missingCount > 50 &&
+      !window.confirm(
+        `全书共 ${totalChapters} 章，其中 ${missingCount} 章缺少概要。\n` +
+          `批量生成将调用 AI 接口 ${missingCount} 次，可能耗时较长并消耗较多 token。\n` +
+          '确定要继续吗？',
+      )
+    ) {
+      return
+    }
+
+    const concurrency = getActiveConcurrency()
+    const baselineProcessedCount = totalChapters - missingCount
+
+    setGeneratingBookId(bookId)
+    setGeneratingBookProgress(`并发 ${concurrency}，准备生成 ${missingCount} 章概要`)
     setError('')
 
     try {
-      const summary = await generateChapterSummary(activeChapter, useOllama)
+      let nextIndex = 0
+      let completedCount = 0
+      let failedCount = 0
 
-      setState((current) =>
-        syncActiveLibraryBook(current, {
-          summaries: {
-            ...current.summaries,
-            [activeChapter.id]: summary,
-          },
-        }),
+      async function worker() {
+        while (nextIndex < pendingChapters.length) {
+          const chapter = pendingChapters[nextIndex]
+          nextIndex += 1
+
+          setGeneratingBookProgress(
+            `并发 ${concurrency}，正在生成 ${completedCount + failedCount + 1}/${missingCount}（全书 ${baselineProcessedCount + completedCount + failedCount + 1}/${totalChapters}）：第 ${chapter.index} 章`,
+          )
+
+          try {
+            const summary = await generateChapterSummary(chapter)
+            completedCount += 1
+
+            setState((current) =>
+              syncLibraryBook(current, bookId, {
+                summaries: {
+                  ...getLibraryBookSummaries(current, bookId),
+                  [chapter.id]: summary,
+                },
+              }),
+            )
+          } catch {
+            failedCount += 1
+          }
+
+          setGeneratingBookProgress(
+            `并发 ${concurrency}，已完成 ${completedCount}/${missingCount}（全书 ${baselineProcessedCount + completedCount}/${totalChapters}），失败 ${failedCount} 章`,
+          )
+        }
+      }
+
+      await Promise.all(
+        Array.from({ length: Math.min(concurrency, missingCount) }, () => worker()),
       )
+
+      if (failedCount > 0) {
+        setGeneratingBookProgress(
+          `批量生成结束，成功 ${completedCount} 章，失败 ${failedCount} 章。`,
+        )
+      } else {
+        setGeneratingBookProgress(`全书 ${missingCount} 章缺失概要已生成。`)
+      }
     } catch (err) {
-      setError(err instanceof Error ? err.message : '生成概要失败。')
+      setError(err instanceof Error ? err.message : '批量生成概要失败。')
     } finally {
-      setIsGenerating(false)
+      setTimeout(() => {
+        setGeneratingBookId((current) => (current === bookId ? null : current))
+      }, 2000)
     }
   }
 
-  async function generateChapterSummary(chapter: Chapter, useModel: boolean): Promise<Summary> {
-    if (!useModel) {
-      return makeLocalSummary(chapter)
-    }
-
+  async function generateChapterSummary(chapter: Chapter): Promise<Summary> {
     if (state.aiProvider === 'openai') {
       const activeConfig = getActiveOpenAIConfig(state)
 
@@ -1449,147 +1510,16 @@ export function useReaderState(): UseReaderStateReturn {
       )
     }
 
+    if (!state.ollamaModel.trim()) {
+      throw new Error('请先配置 Ollama 模型。')
+    }
+
     return generateWithOllama(
       chapter,
       state.ollamaModel,
       state.ollamaTemperature,
       state.thinkingEnabled,
     )
-  }
-
-  async function handleBatchGenerateCurrentPage() {
-    const pendingChapters = pagedChapters.filter((chapter) => !state.summaries[chapter.id])
-    const concurrency = getActiveConcurrency()
-
-    if (!pendingChapters.length) {
-      setBatchProgress('当前章节页已经全部生成概要。')
-      return
-    }
-
-    setIsGenerating(true)
-    setError('')
-
-    try {
-      let nextIndex = 0
-      let completedCount = 0
-
-      async function worker() {
-        while (nextIndex < pendingChapters.length) {
-          const chapter = pendingChapters[nextIndex]
-          nextIndex += 1
-          setBatchProgress(
-            `并发 ${concurrency}，正在生成 ${completedCount + 1}/${pendingChapters.length}：第 ${chapter.index} 章`,
-          )
-          const summary = await generateChapterSummary(chapter, true)
-          completedCount += 1
-
-          setState((current) =>
-            syncActiveLibraryBook(current, {
-              summaries: {
-                ...current.summaries,
-                [chapter.id]: summary,
-              },
-            }),
-          )
-          setBatchProgress(
-            `并发 ${concurrency}，已完成 ${completedCount}/${pendingChapters.length}`,
-          )
-        }
-      }
-
-      await Promise.all(
-        Array.from({ length: Math.min(concurrency, pendingChapters.length) }, () => worker()),
-      )
-
-      setBatchProgress(`本页 ${pendingChapters.length} 章概要已生成。`)
-    } catch (err) {
-      setError(err instanceof Error ? err.message : '批量生成概要失败。')
-    } finally {
-      setIsGenerating(false)
-    }
-  }
-
-  async function handleBatchGenerateAllMissingSummaries() {
-    if (!state.book) return
-
-    const pendingChapters = state.book.chapters.filter((chapter) => !state.summaries[chapter.id])
-    const totalChapters = state.book.chapters.length
-    const missingCount = pendingChapters.length
-
-    if (!missingCount) {
-      setBatchProgress('全书概要已经全部生成。')
-      return
-    }
-
-    if (
-      missingCount > 50 &&
-      !window.confirm(
-        `全书共 ${totalChapters} 章，其中 ${missingCount} 章缺少概要。\n` +
-          `批量生成将调用 AI 接口 ${missingCount} 次，可能耗时较长并消耗较多 token。\n` +
-          '确定要继续吗？',
-      )
-    ) {
-      return
-    }
-
-    const concurrency = getActiveConcurrency()
-    const baselineProcessedCount = processedCount
-
-    setIsGenerating(true)
-    setError('')
-
-    try {
-      let nextIndex = 0
-      let completedCount = 0
-      let failedCount = 0
-
-      async function worker() {
-        while (nextIndex < pendingChapters.length) {
-          const chapter = pendingChapters[nextIndex]
-          nextIndex += 1
-
-          setBatchProgress(
-            `并发 ${concurrency}，正在生成 ${completedCount + failedCount + 1}/${missingCount}（全书 ${baselineProcessedCount + completedCount + failedCount + 1}/${totalChapters}）：第 ${chapter.index} 章`,
-          )
-
-          try {
-            const summary = await generateChapterSummary(chapter, true)
-            completedCount += 1
-
-            setState((current) =>
-              syncActiveLibraryBook(current, {
-                summaries: {
-                  ...current.summaries,
-                  [chapter.id]: summary,
-                },
-              }),
-            )
-          } catch {
-            failedCount += 1
-          }
-
-          setBatchProgress(
-            `并发 ${concurrency}，已完成 ${completedCount}/${missingCount}（全书 ${baselineProcessedCount + completedCount}/${totalChapters}），失败 ${failedCount} 章`,
-          )
-        }
-      }
-
-      await Promise.all(
-        Array.from({ length: Math.min(concurrency, missingCount) }, () => worker()),
-      )
-
-      if (failedCount > 0) {
-        setBatchProgress(
-          `全书批量生成结束，成功 ${completedCount} 章，失败 ${failedCount} 章。`,
-        )
-      } else {
-        setBatchProgress(`全书 ${missingCount} 章缺失概要已生成。`)
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : '批量生成概要失败。')
-    } finally {
-      setIsGenerating(false)
-    }
   }
 
   function getActiveConcurrency() {
@@ -1808,8 +1738,8 @@ export function useReaderState(): UseReaderStateReturn {
     chapterSearch,
     setChapterSearch,
     isHydrated,
-    isGenerating,
-    batchProgress,
+    generatingBookId,
+    generatingBookProgress,
     isConfigOpen,
     modelConfigDraft,
     setModelConfigDraft,
@@ -1840,9 +1770,7 @@ export function useReaderState(): UseReaderStateReturn {
     draftActiveOpenAIConfig,
     importedDate,
     handleImport,
-    handleGenerateSummary,
-    handleBatchGenerateCurrentPage,
-    handleBatchGenerateAllMissingSummaries,
+    generateMissingSummariesForBook,
     selectBook,
     deleteBook,
     updateActiveChapter,
