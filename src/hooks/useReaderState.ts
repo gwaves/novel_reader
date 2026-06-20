@@ -429,7 +429,7 @@ export function getActiveOpenAIConfig(
 }
 
 const CHAPTER_PATTERN =
-  /^\s*(?:第\s*[0-9零一二三四五六七八九十百千万亿]+\s*[章卷节回][^\n]*|Chapter\s*\d+[^\n]*|\d+[.、]\s*[^\n]+)\s*$/gim
+  /^\s*(?:第\s*[0-9零一二三四五六七八九十百千万亿]+\s*[集卷部]\s+第\s*[0-9零一二三四五六七八九十百千万亿]+\s*[章卷节回][^\n]*|第\s*[0-9零一二三四五六七八九十百千万亿]+\s*[章卷节回][^\n]*|Chapter\s*\d+[^\n]*|\d+[.、]\s*[^\n]+)\s*$/gim
 
 export function splitChapters(rawText: string): Chapter[] {
   const matches = Array.from(rawText.matchAll(CHAPTER_PATTERN))
@@ -462,7 +462,7 @@ function chunkFallback(text: string): Chapter[] {
   let currentTitle = '正文开始'
   let currentLines: string[] = []
 
-  const fallbackPattern = /^(第\s*[0-9零一二三四五六七八九十百千万亿]+\s*[章卷节回]|Chapter\s*\d+|\d+[.、])/
+  const fallbackPattern = /^(第\s*[0-9零一二三四五六七八九十百千万亿]+\s*[集卷部]\s+第\s*[0-9零一二三四五六七八九十百千万亿]+\s*[章卷节回]|第\s*[0-9零一二三四五六七八九十百千万亿]+\s*[章卷节回]|Chapter\s*\d+|\d+[.、])/
 
   for (let index = 0; index < lines.length; index += 1) {
     const line = lines[index].trim()
