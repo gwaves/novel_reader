@@ -385,6 +385,7 @@ function formatReviewReason(reason: string): string {
     description_missing: '缺少描述',
     name_too_short: '名称过短',
     self_loop: '自环关系',
+    single_mention: '只出现一次',
     type_unclear: '类型模糊',
   }
   return labels[reason] ?? reason

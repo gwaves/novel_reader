@@ -2500,6 +2500,10 @@ function computeEntityReviewReasons(entity) {
       break
     }
   }
+  const mentionCount = Number(entity?.mentionCount) || 0
+  if (mentionCount <= 1) {
+    reasons.push('single_mention')
+  }
   return reasons
 }
 
@@ -3205,7 +3209,8 @@ function reconcileTouchedGraphRows(entityIds, relationIds) {
     const mentionCount = getKgEntityMentionCountStatement.get(entityId)?.count ?? 0
     const relationCount = getKgEntityRelationCountStatement.get(entityId, entityId)?.count ?? 0
 
-    if (mentionCount === 0 && relationCount === 0) {
+    // Isolated entities with at most one mention are usually extraction noise.
+    if (mentionCount <= 1 && relationCount === 0) {
       deleteKgEntityStatement.run(entityId)
       continue
     }
