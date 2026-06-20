@@ -178,6 +178,9 @@ node scripts/offline-scanner.mjs resume all <bookId>
 
 # 4. Export results back to the main database
 node scripts/offline-scanner.mjs export <bookId>
+
+# 5. Or create a per-book JSON package for web import
+node scripts/offline-scanner.mjs bundle <bookId>
 ```
 
 Commands:
@@ -190,6 +193,7 @@ Commands:
 | `resume` | `<summary\|kg\|all> <bookId>` | Resume an interrupted scan job |
 | `status` | `[bookId]` | Show progress |
 | `export` | `<bookId>` | Export results to the main database |
+| `bundle` | `<bookId> [path]` | Create a per-book offline scan data package for web import |
 | `sync` | — | Sync model config from the main project |
 | `config` | — | Show current model config |
 | `stop` | — | Send a graceful stop signal |

@@ -9,7 +9,7 @@ import {
   type Node,
 } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
-import { countBookWords, formatWordCount, useReaderState } from './hooks/useReaderState.ts'
+import { countBookWords, formatWordCount, normalizeStoredState, useReaderState } from './hooks/useReaderState.ts'
 import type { AIProvider, Chapter, EmbeddingProvider, ImportEncoding, OpenAIConfig } from './hooks/useReaderState.ts'
 import './App.css'
 
@@ -216,6 +216,13 @@ type KgScanJob = {
   error: string | null
   createdAt: string
   updatedAt: string
+}
+
+type KgScanWorkerProgress = {
+  workerId: number
+  chapterIndex?: number
+  title?: string
+  status: 'idle' | 'running' | 'completed' | 'failed' | 'stopping'
 }
 
 type KgCoreferenceCandidate = {
@@ -452,6 +459,7 @@ function App() {
   const activeChapterButtonRef = useRef<HTMLButtonElement | null>(null)
   const readerScrollSaveTimerRef = useRef<number | null>(null)
   const databaseImportInputRef = useRef<HTMLInputElement | null>(null)
+  const offlineImportInputRef = useRef<HTMLInputElement | null>(null)
   const shouldStopScanningRef = useRef(false)
   const [kgOverview, setKgOverview] = useState<KgOverview | null>(null)
   const [kgEntities, setKgEntities] = useState<KgEntity[]>([])
@@ -466,6 +474,7 @@ function App() {
   const [isKgApplyingPreview, setIsKgApplyingPreview] = useState(false)
   const [kgError, setKgError] = useState('')
   const [showKgManualExtraction, setShowKgManualExtraction] = useState(false)
+  const [showKgAdvancedScanActions, setShowKgAdvancedScanActions] = useState(false)
   const [kgScanMode, setKgScanMode] = useState<KgScanMode>('current')
   const [kgScanStart, setKgScanStart] = useState(1)
   const [kgScanEnd, setKgScanEnd] = useState(1)
@@ -474,6 +483,7 @@ function App() {
   const [isKgScanning, setIsKgScanning] = useState(false)
   const [isStoppingKgScan, setIsStoppingKgScan] = useState(false)
   const [kgScanProgress, setKgScanProgress] = useState('')
+  const [kgScanWorkerProgress, setKgScanWorkerProgress] = useState<KgScanWorkerProgress[]>([])
   const [isKgCoreferencing, setIsKgCoreferencing] = useState(false)
   const [kgCoreferenceProgress, setKgCoreferenceProgress] = useState('')
   const [kgCoreferenceChunkSize, setKgCoreferenceChunkSize] = useState(50)
@@ -504,6 +514,8 @@ function App() {
   const [isKgExporting, setIsKgExporting] = useState(false)
   const [isDatabaseBackupBusy, setIsDatabaseBackupBusy] = useState(false)
   const [databaseBackupStatus, setDatabaseBackupStatus] = useState('')
+  const [isOfflineImportBusy, setIsOfflineImportBusy] = useState(false)
+  const [offlineImportStatus, setOfflineImportStatus] = useState('')
   const [editingBookTitle, setEditingBookTitle] = useState(false)
   const [bookTitleDraft, setBookTitleDraft] = useState('')
   const [editingBookListId, setEditingBookListId] = useState<string | null>(null)
@@ -1376,6 +1388,58 @@ function App() {
       setIsDatabaseBackupBusy(false)
       if (databaseImportInputRef.current) {
         databaseImportInputRef.current.value = ''
+      }
+    }
+  }
+
+  async function importOfflineBookData(file: File) {
+    setKgError('')
+    setOfflineImportStatus('')
+    setIsOfflineImportBusy(true)
+
+    try {
+      const response = await fetch('/api/offline/import', {
+        body: await file.text(),
+        headers: { 'Content-Type': 'application/json' },
+        method: 'POST',
+      })
+      const payload = (await response.json()) as {
+        bookId?: string
+        error?: string
+        extractionCount?: number
+        entityCount?: number
+        relationCount?: number
+        summaryCount?: number
+        title?: string
+      }
+
+      if (!response.ok) {
+        throw new Error(payload.error ?? '导入离线扫描数据失败。')
+      }
+
+      const stateResponse = await fetch('/api/state')
+      if (stateResponse.ok) {
+        const statePayload = (await stateResponse.json()) as { state?: unknown }
+        if (statePayload.state && typeof statePayload.state === 'object') {
+          setState(normalizeStoredState(statePayload.state as Parameters<typeof normalizeStoredState>[0]))
+        }
+      }
+
+      if (payload.bookId && payload.bookId === state.book?.id) {
+        await refreshKnowledgeGraph()
+      }
+
+      setOfflineImportStatus(
+        `已导入《${payload.title ?? '当前书籍'}》：概要 ${payload.summaryCount ?? 0}，图谱扫描 ${payload.extractionCount ?? 0}，实体 ${payload.entityCount ?? 0}，关系 ${payload.relationCount ?? 0}。`,
+      )
+    } catch (err) {
+      const message = err instanceof Error ? err.message : '导入离线扫描数据失败。'
+      setOfflineImportStatus(message)
+      setKgError(message)
+    } finally {
+      setIsOfflineImportBusy(false)
+      if (offlineImportInputRef.current) {
+        offlineImportInputRef.current.value = ''
       }
     }
   }
@@ -2381,6 +2445,7 @@ ${context}
     setIsKgScanning(true)
     setIsStoppingKgScan(false)
     shouldStopScanningRef.current = false
+    setKgScanWorkerProgress([])
 
     let jobId: string | null = null
     let completedCount = 0
@@ -2389,6 +2454,7 @@ ${context}
 
     async function updateJobProgress(status: KgScanJob['status'], error?: string | null) {
       if (!jobId) return
+      if (status === 'running' && shouldStopScanningRef.current) return
       try {
         await fetch(`/api/kg/scan/jobs/${encodeURIComponent(jobId)}`, {
           body: JSON.stringify({
@@ -2432,16 +2498,35 @@ ${context}
     try {
       let nextIndex = 0
       const concurrency = Math.max(1, Math.min(10, Math.floor(kgScanConcurrency)))
+      const workerCount = Math.min(concurrency, chapters.length)
+      setKgScanWorkerProgress(
+        Array.from({ length: workerCount }, (_, index) => ({
+          workerId: index + 1,
+          status: 'idle',
+        })),
+      )
 
-      async function worker() {
+      function updateWorkerProgress(workerId: number, progress: Omit<KgScanWorkerProgress, 'workerId'>) {
+        setKgScanWorkerProgress((current) =>
+          current.map((item) => (item.workerId === workerId ? { workerId, ...progress } : item)),
+        )
+      }
+
+      async function worker(workerId: number) {
         while (nextIndex < chapters.length) {
           if (shouldStopScanningRef.current) {
             wasCancelled = true
+            updateWorkerProgress(workerId, { status: 'stopping' })
             break
           }
 
           const chapter = chapters[nextIndex]
           nextIndex += 1
+          updateWorkerProgress(workerId, {
+            chapterIndex: chapter.index,
+            title: chapter.title,
+            status: 'running',
+          })
           setKgScanProgress(
             `并发 ${concurrency}，正在扫描 ${completedCount + failedCount + 1}/${chapters.length}：第 ${chapter.index} 章 ${chapter.title}`,
           )
@@ -2450,11 +2535,26 @@ ${context}
             const { extraction, model } = await generateKnowledgeGraphExtraction(chapter)
             await saveChapterExtraction(chapter, extraction, model)
             completedCount += 1
+            updateWorkerProgress(workerId, {
+              chapterIndex: chapter.index,
+              title: chapter.title,
+              status: shouldStopScanningRef.current ? 'stopping' : 'completed',
+            })
           } catch {
             failedCount += 1
+            updateWorkerProgress(workerId, {
+              chapterIndex: chapter.index,
+              title: chapter.title,
+              status: shouldStopScanningRef.current ? 'stopping' : 'failed',
+            })
           }
 
-          setKgScanProgress(`并发 ${concurrency}，已完成 ${completedCount}/${chapters.length}，失败 ${failedCount} 章`)
+          if (shouldStopScanningRef.current) {
+            wasCancelled = true
+            setKgScanProgress(`正在停止扫描，已完成 ${completedCount}/${chapters.length}，失败 ${failedCount} 章`)
+          } else {
+            setKgScanProgress(`并发 ${concurrency}，已完成 ${completedCount}/${chapters.length}，失败 ${failedCount} 章`)
+          }
 
           if (!shouldStopScanningRef.current) {
             await updateJobProgress('running')
@@ -2463,13 +2563,13 @@ ${context}
       }
 
       await Promise.all(
-        Array.from({ length: Math.min(concurrency, chapters.length) }, () => worker()),
+        Array.from({ length: workerCount }, (_, index) => worker(index + 1)),
       )
 
       let finalStatus: KgScanJob['status']
       let finalError: string | null = null
 
-      if (wasCancelled) {
+      if (wasCancelled || shouldStopScanningRef.current) {
         finalStatus = 'cancelled'
         finalError = '已停止'
       } else if (failedCount > 0 && failedCount === chapters.length) {
@@ -2506,6 +2606,9 @@ ${context}
       setIsKgScanning(false)
       setIsStoppingKgScan(false)
       shouldStopScanningRef.current = false
+      if (!wasCancelled) {
+        setKgScanWorkerProgress([])
+      }
     }
   }
 
@@ -2618,11 +2721,28 @@ ${context}
     }
   }
 
-  function stopKnowledgeGraphScan() {
+  async function stopKnowledgeGraphScan() {
     if (!isKgScanning) return
     shouldStopScanningRef.current = true
     setIsStoppingKgScan(true)
     setKgScanProgress('正在停止扫描...')
+    setKgScanJob((prev) => (prev ? { ...prev, status: 'cancelled', error: '已停止' } : prev))
+
+    if (!kgScanJob?.id) return
+    try {
+      await fetch(`/api/kg/scan/jobs/${encodeURIComponent(kgScanJob.id)}`, {
+        body: JSON.stringify({
+          status: 'cancelled',
+          completedChapters: kgScanJob.completedChapters,
+          failedChapters: kgScanJob.failedChapters,
+          error: '已停止',
+        }),
+        headers: { 'Content-Type': 'application/json' },
+        method: 'PUT',
+      })
+    } catch {
+      // non-blocking; local workers will write the final cancelled state.
+    }
   }
 
   async function resumeKnowledgeGraphScan() {
@@ -3522,6 +3642,34 @@ ${context}
               onChange={(event) => {
                 const file = event.target.files?.[0]
                 if (file) void importDatabaseBackup(file)
+              }}
+            />
+          </div>
+
+          <div className="database-backup-card">
+            <div>
+              <h3>离线扫描数据</h3>
+              <p>导入离线扫描器为单本书生成的数据包，写入该书概要和知识图谱。</p>
+              {offlineImportStatus && <p className="database-backup-status">{offlineImportStatus}</p>}
+            </div>
+            <div className="book-actions">
+              <button
+                type="button"
+                className="ghost-button"
+                disabled={isOfflineImportBusy}
+                onClick={() => offlineImportInputRef.current?.click()}
+              >
+                导入扫描数据
+              </button>
+            </div>
+            <input
+              ref={offlineImportInputRef}
+              type="file"
+              accept=".json,application/json"
+              hidden
+              onChange={(event) => {
+                const file = event.target.files?.[0]
+                if (file) void importOfflineBookData(file)
               }}
             />
           </div>
@@ -5462,93 +5610,97 @@ ${context}
                 </p>
               </div>
 
-            <div className="kg-scan-options">
-              <label>
-                <input
-                  type="radio"
-                  checked={kgScanMode === 'current'}
-                  onChange={() => setKgScanMode('current')}
-                />
-                当前章节
-              </label>
-              <label>
-                <input
-                  type="radio"
-                  checked={kgScanMode === 'page'}
-                  onChange={() => setKgScanMode('page')}
-                />
-                当前章节页（{pagedChapters.length} 章）
-              </label>
-              <label>
-                <input
-                  type="radio"
-                  checked={kgScanMode === 'range'}
-                  onChange={() => setKgScanMode('range')}
-                />
-                指定范围
-              </label>
-              <label>
-                <input
-                  type="radio"
-                  checked={kgScanMode === 'all'}
-                  onChange={() => setKgScanMode('all')}
-                />
-                完全扫描全书（{state.book.chapters.length} 章）
-              </label>
-            </div>
+            <div className="kg-scan-layout">
+              <div className="kg-scan-mode-group" aria-label="扫描范围">
+                <button
+                  type="button"
+                  className={kgScanMode === 'current' ? 'active' : ''}
+                  onClick={() => setKgScanMode('current')}
+                >
+                  <strong>当前章节</strong>
+                  <span>1 章</span>
+                </button>
+                <button
+                  type="button"
+                  className={kgScanMode === 'page' ? 'active' : ''}
+                  onClick={() => setKgScanMode('page')}
+                >
+                  <strong>当前页</strong>
+                  <span>{pagedChapters.length} 章</span>
+                </button>
+                <button
+                  type="button"
+                  className={kgScanMode === 'range' ? 'active' : ''}
+                  onClick={() => setKgScanMode('range')}
+                >
+                  <strong>指定范围</strong>
+                  <span>
+                    {Math.min(kgScanStart, kgScanEnd)}-{Math.max(kgScanStart, kgScanEnd)}
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  className={kgScanMode === 'all' ? 'active' : ''}
+                  onClick={() => setKgScanMode('all')}
+                >
+                  <strong>全书</strong>
+                  <span>{state.book.chapters.length} 章</span>
+                </button>
+              </div>
 
-            {kgScanMode === 'range' && (
-              <div className="kg-range-fields">
-                <label htmlFor="kg-scan-start">
-                  起始章
+              <div className="kg-scan-settings">
+                {kgScanMode === 'range' && (
+                  <>
+                    <label htmlFor="kg-scan-start">
+                      起始章
+                      <input
+                        id="kg-scan-start"
+                        type="number"
+                        min="1"
+                        max={state.book.chapters.length}
+                        value={kgScanStart}
+                        onChange={(event) => setKgScanStart(Number(event.target.value))}
+                      />
+                    </label>
+                    <label htmlFor="kg-scan-end">
+                      结束章
+                      <input
+                        id="kg-scan-end"
+                        type="number"
+                        min="1"
+                        max={state.book.chapters.length}
+                        value={kgScanEnd}
+                        onChange={(event) => setKgScanEnd(Number(event.target.value))}
+                      />
+                    </label>
+                  </>
+                )}
+
+                <label htmlFor="kg-scan-concurrency">
+                  并发数
                   <input
-                    id="kg-scan-start"
+                    id="kg-scan-concurrency"
                     type="number"
                     min="1"
-                    max={state.book.chapters.length}
-                    value={kgScanStart}
-                    onChange={(event) => setKgScanStart(Number(event.target.value))}
+                    max="10"
+                    value={kgScanConcurrency}
+                    onChange={(event) =>
+                      setKgScanConcurrency(Math.max(1, Math.min(10, Number(event.target.value))))
+                    }
                   />
                 </label>
-                <label htmlFor="kg-scan-end">
-                  结束章
+
+                <label className="kg-inline-toggle" htmlFor="kg-scan-overwrite">
                   <input
-                    id="kg-scan-end"
-                    type="number"
-                    min="1"
-                    max={state.book.chapters.length}
-                    value={kgScanEnd}
-                    onChange={(event) => setKgScanEnd(Number(event.target.value))}
+                    id="kg-scan-overwrite"
+                    type="checkbox"
+                    checked={kgScanOverwriteCompleted}
+                    onChange={(event) => setKgScanOverwriteCompleted(event.target.checked)}
                   />
+                  覆盖已完成章节
                 </label>
               </div>
-            )}
-
-            <div className="kg-range-fields">
-              <label htmlFor="kg-scan-concurrency">
-                并发数
-                <input
-                  id="kg-scan-concurrency"
-                  type="number"
-                  min="1"
-                  max="10"
-                  value={kgScanConcurrency}
-                  onChange={(event) =>
-                    setKgScanConcurrency(Math.max(1, Math.min(10, Number(event.target.value))))
-                  }
-                />
-              </label>
             </div>
-
-            <label className="kg-inline-toggle" htmlFor="kg-scan-overwrite">
-              <input
-                id="kg-scan-overwrite"
-                type="checkbox"
-                checked={kgScanOverwriteCompleted}
-                onChange={(event) => setKgScanOverwriteCompleted(event.target.checked)}
-              />
-              覆盖已完成章节
-            </label>
 
             <div className="kg-scan-actions">
               {isKgScanning ? (
@@ -5575,14 +5727,6 @@ ${context}
                     {kgScanOverwriteCompleted
                       ? `预览覆盖重扫 ${getSelectedKgScanChapters().length} 章`
                       : `开始扫描 ${getPendingKgScanChapters().length} 章`}
-                  </button>
-                  <button
-                    type="button"
-                    className="ghost-button"
-                    disabled={getSelectedKgScanChapters().length === 0}
-                    onClick={() => void replaySelectedKnowledgeGraphChapters()}
-                  >
-                    重放已保存 JSON
                   </button>
                 </>
               )}
@@ -5618,21 +5762,69 @@ ${context}
                   ? '将覆盖已完成章节并重新调用模型。'
                   : `已完成将自动跳过 ${getSelectedKgScanChapters().length - getPendingKgScanChapters().length} 章。`}
               </p>
-              <p>“重放已保存 JSON”不会调用模型，只会用现有章节抽取结果重建图谱写入。</p>
-              {kgScanProgress && <p>{kgScanProgress}</p>}
             </div>
+
+            {(isKgScanning || kgScanWorkerProgress.length > 0 || kgScanProgress) && (
+              <div className="kg-scan-live-panel">
+                <div>
+                  <strong>当前并发进展</strong>
+                  {kgScanProgress && <span>{kgScanProgress}</span>}
+                </div>
+                {kgScanWorkerProgress.length > 0 ? (
+                  <div className="kg-scan-worker-grid">
+                    {kgScanWorkerProgress.map((worker) => (
+                      <div className={`kg-scan-worker-row ${worker.status}`} key={worker.workerId}>
+                        <span>#{worker.workerId}</span>
+                        <strong>
+                          {worker.chapterIndex ? `第 ${worker.chapterIndex} 章` : '等待任务'}
+                        </strong>
+                        <em>{worker.title ?? '队列中'}</em>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p>{kgScanProgress}</p>
+                )}
+              </div>
+            )}
 
             <div className="kg-advanced-actions">
               <button
                 type="button"
                 className="ghost-button"
-                onClick={() => setShowKgManualExtraction((current) => !current)}
+                onClick={() => setShowKgAdvancedScanActions((current) => !current)}
               >
-                {showKgManualExtraction ? '收起手动 JSON' : '手动 JSON'}
+                {showKgAdvancedScanActions ? '收起高级操作' : '高级操作'}
               </button>
             </div>
 
-            {showKgManualExtraction && (
+            {showKgAdvancedScanActions && (
+              <div className="kg-advanced-scan-panel">
+                <div>
+                  <h4>重建与调试</h4>
+                  <p>这些操作主要用于维护图谱数据，日常扫描不需要使用。</p>
+                </div>
+                <div className="kg-advanced-scan-actions">
+                  <button
+                    type="button"
+                    className="ghost-button"
+                    disabled={getSelectedKgScanChapters().length === 0}
+                    onClick={() => void replaySelectedKnowledgeGraphChapters()}
+                  >
+                    用已保存结果重建图谱
+                  </button>
+                  <button
+                    type="button"
+                    className="ghost-button"
+                    onClick={() => setShowKgManualExtraction((current) => !current)}
+                  >
+                    {showKgManualExtraction ? '收起手动 JSON' : '手动 JSON'}
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {showKgAdvancedScanActions && showKgManualExtraction && (
               <div className="kg-manual-extraction">
                 <h4>当前章节 JSON</h4>
                 <p>

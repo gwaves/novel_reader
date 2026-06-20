@@ -396,6 +396,21 @@ const getLatestKgScanJobStatement = db.prepare(`
   ORDER BY created_at DESC
   LIMIT 1
 `)
+const getKgScanJobByIdStatement = db.prepare(`
+  SELECT
+    id,
+    book_id AS bookId,
+    scope,
+    status,
+    total_chapters AS totalChapters,
+    completed_chapters AS completedChapters,
+    failed_chapters AS failedChapters,
+    error,
+    created_at AS createdAt,
+    updated_at AS updatedAt
+  FROM kg_scan_jobs
+  WHERE id = ?
+`)
 const deleteKgScanJobsForBookStatement = db.prepare(`
   DELETE FROM kg_scan_jobs WHERE book_id = ?
 `)
@@ -3404,6 +3419,209 @@ function saveStateTransaction(state) {
   }
 }
 
+function asArray(value) {
+  return Array.isArray(value) ? value : []
+}
+
+function importOfflineBookDataPackage(dataPackage) {
+  if (!dataPackage || typeof dataPackage !== 'object') {
+    throw new Error('离线数据包格式不正确。')
+  }
+  if (dataPackage.kind !== 'novel-reader-offline-book-data' || dataPackage.version !== 1) {
+    throw new Error('不支持的离线数据包格式或版本。')
+  }
+
+  const bookId = typeof dataPackage.book?.id === 'string' ? dataPackage.book.id : ''
+  if (!bookId) {
+    throw new Error('离线数据包缺少书籍 ID。')
+  }
+
+  const book = getBookStatement.get(bookId)
+  if (!book) {
+    throw new Error('当前书架中找不到这本书，请先导入同一本书。')
+  }
+
+  const localChapters = db.prepare(`
+    SELECT id, chapter_index AS chapterIndex
+    FROM chapters
+    WHERE book_id = ?
+  `).all(bookId)
+  const localChapterIds = new Set(localChapters.map((chapter) => chapter.id))
+  const packageChapters = asArray(dataPackage.chapters)
+
+  if (!packageChapters.length) {
+    throw new Error('离线数据包没有章节信息。')
+  }
+
+  for (const chapter of packageChapters) {
+    if (chapter?.book_id !== bookId || !localChapterIds.has(chapter.id)) {
+      throw new Error('离线数据包的章节和当前书籍不匹配。')
+    }
+  }
+
+  const ensureChapterId = (chapterId) => {
+    if (!localChapterIds.has(chapterId)) {
+      throw new Error('离线数据包包含当前书籍之外的章节。')
+    }
+  }
+
+  const summaries = asArray(dataPackage.summaries)
+  const extractions = asArray(dataPackage.kgChapterExtractions)
+  const entities = asArray(dataPackage.kgEntities)
+  const entityMentions = asArray(dataPackage.kgEntityMentions)
+  const relations = asArray(dataPackage.kgRelations)
+  const relationMentions = asArray(dataPackage.kgRelationMentions)
+
+  const insertExtraction = db.prepare(`
+    INSERT INTO kg_chapter_extractions (chapter_id, book_id, status, extraction_json, error, model, scanned_at, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+    ON CONFLICT(chapter_id) DO UPDATE SET
+      book_id = excluded.book_id,
+      status = excluded.status,
+      extraction_json = excluded.extraction_json,
+      error = excluded.error,
+      model = excluded.model,
+      scanned_at = excluded.scanned_at,
+      updated_at = CURRENT_TIMESTAMP
+  `)
+  const insertEntity = db.prepare(`
+    INSERT INTO kg_entities (
+      id, book_id, type, name, normalized_name, aliases_json, description,
+      confidence, first_chapter_index, last_chapter_index, created_at, updated_at
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `)
+  const insertEntityMention = db.prepare(`
+    INSERT INTO kg_entity_mentions (id, entity_id, book_id, chapter_id, chapter_index, evidence, confidence, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `)
+  const insertRelation = db.prepare(`
+    INSERT INTO kg_relations (
+      id, book_id, source_entity_id, target_entity_id, type, description,
+      confidence, first_chapter_index, last_chapter_index, created_at, updated_at
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `)
+  const insertRelationMention = db.prepare(`
+    INSERT INTO kg_relation_mentions (id, relation_id, book_id, chapter_id, chapter_index, evidence, confidence, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+  `)
+
+  db.exec('BEGIN')
+
+  try {
+    for (const summary of summaries) {
+      ensureChapterId(summary.chapter_id)
+      upsertSummaryStatement.run(
+        summary.chapter_id,
+        String(summary.short ?? ''),
+        String(summary.detail ?? ''),
+        typeof summary.key_points_json === 'string' ? summary.key_points_json : JSON.stringify(summary.key_points_json ?? []),
+        String(summary.skippable ?? 'false'),
+        String(summary.generated_by ?? 'offline-scanner'),
+      )
+    }
+
+    for (const extraction of extractions) {
+      ensureChapterId(extraction.chapter_id)
+      if (extraction.book_id !== bookId) throw new Error('离线数据包包含其他书籍的图谱扫描结果。')
+      insertExtraction.run(
+        extraction.chapter_id,
+        extraction.book_id,
+        String(extraction.status ?? 'completed'),
+        extraction.extraction_json ?? null,
+        extraction.error ?? null,
+        extraction.model ?? null,
+        extraction.scanned_at ?? null,
+      )
+    }
+
+    db.prepare(`DELETE FROM kg_entity_mentions WHERE book_id = ?`).run(bookId)
+    db.prepare(`DELETE FROM kg_relation_mentions WHERE book_id = ?`).run(bookId)
+    db.prepare(`DELETE FROM kg_relations WHERE book_id = ?`).run(bookId)
+    db.prepare(`DELETE FROM kg_entities WHERE book_id = ?`).run(bookId)
+
+    for (const entity of entities) {
+      if (entity.book_id !== bookId) throw new Error('离线数据包包含其他书籍的实体。')
+      insertEntity.run(
+        entity.id,
+        entity.book_id,
+        entity.type,
+        entity.name,
+        entity.normalized_name,
+        entity.aliases_json ?? '[]',
+        entity.description ?? null,
+        Number(entity.confidence ?? 0),
+        entity.first_chapter_index ?? null,
+        entity.last_chapter_index ?? null,
+        entity.created_at ?? new Date().toISOString(),
+        entity.updated_at ?? new Date().toISOString(),
+      )
+    }
+
+    for (const mention of entityMentions) {
+      if (mention.book_id !== bookId) throw new Error('离线数据包包含其他书籍的实体证据。')
+      ensureChapterId(mention.chapter_id)
+      insertEntityMention.run(
+        mention.id,
+        mention.entity_id,
+        mention.book_id,
+        mention.chapter_id,
+        Number(mention.chapter_index ?? 0),
+        mention.evidence ?? null,
+        Number(mention.confidence ?? 0),
+        mention.created_at ?? new Date().toISOString(),
+      )
+    }
+
+    for (const relation of relations) {
+      if (relation.book_id !== bookId) throw new Error('离线数据包包含其他书籍的关系。')
+      insertRelation.run(
+        relation.id,
+        relation.book_id,
+        relation.source_entity_id,
+        relation.target_entity_id,
+        relation.type,
+        relation.description ?? null,
+        Number(relation.confidence ?? 0),
+        relation.first_chapter_index ?? null,
+        relation.last_chapter_index ?? null,
+        relation.created_at ?? new Date().toISOString(),
+        relation.updated_at ?? new Date().toISOString(),
+      )
+    }
+
+    for (const mention of relationMentions) {
+      if (mention.book_id !== bookId) throw new Error('离线数据包包含其他书籍的关系证据。')
+      ensureChapterId(mention.chapter_id)
+      insertRelationMention.run(
+        mention.id,
+        mention.relation_id,
+        mention.book_id,
+        mention.chapter_id,
+        Number(mention.chapter_index ?? 0),
+        mention.evidence ?? null,
+        Number(mention.confidence ?? 0),
+        mention.created_at ?? new Date().toISOString(),
+      )
+    }
+
+    db.exec('COMMIT')
+  } catch (error) {
+    db.exec('ROLLBACK')
+    throw error
+  }
+
+  return {
+    bookId,
+    title: book.title,
+    summaryCount: summaries.length,
+    extractionCount: extractions.length,
+    entityCount: entities.length,
+    relationCount: relations.length,
+  }
+}
+
 const server = createServer(async (request, response) => {
   if (request.method === 'OPTIONS') {
     sendJson(response, 204, {})
@@ -3542,6 +3760,19 @@ const server = createServer(async (request, response) => {
         if (existsSync(uploadPath)) unlinkSync(uploadPath)
         sendJson(response, 400, {
           error: error instanceof Error ? error.message : 'Import failed.',
+        })
+      }
+      return
+    }
+
+    if (request.method === 'POST' && url.pathname === '/api/offline/import') {
+      try {
+        const body = await readJson(request)
+        const result = importOfflineBookDataPackage(body)
+        sendJson(response, 200, { ok: true, ...result })
+      } catch (error) {
+        sendJson(response, 400, {
+          error: error instanceof Error ? error.message : '导入离线扫描数据失败。',
         })
       }
       return
@@ -3811,6 +4042,16 @@ const server = createServer(async (request, response) => {
 
       if (!status || typeof status !== 'string') {
         sendJson(response, 400, { error: 'Missing status.' })
+        return
+      }
+
+      const currentJob = getKgScanJobByIdStatement.get(jobId)
+      if (!currentJob) {
+        sendJson(response, 404, { error: 'Scan job not found.' })
+        return
+      }
+      if (status === 'running' && currentJob.status !== 'running') {
+        sendJson(response, 200, { ok: true, ignored: true })
         return
       }
 
