@@ -598,8 +598,8 @@ function App() {
     chapterSearch,
     setChapterSearch,
     isHydrated,
-    isGenerating,
-    batchProgress,
+    generatingBookId,
+    generatingBookProgress,
     isConfigOpen,
     modelConfigDraft,
     setModelConfigDraft,
@@ -618,7 +618,6 @@ function App() {
     searchedChapters,
     visibleChapters,
     processedCount,
-    pageSummaryCount,
     currentProgressLabel,
     activeProviderLabel,
     activeOpenAIConfig,
@@ -632,9 +631,7 @@ function App() {
     selectBook,
     deleteBook,
     updateActiveChapter,
-    handleGenerateSummary,
-    handleBatchGenerateCurrentPage,
-    handleBatchGenerateAllMissingSummaries,
+    generateMissingSummariesForBook,
     navigateToPreviousChapter,
     navigateToNextChapter,
     openModelConfig,
@@ -3528,6 +3525,28 @@ ${context}
                 <button type="button" onClick={() => setView('reader')}>
                   继续阅读
                 </button>
+                <button
+                  type="button"
+                  className="ghost-button"
+                  disabled={
+                    !activeModelName ||
+                    (generatingBookId !== null && generatingBookId !== state.book!.id)
+                  }
+                  title={
+                    !activeModelName
+                      ? '未配置模型，请先点击右上角设置'
+                      : generatingBookId === state.book!.id
+                        ? generatingBookProgress
+                        : `${state.book!.chapters.length - processedCount} 章缺少概要`
+                  }
+                  onClick={() => void generateMissingSummariesForBook(state.book!.id)}
+                >
+                  {generatingBookId === state.book!.id
+                    ? `生成中… ${generatingBookProgress}`
+                    : processedCount === state.book!.chapters.length
+                      ? '概要已生成'
+                      : `生成概要 (${state.book!.chapters.length - processedCount})`}
+                </button>
                 <button type="button" className="ghost-button" onClick={() => deleteBook(state.book!.id)}>
                   删除当前书
                 </button>
@@ -3608,6 +3627,28 @@ ${context}
                       <div className="book-row-actions">
                         <button type="button" onClick={() => selectBook(libraryBook.book.id)}>
                           {isActive ? '继续阅读' : '打开'}
+                        </button>
+                        <button
+                          type="button"
+                          className="ghost-button"
+                          disabled={
+                            !activeModelName ||
+                            (generatingBookId !== null && generatingBookId !== libraryBook.book.id)
+                          }
+                          title={
+                            !activeModelName
+                              ? '未配置模型，请先点击右上角设置'
+                              : generatingBookId === libraryBook.book.id
+                                ? generatingBookProgress
+                                : `${libraryBook.book.chapters.length - Object.keys(libraryBook.summaries).length} 章缺少概要`
+                          }
+                          onClick={() => void generateMissingSummariesForBook(libraryBook.book.id)}
+                        >
+                          {generatingBookId === libraryBook.book.id
+                            ? `生成中… ${generatingBookProgress}`
+                            : Object.keys(libraryBook.summaries).length === libraryBook.book.chapters.length
+                              ? '概要已生成'
+                              : `生成概要 (${libraryBook.book.chapters.length - Object.keys(libraryBook.summaries).length})`}
                         </button>
                         <button
                           type="button"
@@ -6317,47 +6358,6 @@ ${context}
           <aside className="ai-panel" aria-label="AI 辅助栏">
             <p className="eyebrow">AI 辅助栏</p>
             <h2>本章概要</h2>
-            <div className="summary-actions">
-              <button
-                type="button"
-                onClick={() => void handleGenerateSummary(true)}
-                disabled={isGenerating}
-              >
-                {isGenerating
-                  ? '生成中...'
-                  : state.aiProvider === 'openai'
-                    ? '用外部模型生成'
-                    : '用 Ollama 生成'}
-              </button>
-              <button
-                type="button"
-                className="ghost-button"
-                onClick={() => void handleGenerateSummary(false)}
-                disabled={isGenerating}
-              >
-                本地粗略概要
-              </button>
-              <button
-                type="button"
-                className="ghost-button"
-                onClick={() => void handleBatchGenerateCurrentPage()}
-                disabled={isGenerating}
-              >
-                批量生成本页缺失概要
-              </button>
-              <button
-                type="button"
-                className="ghost-button"
-                onClick={() => void handleBatchGenerateAllMissingSummaries()}
-                disabled={isGenerating}
-              >
-                批量生成全书缺失概要
-              </button>
-            </div>
-            <p className="batch-status">
-              全书已生成 {processedCount}/{state.book.chapters.length} 章 · 本页 {pageSummaryCount}/{pagedChapters.length} 章
-              {batchProgress ? ` · ${batchProgress}` : ''}
-            </p>
 
             {error && <p className="error">{error}</p>}
 
@@ -6386,7 +6386,7 @@ ${context}
               </div>
             ) : (
               <div className="empty-summary">
-                <p>这一章还没有概要。你可以先用本地粗略概要测试流程，再用 Ollama 生成更像样的版本。</p>
+                <p>这一章还没有概要。请在首页点击书籍的「生成概要」按钮批量生成。</p>
               </div>
             )}
           </aside>

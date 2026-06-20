@@ -53,8 +53,8 @@ function MobileApp() {
     chapterSearch,
     setChapterSearch,
     isHydrated,
-    isGenerating,
-    batchProgress,
+    generatingBookId,
+    generatingBookProgress,
     isConfigOpen,
     modelConfigDraft,
     setModelConfigDraft,
@@ -68,12 +68,10 @@ function MobileApp() {
     previousChapter,
     nextChapter,
     chapterPageCount,
-    pagedChapters,
     normalizedChapterSearch,
     searchedChapters,
     visibleChapters,
     processedCount,
-    pageSummaryCount,
     activeModelName,
     activeTemperature,
     draftActiveOpenAIConfig,
@@ -82,9 +80,7 @@ function MobileApp() {
     selectBook,
     deleteBook,
     updateActiveChapter,
-    handleGenerateSummary,
-    handleBatchGenerateCurrentPage,
-    handleBatchGenerateAllMissingSummaries,
+    generateMissingSummariesForBook,
     navigateToPreviousChapter,
     navigateToNextChapter,
     openModelConfig,
@@ -560,6 +556,21 @@ ${context}
                   >
                     继续阅读
                   </button>
+                  <button
+                    type="button"
+                    className="mobile-ghost-button"
+                    disabled={
+                      !activeModelName ||
+                      (generatingBookId !== null && generatingBookId !== state.book!.id)
+                    }
+                    onClick={() => void generateMissingSummariesForBook(state.book!.id)}
+                  >
+                    {generatingBookId === state.book!.id
+                      ? `生成中… ${generatingBookProgress}`
+                      : processedCount === state.book!.chapters.length
+                        ? '概要已生成'
+                        : `生成概要 (${state.book!.chapters.length - processedCount})`}
+                  </button>
                   <button type="button" className="mobile-ghost-button" onClick={() => state.book && deleteBook(state.book.id)}>
                     删除当前书
                   </button>
@@ -590,6 +601,21 @@ ${context}
                         <div className="mobile-book-row-actions">
                           <button type="button" className="mobile-primary-button" onClick={() => selectBook(libraryBook.book.id)}>
                             {isActive ? '继续' : '打开'}
+                          </button>
+                          <button
+                            type="button"
+                            className="mobile-ghost-button"
+                            disabled={
+                              !activeModelName ||
+                              (generatingBookId !== null && generatingBookId !== libraryBook.book.id)
+                            }
+                            onClick={() => void generateMissingSummariesForBook(libraryBook.book.id)}
+                          >
+                            {generatingBookId === libraryBook.book.id
+                              ? `生成中… ${generatingBookProgress}`
+                              : Object.keys(libraryBook.summaries).length === libraryBook.book.chapters.length
+                                ? '概要已生成'
+                                : `生成概要 (${libraryBook.book.chapters.length - Object.keys(libraryBook.summaries).length})`}
                           </button>
                           <button type="button" className="mobile-ghost-button" onClick={() => deleteBook(libraryBook.book.id)}>
                             删除
@@ -879,46 +905,6 @@ ${context}
 
             {activeChapter ? (
               <>
-                <div className="mobile-actions">
-                  <button
-                    type="button"
-                    className="mobile-primary-button"
-                    onClick={() => void handleGenerateSummary(true)}
-                    disabled={isGenerating}
-                  >
-                    {isGenerating ? '生成中...' : state.aiProvider === 'openai' ? '用外部模型生成' : '用 Ollama 生成'}
-                  </button>
-                  <button
-                    type="button"
-                    className="mobile-ghost-button"
-                    onClick={() => void handleGenerateSummary(false)}
-                    disabled={isGenerating}
-                  >
-                    本地粗略概要
-                  </button>
-                  <button
-                    type="button"
-                    className="mobile-ghost-button"
-                    onClick={() => void handleBatchGenerateCurrentPage()}
-                    disabled={isGenerating}
-                  >
-                    批量生成本页缺失概要
-                  </button>
-                  <button
-                    type="button"
-                    className="mobile-ghost-button"
-                    onClick={() => void handleBatchGenerateAllMissingSummaries()}
-                    disabled={isGenerating}
-                  >
-                    批量生成全书缺失概要
-                  </button>
-                </div>
-
-                <p className="mobile-batch-status">
-                  全书已生成 {processedCount}/{state.book?.chapters.length ?? 0} 章 · 本页 {pageSummaryCount}/{pagedChapters.length} 章
-                  {batchProgress ? ` · ${batchProgress}` : ''}
-                </p>
-
                 {error && <p className="mobile-error">{error}</p>}
 
                 {activeSummary ? (
@@ -946,7 +932,7 @@ ${context}
                   </div>
                 ) : (
                   <div className="mobile-empty">
-                    <p>这一章还没有概要。点击下方按钮生成。</p>
+                    <p>这一章还没有概要。请在首页点击书籍的「生成概要」按钮批量生成。</p>
                   </div>
                 )}
               </>

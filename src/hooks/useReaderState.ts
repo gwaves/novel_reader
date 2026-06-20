@@ -429,7 +429,7 @@ export function getActiveOpenAIConfig(
 }
 
 const CHAPTER_PATTERN =
-  /^\s*(?:第\s*[0-9零一二三四五六七八九十百千万亿]+\s*[章卷节回][^\n]*|Chapter\s*\d+[^\n]*|\d+[.、]\s*[^\n]+)\s*$/gim
+  /^\s*(?:第\s*[0-9零一二三四五六七八九十百千万亿]+\s*[集卷部]\s+第\s*[0-9零一二三四五六七八九十百千万亿]+\s*[章卷节回][^\n]*|第\s*[0-9零一二三四五六七八九十百千万亿]+\s*[章卷节回][^\n]*|Chapter\s*\d+[^\n]*|\d+[.、]\s*[^\n]+)\s*$/gim
 
 export function splitChapters(rawText: string): Chapter[] {
   const matches = Array.from(rawText.matchAll(CHAPTER_PATTERN))
@@ -462,7 +462,7 @@ function chunkFallback(text: string): Chapter[] {
   let currentTitle = '正文开始'
   let currentLines: string[] = []
 
-  const fallbackPattern = /^(第\s*[0-9零一二三四五六七八九十百千万亿]+\s*[章卷节回]|Chapter\s*\d+|\d+[.、])/
+  const fallbackPattern = /^(第\s*[0-9零一二三四五六七八九十百千万亿]+\s*[集卷部]\s+第\s*[0-9零一二三四五六七八九十百千万亿]+\s*[章卷节回]|第\s*[0-9零一二三四五六七八九十百千万亿]+\s*[章卷节回]|Chapter\s*\d+|\d+[.、])/
 
   for (let index = 0; index < lines.length; index += 1) {
     const line = lines[index].trim()
@@ -510,6 +510,420 @@ export function countWords(text: string) {
 
 export function countBookWords(book: Pick<Book, 'chapters'>) {
   return book.chapters.reduce((total, chapter) => total + chapter.wordCount, 0)
+}
+
+function cleanFormattingTags(text: string): string {
+  return text.replace(/\[\/?(?:color|b|i|u|size)(?:=[^\]]*)?\]/gi, '')
+}
+
+function isBadSplit(chapters: Chapter[], rawText: string): boolean {
+  if (chapters.length < 2) return true
+
+  const totalChars = rawText.replace(/\s/g, '').length
+  const avgLength = totalChars / chapters.length
+
+  return avgLength > 30000 || (totalChars > 100000 && chapters.length < 3)
+}
+
+function parseJsonObject(text: string): unknown {
+  try {
+    return JSON.parse(text)
+  } catch {
+    const start = text.indexOf('{')
+    if (start === -1) throw new Error('模型没有返回 JSON 对象。')
+
+    let depth = 0
+    let inString = false
+    let escape = false
+    for (let i = start; i < text.length; i += 1) {
+      const char = text[i]
+      if (escape) {
+        escape = false
+        continue
+      }
+      if (char === '\\') {
+        escape = true
+        continue
+      }
+      if (char === '"' && !inString) {
+        inString = true
+        continue
+      }
+      if (char === '"' && inString) {
+        inString = false
+        continue
+      }
+      if (inString) continue
+      if (char === '{') depth += 1
+      if (char === '}') depth -= 1
+      if (depth === 0) return JSON.parse(text.slice(start, i + 1))
+    }
+
+    throw new Error('模型没有返回 JSON 对象。')
+  }
+}
+
+function convertChineseNumber(input: string): number | null {
+  const normalized = input.trim()
+  if (!normalized) return null
+
+  const asInt = Number(normalized)
+  if (Number.isFinite(asInt)) return asInt
+
+  const s = normalized
+    .replace(/廿/g, '二十')
+    .replace(/卅/g, '三十')
+    .replace(/〇/g, '零')
+
+  const digitMap: Record<string, number> = {
+    零: 0,
+    一: 1,
+    二: 2,
+    三: 3,
+    四: 4,
+    五: 5,
+    六: 6,
+    七: 7,
+    八: 8,
+    九: 9,
+  }
+  const unitMap: Record<string, number> = {
+    十: 10,
+    百: 100,
+    千: 1000,
+    万: 10000,
+    亿: 100000000,
+  }
+
+  let total = 0
+  let temp = 0
+
+  for (const char of s) {
+    if (char in digitMap) {
+      temp = temp * 10 + digitMap[char]
+    } else if (char in unitMap) {
+      const unit = unitMap[char]
+      total += (temp === 0 ? 1 : temp) * unit
+      temp = 0
+    }
+  }
+
+  total += temp
+  return total === 0 && s !== '零' ? null : total
+}
+
+type HeadingInfo = {
+  index: number
+  raw: string
+  vol: number
+  ch: number
+  title: string
+}
+
+type LocalPattern = {
+  name: string
+  regex: RegExp
+  extract: (match: RegExpMatchArray) => { vol: number; ch: number; title: string } | null
+}
+
+const CN_NUM = '[一二三四五六七八九十百千万亿〇零廿卅\\d]+'
+
+const LOCAL_CHAPTER_PATTERNS: LocalPattern[] = [
+  {
+    name: 'bracket-volume-colon-chapter',
+    regex: new RegExp(`^【第(${CN_NUM})卷[：:](.+?)】第(${CN_NUM})折[：:\\s　]+(.+)$`, 'im'),
+    extract: (m) => {
+      const vol = convertChineseNumber(m[1])
+      const ch = convertChineseNumber(m[3])
+      if (vol == null || ch == null) return null
+      return { vol, ch, title: m[4].trim() }
+    },
+  },
+  {
+    name: 'plain-volume-bracket-chapter',
+    regex: new RegExp(`^卷(${CN_NUM})\\s+(.+?)\\s+【第(${CN_NUM})折[\\s　]+(.+?)】$`, 'im'),
+    extract: (m) => {
+      const vol = convertChineseNumber(m[1])
+      const ch = convertChineseNumber(m[3])
+      if (vol == null || ch == null) return null
+      return { vol, ch, title: m[4].trim() }
+    },
+  },
+  {
+    name: 'plain-volume-space-chapter',
+    regex: new RegExp(`^卷(${CN_NUM})\\s+(.+?)\\s+第(${CN_NUM})折[\\s　]+(.+)$`, 'im'),
+    extract: (m) => {
+      const vol = convertChineseNumber(m[1])
+      const ch = convertChineseNumber(m[3])
+      if (vol == null || ch == null) return null
+      return { vol, ch, title: m[4].trim() }
+    },
+  },
+  {
+    name: 'plain-volume-tight-chapter',
+    regex: new RegExp(`^卷(${CN_NUM})\\s*(.+?)第(${CN_NUM})折[\\s　]*(.+)$`, 'im'),
+    extract: (m) => {
+      const vol = convertChineseNumber(m[1])
+      const ch = convertChineseNumber(m[3])
+      if (vol == null || ch == null) return null
+      return { vol, ch, title: m[4].trim() }
+    },
+  },
+  {
+    name: 'plain-chapter-only',
+    regex: new RegExp(`^第(${CN_NUM})折[：:\\s　]+(.+)$`, 'im'),
+    extract: (m) => {
+      const ch = convertChineseNumber(m[1])
+      if (ch == null) return null
+      return { vol: 1, ch, title: m[2].trim() }
+    },
+  },
+]
+
+const DEFAULT_NON_CHAPTER_MARKERS = [
+  '完',
+  '后记',
+  '待续',
+  '感恩',
+  '展望',
+  '序章',
+  '楔子',
+  '尾声',
+  '番外',
+  '前言',
+  '引言',
+  '目录',
+]
+
+function isNonChapterMarker(line: string, extraMarkers: string[]): boolean {
+  const allMarkers = [...DEFAULT_NON_CHAPTER_MARKERS, ...extraMarkers]
+  return allMarkers.some((marker) => line.includes(marker))
+}
+
+function extractChapterHeadings(rawText: string, extraMarkers: string[] = []): HeadingInfo[] {
+  const lines = rawText.split(/\r?\n/)
+  const headings: HeadingInfo[] = []
+
+  let globalIndex = 0
+  for (const line of lines) {
+    const trimmed = line.trim()
+    if (!trimmed) {
+      globalIndex += line.length + 1
+      continue
+    }
+
+    if (isNonChapterMarker(trimmed, extraMarkers)) {
+      globalIndex += line.length + 1
+      continue
+    }
+
+    for (const pattern of LOCAL_CHAPTER_PATTERNS) {
+      const match = trimmed.match(pattern.regex)
+      if (!match) continue
+
+      const info = pattern.extract(match)
+      if (!info) continue
+
+      headings.push({
+        index: globalIndex,
+        raw: trimmed,
+        vol: info.vol,
+        ch: info.ch,
+        title: info.title,
+      })
+      break
+    }
+
+    globalIndex += line.length + 1
+  }
+
+  return headings
+}
+
+function standardizeHeading(vol: number, ch: number, title: string): string {
+  return `第${vol}卷第${ch}章：${title}`
+}
+
+function splitWithHeadings(rawText: string, headings: HeadingInfo[]): Chapter[] {
+  if (headings.length < 2) return []
+
+  return headings.map((heading, idx) => {
+    const start = heading.index
+    const end = idx < headings.length - 1 ? headings[idx + 1].index : rawText.length
+    const block = rawText.slice(start, end).trim()
+    const lines = block.split(/\r?\n/)
+    const title = standardizeHeading(heading.vol, heading.ch, heading.title)
+    const content = lines.slice(1).join('\n').trim()
+
+    return {
+      id: `${idx + 1}-${title.slice(0, 32)}`,
+      index: idx + 1,
+      title,
+      content,
+      wordCount: countWords(content),
+    }
+  })
+}
+
+function buildFormatAnalysisPrompt(sample: string): string {
+  return `你是一名文本处理助手。请分析下面这部中文小说的三个片段，它们分别来自小说的开头、中间和结尾。找出其中章节标题的规律。
+
+说明：
+- 文本中可能包含 [color=...]、[b]、[/b]、[/color] 等格式标签，这些标签会在后续处理中被移除。请忽略这些标签。
+- 不同位置的章节标题格式可能不同。
+
+要求：
+1. 只返回一个 JSON 对象，不要输出任何其他解释。
+2. JSON 格式必须是：
+   {"formats": [{"description": "格式描述", "examples": ["示例1", "示例2"]}], "nonChapterMarkers": ["完", "后记"]}
+3. description 用自然语言描述一种章节标题格式。
+4. examples 列出该格式的真实示例（从片段中截取）。
+5. nonChapterMarkers 列出看起来像章节标题但不是正文章节的标记（如"第一卷完"、"后记"、"待续"等）。
+
+文本片段：
+${sample}`
+}
+
+type FormatAnalysis = {
+  formats: Array<{
+    description: string
+    examples: string[]
+  }>
+  nonChapterMarkers: string[]
+}
+
+function parseFormatAnalysis(raw: string): FormatAnalysis | null {
+  const jsonText = raw
+    .trim()
+    .replace(/^```json\s*/i, '')
+    .replace(/^```\s*/i, '')
+    .replace(/```$/i, '')
+    .trim()
+
+  try {
+    const parsed = parseJsonObject(jsonText) as Record<string, unknown>
+    const formats = Array.isArray(parsed.formats)
+      ? parsed.formats
+          .map((item) => {
+            const format = item as Record<string, unknown>
+            const description = typeof format.description === 'string' ? format.description : ''
+            const examples = Array.isArray(format.examples)
+              ? format.examples.filter((e): e is string => typeof e === 'string')
+              : []
+            return description ? { description, examples } : null
+          })
+          .filter((item): item is FormatAnalysis['formats'][number] => Boolean(item))
+      : []
+    const nonChapterMarkers = Array.isArray(parsed.nonChapterMarkers)
+      ? parsed.nonChapterMarkers.filter((m): m is string => typeof m === 'string')
+      : []
+
+    return { formats, nonChapterMarkers }
+  } catch {
+    return null
+  }
+}
+
+async function analyzeChapterFormats(
+  rawText: string,
+  modelConfig: ModelConfigDraft,
+): Promise<FormatAnalysis | null> {
+  const chunkSize = 7000
+  const start = rawText.slice(0, chunkSize)
+  const middleStart = Math.max(0, Math.floor(rawText.length / 2) - chunkSize / 2)
+  const middle = rawText.slice(middleStart, middleStart + chunkSize)
+  const end = rawText.slice(Math.max(0, rawText.length - chunkSize))
+  const sample = `【开头片段】\n${start}\n\n【中间片段】\n${middle}\n\n【结尾片段】\n${end}`
+  const prompt = buildFormatAnalysisPrompt(sample)
+
+  try {
+    let responseText: string
+
+    if (modelConfig.aiProvider === 'ollama') {
+      const model = modelConfig.ollamaModel.trim()
+      if (!model) return null
+
+      const response = await fetch(`${OLLAMA_BASE_URL}/api/generate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model,
+          prompt,
+          stream: false,
+          format: 'json',
+          options: { temperature: 0.2 },
+        }),
+      })
+
+      if (!response.ok) return null
+
+      const data = (await response.json()) as { response?: string }
+      responseText = data.response ?? '{}'
+    } else {
+      const activeConfig = getActiveOpenAIConfig(modelConfig)
+      if (!activeConfig) return null
+
+      const normalizedBaseUrl = activeConfig.baseUrl.trim().replace(/\/+$/, '')
+      const model = activeConfig.model.trim()
+      if (!normalizedBaseUrl || !model) return null
+
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+      }
+      if (activeConfig.apiKey.trim()) {
+        headers.Authorization = `Bearer ${activeConfig.apiKey.trim()}`
+      }
+
+      const requestBody: Record<string, unknown> = {
+        model,
+        messages: [
+          {
+            role: 'system',
+            content: '你是文本处理助手。你必须只输出符合要求的 JSON。',
+          },
+          { role: 'user', content: prompt },
+        ],
+        temperature: 0.2,
+        response_format: { type: 'json_object' },
+      }
+
+      if (!modelConfig.thinkingEnabled) {
+        requestBody.chat_template_kwargs = { enable_thinking: false }
+      }
+
+      const response = await fetch(`${normalizedBaseUrl}/chat/completions`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(requestBody),
+      })
+
+      if (!response.ok) return null
+
+      const data = (await response.json()) as {
+        choices?: Array<{ message?: { content?: string } }>
+      }
+      responseText = data.choices?.[0]?.message?.content ?? '{}'
+    }
+
+    return parseFormatAnalysis(responseText)
+  } catch {
+    return null
+  }
+}
+
+function tryExtractChaptersHybrid(
+  rawText: string,
+  analysis: FormatAnalysis | null,
+): Chapter[] | null {
+  const extraMarkers = analysis?.nonChapterMarkers ?? []
+  const headings = extractChapterHeadings(rawText, extraMarkers)
+
+  if (headings.length < 2) return null
+
+  const nonEmptyLines = rawText.split(/\r?\n/).filter((line) => line.trim()).length
+  if (nonEmptyLines > 0 && headings.length > nonEmptyLines * 0.05) return null
+
+  return splitWithHeadings(rawText, headings)
 }
 
 export function formatWordCount(count: number) {
@@ -589,6 +1003,19 @@ function decodeTextFile(file: File): Promise<string> {
 
     reader.onload = () => {
       const buffer = reader.result as ArrayBuffer
+      const bytes = new Uint8Array(buffer)
+
+      // UTF-16 BOM
+      if (bytes.length >= 2) {
+        if (bytes[0] === 0xff && bytes[1] === 0xfe) {
+          resolve(new TextDecoder('utf-16le').decode(buffer))
+          return
+        }
+        if (bytes[0] === 0xfe && bytes[1] === 0xff) {
+          resolve(new TextDecoder('utf-16be').decode(buffer))
+          return
+        }
+      }
 
       // Try UTF-8 first; only fall back to GB18030 if the bytes are not valid UTF-8.
       try {
@@ -799,34 +1226,29 @@ async function parseEpubFile(file: File): Promise<ImportedBookContent> {
   return { title: metadataTitle, chapters }
 }
 
-async function parseImportedBook(file: File): Promise<ImportedBookContent> {
+async function parseImportedBook(
+  file: File,
+  modelConfig?: ModelConfigDraft,
+): Promise<ImportedBookContent> {
   if (/\.epub$/i.test(file.name) || file.type === 'application/epub+zip') {
     return parseEpubFile(file)
   }
 
   const text = await decodeTextFile(file)
+  const cleanedText = cleanFormattingTags(text)
+  let chapters = splitChapters(cleanedText)
+
+  if (isBadSplit(chapters, cleanedText) && modelConfig) {
+    const analysis = await analyzeChapterFormats(cleanedText, modelConfig)
+    const hybridChapters = tryExtractChaptersHybrid(cleanedText, analysis)
+    if (hybridChapters && hybridChapters.length > chapters.length && !isBadSplit(hybridChapters, cleanedText)) {
+      chapters = hybridChapters
+    }
+  }
+
   return {
     title: inferTitle(file.name),
-    chapters: splitChapters(text),
-  }
-}
-
-function makeLocalSummary(chapter: Chapter): Summary {
-  const sentences = chapter.content
-    .replace(/\s+/g, ' ')
-    .split(/[。！？]/)
-    .filter((sentence) => sentence.trim().length >= 10)
-
-  const short = sentences.slice(0, 2).join('。') || '本章内容较短，未提取到明显情节。'
-  const detail = sentences.slice(0, 5).join('。') || short
-  const keyPoints = sentences.slice(0, 3).map((sentence) => sentence.trim())
-
-  return {
-    short,
-    detail,
-    keyPoints,
-    skippable: '本地粗略概要仅供参考，不能作为跳读依据。',
-    generatedBy: 'local',
+    chapters,
   }
 }
 
@@ -1149,8 +1571,8 @@ export interface UseReaderStateReturn {
   chapterSearch: string
   setChapterSearch: React.Dispatch<React.SetStateAction<string>>
   isHydrated: boolean
-  isGenerating: boolean
-  batchProgress: string
+  generatingBookId: string | null
+  generatingBookProgress: string
   isConfigOpen: boolean
   modelConfigDraft: ModelConfigDraft
   setModelConfigDraft: React.Dispatch<React.SetStateAction<ModelConfigDraft>>
@@ -1181,9 +1603,7 @@ export interface UseReaderStateReturn {
   draftActiveOpenAIConfig: OpenAIConfig | undefined
   importedDate: string
   handleImport: (file: File) => Promise<void>
-  handleGenerateSummary: (useOllama: boolean) => Promise<void>
-  handleBatchGenerateCurrentPage: () => Promise<void>
-  handleBatchGenerateAllMissingSummaries: () => Promise<void>
+  generateMissingSummariesForBook: (bookId: string) => Promise<void>
   selectBook: (bookId: string) => void
   deleteBook: (bookId: string) => void
   updateActiveChapter: (id: string) => void
@@ -1214,6 +1634,26 @@ function syncActiveLibraryBook(
   }
 }
 
+function getLibraryBookSummaries(current: StoredState, bookId: string): Record<string, Summary> {
+  return current.books.find((entry) => entry.book.id === bookId)?.summaries ?? {}
+}
+
+function syncLibraryBook(
+  current: StoredState,
+  bookId: string,
+  updates: Partial<Pick<LibraryBook, 'activeChapterId' | 'summaries'>>,
+): StoredState {
+  const isActive = current.activeBookId === bookId
+  return {
+    ...current,
+    ...(isActive && updates.summaries ? { summaries: updates.summaries } : {}),
+    ...(isActive && updates.activeChapterId ? { activeChapterId: updates.activeChapterId } : {}),
+    books: current.books.map((entry) =>
+      entry.book.id === bookId ? { ...entry, ...updates } : entry,
+    ),
+  }
+}
+
 function getChapterPageForState(state: StoredState): number {
   if (!state.book || !state.activeChapterId) return 1
 
@@ -1228,8 +1668,8 @@ export function useReaderState(): UseReaderStateReturn {
   const [chapterPage, setChapterPage] = useState(1)
   const [chapterSearch, setChapterSearch] = useState('')
   const [isHydrated, setIsHydrated] = useState(false)
-  const [isGenerating, setIsGenerating] = useState(false)
-  const [batchProgress, setBatchProgress] = useState('')
+  const [generatingBookId, setGeneratingBookId] = useState<string | null>(null)
+  const [generatingBookProgress, setGeneratingBookProgress] = useState('')
   const [isConfigOpen, setIsConfigOpen] = useState(false)
   const [modelConfigDraft, setModelConfigDraft] = useState<ModelConfigDraft>(() =>
     getModelConfigDraft(initialState),
@@ -1353,7 +1793,7 @@ export function useReaderState(): UseReaderStateReturn {
     setError('')
 
     try {
-      const imported = await parseImportedBook(file)
+      const imported = await parseImportedBook(file, getModelConfigDraft(state))
       const { chapters } = imported
 
       if (!chapters.length) {
@@ -1389,36 +1829,101 @@ export function useReaderState(): UseReaderStateReturn {
     }
   }
 
-  async function handleGenerateSummary(useOllama: boolean) {
-    if (!activeChapter) return
+  async function generateMissingSummariesForBook(bookId: string) {
+    const libraryBook = state.books.find((entry) => entry.book.id === bookId)
 
-    setIsGenerating(true)
-    setBatchProgress('')
+    if (!libraryBook) return
+
+    const pendingChapters = libraryBook.book.chapters.filter(
+      (chapter) => !libraryBook.summaries[chapter.id],
+    )
+    const totalChapters = libraryBook.book.chapters.length
+    const missingCount = pendingChapters.length
+
+    if (!missingCount) {
+      setGeneratingBookId(bookId)
+      setGeneratingBookProgress('概要已经全部生成。')
+      setTimeout(() => {
+        setGeneratingBookId((current) => (current === bookId ? null : current))
+      }, 2000)
+      return
+    }
+
+    if (
+      missingCount > 50 &&
+      !window.confirm(
+        `全书共 ${totalChapters} 章，其中 ${missingCount} 章缺少概要。\n` +
+          `批量生成将调用 AI 接口 ${missingCount} 次，可能耗时较长并消耗较多 token。\n` +
+          '确定要继续吗？',
+      )
+    ) {
+      return
+    }
+
+    const concurrency = getActiveConcurrency()
+    const baselineProcessedCount = totalChapters - missingCount
+
+    setGeneratingBookId(bookId)
+    setGeneratingBookProgress(`并发 ${concurrency}，准备生成 ${missingCount} 章概要`)
     setError('')
 
     try {
-      const summary = await generateChapterSummary(activeChapter, useOllama)
+      let nextIndex = 0
+      let completedCount = 0
+      let failedCount = 0
 
-      setState((current) =>
-        syncActiveLibraryBook(current, {
-          summaries: {
-            ...current.summaries,
-            [activeChapter.id]: summary,
-          },
-        }),
+      async function worker() {
+        while (nextIndex < pendingChapters.length) {
+          const chapter = pendingChapters[nextIndex]
+          nextIndex += 1
+
+          setGeneratingBookProgress(
+            `并发 ${concurrency}，正在生成 ${completedCount + failedCount + 1}/${missingCount}（全书 ${baselineProcessedCount + completedCount + failedCount + 1}/${totalChapters}）：第 ${chapter.index} 章`,
+          )
+
+          try {
+            const summary = await generateChapterSummary(chapter)
+            completedCount += 1
+
+            setState((current) =>
+              syncLibraryBook(current, bookId, {
+                summaries: {
+                  ...getLibraryBookSummaries(current, bookId),
+                  [chapter.id]: summary,
+                },
+              }),
+            )
+          } catch {
+            failedCount += 1
+          }
+
+          setGeneratingBookProgress(
+            `并发 ${concurrency}，已完成 ${completedCount}/${missingCount}（全书 ${baselineProcessedCount + completedCount}/${totalChapters}），失败 ${failedCount} 章`,
+          )
+        }
+      }
+
+      await Promise.all(
+        Array.from({ length: Math.min(concurrency, missingCount) }, () => worker()),
       )
+
+      if (failedCount > 0) {
+        setGeneratingBookProgress(
+          `批量生成结束，成功 ${completedCount} 章，失败 ${failedCount} 章。`,
+        )
+      } else {
+        setGeneratingBookProgress(`全书 ${missingCount} 章缺失概要已生成。`)
+      }
     } catch (err) {
-      setError(err instanceof Error ? err.message : '生成概要失败。')
+      setError(err instanceof Error ? err.message : '批量生成概要失败。')
     } finally {
-      setIsGenerating(false)
+      setTimeout(() => {
+        setGeneratingBookId((current) => (current === bookId ? null : current))
+      }, 2000)
     }
   }
 
-  async function generateChapterSummary(chapter: Chapter, useModel: boolean): Promise<Summary> {
-    if (!useModel) {
-      return makeLocalSummary(chapter)
-    }
-
+  async function generateChapterSummary(chapter: Chapter): Promise<Summary> {
     if (state.aiProvider === 'openai') {
       const activeConfig = getActiveOpenAIConfig(state)
 
@@ -1436,147 +1941,16 @@ export function useReaderState(): UseReaderStateReturn {
       )
     }
 
+    if (!state.ollamaModel.trim()) {
+      throw new Error('请先配置 Ollama 模型。')
+    }
+
     return generateWithOllama(
       chapter,
       state.ollamaModel,
       state.ollamaTemperature,
       state.thinkingEnabled,
     )
-  }
-
-  async function handleBatchGenerateCurrentPage() {
-    const pendingChapters = pagedChapters.filter((chapter) => !state.summaries[chapter.id])
-    const concurrency = getActiveConcurrency()
-
-    if (!pendingChapters.length) {
-      setBatchProgress('当前章节页已经全部生成概要。')
-      return
-    }
-
-    setIsGenerating(true)
-    setError('')
-
-    try {
-      let nextIndex = 0
-      let completedCount = 0
-
-      async function worker() {
-        while (nextIndex < pendingChapters.length) {
-          const chapter = pendingChapters[nextIndex]
-          nextIndex += 1
-          setBatchProgress(
-            `并发 ${concurrency}，正在生成 ${completedCount + 1}/${pendingChapters.length}：第 ${chapter.index} 章`,
-          )
-          const summary = await generateChapterSummary(chapter, true)
-          completedCount += 1
-
-          setState((current) =>
-            syncActiveLibraryBook(current, {
-              summaries: {
-                ...current.summaries,
-                [chapter.id]: summary,
-              },
-            }),
-          )
-          setBatchProgress(
-            `并发 ${concurrency}，已完成 ${completedCount}/${pendingChapters.length}`,
-          )
-        }
-      }
-
-      await Promise.all(
-        Array.from({ length: Math.min(concurrency, pendingChapters.length) }, () => worker()),
-      )
-
-      setBatchProgress(`本页 ${pendingChapters.length} 章概要已生成。`)
-    } catch (err) {
-      setError(err instanceof Error ? err.message : '批量生成概要失败。')
-    } finally {
-      setIsGenerating(false)
-    }
-  }
-
-  async function handleBatchGenerateAllMissingSummaries() {
-    if (!state.book) return
-
-    const pendingChapters = state.book.chapters.filter((chapter) => !state.summaries[chapter.id])
-    const totalChapters = state.book.chapters.length
-    const missingCount = pendingChapters.length
-
-    if (!missingCount) {
-      setBatchProgress('全书概要已经全部生成。')
-      return
-    }
-
-    if (
-      missingCount > 50 &&
-      !window.confirm(
-        `全书共 ${totalChapters} 章，其中 ${missingCount} 章缺少概要。\n` +
-          `批量生成将调用 AI 接口 ${missingCount} 次，可能耗时较长并消耗较多 token。\n` +
-          '确定要继续吗？',
-      )
-    ) {
-      return
-    }
-
-    const concurrency = getActiveConcurrency()
-    const baselineProcessedCount = processedCount
-
-    setIsGenerating(true)
-    setError('')
-
-    try {
-      let nextIndex = 0
-      let completedCount = 0
-      let failedCount = 0
-
-      async function worker() {
-        while (nextIndex < pendingChapters.length) {
-          const chapter = pendingChapters[nextIndex]
-          nextIndex += 1
-
-          setBatchProgress(
-            `并发 ${concurrency}，正在生成 ${completedCount + failedCount + 1}/${missingCount}（全书 ${baselineProcessedCount + completedCount + failedCount + 1}/${totalChapters}）：第 ${chapter.index} 章`,
-          )
-
-          try {
-            const summary = await generateChapterSummary(chapter, true)
-            completedCount += 1
-
-            setState((current) =>
-              syncActiveLibraryBook(current, {
-                summaries: {
-                  ...current.summaries,
-                  [chapter.id]: summary,
-                },
-              }),
-            )
-          } catch {
-            failedCount += 1
-          }
-
-          setBatchProgress(
-            `并发 ${concurrency}，已完成 ${completedCount}/${missingCount}（全书 ${baselineProcessedCount + completedCount}/${totalChapters}），失败 ${failedCount} 章`,
-          )
-        }
-      }
-
-      await Promise.all(
-        Array.from({ length: Math.min(concurrency, missingCount) }, () => worker()),
-      )
-
-      if (failedCount > 0) {
-        setBatchProgress(
-          `全书批量生成结束，成功 ${completedCount} 章，失败 ${failedCount} 章。`,
-        )
-      } else {
-        setBatchProgress(`全书 ${missingCount} 章缺失概要已生成。`)
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : '批量生成概要失败。')
-    } finally {
-      setIsGenerating(false)
-    }
   }
 
   function getActiveConcurrency() {
@@ -1795,8 +2169,8 @@ export function useReaderState(): UseReaderStateReturn {
     chapterSearch,
     setChapterSearch,
     isHydrated,
-    isGenerating,
-    batchProgress,
+    generatingBookId,
+    generatingBookProgress,
     isConfigOpen,
     modelConfigDraft,
     setModelConfigDraft,
@@ -1827,9 +2201,7 @@ export function useReaderState(): UseReaderStateReturn {
     draftActiveOpenAIConfig,
     importedDate,
     handleImport,
-    handleGenerateSummary,
-    handleBatchGenerateCurrentPage,
-    handleBatchGenerateAllMissingSummaries,
+    generateMissingSummariesForBook,
     selectBook,
     deleteBook,
     updateActiveChapter,
