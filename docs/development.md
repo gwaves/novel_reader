@@ -90,6 +90,12 @@ novel_reader/
 └── docs/                   # Documentation
 ```
 
+## Import Formats
+
+- `.txt`: the browser reads the file, decodes it with the selected encoding or automatic UTF-8 / GB18030 scoring, then splits chapters by heading patterns.
+- `.epub`: the browser parses the ZIP structure, reads `META-INF/container.xml` to locate the OPF package, follows manifest/spine order, and converts XHTML content into plain-text chapters.
+- EPUB v1 does not preserve images, CSS, footnote navigation, or complex layout. Imported EPUB chapters reuse the existing SQLite library, summaries, RAG, and knowledge graph workflows.
+
 ## Database
 
 The app uses the native Node.js `node:sqlite` module (`DatabaseSync`).
@@ -135,6 +141,16 @@ RAG search combines summary embeddings with knowledge graph entity matching.
 - Search results include chapter summaries, matched entity names, similarity, match type, and optional chapter snippets.
 - If fewer than 80% of chapters have embeddings for the selected model, the API returns `409 EMBEDDINGS_NOT_READY`.
 - The desktop and mobile UIs can generate embeddings, search, and ask the configured generation model to answer from retrieved results.
+
+## Reader UX Polish Plan
+
+The Reader UX polish phase prioritizes long continuous reading over adding more always-visible controls.
+
+- Reading preferences should live in shared `StoredState` so desktop and mobile reuse the same theme, font size, line height, and paragraph spacing.
+- Chapter scroll positions are saved by `bookId:chapterId` and restored when returning to a chapter; chapters without a saved position open at the top.
+- Reader keyboard shortcuts must not intercept input while fields, buttons, or selects are focused.
+- Mobile reading uses lightweight body tap zones for paging instead of adding more fixed buttons.
+- In-reader AI should start from contextual actions such as selected text -> search/explain/related graph, rather than keeping the full AI panel in the main reading flow.
 
 ## Database Backup And Restore
 

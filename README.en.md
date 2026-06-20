@@ -6,8 +6,8 @@ A local-first web reader for long Chinese web novels, with AI-powered summaries,
 
 ## Features
 
-- Import `.txt` novels with automatic UTF-8 / GB18030 decoding.
-- Split long novels into chapters and paginate the chapter list by 100 chapters.
+- Import `.txt` novels with automatic UTF-8 / GB18030 decoding, or `.epub` books by reading the OPF spine and XHTML chapters.
+- Split imported books into chapters and paginate the chapter list by 100 chapters.
 - Persist imported chapters, reading progress, summaries, knowledge graph data, embeddings, and settings in a local SQLite database under `~/.novel_reader`.
 - Generate single-chapter, current-page, or all-missing chapter summaries.
 - Configure local Ollama models and OpenAI-compatible external models, with separate validation for generation and embedding models.

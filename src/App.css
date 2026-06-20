@@ -1817,15 +1817,56 @@ button.kg-relation-row:hover {
 
 .chapter-reader {
   overflow: auto;
-  background: #fbf8f2;
+  --reader-bg: #fbf8f2;
+  --reader-panel-bg: #fffaf2;
+  --reader-text: #2a2722;
+  --reader-muted: #766c60;
+  --reader-border: #e1d8ca;
+  --reader-accent: #2c5b4b;
+  background: var(--reader-bg);
   padding: 34px clamp(24px, 5vw, 72px);
   text-align: left;
 }
 
+.reader-theme-green {
+  --reader-bg: #f2f7ef;
+  --reader-panel-bg: #fbfff8;
+  --reader-text: #263126;
+  --reader-muted: #64705d;
+  --reader-border: #d6e2cf;
+  --reader-accent: #3f6f4d;
+}
+
+.reader-theme-night {
+  --reader-bg: #171716;
+  --reader-panel-bg: #20201e;
+  --reader-text: #d8d1c4;
+  --reader-muted: #aaa192;
+  --reader-border: #3a3731;
+  --reader-accent: #d6a85f;
+}
+
+.reader-progress {
+  position: sticky;
+  top: -34px;
+  z-index: 2;
+  height: 3px;
+  max-width: var(--reader-content-width);
+  margin: -34px auto 31px;
+  background: color-mix(in srgb, var(--reader-border) 70%, transparent);
+}
+
+.reader-progress span {
+  display: block;
+  height: 100%;
+  background: var(--reader-accent);
+  transition: width 0.16s ease-out;
+}
+
 .chapter-heading {
-  max-width: 820px;
+  max-width: var(--reader-content-width);
   margin: 0 auto 28px;
-  border-bottom: 1px solid #e1d8ca;
+  border-bottom: 1px solid var(--reader-border);
   padding-bottom: 18px;
 }
 
@@ -1853,7 +1894,7 @@ button.kg-relation-row:hover {
 }
 
 .chapter-nav span {
-  color: #766c60;
+  color: var(--reader-muted);
   font-size: 13px;
   text-align: center;
 }
@@ -1861,9 +1902,10 @@ button.kg-relation-row:hover {
 .reader-controls {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 16px;
-  color: #766c60;
+  justify-content: flex-start;
+  gap: 12px 16px;
+  flex-wrap: wrap;
+  color: var(--reader-muted);
 }
 
 .reader-controls p {
@@ -1874,31 +1916,73 @@ button.kg-relation-row:hover {
   display: flex;
   align-items: center;
   gap: 8px;
-  color: #6b6256;
+  color: var(--reader-muted);
   font-size: 14px;
   font-weight: 650;
 }
 
 .reader-controls input {
-  width: 120px;
+  width: 96px;
   padding: 0;
-  accent-color: #2c5b4b;
+  accent-color: var(--reader-accent);
 }
 
 .reader-controls span {
   min-width: 38px;
-  color: #4d463d;
+  color: var(--reader-text);
+}
+
+.reader-controls select {
+  border: 1px solid var(--reader-border);
+  border-radius: 8px;
+  background: var(--reader-panel-bg);
+  color: var(--reader-text);
+  padding: 7px 9px;
+}
+
+.reader-selection-actions {
+  position: fixed;
+  left: 50%;
+  bottom: 24px;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  width: min(720px, calc(100vw - 40px));
+  margin: 0;
+  border: 1px solid var(--reader-border);
+  border-radius: 8px;
+  background: var(--reader-panel-bg);
+  box-shadow: 0 16px 40px rgba(31, 28, 24, 0.18);
+  padding: 10px;
+  transform: translateX(-50%);
+}
+
+.reader-selection-actions span {
+  flex: 1;
+  min-width: 180px;
+  overflow: hidden;
+  color: var(--reader-muted);
+  font-size: 13px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.reader-selection-actions button {
+  width: auto;
+  padding: 6px 10px;
 }
 
 .chapter-content {
-  max-width: 820px;
+  max-width: var(--reader-content-width);
   margin: 0 auto;
-  color: #2a2722;
-  line-height: 2.05;
+  color: var(--reader-text);
+  line-height: var(--reader-line-height);
 }
 
 .chapter-content p {
-  margin: 0 0 1em;
+  margin: 0 0 var(--reader-paragraph-spacing);
   text-indent: 2em;
 }
 
@@ -1906,9 +1990,9 @@ button.kg-relation-row:hover {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 14px;
-  max-width: 820px;
+  max-width: var(--reader-content-width);
   margin: 34px auto 0;
-  border-top: 1px solid #e1d8ca;
+  border-top: 1px solid var(--reader-border);
   padding-top: 20px;
 }
 
@@ -1926,14 +2010,14 @@ button.kg-relation-row:hover {
 }
 
 .chapter-bottom-nav span {
-  color: #786d60;
+  color: var(--reader-muted);
   font-size: 13px;
   font-weight: 700;
 }
 
 .chapter-bottom-nav strong {
   overflow: hidden;
-  color: #24211c;
+  color: var(--reader-text);
   font-size: 15px;
   line-height: 1.35;
   text-overflow: ellipsis;

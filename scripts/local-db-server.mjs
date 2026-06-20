@@ -1906,10 +1906,11 @@ async function runKgCoreferenceJob(bookId, jobId, config, components, totalCompo
 
     try {
       const { clusters } = await resolveCoreferenceComponent(limited, config)
+      let merged = 0
 
       db.exec('BEGIN')
       try {
-        const merged = applyCoreferenceClusters(bookId, limited, clusters)
+        merged = applyCoreferenceClusters(bookId, limited, clusters)
         totalMerged += merged
         db.exec('COMMIT')
       } catch (error) {

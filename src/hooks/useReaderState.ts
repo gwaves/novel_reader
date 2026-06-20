@@ -44,12 +44,18 @@ export type StoredState = {
   thinkingEnabled: boolean
   importEncoding: ImportEncoding
   readerFontSize: number
+  readerLineHeight: number
+  readerContentWidth: number
+  readerParagraphSpacing: number
+  readerTheme: ReaderTheme
+  chapterScrollPositions: Record<string, number>
   embeddingConfig: EmbeddingConfig
 }
 
 export type AIProvider = 'ollama' | 'openai'
 export type EmbeddingProvider = 'ollama' | 'openai'
 export type ImportEncoding = 'auto' | 'utf-8' | 'gb18030'
+export type ReaderTheme = 'paper' | 'night' | 'green'
 export type AppView = 'home' | 'reader' | 'knowledge' | 'search'
 export type OllamaModel = {
   name: string
@@ -83,6 +89,17 @@ export type ModelConfigDraft = Pick<
   | 'embeddingConfig'
 >
 
+type ImportedBookContent = {
+  title: string
+  chapters: Chapter[]
+}
+
+type ZipEntry = {
+  name: string
+  compressionMethod: number
+  compressedData: Uint8Array
+}
+
 const STORAGE_KEY = 'novel-reader-mvp-state'
 const LEGACY_DB_NAME = 'novel-reader-mvp'
 const LEGACY_DB_STORE = 'state'
@@ -115,6 +132,11 @@ const initialState: StoredState = {
   thinkingEnabled: false,
   importEncoding: 'auto',
   readerFontSize: 18,
+  readerLineHeight: 2.05,
+  readerContentWidth: 820,
+  readerParagraphSpacing: 1,
+  readerTheme: 'paper',
+  chapterScrollPositions: {},
   embeddingConfig: {
     provider: 'ollama',
     baseUrl: 'http://localhost:11434',
@@ -212,6 +234,16 @@ function sanitizeSummaries(value: unknown): Record<string, Summary> {
     : {}
 }
 
+function sanitizeRecordOfNumbers(value: unknown): Record<string, number> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {}
+
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>)
+      .filter(([key, entry]) => typeof key === 'string' && typeof entry === 'number' && Number.isFinite(entry))
+      .map(([key, entry]) => [key, Math.max(0, entry as number)]),
+  )
+}
+
 function sanitizeLibraryBooks(storedState: Partial<StoredState> & Record<string, unknown>): LibraryBook[] {
   const fromBooks = Array.isArray(storedState.books)
     ? storedState.books
@@ -307,6 +339,23 @@ export function normalizeStoredState(
       typeof storedState.readerFontSize === 'number'
         ? Math.max(14, Math.min(28, storedState.readerFontSize))
         : initialState.readerFontSize,
+    readerLineHeight:
+      typeof storedState.readerLineHeight === 'number'
+        ? Math.max(1.5, Math.min(2.6, storedState.readerLineHeight))
+        : initialState.readerLineHeight,
+    readerContentWidth:
+      typeof storedState.readerContentWidth === 'number'
+        ? Math.max(640, Math.min(1040, storedState.readerContentWidth))
+        : initialState.readerContentWidth,
+    readerParagraphSpacing:
+      typeof storedState.readerParagraphSpacing === 'number'
+        ? Math.max(0.5, Math.min(1.8, storedState.readerParagraphSpacing))
+        : initialState.readerParagraphSpacing,
+    readerTheme:
+      storedState.readerTheme === 'night' || storedState.readerTheme === 'green'
+        ? storedState.readerTheme
+        : initialState.readerTheme,
+    chapterScrollPositions: sanitizeRecordOfNumbers(storedState.chapterScrollPositions),
     embeddingConfig: sanitizeEmbeddingConfig(storedState.embeddingConfig),
   }
 }
@@ -469,6 +518,18 @@ export function countWords(text: string) {
   return text.replace(/\s/g, '').length
 }
 
+export function countBookWords(book: Pick<Book, 'chapters'>) {
+  return book.chapters.reduce((total, chapter) => total + chapter.wordCount, 0)
+}
+
+export function formatWordCount(count: number) {
+  if (count >= 10000) {
+    return `${(count / 10000).toFixed(count >= 100000 ? 1 : 2)} 万字`
+  }
+
+  return `${count} 字`
+}
+
 export function inferTitle(fileName: string) {
   return fileName.replace(/\.[^.]+$/, '') || '未命名小说'
 }
@@ -566,6 +627,212 @@ function scoreDecodedText(text: string) {
   const replacementCount = (text.match(/�/g) ?? []).length
 
   return chineseCount + chapterHeadingCount * 80 - replacementCount * 160
+}
+
+function decodeZipName(bytes: Uint8Array, useUtf8: boolean) {
+  const decoder = new TextDecoder(useUtf8 ? 'utf-8' : 'latin1')
+  return decoder.decode(bytes)
+}
+
+function toArrayBuffer(bytes: Uint8Array): ArrayBuffer {
+  const copy = new Uint8Array(bytes.byteLength)
+  copy.set(bytes)
+  return copy.buffer
+}
+
+function findZipEndOfCentralDirectory(view: DataView) {
+  const minOffset = Math.max(0, view.byteLength - 0xffff - 22)
+
+  for (let offset = view.byteLength - 22; offset >= minOffset; offset -= 1) {
+    if (view.getUint32(offset, true) === 0x06054b50) return offset
+  }
+
+  throw new Error('不是有效的 EPUB/ZIP 文件。')
+}
+
+function readZipEntries(buffer: ArrayBuffer): Map<string, ZipEntry> {
+  const view = new DataView(buffer)
+  const bytes = new Uint8Array(buffer)
+  const endOffset = findZipEndOfCentralDirectory(view)
+  const entryCount = view.getUint16(endOffset + 10, true)
+  const centralDirectoryOffset = view.getUint32(endOffset + 16, true)
+  const entries = new Map<string, ZipEntry>()
+  let offset = centralDirectoryOffset
+
+  for (let index = 0; index < entryCount; index += 1) {
+    if (view.getUint32(offset, true) !== 0x02014b50) {
+      throw new Error('EPUB 中央目录损坏。')
+    }
+
+    const flags = view.getUint16(offset + 8, true)
+    const compressionMethod = view.getUint16(offset + 10, true)
+    const compressedSize = view.getUint32(offset + 20, true)
+    const fileNameLength = view.getUint16(offset + 28, true)
+    const extraLength = view.getUint16(offset + 30, true)
+    const commentLength = view.getUint16(offset + 32, true)
+    const localHeaderOffset = view.getUint32(offset + 42, true)
+    const nameBytes = bytes.slice(offset + 46, offset + 46 + fileNameLength)
+    const name = decodeZipName(nameBytes, Boolean(flags & 0x0800)).replace(/\\/g, '/')
+
+    if (!name.endsWith('/')) {
+      if (view.getUint32(localHeaderOffset, true) !== 0x04034b50) {
+        throw new Error(`EPUB 条目损坏：${name}`)
+      }
+
+      const localNameLength = view.getUint16(localHeaderOffset + 26, true)
+      const localExtraLength = view.getUint16(localHeaderOffset + 28, true)
+      const dataOffset = localHeaderOffset + 30 + localNameLength + localExtraLength
+      entries.set(name, {
+        name,
+        compressionMethod,
+        compressedData: bytes.slice(dataOffset, dataOffset + compressedSize),
+      })
+    }
+
+    offset += 46 + fileNameLength + extraLength + commentLength
+  }
+
+  return entries
+}
+
+async function readZipText(entries: Map<string, ZipEntry>, path: string) {
+  const entry = entries.get(path)
+  if (!entry) throw new Error(`EPUB 缺少文件：${path}`)
+
+  let data: ArrayBuffer
+
+  if (entry.compressionMethod === 0) {
+    data = toArrayBuffer(entry.compressedData)
+  } else if (entry.compressionMethod === 8) {
+    if (typeof DecompressionStream === 'undefined') {
+      throw new Error('当前浏览器不支持解压 EPUB，请升级浏览器后重试。')
+    }
+
+    data = await new Response(
+      new Blob([toArrayBuffer(entry.compressedData)]).stream().pipeThrough(new DecompressionStream('deflate-raw')),
+    ).arrayBuffer()
+  } else {
+    throw new Error(`暂不支持 EPUB 压缩方式：${entry.compressionMethod}`)
+  }
+
+  return new TextDecoder('utf-8').decode(data)
+}
+
+function getXmlElements(document: Document, localName: string) {
+  return Array.from(document.getElementsByTagName('*')).filter((element) => element.localName === localName)
+}
+
+function joinPath(basePath: string, relativePath: string) {
+  if (/^[a-z]+:/i.test(relativePath)) return relativePath
+
+  const parts = `${basePath}/${relativePath}`.split('/')
+  const output: string[] = []
+
+  for (const part of parts) {
+    if (!part || part === '.') continue
+    if (part === '..') {
+      output.pop()
+    } else {
+      try {
+        output.push(decodeURIComponent(part))
+      } catch {
+        output.push(part)
+      }
+    }
+  }
+
+  return output.join('/')
+}
+
+function stripExtension(path: string) {
+  const name = path.split('/').pop() ?? path
+  return name.replace(/\.[^.]+$/, '') || '章节'
+}
+
+function extractHtmlText(html: string) {
+  const document = new DOMParser().parseFromString(html, 'text/html')
+  document.querySelectorAll('script, style, nav, noscript').forEach((node) => node.remove())
+  const body = document.body
+  const heading = body.querySelector('h1,h2,h3,title')?.textContent?.replace(/\s+/g, ' ').trim() ?? ''
+  const blocks = Array.from(body.querySelectorAll('h1,h2,h3,h4,h5,h6,p,li,blockquote'))
+    .map((node) => node.textContent?.replace(/\s+/g, ' ').trim() ?? '')
+    .filter(Boolean)
+  const text = blocks.length
+    ? blocks.join('\n')
+    : body.textContent?.replace(/\s+/g, ' ').trim() ?? ''
+
+  return { heading, text }
+}
+
+function makeChapterFromText(index: number, title: string, text: string): Chapter {
+  return {
+    id: `${index}-${title.slice(0, 32)}`,
+    index,
+    title,
+    content: text,
+    wordCount: countWords(text),
+  }
+}
+
+async function parseEpubFile(file: File): Promise<ImportedBookContent> {
+  const entries = readZipEntries(await file.arrayBuffer())
+  const containerXml = await readZipText(entries, 'META-INF/container.xml')
+  const container = new DOMParser().parseFromString(containerXml, 'application/xml')
+  const rootfile = getXmlElements(container, 'rootfile')[0]?.getAttribute('full-path')
+
+  if (!rootfile) {
+    throw new Error('EPUB 缺少 OPF rootfile。')
+  }
+
+  const opfText = await readZipText(entries, rootfile)
+  const opf = new DOMParser().parseFromString(opfText, 'application/xml')
+  const opfBasePath = rootfile.split('/').slice(0, -1).join('/')
+  const metadataTitle =
+    getXmlElements(opf, 'title')[0]?.textContent?.replace(/\s+/g, ' ').trim() || inferTitle(file.name)
+  const manifest = new Map(
+    getXmlElements(opf, 'item')
+      .map((item) => {
+        const id = item.getAttribute('id')
+        const href = item.getAttribute('href')
+        const mediaType = item.getAttribute('media-type') ?? ''
+        return id && href ? [id, { href: joinPath(opfBasePath, href), mediaType }] : null
+      })
+      .filter((entry): entry is [string, { href: string; mediaType: string }] => Boolean(entry)),
+  )
+  const spineIds = getXmlElements(opf, 'itemref')
+    .map((itemref) => itemref.getAttribute('idref'))
+    .filter((idref): idref is string => Boolean(idref))
+
+  const chapters: Chapter[] = []
+
+  for (const idref of spineIds) {
+    const item = manifest.get(idref)
+    if (!item || !/xhtml|html/i.test(item.mediaType)) continue
+
+    const html = await readZipText(entries, item.href)
+    const { heading, text } = extractHtmlText(html)
+    if (!text) continue
+
+    chapters.push(makeChapterFromText(chapters.length + 1, heading || stripExtension(item.href), text))
+  }
+
+  if (!chapters.length) {
+    throw new Error('EPUB 中没有识别到可阅读章节。')
+  }
+
+  return { title: metadataTitle, chapters }
+}
+
+async function parseImportedBook(file: File, encoding: ImportEncoding): Promise<ImportedBookContent> {
+  if (/\.epub$/i.test(file.name) || file.type === 'application/epub+zip') {
+    return parseEpubFile(file)
+  }
+
+  const text = await decodeTextFile(file, encoding)
+  return {
+    title: inferTitle(file.name),
+    chapters: splitChapters(text),
+  }
 }
 
 function makeLocalSummary(chapter: Chapter): Summary {
@@ -1110,17 +1377,17 @@ export function useReaderState(): UseReaderStateReturn {
     setError('')
 
     try {
-      const text = await decodeTextFile(file, state.importEncoding)
-      const chapters = splitChapters(text)
+      const imported = await parseImportedBook(file, state.importEncoding)
+      const { chapters } = imported
 
       if (!chapters.length) {
-        setError('没有识别到正文内容，请换一个 txt 文件试试。')
+        setError('没有识别到正文内容，请换一个 txt 或 epub 文件试试。')
         return
       }
 
       const book: Book = {
         id: generateId(),
-        title: inferTitle(file.name),
+        title: imported.title,
         chapters,
         importedAt: new Date().toISOString(),
       }
