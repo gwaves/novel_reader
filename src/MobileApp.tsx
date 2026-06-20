@@ -1,5 +1,5 @@
-import { useEffect, useRef, useState } from 'react'
-import { useReaderState } from './hooks/useReaderState.ts'
+import { type CSSProperties, type MouseEvent, useEffect, useRef, useState } from 'react'
+import { countBookWords, formatWordCount, useReaderState } from './hooks/useReaderState.ts'
 import type { AIProvider, EmbeddingProvider, ImportEncoding, OpenAIConfig } from './hooks/useReaderState.ts'
 import './MobileApp.css'
 
@@ -36,6 +36,7 @@ type EmbeddingStatus = {
 
 function MobileApp() {
   const readerRef = useRef<HTMLDivElement | null>(null)
+  const readerScrollSaveTimerRef = useRef<number | null>(null)
   const {
     state,
     setState,
@@ -102,16 +103,57 @@ function MobileApp() {
   const [isGeneratingEmbeddings, setIsGeneratingEmbeddings] = useState(false)
   const [embeddingProgress, setEmbeddingProgress] = useState('')
   const [ragError, setRagError] = useState('')
+  const [readerProgress, setReaderProgress] = useState(0)
 
   useEffect(() => {
     if (mobileTab === 'reader' && activeChapter) {
       requestAnimationFrame(() => {
         if (readerRef.current) {
-          readerRef.current.scrollTop = 0
+          const key = `${state.book?.id ?? 'book'}:${activeChapter.id}`
+          readerRef.current.scrollTop = state.chapterScrollPositions[key] ?? 0
         }
       })
     }
-  }, [activeChapter, activeChapter?.id, mobileTab])
+  }, [activeChapter?.id, mobileTab, state.book?.id])
+
+  useEffect(() => {
+    if (mobileTab !== 'reader' || !activeChapter) return
+
+    if (!readerRef.current) return
+    const readerElement = readerRef.current
+
+    const key = `${state.book?.id ?? 'book'}:${activeChapter.id}`
+
+    function updateReaderProgress() {
+      const scrollable = Math.max(1, readerElement.scrollHeight - readerElement.clientHeight)
+      setReaderProgress(Math.max(0, Math.min(100, (readerElement.scrollTop / scrollable) * 100)))
+
+      if (readerScrollSaveTimerRef.current) {
+        window.clearTimeout(readerScrollSaveTimerRef.current)
+      }
+
+      readerScrollSaveTimerRef.current = window.setTimeout(() => {
+        setState((current) => ({
+          ...current,
+          chapterScrollPositions: {
+            ...current.chapterScrollPositions,
+            [key]: readerElement.scrollTop,
+          },
+        }))
+      }, 500)
+    }
+
+    updateReaderProgress()
+    readerElement.addEventListener('scroll', updateReaderProgress, { passive: true })
+
+    return () => {
+      readerElement.removeEventListener('scroll', updateReaderProgress)
+      if (readerScrollSaveTimerRef.current) {
+        window.clearTimeout(readerScrollSaveTimerRef.current)
+        readerScrollSaveTimerRef.current = null
+      }
+    }
+  }, [activeChapter?.id, mobileTab, setState, state.book?.id])
 
   function handleChapterClick(id: string) {
     updateActiveChapter(id)
@@ -124,6 +166,18 @@ function MobileApp() {
 
   function handleNavigateNext() {
     navigateToNextChapter()
+  }
+
+  function handleReaderTap(event: MouseEvent<HTMLDivElement>) {
+    if (window.getSelection()?.toString()) return
+
+    const rect = event.currentTarget.getBoundingClientRect()
+    const ratio = (event.clientX - rect.left) / rect.width
+    if (ratio < 0.34) {
+      readerRef.current?.scrollBy({ top: -Math.round(window.innerHeight * 0.72), behavior: 'smooth' })
+    } else if (ratio > 0.66) {
+      readerRef.current?.scrollBy({ top: Math.round(window.innerHeight * 0.72), behavior: 'smooth' })
+    }
   }
 
   function getEmbeddingConfig() {
@@ -458,6 +512,10 @@ ${context}
                     <span className="mobile-stat-value">{state.book.chapters.length}</span>
                   </div>
                   <div>
+                    <span className="mobile-stat-label">字数</span>
+                    <span className="mobile-stat-value mobile-stat-small">{formatWordCount(countBookWords(state.book))}</span>
+                  </div>
+                  <div>
                     <span className="mobile-stat-label">概要</span>
                     <span className="mobile-stat-value">{processedCount}</span>
                   </div>
@@ -508,10 +566,11 @@ ${context}
                     return (
                       <div className={isActive ? 'mobile-book-row active' : 'mobile-book-row'} key={libraryBook.book.id}>
                         <div>
-                          <h3>{libraryBook.book.title}</h3>
-                          <p>
-                            {libraryBook.book.chapters.length} 章 · 概要 {Object.keys(libraryBook.summaries).length} 章
-                          </p>
+	                          <h3>{libraryBook.book.title}</h3>
+	                          <p>
+	                            {libraryBook.book.chapters.length} 章 · {formatWordCount(countBookWords(libraryBook.book))} · 概要{' '}
+	                            {Object.keys(libraryBook.summaries).length} 章
+	                          </p>
                         </div>
                         <div className="mobile-book-row-actions">
                           <button type="button" className="mobile-primary-button" onClick={() => selectBook(libraryBook.book.id)}>
@@ -532,15 +591,15 @@ ${context}
               <label className="mobile-upload">
                 <input
                   type="file"
-                  accept=".txt,text/plain"
+                  accept=".txt,.epub,text/plain,application/epub+zip"
                   onChange={(event) => {
                     const file = event.target.files?.[0]
                     if (file) void handleImport(file)
                     event.target.value = ''
                   }}
                 />
-                <span className="mobile-primary-button">{state.books.length ? '导入新 txt 到书架' : '选择 txt 文件'}</span>
-                <small>支持“第1章 / 第一章 / Chapter 1”等格式</small>
+                <span className="mobile-primary-button">{state.books.length ? '导入新书到书架' : '选择 txt / epub 文件'}</span>
+                <small>txt 自动拆章，epub 按 spine 导入</small>
               </label>
 
               <label className="mobile-field">
@@ -578,6 +637,60 @@ ${context}
                   />
                   <span>{state.readerFontSize}px</span>
                 </div>
+              </label>
+              <label className="mobile-field mobile-font-field">
+                行高
+                <div className="mobile-font-row">
+                  <input
+                    type="range"
+                    min="1.5"
+                    max="2.6"
+                    step="0.05"
+                    value={state.readerLineHeight}
+                    onChange={(event) =>
+                      setState((current) => ({
+                        ...current,
+                        readerLineHeight: Number(event.target.value),
+                      }))
+                    }
+                  />
+                  <span>{state.readerLineHeight.toFixed(2)}</span>
+                </div>
+              </label>
+              <label className="mobile-field mobile-font-field">
+                段距
+                <div className="mobile-font-row">
+                  <input
+                    type="range"
+                    min="0.5"
+                    max="1.8"
+                    step="0.1"
+                    value={state.readerParagraphSpacing}
+                    onChange={(event) =>
+                      setState((current) => ({
+                        ...current,
+                        readerParagraphSpacing: Number(event.target.value),
+                      }))
+                    }
+                  />
+                  <span>{state.readerParagraphSpacing.toFixed(1)}</span>
+                </div>
+              </label>
+              <label className="mobile-field">
+                阅读主题
+                <select
+                  value={state.readerTheme}
+                  onChange={(event) =>
+                    setState((current) => ({
+                      ...current,
+                      readerTheme: event.target.value as typeof current.readerTheme,
+                    }))
+                  }
+                >
+                  <option value="paper">纸张</option>
+                  <option value="green">护眼</option>
+                  <option value="night">夜间</option>
+                </select>
               </label>
             </div>
             {error && <p className="mobile-error">{error}</p>}
@@ -689,9 +802,18 @@ ${context}
         )}
 
         {mobileTab === 'reader' && (
-          <section className="mobile-panel mobile-reader">
+          <section
+            className={`mobile-panel mobile-reader mobile-reader-theme-${state.readerTheme}`}
+            style={{
+              '--mobile-reader-line-height': state.readerLineHeight,
+              '--mobile-reader-paragraph-spacing': `${state.readerParagraphSpacing}em`,
+            } as CSSProperties}
+          >
             {activeChapter ? (
               <>
+                <div className="mobile-reader-progress" aria-hidden="true">
+                  <span style={{ width: `${readerProgress}%` }} />
+                </div>
                 <div className="mobile-reader-heading">
                   <span>
                     第 {activeChapter.index}/{state.book?.chapters.length ?? 0} 章 · {activeChapter.wordCount} 字
@@ -701,6 +823,7 @@ ${context}
                 <div
                   className="mobile-chapter-content"
                   style={{ fontSize: `${state.readerFontSize}px` }}
+                  onClick={handleReaderTap}
                 >
                   {activeChapter.content.split('\n').map((line, index) => (
                     <p key={`${activeChapter.id}-${index}`}>{line.trim() || ' '}</p>

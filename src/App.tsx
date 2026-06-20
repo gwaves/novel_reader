@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { type CSSProperties, useEffect, useMemo, useRef, useState } from 'react'
 import {
   Background,
   Controls,
@@ -9,7 +9,7 @@ import {
   type Node,
 } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
-import { useReaderState } from './hooks/useReaderState.ts'
+import { countBookWords, formatWordCount, useReaderState } from './hooks/useReaderState.ts'
 import type { AIProvider, Chapter, EmbeddingProvider, ImportEncoding, OpenAIConfig } from './hooks/useReaderState.ts'
 import './App.css'
 
@@ -450,6 +450,7 @@ function App() {
   const readerRef = useRef<HTMLElement | null>(null)
   const chapterListRef = useRef<HTMLDivElement | null>(null)
   const activeChapterButtonRef = useRef<HTMLButtonElement | null>(null)
+  const readerScrollSaveTimerRef = useRef<number | null>(null)
   const databaseImportInputRef = useRef<HTMLInputElement | null>(null)
   const shouldStopScanningRef = useRef(false)
   const [kgOverview, setKgOverview] = useState<KgOverview | null>(null)
@@ -564,6 +565,8 @@ function App() {
   const [embeddingProgress, setEmbeddingProgress] = useState('')
   const [ragError, setRagError] = useState('')
   const [configTab, setConfigTab] = useState<'llm' | 'embedding'>('llm')
+  const [readerProgress, setReaderProgress] = useState(0)
+  const [selectedReaderText, setSelectedReaderText] = useState('')
 
   const {
     state,
@@ -644,10 +647,51 @@ function App() {
 
     window.requestAnimationFrame(() => {
       if (readerRef.current) {
-        readerRef.current.scrollTop = 0
+        const key = `${state.book?.id ?? 'book'}:${activeChapter.id}`
+        readerRef.current.scrollTop = state.chapterScrollPositions[key] ?? 0
       }
     })
-  }, [view, activeChapter, activeChapter?.id])
+  }, [view, activeChapter?.id, state.book?.id])
+
+  useEffect(() => {
+    if (view !== 'reader' || !activeChapter) return
+
+    if (!readerRef.current) return
+    const readerElement = readerRef.current
+
+    const key = `${state.book?.id ?? 'book'}:${activeChapter.id}`
+
+    function updateReaderProgress() {
+      const scrollable = Math.max(1, readerElement.scrollHeight - readerElement.clientHeight)
+      const nextProgress = Math.max(0, Math.min(100, (readerElement.scrollTop / scrollable) * 100))
+      setReaderProgress(nextProgress)
+
+      if (readerScrollSaveTimerRef.current) {
+        window.clearTimeout(readerScrollSaveTimerRef.current)
+      }
+
+      readerScrollSaveTimerRef.current = window.setTimeout(() => {
+        setState((current) => ({
+          ...current,
+          chapterScrollPositions: {
+            ...current.chapterScrollPositions,
+            [key]: readerElement.scrollTop,
+          },
+        }))
+      }, 500)
+    }
+
+    updateReaderProgress()
+    readerElement.addEventListener('scroll', updateReaderProgress, { passive: true })
+
+    return () => {
+      readerElement.removeEventListener('scroll', updateReaderProgress)
+      if (readerScrollSaveTimerRef.current) {
+        window.clearTimeout(readerScrollSaveTimerRef.current)
+        readerScrollSaveTimerRef.current = null
+      }
+    }
+  }, [view, activeChapter, activeChapter?.id, state.book?.id, setState])
 
   useEffect(() => {
     if (view !== 'reader' || isConfigOpen) return
@@ -670,19 +714,36 @@ function App() {
         return
       }
 
+      if (event.key === '[') {
+        event.preventDefault()
+        navigateToPreviousChapter()
+        return
+      }
+
       if (event.key === 'ArrowRight') {
         event.preventDefault()
         navigateToNextChapter()
         return
       }
 
-      if (event.key === 'ArrowUp') {
+      if (event.key === ']') {
+        event.preventDefault()
+        navigateToNextChapter()
+        return
+      }
+
+      if (event.key === 'ArrowUp' || event.key.toLowerCase() === 'k' || event.key === 'PageUp') {
         event.preventDefault()
         readerRef.current?.scrollBy({ top: -Math.round(window.innerHeight * 0.72), behavior: 'smooth' })
         return
       }
 
-      if (event.key === 'ArrowDown') {
+      if (
+        event.key === 'ArrowDown' ||
+        event.key.toLowerCase() === 'j' ||
+        event.key === 'PageDown' ||
+        event.key === ' '
+      ) {
         event.preventDefault()
         readerRef.current?.scrollBy({ top: Math.round(window.innerHeight * 0.72), behavior: 'smooth' })
       }
@@ -692,6 +753,35 @@ function App() {
 
     return () => window.removeEventListener('keydown', handleKeyDown)
   }, [view, isConfigOpen, previousChapter?.id, nextChapter?.id, navigateToPreviousChapter, navigateToNextChapter])
+
+  function captureReaderSelection() {
+    const text = window.getSelection()?.toString().replace(/\s+/g, ' ').trim() ?? ''
+    setSelectedReaderText(text.length > 80 ? text.slice(0, 80) : text)
+  }
+
+  function searchSelectedReaderText() {
+    if (!selectedReaderText) return
+    setRagQuery(selectedReaderText)
+    setView('search')
+  }
+
+  function searchSelectedReaderTextInKnowledgeGraph() {
+    if (!selectedReaderText) return
+    setKgEvidenceSearchQuery(selectedReaderText)
+    setKgEvidenceSearchKind('all')
+    setShowKgEvidenceSearch(true)
+    setShowKgScan(false)
+    setShowKgScannedChapters(false)
+    setShowKgEntities(false)
+    setShowKgRelations(false)
+    setShowKgReviewQueue(false)
+    setShowKgBookGraph(false)
+    setShowKgCoreference(false)
+    setKgEntityDetail(null)
+    setKgRelationDetail(null)
+    setView('knowledge')
+    void searchKgEvidence(selectedReaderText)
+  }
 
   useEffect(() => {
     if (view !== 'knowledge' || !state.book) return
@@ -1145,10 +1235,10 @@ function App() {
     }
   }
 
-  async function searchKgEvidence() {
+  async function searchKgEvidence(searchQuery = kgEvidenceSearchQuery) {
     if (!state.book) return
 
-    const query = kgEvidenceSearchQuery.trim()
+    const query = searchQuery.trim()
     if (!query) {
       setKgEvidenceEntityHits([])
       setKgEvidenceRelationHits([])
@@ -3271,6 +3361,10 @@ ${context}
                   <dd>{state.book.chapters.length} 章</dd>
                 </div>
                 <div>
+                  <dt>字数</dt>
+                  <dd>{formatWordCount(countBookWords(state.book))}</dd>
+                </div>
+                <div>
                   <dt>概要</dt>
                   <dd>{processedCount} 章</dd>
                 </div>
@@ -3358,9 +3452,10 @@ ${context}
                               <path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z" />
                             </svg>
                           </button>
-                          <p>
-                            {libraryBook.book.chapters.length} 章 · 概要 {Object.keys(libraryBook.summaries).length} 章
-                          </p>
+	                          <p>
+	                            {libraryBook.book.chapters.length} 章 · {formatWordCount(countBookWords(libraryBook.book))} · 概要{' '}
+	                            {Object.keys(libraryBook.summaries).length} 章
+	                          </p>
                         </div>
                       )}
                       <div className="book-row-actions">
@@ -3385,14 +3480,14 @@ ${context}
           <label className="upload-box">
             <input
               type="file"
-              accept=".txt,text/plain"
+              accept=".txt,.epub,text/plain,application/epub+zip"
               onChange={(event) => {
                 const file = event.target.files?.[0]
                 if (file) void handleImport(file)
               }}
             />
-            <span>{state.books.length ? '导入新 txt 到书架' : '选择 txt 文件'}</span>
-            <small>支持“第1章 / 第一章 / Chapter 1”等常见标题格式</small>
+            <span>{state.books.length ? '导入新书到书架' : '选择 txt / epub 文件'}</span>
+            <small>txt 支持常见章节标题；epub 会按目录 spine 导入章节</small>
           </label>
 
           <div className="database-backup-card">
@@ -5796,9 +5891,20 @@ ${context}
             </div>
           </aside>
 
-          <article className="chapter-reader" ref={readerRef}>
+          <article
+            className={`chapter-reader reader-theme-${state.readerTheme}`}
+            ref={readerRef}
+            style={{
+              '--reader-content-width': `${state.readerContentWidth}px`,
+              '--reader-line-height': state.readerLineHeight,
+              '--reader-paragraph-spacing': `${state.readerParagraphSpacing}em`,
+            } as CSSProperties}
+          >
             {activeChapter && (
               <>
+                <div className="reader-progress" aria-hidden="true">
+                  <span style={{ width: `${readerProgress}%` }} />
+                </div>
                 <div className="chapter-heading">
                   <p className="eyebrow">
                     位置 {activeChapter.index}/{state.book.chapters.length}
@@ -5843,11 +5949,101 @@ ${context}
                       />
                       <span>{state.readerFontSize}px</span>
                     </label>
+                    <label htmlFor="reader-line-height">
+                      行高
+                      <input
+                        id="reader-line-height"
+                        type="range"
+                        min="1.5"
+                        max="2.6"
+                        step="0.05"
+                        value={state.readerLineHeight}
+                        onChange={(event) =>
+                          setState((current) => ({
+                            ...current,
+                            readerLineHeight: Number(event.target.value),
+                          }))
+                        }
+                      />
+                      <span>{state.readerLineHeight.toFixed(2)}</span>
+                    </label>
+                    <label htmlFor="reader-content-width">
+                      宽度
+                      <input
+                        id="reader-content-width"
+                        type="range"
+                        min="640"
+                        max="1040"
+                        step="20"
+                        value={state.readerContentWidth}
+                        onChange={(event) =>
+                          setState((current) => ({
+                            ...current,
+                            readerContentWidth: Number(event.target.value),
+                          }))
+                        }
+                      />
+                      <span>{state.readerContentWidth}px</span>
+                    </label>
+                    <label htmlFor="reader-paragraph-spacing">
+                      段距
+                      <input
+                        id="reader-paragraph-spacing"
+                        type="range"
+                        min="0.5"
+                        max="1.8"
+                        step="0.1"
+                        value={state.readerParagraphSpacing}
+                        onChange={(event) =>
+                          setState((current) => ({
+                            ...current,
+                            readerParagraphSpacing: Number(event.target.value),
+                          }))
+                        }
+                      />
+                      <span>{state.readerParagraphSpacing.toFixed(1)}</span>
+                    </label>
+                    <label htmlFor="reader-theme">
+                      主题
+                      <select
+                        id="reader-theme"
+                        value={state.readerTheme}
+                        onChange={(event) =>
+                          setState((current) => ({
+                            ...current,
+                            readerTheme: event.target.value as typeof current.readerTheme,
+                          }))
+                        }
+                      >
+                        <option value="paper">纸张</option>
+                        <option value="green">护眼</option>
+                        <option value="night">夜间</option>
+                      </select>
+                    </label>
                   </div>
+                  {selectedReaderText && (
+	                    <div className="reader-selection-actions">
+	                      <span>{selectedReaderText}</span>
+	                      <button type="button" className="ghost-button" onClick={searchSelectedReaderText}>
+	                        智能搜索
+	                      </button>
+	                      <button
+	                        type="button"
+	                        className="ghost-button"
+	                        onClick={searchSelectedReaderTextInKnowledgeGraph}
+	                      >
+	                        图谱搜索
+	                      </button>
+	                      <button type="button" className="ghost-button" onClick={() => setSelectedReaderText('')}>
+	                        关闭
+                      </button>
+                    </div>
+                  )}
                 </div>
                 <div
                   className="chapter-content"
                   style={{ fontSize: `${state.readerFontSize}px` }}
+                  onMouseUp={captureReaderSelection}
                 >
                   {activeChapter.content.split('\n').map((line, index) => (
                     <p key={`${activeChapter.id}-${index}`}>{line || ' '}</p>
