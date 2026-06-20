@@ -453,6 +453,40 @@ button:disabled {
   font-weight: 700;
 }
 
+.database-backup-card .offline-import-detail {
+  margin-top: 4px;
+  color: #5e5549;
+  font-size: 12px;
+}
+
+.offline-import-progress {
+  position: relative;
+  overflow: hidden;
+  width: min(420px, 100%);
+  height: 8px;
+  margin-top: 10px;
+  border-radius: 999px;
+  background: #e8dfd2;
+}
+
+.offline-import-progress span {
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 42%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #2c5b4b, #8aa99a);
+  animation: offline-import-progress 1.1s ease-in-out infinite;
+}
+
+@keyframes offline-import-progress {
+  0% {
+    transform: translateX(-100%);
+  }
+  100% {
+    transform: translateX(240%);
+  }
+}
+
 .book-list-card {
   padding: 18px;
 }

@@ -516,6 +516,7 @@ function App() {
   const [databaseBackupStatus, setDatabaseBackupStatus] = useState('')
   const [isOfflineImportBusy, setIsOfflineImportBusy] = useState(false)
   const [offlineImportStatus, setOfflineImportStatus] = useState('')
+  const [offlineImportDetail, setOfflineImportDetail] = useState('')
   const [editingBookTitle, setEditingBookTitle] = useState(false)
   const [bookTitleDraft, setBookTitleDraft] = useState('')
   const [editingBookListId, setEditingBookListId] = useState<string | null>(null)
@@ -1394,12 +1395,36 @@ function App() {
 
   async function importOfflineBookData(file: File) {
     setKgError('')
-    setOfflineImportStatus('')
+    setOfflineImportStatus('正在读取离线扫描数据包...')
+    setOfflineImportDetail(`${file.name} · ${(file.size / 1024 / 1024).toFixed(1)} MB`)
     setIsOfflineImportBusy(true)
 
     try {
+      const fileText = await file.text()
+      setOfflineImportStatus('正在校验数据包...')
+      await new Promise<void>((resolve) => window.setTimeout(resolve, 0))
+
+      const dataPackage = JSON.parse(fileText) as {
+        book?: { title?: string }
+        counts?: {
+          kgChapterExtractions?: number
+          kgEntities?: number
+          kgRelations?: number
+          summaries?: number
+        }
+      }
+      const counts = dataPackage.counts
+      const packageTitle = dataPackage.book?.title ?? file.name
+      setOfflineImportStatus(`正在导入《${packageTitle}》...`)
+      setOfflineImportDetail(
+        counts
+          ? `概要 ${counts.summaries ?? 0} · 图谱扫描 ${counts.kgChapterExtractions ?? 0} · 实体 ${counts.kgEntities ?? 0} · 关系 ${counts.kgRelations ?? 0}`
+          : '正在写入概要和知识图谱数据',
+      )
+      await new Promise<void>((resolve) => window.setTimeout(resolve, 0))
+
       const response = await fetch('/api/offline/import', {
-        body: await file.text(),
+        body: fileText,
         headers: { 'Content-Type': 'application/json' },
         method: 'POST',
       })
@@ -1417,6 +1442,8 @@ function App() {
         throw new Error(payload.error ?? '导入离线扫描数据失败。')
       }
 
+      setOfflineImportStatus('导入完成，正在刷新书架状态...')
+      setOfflineImportDetail('正在同步概要快照和图谱统计')
       const stateResponse = await fetch('/api/state')
       if (stateResponse.ok) {
         const statePayload = (await stateResponse.json()) as { state?: unknown }
@@ -1432,9 +1459,11 @@ function App() {
       setOfflineImportStatus(
         `已导入《${payload.title ?? '当前书籍'}》：概要 ${payload.summaryCount ?? 0}，图谱扫描 ${payload.extractionCount ?? 0}，实体 ${payload.entityCount ?? 0}，关系 ${payload.relationCount ?? 0}。`,
       )
+      setOfflineImportDetail('')
     } catch (err) {
       const message = err instanceof Error ? err.message : '导入离线扫描数据失败。'
       setOfflineImportStatus(message)
+      setOfflineImportDetail('')
       setKgError(message)
     } finally {
       setIsOfflineImportBusy(false)
@@ -3651,6 +3680,12 @@ ${context}
               <h3>离线扫描数据</h3>
               <p>导入离线扫描器为单本书生成的数据包，写入该书概要和知识图谱。</p>
               {offlineImportStatus && <p className="database-backup-status">{offlineImportStatus}</p>}
+              {offlineImportDetail && <p className="offline-import-detail">{offlineImportDetail}</p>}
+              {isOfflineImportBusy && (
+                <div className="offline-import-progress" aria-label="离线扫描数据导入中">
+                  <span />
+                </div>
+              )}
             </div>
             <div className="book-actions">
               <button
@@ -3659,7 +3694,7 @@ ${context}
                 disabled={isOfflineImportBusy}
                 onClick={() => offlineImportInputRef.current?.click()}
               >
-                导入扫描数据
+                {isOfflineImportBusy ? '导入中...' : '导入扫描数据'}
               </button>
             </div>
             <input
