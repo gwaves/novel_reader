@@ -1215,8 +1215,11 @@ function syncLibraryBook(
   bookId: string,
   updates: Partial<Pick<LibraryBook, 'activeChapterId' | 'summaries'>>,
 ): StoredState {
+  const isActive = current.activeBookId === bookId
   return {
     ...current,
+    ...(isActive && updates.summaries ? { summaries: updates.summaries } : {}),
+    ...(isActive && updates.activeChapterId ? { activeChapterId: updates.activeChapterId } : {}),
     books: current.books.map((entry) =>
       entry.book.id === bookId ? { ...entry, ...updates } : entry,
     ),
