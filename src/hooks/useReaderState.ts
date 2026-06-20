@@ -589,6 +589,19 @@ function decodeTextFile(file: File): Promise<string> {
 
     reader.onload = () => {
       const buffer = reader.result as ArrayBuffer
+      const bytes = new Uint8Array(buffer)
+
+      // UTF-16 BOM
+      if (bytes.length >= 2) {
+        if (bytes[0] === 0xff && bytes[1] === 0xfe) {
+          resolve(new TextDecoder('utf-16le').decode(buffer))
+          return
+        }
+        if (bytes[0] === 0xfe && bytes[1] === 0xff) {
+          resolve(new TextDecoder('utf-16be').decode(buffer))
+          return
+        }
+      }
 
       // Try UTF-8 first; only fall back to GB18030 if the bytes are not valid UTF-8.
       try {
