@@ -291,6 +291,12 @@
   color: #8a5a2b;
 }
 
+.mobile-match-type.chunk,
+.mobile-match-type.entity-first {
+  background: #e6f7ff;
+  color: #2a5d8a;
+}
+
 .mobile-match-type.both {
   background: #e8e4f3;
   color: #5b4a7a;

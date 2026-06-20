@@ -246,9 +246,10 @@ type RagSearchResult = {
     keyPoints: string[]
   }
   similarity: number
-  matchType: 'vector' | 'entity' | 'both' | 'entity-first'
+  matchType: 'vector' | 'chunk' | 'entity' | 'both' | 'entity-first'
   matchedEntities: string[]
   contentSnippet: string | null
+  chunkIndex?: number | null
 }
 
 type RagEntityMatch = {
@@ -262,8 +263,13 @@ type RagEntityMatch = {
 
 type EmbeddingStatus = {
   totalChapters: number
+  summarizedChapters?: number
+  missingSummaries?: number
   embeddedChapters: number
   missingChapters: number
+  totalChunks?: number
+  embeddedChunks?: number
+  missingChunks?: number
   model: string
   dimension: number | null
 }
@@ -2143,10 +2149,12 @@ function App() {
       const batchSize = config.provider === 'ollama' ? 5 : 50
       let completed = 0
       let failed = 0
+      let chunkCompleted = 0
+      let chunkFailed = 0
 
       for (let i = 0; i < chapterIds.length; i += batchSize) {
         const batch = chapterIds.slice(i, i + batchSize)
-        setEmbeddingProgress(`正在生成 embedding：${completed + failed}/${chapterIds.length}...`)
+        setEmbeddingProgress(`正在生成概要与正文片段 embedding：${completed + failed}/${chapterIds.length} 章...`)
 
         const response = await fetch('/api/rag/embeddings/batch', {
           body: JSON.stringify({
@@ -2166,6 +2174,8 @@ function App() {
           completed: number
           failed: number
           total: number
+          chunkCompleted?: number
+          chunkFailed?: number
           error?: string
         }
         if (!response.ok) {
@@ -2173,9 +2183,13 @@ function App() {
         }
         completed += payload.completed
         failed += payload.failed
+        chunkCompleted += payload.chunkCompleted ?? 0
+        chunkFailed += payload.chunkFailed ?? 0
       }
 
-      setEmbeddingProgress(`已生成 ${completed}/${chapterIds.length}，失败 ${failed} 个。`)
+      setEmbeddingProgress(
+        `已处理 ${completed}/${chapterIds.length} 章，失败 ${failed} 章；正文片段 ${chunkCompleted} 个，失败 ${chunkFailed} 个。`,
+      )
       const status = await fetchEmbeddingStatus()
       if (status?.dimension) {
         setState((current) => ({
@@ -5889,7 +5903,7 @@ ${context}
             <div>
               <p className="eyebrow">智能搜索</p>
               <h2>{state.book.title}</h2>
-              <p>基于章节摘要和知识图谱，回答跨章节问题。</p>
+              <p>基于章节摘要、正文片段和知识图谱，回答跨章节问题。</p>
             </div>
           </div>
 
@@ -5898,17 +5912,31 @@ ${context}
               <span>
                 Embedding 覆盖：{embeddingStatus.embeddedChapters}/{embeddingStatus.totalChapters} 章
                 {embeddingStatus.missingChapters > 0 && `（还差 ${embeddingStatus.missingChapters} 章）`}
+                {typeof embeddingStatus.summarizedChapters === 'number' &&
+                  ` · 概要 ${embeddingStatus.summarizedChapters}/${embeddingStatus.totalChapters}`}
+                {typeof embeddingStatus.embeddedChunks === 'number' &&
+                  typeof embeddingStatus.totalChunks === 'number' &&
+                  ` · 正文片段 ${embeddingStatus.embeddedChunks}/${embeddingStatus.totalChunks}`}
                 {typeof embeddingStatus.dimension === 'number' && ` · 维度 ${embeddingStatus.dimension}`}
               </span>
+              {Boolean(embeddingStatus.missingSummaries) && (
+                <small className="embedding-warning">
+                  还有 {embeddingStatus.missingSummaries} 章没有概要；当前只能为已有概要的章节生成 embedding，建议先补齐概要再做全书搜索。
+                </small>
+              )}
               {embeddingStatus && (
                 <button
                   type="button"
-                  onClick={() => void handleGenerateEmbeddings(embeddingStatus.missingChapters === 0)}
+                  onClick={() =>
+                    void handleGenerateEmbeddings(
+                      embeddingStatus.missingChapters === 0 && (embeddingStatus.missingChunks ?? 0) === 0,
+                    )
+                  }
                   disabled={isGeneratingEmbeddings}
                 >
                   {isGeneratingEmbeddings
                     ? '生成中...'
-                    : embeddingStatus.missingChapters > 0
+                    : embeddingStatus.missingChapters > 0 || (embeddingStatus.missingChunks ?? 0) > 0
                       ? '生成 embedding'
                       : '重新生成 embedding'}
                 </button>
@@ -6001,6 +6029,8 @@ ${context}
                     <span className={`match-type ${result.matchType}`}>
                       {result.matchType === 'vector'
                         ? '语义'
+                        : result.matchType === 'chunk'
+                          ? '原文'
                         : result.matchType === 'entity'
                           ? '实体'
                           : result.matchType === 'entity-first'

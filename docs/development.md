@@ -133,12 +133,12 @@ See [backend-api.md](backend-api.md) for the backend API reference.
 
 ## RAG Search
 
-RAG search combines summary embeddings with knowledge graph entity matching.
+RAG search combines summary embeddings, chapter chunk embeddings, and knowledge graph entity matching.
 
-- Embeddings are generated through `/api/rag/embeddings/batch` and stored in `summary_embeddings`.
+- Embeddings are generated through `/api/rag/embeddings/batch` and stored in `summary_embeddings` plus `chapter_chunk_embeddings`.
 - Embedding configuration is separate from the text-generation model configuration and is validated through `/api/rag/embeddings/validate` so browser CORS does not block Ollama/OpenAI-compatible checks.
-- Search calls `/api/rag/search`, which fuses vector recall and entity recall with reciprocal-rank-style scoring.
-- Search results include chapter summaries, matched entity names, similarity, match type, and optional chapter snippets.
+- Search calls `/api/rag/search`, which fuses summary vector recall, best-per-chapter chunk recall, and entity recall with reciprocal-rank-style scoring.
+- Search results include chapter summaries, matched entity names, similarity, match type, and optional best-matching chunk snippets.
 - If fewer than 80% of chapters have embeddings for the selected model, the API returns `409 EMBEDDINGS_NOT_READY`.
 - The desktop and mobile UIs can generate embeddings, search, and ask the configured generation model to answer from retrieved results.
 

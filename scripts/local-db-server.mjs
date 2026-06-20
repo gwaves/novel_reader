@@ -169,6 +169,24 @@ db.exec(`
     generated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
   );
   CREATE INDEX IF NOT EXISTS idx_summary_embeddings_book ON summary_embeddings(book_id);
+
+  CREATE TABLE IF NOT EXISTS chapter_chunk_embeddings (
+    id TEXT PRIMARY KEY,
+    book_id TEXT NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+    chapter_id TEXT NOT NULL REFERENCES chapters(id) ON DELETE CASCADE,
+    chapter_index INTEGER NOT NULL,
+    chunk_index INTEGER NOT NULL,
+    start_offset INTEGER NOT NULL,
+    end_offset INTEGER NOT NULL,
+    text TEXT NOT NULL,
+    model TEXT NOT NULL,
+    dimension INTEGER NOT NULL,
+    embedding_json TEXT NOT NULL,
+    generated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(chapter_id, chunk_index, model)
+  );
+  CREATE INDEX IF NOT EXISTS idx_chunk_embeddings_book_model ON chapter_chunk_embeddings(book_id, model);
+  CREATE INDEX IF NOT EXISTS idx_chunk_embeddings_chapter ON chapter_chunk_embeddings(chapter_id, model);
 `)
 
 // Migration: add first/last chapter index to relations if missing
@@ -267,8 +285,14 @@ const countChaptersForBookStatement = db.prepare(`
 const countEmbeddingsForBookStatement = db.prepare(`
   SELECT COUNT(*) AS count FROM summary_embeddings WHERE book_id = ? AND model = ?
 `)
+const countChunkEmbeddingsForBookStatement = db.prepare(`
+  SELECT COUNT(*) AS count FROM chapter_chunk_embeddings WHERE book_id = ? AND model = ?
+`)
 const getEmbeddingDimensionStatement = db.prepare(`
   SELECT dimension FROM summary_embeddings WHERE book_id = ? AND model = ? LIMIT 1
+`)
+const getChunkEmbeddingDimensionStatement = db.prepare(`
+  SELECT dimension FROM chapter_chunk_embeddings WHERE book_id = ? AND model = ? LIMIT 1
 `)
 const listEmbeddingsForBookStatement = db.prepare(`
   SELECT
@@ -286,6 +310,11 @@ const listEmbeddingsForBookStatement = db.prepare(`
 const getEmbeddingForChapterStatement = db.prepare(`
   SELECT embedding_json AS embeddingJson, model, dimension
   FROM summary_embeddings
+  WHERE chapter_id = ? AND model = ?
+`)
+const countChunkEmbeddingsForChapterStatement = db.prepare(`
+  SELECT COUNT(*) AS count
+  FROM chapter_chunk_embeddings
   WHERE chapter_id = ? AND model = ?
 `)
 const getMissingEmbeddingChapterIdsStatement = db.prepare(`
@@ -306,6 +335,18 @@ const getSummaryChapterIdsForBookStatement = db.prepare(`
   WHERE c.book_id = ?
   ORDER BY c.chapter_index ASC
 `)
+const getChapterRowsForBookStatement = db.prepare(`
+  SELECT id, book_id AS bookId, chapter_index AS chapterIndex, title, content, word_count AS wordCount
+  FROM chapters
+  WHERE book_id = ?
+  ORDER BY chapter_index ASC
+`)
+const getChapterRowsByIdsStatement = db.prepare(`
+  SELECT id, book_id AS bookId, chapter_index AS chapterIndex, title, content, word_count AS wordCount
+  FROM chapters
+  WHERE book_id = ? AND id IN (SELECT value FROM json_each(?))
+  ORDER BY chapter_index ASC
+`)
 const upsertEmbeddingStatement = db.prepare(`
   INSERT INTO summary_embeddings (chapter_id, book_id, model, dimension, embedding_json, generated_at)
   VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
@@ -315,6 +356,55 @@ const upsertEmbeddingStatement = db.prepare(`
     dimension = excluded.dimension,
     embedding_json = excluded.embedding_json,
     generated_at = excluded.generated_at
+`)
+const upsertChunkEmbeddingStatement = db.prepare(`
+  INSERT INTO chapter_chunk_embeddings (
+    id,
+    book_id,
+    chapter_id,
+    chapter_index,
+    chunk_index,
+    start_offset,
+    end_offset,
+    text,
+    model,
+    dimension,
+    embedding_json,
+    generated_at
+  )
+  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+  ON CONFLICT(chapter_id, chunk_index, model) DO UPDATE SET
+    id = excluded.id,
+    book_id = excluded.book_id,
+    chapter_index = excluded.chapter_index,
+    start_offset = excluded.start_offset,
+    end_offset = excluded.end_offset,
+    text = excluded.text,
+    dimension = excluded.dimension,
+    embedding_json = excluded.embedding_json,
+    generated_at = excluded.generated_at
+`)
+const deleteChunkEmbeddingsForChapterStatement = db.prepare(`
+  DELETE FROM chapter_chunk_embeddings
+  WHERE chapter_id = ? AND model = ?
+`)
+const listChunkEmbeddingsForBookStatement = db.prepare(`
+  SELECT
+    cce.id,
+    cce.chapter_id AS chapterId,
+    cce.chapter_index AS chapterIndex,
+    c.title AS chapterTitle,
+    cce.chunk_index AS chunkIndex,
+    cce.start_offset AS startOffset,
+    cce.end_offset AS endOffset,
+    cce.text,
+    cce.embedding_json AS embeddingJson,
+    cce.model,
+    cce.dimension
+  FROM chapter_chunk_embeddings cce
+  JOIN chapters c ON c.id = cce.chapter_id
+  WHERE cce.book_id = ? AND cce.model = ?
+  ORDER BY cce.chapter_index ASC, cce.chunk_index ASC
 `)
 const listEntitiesForBookStatement = db.prepare(`
   SELECT
@@ -1417,10 +1507,11 @@ function cosineSimilarity(a, b) {
   return dotProduct(a, b)
 }
 
-function rrfScore(rankVector, rankEntity, k = 60) {
+function rrfScore(rankVector, rankEntity, k = 60, rankChunk = 0) {
   const scoreVector = rankVector > 0 ? 1 / (k + rankVector) : 0
   const scoreEntity = rankEntity > 0 ? 1 / (k + rankEntity) : 0
-  return scoreVector + scoreEntity
+  const scoreChunk = rankChunk > 0 ? 1 / (k + rankChunk) : 0
+  return scoreVector + scoreEntity + scoreChunk
 }
 
 function isTemporalAppearanceQuery(query) {
@@ -1436,6 +1527,121 @@ function buildSummaryText(summary) {
     parts.push(...keyPoints)
   }
   return parts.join(' ').trim()
+}
+
+const CHUNK_TARGET_CHARS = 1200
+const CHUNK_OVERLAP_CHARS = 160
+
+function normalizeChunkText(text) {
+  return String(text ?? '')
+    .replace(/\r\n/g, '\n')
+    .replace(/[ \t]+/g, ' ')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
+}
+
+function splitChapterIntoChunks(chapter) {
+  const content = normalizeChunkText(chapter?.content)
+  if (!content) return []
+
+  const chunks = []
+  const paragraphs = content.split(/\n{2,}/).map((paragraph) => paragraph.trim()).filter(Boolean)
+  let buffer = ''
+  let bufferStart = 0
+  let cursor = 0
+
+  const pushChunk = (text, startOffset, endOffset) => {
+    const normalized = normalizeChunkText(text)
+    if (!normalized) return
+    chunks.push({
+      id: `${chapter.id}:chunk:${chunks.length}`,
+      bookId: chapter.bookId,
+      chapterId: chapter.id,
+      chapterIndex: chapter.chapterIndex,
+      chunkIndex: chunks.length,
+      startOffset,
+      endOffset,
+      text: normalized,
+    })
+  }
+
+  for (const paragraph of paragraphs) {
+    const paragraphStart = content.indexOf(paragraph, cursor)
+    const start = paragraphStart >= 0 ? paragraphStart : cursor
+    const end = start + paragraph.length
+    cursor = end
+
+    if (paragraph.length > CHUNK_TARGET_CHARS) {
+      if (buffer) {
+        pushChunk(buffer, bufferStart, start)
+        buffer = buffer.slice(Math.max(0, buffer.length - CHUNK_OVERLAP_CHARS))
+        bufferStart = Math.max(0, start - buffer.length)
+      }
+      for (let i = 0; i < paragraph.length; i += CHUNK_TARGET_CHARS - CHUNK_OVERLAP_CHARS) {
+        const piece = paragraph.slice(i, i + CHUNK_TARGET_CHARS)
+        pushChunk(piece, start + i, Math.min(end, start + i + piece.length))
+      }
+      buffer = ''
+      bufferStart = end
+      continue
+    }
+
+    const nextBuffer = buffer ? `${buffer}\n\n${paragraph}` : paragraph
+    if (nextBuffer.length > CHUNK_TARGET_CHARS && buffer) {
+      pushChunk(buffer, bufferStart, start)
+      const overlap = buffer.slice(Math.max(0, buffer.length - CHUNK_OVERLAP_CHARS))
+      buffer = overlap ? `${overlap}\n\n${paragraph}` : paragraph
+      bufferStart = Math.max(0, start - overlap.length)
+    } else {
+      if (!buffer) bufferStart = start
+      buffer = nextBuffer
+    }
+  }
+
+  if (buffer) {
+    pushChunk(buffer, bufferStart, content.length)
+  }
+
+  return chunks
+}
+
+function getEmbeddingCoverage(bookId, model) {
+  const chapters = getChapterRowsForBookStatement.all(bookId)
+  const totalChapters = chapters.length
+  const summarizedChapters = getSummaryChapterIdsForBookStatement.all(bookId).length
+  const totalChunks = chapters.reduce((sum, chapter) => sum + splitChapterIntoChunks(chapter).length, 0)
+  const embeddedChapters = countEmbeddingsForBookStatement.get(bookId, model)?.count ?? 0
+  const embeddedChunks = countChunkEmbeddingsForBookStatement.get(bookId, model)?.count ?? 0
+  const dimensionRow = getEmbeddingDimensionStatement.get(bookId, model)
+    ?? getChunkEmbeddingDimensionStatement.get(bookId, model)
+
+  return {
+    totalChapters,
+    summarizedChapters,
+    missingSummaries: Math.max(0, totalChapters - summarizedChapters),
+    embeddedChapters,
+    missingChapters: Math.max(0, totalChapters - embeddedChapters),
+    totalChunks,
+    embeddedChunks,
+    missingChunks: Math.max(0, totalChunks - embeddedChunks),
+    model,
+    dimension: dimensionRow?.dimension ?? null,
+  }
+}
+
+function getEmbeddingTargetChapterIds(bookId, model, force = false) {
+  const summaryIds = new Set(getSummaryChapterIdsForBookStatement.all(bookId).map((row) => row.chapterId))
+  const chapters = getChapterRowsForBookStatement.all(bookId).filter((chapter) => summaryIds.has(chapter.id))
+
+  return chapters
+    .filter((chapter) => {
+      if (force) return true
+      const hasSummaryEmbedding = Boolean(getEmbeddingForChapterStatement.get(chapter.id, model))
+      const expectedChunks = splitChapterIntoChunks(chapter).length
+      const chunkCount = countChunkEmbeddingsForChapterStatement.get(chapter.id, model)?.count ?? 0
+      return !hasSummaryEmbedding || chunkCount < expectedChunks
+    })
+    .map((chapter) => chapter.id)
 }
 
 const EMBEDDING_BATCH_SIZE_OLLAMA = 5
@@ -2077,10 +2283,41 @@ async function searchRag(bookId, query, topK, includeSnippets, embeddingConfig) 
     .filter((item) => Number.isFinite(item.similarity))
     .sort((a, b) => b.similarity - a.similarity)
 
+  const chunkRows = listChunkEmbeddingsForBookStatement.all(bookId, model)
+  const chunkRanked = chunkRows
+    .map((row) => {
+      const embedding = l2Normalize(safeJsonParse(row.embeddingJson, []))
+      const similarity = cosineSimilarity(queryEmbedding, embedding)
+      return {
+        chapterId: row.chapterId,
+        chapterIndex: row.chapterIndex,
+        chapterTitle: row.chapterTitle,
+        chunkIndex: row.chunkIndex,
+        text: row.text,
+        similarity,
+      }
+    })
+    .filter((item) => Number.isFinite(item.similarity))
+    .sort((a, b) => b.similarity - a.similarity)
+
+  const bestChunkByChapterId = new Map()
+  for (const item of chunkRanked) {
+    if (!bestChunkByChapterId.has(item.chapterId)) {
+      bestChunkByChapterId.set(item.chapterId, item)
+    }
+  }
+  const chunkChapterRanked = Array.from(bestChunkByChapterId.values())
+    .sort((a, b) => b.similarity - a.similarity)
+
   // Build fused ranking.
   const vectorRankByChapterId = new Map()
   vectorRanked.forEach((item, index) => {
     vectorRankByChapterId.set(item.chapterId, index + 1)
+  })
+
+  const chunkRankByChapterId = new Map()
+  chunkChapterRanked.forEach((item, index) => {
+    chunkRankByChapterId.set(item.chapterId, index + 1)
   })
 
   const entityRankByChapterId = new Map()
@@ -2093,25 +2330,36 @@ async function searchRag(bookId, query, topK, includeSnippets, embeddingConfig) 
 
   const candidateChapterIds = new Set([
     ...vectorRanked.map((item) => item.chapterId),
+    ...chunkChapterRanked.map((item) => item.chapterId),
     ...entityRecalledList.map((item) => item.chapterId),
   ])
 
   const fused = Array.from(candidateChapterIds)
     .map((chapterId) => {
       const vectorItem = vectorRanked.find((item) => item.chapterId === chapterId)
-      const similarity = vectorItem?.similarity ?? 0
+      const chunkItem = bestChunkByChapterId.get(chapterId)
+      const similarity = Math.max(vectorItem?.similarity ?? 0, chunkItem?.similarity ?? 0)
       const vectorRank = vectorRankByChapterId.get(chapterId) || 0
+      const chunkRank = chunkRankByChapterId.get(chapterId) || 0
       const entityRank = entityRankByChapterId.get(chapterId) || 0
       const entityCount = entityRecalledChapterIds.get(chapterId)?.size ?? 0
-      const matchType = vectorRank > 0 && entityRank > 0 ? 'both' : vectorRank > 0 ? 'vector' : 'entity'
+      const hasVector = vectorRank > 0 || chunkRank > 0
+      const matchType = hasVector && entityRank > 0
+        ? 'both'
+        : chunkRank > 0
+          ? 'chunk'
+          : vectorRank > 0
+            ? 'vector'
+            : 'entity'
       return {
         chapterId,
-        chapterIndex: vectorItem?.chapterIndex ?? 0,
-        chapterTitle: vectorItem?.chapterTitle ?? '',
+        chapterIndex: vectorItem?.chapterIndex ?? chunkItem?.chapterIndex ?? 0,
+        chapterTitle: vectorItem?.chapterTitle ?? chunkItem?.chapterTitle ?? '',
         similarity,
         matchType,
         entityCount,
-        score: rrfScore(vectorRank, entityRank),
+        bestChunk: chunkItem ?? null,
+        score: rrfScore(vectorRank, entityRank, 60, chunkRank),
       }
     })
     .sort((a, b) => b.score - a.score)
@@ -2133,8 +2381,11 @@ async function searchRag(bookId, query, topK, includeSnippets, embeddingConfig) 
 
     let contentSnippet = null
     if (includeSnippets) {
-      const snippetRow = getChapterContentSnippetStatement.get(item.chapterId)
-      contentSnippet = snippetRow?.snippet || null
+      contentSnippet = item.bestChunk?.text || null
+      if (!contentSnippet) {
+        const snippetRow = getChapterContentSnippetStatement.get(item.chapterId)
+        contentSnippet = snippetRow?.snippet || null
+      }
     }
 
     results.push({
@@ -2150,6 +2401,7 @@ async function searchRag(bookId, query, topK, includeSnippets, embeddingConfig) 
       matchType: item.matchType,
       matchedEntities: matchedEntityNames,
       contentSnippet,
+      chunkIndex: item.bestChunk?.chunkIndex ?? null,
     })
   }
 
@@ -4365,45 +4617,88 @@ const server = createServer(async (request, response) => {
       }
 
       let summaries
+      let chapters
       if (requestedChapterIds && requestedChapterIds.length > 0) {
         summaries = requestedChapterIds
           .map((id) => getSummaryForChapterStatement.get(id))
           .filter(Boolean)
+        chapters = getChapterRowsByIdsStatement.all(bookId, JSON.stringify(requestedChapterIds))
       } else {
         summaries = getSummariesForBookStatement.all(bookId)
+        chapters = getChapterRowsForBookStatement.all(bookId)
       }
+      const summaryByChapterId = new Map(summaries.map((summary) => [summary.chapterId, summary]))
 
-      const targetSummaries = force
-        ? summaries
-        : summaries.filter((summary) => {
-            const existing = getEmbeddingForChapterStatement.get(summary.chapterId, model)
-            return !existing
-          })
+      const targetChapters = chapters.filter((chapter) => {
+        if (!summaryByChapterId.has(chapter.id)) return false
+        if (force) return true
+
+        const expectedChunks = splitChapterIntoChunks(chapter).length
+        const existingChunks = countChunkEmbeddingsForChapterStatement.get(chapter.id, model)?.count ?? 0
+        const existingSummary = getEmbeddingForChapterStatement.get(chapter.id, model)
+        return !existingSummary || existingChunks < expectedChunks
+      })
 
       const embeddingConfig = { provider, model, baseUrl, apiKey }
       const batchSize = provider === 'ollama' ? EMBEDDING_BATCH_SIZE_OLLAMA : EMBEDDING_BATCH_SIZE_OPENAI
       let completed = 0
       let failed = 0
+      let chunkCompleted = 0
+      let chunkFailed = 0
 
-      for (let i = 0; i < targetSummaries.length; i += batchSize) {
-        const batch = targetSummaries.slice(i, i + batchSize)
+      for (let i = 0; i < targetChapters.length; i += batchSize) {
+        const batch = targetChapters.slice(i, i + batchSize)
         await Promise.all(
-          batch.map(async (summary) => {
+          batch.map(async (chapter) => {
+            const summary = summaryByChapterId.get(chapter.id)
             const text = buildSummaryText(summary)
             if (!text) {
               failed++
               return
             }
             try {
-              const embeddingRaw = await generateEmbedding(text, embeddingConfig)
-              const embedding = l2Normalize(embeddingRaw)
-              upsertEmbeddingStatement.run(
-                summary.chapterId,
-                bookId,
-                model,
-                embedding.length,
-                JSON.stringify(embedding),
-              )
+              if (force || !getEmbeddingForChapterStatement.get(chapter.id, model)) {
+                const embeddingRaw = await generateEmbedding(text, embeddingConfig)
+                const embedding = l2Normalize(embeddingRaw)
+                upsertEmbeddingStatement.run(
+                  chapter.id,
+                  bookId,
+                  model,
+                  embedding.length,
+                  JSON.stringify(embedding),
+                )
+              }
+
+              const chunks = splitChapterIntoChunks(chapter)
+              const existingChunks = countChunkEmbeddingsForChapterStatement.get(chapter.id, model)?.count ?? 0
+              if (force || existingChunks < chunks.length) {
+                deleteChunkEmbeddingsForChapterStatement.run(chapter.id, model)
+                for (const chunk of chunks) {
+                  try {
+                    const chunkEmbeddingRaw = await generateEmbedding(
+                      `第 ${chapter.chapterIndex} 章：${chapter.title}\n\n${chunk.text}`,
+                      embeddingConfig,
+                    )
+                    const chunkEmbedding = l2Normalize(chunkEmbeddingRaw)
+                    upsertChunkEmbeddingStatement.run(
+                      chunk.id,
+                      bookId,
+                      chapter.id,
+                      chapter.chapterIndex,
+                      chunk.chunkIndex,
+                      chunk.startOffset,
+                      chunk.endOffset,
+                      chunk.text,
+                      model,
+                      chunkEmbedding.length,
+                      JSON.stringify(chunkEmbedding),
+                    )
+                    chunkCompleted++
+                  } catch {
+                    chunkFailed++
+                  }
+                }
+              }
               completed++
             } catch {
               failed++
@@ -4415,7 +4710,9 @@ const server = createServer(async (request, response) => {
       sendJson(response, 200, {
         completed,
         failed,
-        total: targetSummaries.length,
+        total: targetChapters.length,
+        chunkCompleted,
+        chunkFailed,
       })
       return
     }
@@ -4462,17 +4759,7 @@ const server = createServer(async (request, response) => {
         return
       }
 
-      const totalChapters = countChaptersForBookStatement.get(bookId)?.count ?? 0
-      const embeddedChapters = countEmbeddingsForBookStatement.get(bookId, model)?.count ?? 0
-      const dimensionRow = getEmbeddingDimensionStatement.get(bookId, model)
-
-      sendJson(response, 200, {
-        totalChapters,
-        embeddedChapters,
-        missingChapters: Math.max(0, totalChapters - embeddedChapters),
-        model,
-        dimension: dimensionRow?.dimension ?? null,
-      })
+      sendJson(response, 200, getEmbeddingCoverage(bookId, model))
       return
     }
 
@@ -4489,8 +4776,7 @@ const server = createServer(async (request, response) => {
         return
       }
 
-      const rows = getMissingEmbeddingChapterIdsStatement.all(bookId, model)
-      sendJson(response, 200, { chapterIds: rows.map((row) => row.chapterId) })
+      sendJson(response, 200, { chapterIds: getEmbeddingTargetChapterIds(bookId, model, false) })
       return
     }
 

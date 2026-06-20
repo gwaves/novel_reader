@@ -610,6 +610,10 @@ button:disabled {
   width: 100%;
 }
 
+.embedding-status .embedding-warning {
+  color: #8a5a2b;
+}
+
 .search-input-area {
   display: flex;
   gap: 12px;
@@ -719,6 +723,11 @@ button:disabled {
 .match-type.entity {
   background: #fff1e0;
   color: #8a5a2b;
+}
+
+.match-type.chunk {
+  background: #e6f7ff;
+  color: #2a5d8a;
 }
 
 .match-type.entity-first {
