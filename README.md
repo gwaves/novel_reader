@@ -31,6 +31,7 @@
 - **多模型配置**：同时配置本地 Ollama 与多个兼容 OpenAI 的外部模型，并为生成模型和 embedding 模型分别校验。
 - **离线扫描器**：在浏览器外批量处理概要或知识图谱任务，支持中断续扫并导回主数据库。
 - **数据本地存储与备份**：导入的章节、阅读进度、概要、设置、知识图谱、embedding 全部持久化到本地 SQLite，并支持浏览器内导出/恢复完整数据库。
+- **Android 移动端**：`mobile-app` 提供独立 Android/Capacitor 应用，可在同一局域网从 PC 端同步完整书籍数据包，离线阅读章节、概要和图谱数据；移动端不生成书籍 embedding，消费 PC 已生成的数据。
 
 ## 快速开始
 
@@ -51,6 +52,41 @@ npm run dev
 ```text
 ~/.novel_reader/novel_reader.sqlite
 ```
+
+### Android 移动端快速体验
+
+PC 端作为移动端同步服务时，需要监听局域网地址：
+
+```bash
+NOVEL_READER_API_HOST=0.0.0.0 npm run api
+```
+
+移动端 App 中填写电脑局域网地址，例如：
+
+```text
+http://192.168.x.x:5174
+```
+
+Android 调试包位于 `mobile-app` workspace：
+
+```bash
+cd mobile-app
+npm install
+npm run android:sync
+cd android
+JAVA_HOME=/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home \
+PATH="/opt/homebrew/opt/openjdk@21/bin:$PATH" \
+ANDROID_HOME=/opt/homebrew/share/android-commandlinetools \
+./gradlew assembleDebug
+```
+
+生成的 APK：
+
+```text
+mobile-app/android/app/build/outputs/apk/debug/app-debug.apk
+```
+
+更多 Android 构建、HTTP 局域网同步和状态栏适配说明见 [mobile-app/docs/android.md](mobile-app/docs/android.md)。
 
 ## 详细功能使用说明
 
@@ -281,6 +317,8 @@ node scripts/offline-scanner.mjs bundle <bookId>
 
 - [开发文档](docs/development.zh-CN.md)
 - [Backend API Reference](docs/backend-api.md)
+- [移动端 API 契约](mobile-app/docs/api.md)
+- [Android App 构建说明](mobile-app/docs/android.md)
 - [知识图谱路线图](docs/knowledge-graph-roadmap.md)
 - [当前开发进展](docs/current_progress.md)
 
@@ -314,6 +352,7 @@ node scripts/offline-scanner.mjs bundle <bookId>
 | `NOVEL_READER_API_PORT` | `5174` | API 服务监听端口 |
 | `NOVEL_READER_DATA_DIR` | `~/.novel_reader` | 应用数据目录 |
 | `NOVEL_READER_DB_PATH` | `<dataDir>/novel_reader.sqlite` | SQLite 数据库完整路径 |
+| `NOVEL_READER_MOBILE_SYNC_TOKEN` | — | 可选移动端同步 token；设置后 `/api/mobile/*` 需要 Bearer token |
 
 ### 修改端口或数据目录
 
@@ -368,6 +407,7 @@ novel_reader/
 │   ├── local-db-server.mjs # SQLite REST API 服务
 │   ├── offline-scanner.mjs # 离线批量扫描器 CLI
 │   └── offline-scanner/    # 扫描器模块（config、db、llm、scanner）
+├── mobile-app/             # 独立 Android 移动端 workspace（Capacitor + React）
 ├── src/                    # React 前端
 │   ├── main.tsx            # 入口（桌面/移动路由）
 │   ├── App.tsx             # 桌面端主 UI
@@ -382,5 +422,6 @@ novel_reader/
 ## 注意事项
 
 - 这是一个个人本地 Web 应用。API Key 以明文形式存储在本地 SQLite 数据库中，因此在没有增加后端代理、身份认证和密钥管理之前，请勿将其作为公开多用户服务部署。
+- 若将 API 服务绑定到 `0.0.0.0` 供手机同步，请只在可信局域网使用；需要访问控制时设置 `NOVEL_READER_MOBILE_SYNC_TOKEN`。
 - 离线扫描器与 Web 端通过主数据库的 `app_state` 表共享同一份模型配置。
 - 知识图谱的抽取质量取决于所选模型和提示词，建议对低置信度结果进行人工复审和纠错。
