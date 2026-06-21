@@ -258,6 +258,16 @@ button:disabled {
   background: #f0e7d9;
 }
 
+.secondary-button {
+  border: 1px solid #d6cbbd;
+  background: #fffaf2;
+  color: #4d463d;
+}
+
+.secondary-button:hover {
+  background: #f0e7d9;
+}
+
 .home-panel,
 .import-panel {
   display: grid;

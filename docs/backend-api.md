@@ -1139,6 +1139,243 @@ Error response when embeddings are not ready:
 
 The API requires at least 80% embedding coverage for the selected model before search.
 
+## Mobile Sync APIs
+
+These endpoints are the PC-side contract for the independent Android app under `mobile-app/`. They are designed for LAN sync: the mobile app pulls complete PC-generated data while it can reach the PC, then reads and searches its local SQLite copy while away from the LAN.
+
+The mobile app must not generate book, chapter, summary, or chunk embeddings. Mobile packages include PC-generated `summary_embeddings` and `chapter_chunk_embeddings` as read-only synced assets.
+
+### Authentication
+
+All `/api/mobile/*` endpoints require a sync token once implemented.
+
+Recommended request header:
+
+```text
+Authorization: Bearer <sync-token>
+```
+
+Temporary development builds may allow the token to be disabled, but production-like LAN testing should require it. Do not include desktop LLM API keys or sensitive model configuration in any mobile response.
+
+### Mobile Data Shapes
+
+```ts
+type MobileManifest = {
+  serverVersion: string
+  schemaVersion: number
+  capabilities: Array<
+    | 'full-book-package'
+    | 'reading-progress'
+    | 'incremental-sync'
+    | 'compressed-package'
+  >
+  generatedAt: string
+}
+
+type MobileBookListItem = {
+  id: string
+  title: string
+  importedAt: string
+  updatedAt: string | null
+  chapterCount: number
+  wordCount: number
+  summaryCoverage: {
+    completed: number
+    total: number
+  }
+  graphCoverage: {
+    scannedChapters: number
+    totalChapters: number
+    entityCount: number
+    relationCount: number
+  }
+  embeddingCoverage: {
+    model: string | null
+    dimension: number | null
+    embeddedSummaries: number
+    totalSummaries: number
+    embeddedChunks: number
+    totalChunks: number
+  }
+  packageVersion: string
+}
+
+type MobileBookPackage = {
+  schemaVersion: number
+  packageVersion: string
+  generatedAt: string
+  book: {
+    id: string
+    title: string
+    importedAt: string
+    chapterCount: number
+    wordCount: number
+  }
+  chapters: Array<{
+    id: string
+    bookId: string
+    index: number
+    title: string
+    content: string
+    wordCount: number
+    updatedAt: string | null
+  }>
+  summaries: Array<{
+    chapterId: string
+    short: string
+    detail: string
+    keyPoints: string[]
+    skippable: string
+    generatedBy: 'local' | 'ollama' | 'openai'
+    updatedAt: string | null
+  }>
+  knowledgeGraph: {
+    entities: Array<{
+      id: string
+      bookId: string
+      type: string
+      name: string
+      normalizedName: string
+      aliases: string[]
+      description: string | null
+      confidence: number
+      firstChapterIndex: number | null
+      lastChapterIndex: number | null
+      reviewStatus: string | null
+      updatedAt: string | null
+    }>
+    entityMentions: Array<{
+      id: string
+      entityId: string
+      bookId: string
+      chapterId: string
+      chapterIndex: number
+      evidence: string | null
+      confidence: number
+    }>
+    relations: Array<{
+      id: string
+      bookId: string
+      sourceEntityId: string
+      targetEntityId: string
+      type: string
+      description: string | null
+      confidence: number
+      firstChapterIndex: number | null
+      lastChapterIndex: number | null
+      reviewStatus: string | null
+      updatedAt: string | null
+    }>
+    relationMentions: Array<{
+      id: string
+      relationId: string
+      bookId: string
+      chapterId: string
+      chapterIndex: number
+      evidence: string | null
+      confidence: number
+    }>
+  }
+  embeddings: {
+    summaries: Array<{
+      chapterId: string
+      bookId: string
+      model: string
+      dimension: number
+      embedding: number[]
+      generatedAt: string
+    }>
+    chunks: Array<{
+      id: string
+      bookId: string
+      chapterId: string
+      chapterIndex: number
+      chunkIndex: number
+      startOffset: number
+      endOffset: number
+      text: string
+      model: string
+      dimension: number
+      embedding: number[]
+      generatedAt: string
+    }>
+  }
+  integrity: {
+    contentHash: string | null
+    algorithm: 'sha256' | null
+  }
+}
+```
+
+### `GET /api/mobile/manifest`
+
+Returns PC sync service metadata.
+
+Response:
+
+```json
+{
+  "serverVersion": "0.1.0",
+  "schemaVersion": 1,
+  "capabilities": ["full-book-package", "reading-progress"],
+  "generatedAt": "2026-06-21T00:00:00.000Z"
+}
+```
+
+### `GET /api/mobile/books`
+
+Returns lightweight package metadata for the mobile bookshelf download screen.
+
+Response:
+
+```ts
+{
+  books: MobileBookListItem[]
+}
+```
+
+### `GET /api/mobile/books/:bookId/package`
+
+Returns a complete single-book mobile package. Phase 1 may return plain JSON. Later versions may add compression or SQLite package export.
+
+Response:
+
+```ts
+MobileBookPackage
+```
+
+Error responses:
+
+```json
+{ "error": "Book not found.", "code": "BOOK_NOT_FOUND" }
+```
+
+### `GET /api/mobile/books/:bookId/changes?since=<packageVersion>`
+
+Reserved for incremental sync. Not required for the first mobile implementation.
+
+### `POST /api/mobile/progress`
+
+Optionally accepts reading progress from mobile when the phone returns to the LAN.
+
+Request:
+
+```json
+{
+  "bookId": "book-id",
+  "chapterId": "chapter-id",
+  "scrollTop": 1024,
+  "progressRatio": 0.42,
+  "updatedAt": "2026-06-21T00:00:00.000Z"
+}
+```
+
+Response:
+
+```json
+{ "ok": true }
+```
+
 ## Implementation Notes
 
 - The database is SQLite with `PRAGMA foreign_keys = ON` and `WAL` journal mode.
