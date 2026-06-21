@@ -582,6 +582,7 @@ function App() {
   const [ragIncludeSnippets, setRagIncludeSnippets] = useState(true)
   const [embeddingStatus, setEmbeddingStatus] = useState<EmbeddingStatus | null>(null)
   const [isGeneratingEmbeddings, setIsGeneratingEmbeddings] = useState(false)
+  const [isClearingEmbeddings, setIsClearingEmbeddings] = useState(false)
   const [embeddingProgress, setEmbeddingProgress] = useState('')
   const [ragError, setRagError] = useState('')
   const [configTab, setConfigTab] = useState<'llm' | 'embedding'>('llm')
@@ -2077,6 +2078,7 @@ function App() {
     const model = embeddingConfig.model.trim()
     const baseUrl = embeddingConfig.baseUrl.trim()
     const apiKey = embeddingConfig.apiKey
+    const concurrency = Math.max(1, Math.min(20, Math.floor(embeddingConfig.concurrency || 3)))
 
     if (!model) return null
     if (!baseUrl) return null
@@ -2086,6 +2088,7 @@ function App() {
       model,
       baseUrl,
       apiKey,
+      concurrency,
     }
   }
 
@@ -2144,11 +2147,12 @@ function App() {
         return
       }
 
-      const batchSize = config.provider === 'ollama' ? 5 : 50
+      const batchSize = config.concurrency
       let completed = 0
       let failed = 0
       let chunkCompleted = 0
       let chunkFailed = 0
+      let firstEmbeddingError = ''
 
       for (let i = 0; i < chapterIds.length; i += batchSize) {
         const batch = chapterIds.slice(i, i + batchSize)
@@ -2161,6 +2165,7 @@ function App() {
             model: config.model,
             baseUrl: config.baseUrl,
             apiKey: config.apiKey,
+            concurrency: config.concurrency,
             chapterIds: batch,
             force,
           }),
@@ -2174,6 +2179,8 @@ function App() {
           total: number
           chunkCompleted?: number
           chunkFailed?: number
+          errors?: Array<{ chapterIndex?: number; error?: string }>
+          chunkErrors?: Array<{ chapterIndex?: number; chunkIndex?: number; error?: string }>
           error?: string
         }
         if (!response.ok) {
@@ -2183,10 +2190,17 @@ function App() {
         failed += payload.failed
         chunkCompleted += payload.chunkCompleted ?? 0
         chunkFailed += payload.chunkFailed ?? 0
+        const firstError = payload.errors?.[0]?.error ?? payload.chunkErrors?.[0]?.error
+        if (firstError) {
+          firstEmbeddingError ||= firstError
+          setEmbeddingProgress(`已处理 ${completed + failed}/${chapterIds.length} 章，发现失败：${firstError}`)
+        }
       }
 
       setEmbeddingProgress(
-        `已处理 ${completed}/${chapterIds.length} 章，失败 ${failed} 章；正文片段 ${chunkCompleted} 个，失败 ${chunkFailed} 个。`,
+        `已处理 ${completed}/${chapterIds.length} 章，失败 ${failed} 章；正文片段 ${chunkCompleted} 个，失败 ${chunkFailed} 个。${
+          firstEmbeddingError ? ` 首个错误：${firstEmbeddingError}` : ''
+        }`,
       )
       const status = await fetchEmbeddingStatus()
       if (status?.dimension) {
@@ -2203,6 +2217,46 @@ function App() {
       setRagError(err instanceof Error ? err.message : '生成 embedding 失败。')
     } finally {
       setIsGeneratingEmbeddings(false)
+    }
+  }
+
+  async function handleClearEmbeddings() {
+    if (!state.book || isGeneratingEmbeddings) return
+    const confirmed = window.confirm(`清除《${state.book.title}》的全部 embedding？这会删除该书所有模型的概要和正文片段 embedding，之后需要重新生成。`)
+    if (!confirmed) return
+
+    setIsClearingEmbeddings(true)
+    setRagError('')
+    setEmbeddingProgress('正在清除当前书的 embedding...')
+
+    try {
+      const response = await fetch('/api/rag/embeddings/clear', {
+        body: JSON.stringify({ bookId: state.book.id }),
+        headers: { 'Content-Type': 'application/json' },
+        method: 'POST',
+      })
+      const payload = (await response.json()) as {
+        deletedSummaries?: number
+        deletedChunks?: number
+        error?: string
+      }
+      if (!response.ok) {
+        throw new Error(payload.error ?? '清除 embedding 失败。')
+      }
+      setEmbeddingProgress(`已清除概要 ${payload.deletedSummaries ?? 0} 条、正文片段 ${payload.deletedChunks ?? 0} 条 embedding。`)
+      setState((current) => ({
+        ...current,
+        embeddingConfig: { ...current.embeddingConfig, dimension: null },
+      }))
+      setModelConfigDraft((current) => ({
+        ...current,
+        embeddingConfig: { ...current.embeddingConfig, dimension: null },
+      }))
+      await fetchEmbeddingStatus()
+    } catch (err) {
+      setRagError(err instanceof Error ? err.message : '清除 embedding 失败。')
+    } finally {
+      setIsClearingEmbeddings(false)
     }
   }
 
@@ -3412,6 +3466,26 @@ ${context}
                       />
                     </>
                   )}
+
+                  <label htmlFor="draft-embedding-concurrency">Embedding 并发度</label>
+                  <input
+                    id="draft-embedding-concurrency"
+                    type="number"
+                    min={1}
+                    max={20}
+                    value={modelConfigDraft.embeddingConfig.concurrency}
+                    disabled={isTestingConfig}
+                    onChange={(event) =>
+                      setModelConfigDraft((current) => ({
+                        ...current,
+                        embeddingConfig: {
+                          ...current.embeddingConfig,
+                          concurrency: Number(event.target.value),
+                        },
+                      }))
+                    }
+                  />
+                  <small>每批同时处理的章节数。外部服务建议先用 3-5；遇到限流或超时就调低。</small>
 
                   {typeof modelConfigDraft.embeddingConfig.dimension === 'number' && (
                     <small>当前已生成 embedding 的维度：{modelConfigDraft.embeddingConfig.dimension}</small>
@@ -5943,6 +6017,7 @@ ${context}
                   typeof embeddingStatus.totalChunks === 'number' &&
                   ` · 正文片段 ${embeddingStatus.embeddedChunks}/${embeddingStatus.totalChunks}`}
                 {typeof embeddingStatus.dimension === 'number' && ` · 维度 ${embeddingStatus.dimension}`}
+                {` · 并发 ${state.embeddingConfig.concurrency}`}
               </span>
               {Boolean(embeddingStatus.missingSummaries) && (
                 <small className="embedding-warning">
@@ -5950,21 +6025,31 @@ ${context}
                 </small>
               )}
               {embeddingStatus && (
-                <button
-                  type="button"
-                  onClick={() =>
-                    void handleGenerateEmbeddings(
-                      embeddingStatus.missingChapters === 0 && (embeddingStatus.missingChunks ?? 0) === 0,
-                    )
-                  }
-                  disabled={isGeneratingEmbeddings}
-                >
-                  {isGeneratingEmbeddings
-                    ? '生成中...'
-                    : embeddingStatus.missingChapters > 0 || (embeddingStatus.missingChunks ?? 0) > 0
-                      ? '生成 embedding'
-                      : '重新生成 embedding'}
-                </button>
+                <>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      void handleGenerateEmbeddings(
+                        embeddingStatus.missingChapters === 0 && (embeddingStatus.missingChunks ?? 0) === 0,
+                      )
+                    }
+                    disabled={isGeneratingEmbeddings || isClearingEmbeddings}
+                  >
+                    {isGeneratingEmbeddings
+                      ? '生成中...'
+                      : embeddingStatus.missingChapters > 0 || (embeddingStatus.missingChunks ?? 0) > 0
+                        ? '生成 embedding'
+                        : '重新生成 embedding'}
+                  </button>
+                  <button
+                    className="secondary-button"
+                    type="button"
+                    onClick={() => void handleClearEmbeddings()}
+                    disabled={isGeneratingEmbeddings || isClearingEmbeddings}
+                  >
+                    {isClearingEmbeddings ? '清除中...' : '清除 embedding'}
+                  </button>
+                </>
               )}
               {embeddingProgress && <small>{embeddingProgress}</small>}
             </div>

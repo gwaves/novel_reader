@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type CSSProperties, type MouseEvent } from 'react'
+import { Capacitor, CapacitorHttp } from '@capacitor/core'
 import {
   MobileApiClient,
   type MobileBookListItem,
@@ -167,7 +168,7 @@ async function createQueryEmbedding(settings: {
   baseUrl: string
   apiKey: string
   model: string
-}, query: string): Promise<number[]> {
+}, query: string, proxyClient?: MobileApiClient): Promise<number[]> {
   const baseUrl = settings.baseUrl.trim().replace(/\/+$/, '')
   const model = settings.model.trim()
   if (!baseUrl || !model) {
@@ -179,52 +180,103 @@ async function createQueryEmbedding(settings: {
     headers.Authorization = `Bearer ${settings.apiKey.trim()}`
   }
 
-  const openAiResponse = await fetch(`${baseUrl}/embeddings`, {
-    body: JSON.stringify({ model, input: query }),
-    headers,
-    method: 'POST',
-  })
+  const embeddingPayload = { model, input: query, encoding_format: 'float' }
 
-  if (openAiResponse.ok) {
-    const payload = (await openAiResponse.json()) as { data?: Array<{ embedding?: number[] }> }
+  if (Capacitor.isNativePlatform()) {
+    const response = await CapacitorHttp.post({
+      data: embeddingPayload,
+      headers,
+      url: `${baseUrl}/embeddings`,
+    })
+
+    if (response.status >= 200 && response.status < 300) {
+      const embedding = response.data?.data?.[0]?.embedding
+      if (Array.isArray(embedding) && embedding.length > 0) {
+        return embedding
+      }
+      throw new Error('查询 embedding 响应为空。')
+    }
+
+    const shouldTryOllama = response.status === 404 || baseUrl.includes('11434')
+    if (!shouldTryOllama) {
+      throw new Error(`查询 embedding 失败 ${response.status}：${JSON.stringify(response.data) || '请求失败'}`)
+    }
+  } else if (proxyClient) {
+    const payload = await proxyClient.createEmbedding({
+      apiKey: settings.apiKey,
+      baseUrl,
+      input: query,
+      model,
+    })
     const embedding = payload.data?.[0]?.embedding
     if (Array.isArray(embedding) && embedding.length > 0) {
       return embedding
     }
     throw new Error('查询 embedding 响应为空。')
-  }
-
-  const openAiBody = await openAiResponse.text()
-  const shouldTryOllama = openAiResponse.status === 404 || baseUrl.includes('11434')
-
-  if (shouldTryOllama) {
-    const ollamaResponse = await fetch(`${baseUrl}/api/embeddings`, {
-      body: JSON.stringify({ model, prompt: query }),
-      headers: { 'Content-Type': 'application/json' },
+  } else {
+    const openAiResponse = await fetch(`${baseUrl}/embeddings`, {
+      body: JSON.stringify(embeddingPayload),
+      headers,
       method: 'POST',
     })
 
-    if (ollamaResponse.ok) {
-      const payload = (await ollamaResponse.json()) as { embedding?: number[] }
-      if (Array.isArray(payload.embedding) && payload.embedding.length > 0) {
-        return payload.embedding
+    if (openAiResponse.ok) {
+      const payload = (await openAiResponse.json()) as { data?: Array<{ embedding?: number[] }> }
+      const embedding = payload.data?.[0]?.embedding
+      if (Array.isArray(embedding) && embedding.length > 0) {
+        return embedding
+      }
+      throw new Error('查询 embedding 响应为空。')
+    }
+
+    const openAiBody = await openAiResponse.text()
+    const shouldTryOllama = openAiResponse.status === 404 || baseUrl.includes('11434')
+
+    if (!shouldTryOllama) {
+      throw new Error(`查询 embedding 失败 ${openAiResponse.status}：${openAiBody || '请求失败'}`)
+    }
+  }
+
+  if (Capacitor.isNativePlatform()) {
+    const ollamaResponse = await CapacitorHttp.post({
+      data: { model, prompt: query },
+      headers: { 'Content-Type': 'application/json' },
+      url: `${baseUrl}/api/embeddings`,
+    })
+    if (ollamaResponse.status >= 200 && ollamaResponse.status < 300) {
+      const embedding = ollamaResponse.data?.embedding
+      if (Array.isArray(embedding) && embedding.length > 0) {
+        return embedding
       }
       throw new Error('Ollama embedding 响应为空。')
     }
-
-    const ollamaBody = await ollamaResponse.text()
-    throw new Error(`查询 embedding 失败 ${ollamaResponse.status}：${ollamaBody || '请求失败'}`)
+    throw new Error(`查询 embedding 失败 ${ollamaResponse.status}：${JSON.stringify(ollamaResponse.data) || '请求失败'}`)
   }
 
-  throw new Error(`查询 embedding 失败 ${openAiResponse.status}：${openAiBody || '请求失败'}`)
+  const ollamaResponse = await fetch(`${baseUrl}/api/embeddings`, {
+    body: JSON.stringify({ model, prompt: query }),
+    headers: { 'Content-Type': 'application/json' },
+    method: 'POST',
+  })
+
+  if (ollamaResponse.ok) {
+    const payload = (await ollamaResponse.json()) as { embedding?: number[] }
+    if (Array.isArray(payload.embedding) && payload.embedding.length > 0) {
+      return payload.embedding
+    }
+    throw new Error('Ollama embedding 响应为空。')
+  }
+
+  const ollamaBody = await ollamaResponse.text()
+  throw new Error(`查询 embedding 失败 ${ollamaResponse.status}：${ollamaBody || '请求失败'}`)
 }
 
 async function testEmbeddingServiceConfig(settings: {
   baseUrl: string
   apiKey: string
   model: string
-}): Promise<number> {
-  const embedding = await createQueryEmbedding(settings, 'ping')
+}, proxyClient?: MobileApiClient): Promise<number> {
+  const embedding = await createQueryEmbedding(settings, 'ping', proxyClient)
   return embedding.length
 }
 
@@ -233,6 +285,7 @@ async function generateAnswerWithExternalLlm(settings: {
   apiKey: string
   model: string
   temperature: number
+  thinkingEnabled?: boolean
 }, prompt: string): Promise<string> {
   const baseUrl = settings.baseUrl.trim().replace(/\/+$/, '')
   const model = settings.model.trim()
@@ -245,15 +298,21 @@ async function generateAnswerWithExternalLlm(settings: {
     headers.Authorization = `Bearer ${settings.apiKey.trim()}`
   }
 
+  const requestBody: Record<string, unknown> = {
+    model,
+    messages: [
+      { role: 'system', content: '你是长篇小说阅读助手。请只根据给定材料回答，并引用章节号。' },
+      { role: 'user', content: prompt },
+    ],
+    temperature: settings.temperature,
+  }
+
+  if (settings.thinkingEnabled === false) {
+    requestBody.chat_template_kwargs = { enable_thinking: false }
+  }
+
   const response = await fetch(`${baseUrl}/chat/completions`, {
-    body: JSON.stringify({
-      model,
-      messages: [
-        { role: 'system', content: '你是长篇小说阅读助手。请只根据给定材料回答，并引用章节号。' },
-        { role: 'user', content: prompt },
-      ],
-      temperature: settings.temperature,
-    }),
+    body: JSON.stringify(requestBody),
     headers,
     method: 'POST',
   })
@@ -335,6 +394,7 @@ function App() {
   const [ragUseSemantic, setRagUseSemantic] = useState(false)
   const [isRagSearching, setIsRagSearching] = useState(false)
   const [isGeneratingAnswer, setIsGeneratingAnswer] = useState(false)
+  const [ragGenerationStatus, setRagGenerationStatus] = useState('')
   const [hasRagSearched, setHasRagSearched] = useState(false)
   const [ragSearchStatus, setRagSearchStatus] = useState('')
   const [readerFontSize, setReaderFontSize] = useState(19)
@@ -601,7 +661,7 @@ function App() {
         baseUrl: embeddingBaseUrl,
         apiKey: embeddingApiKey,
         model: embeddingModel,
-      })
+      }, client)
       setMessage(`Embedding 服务测试通过，维度 ${dimension}。`)
     } catch (error) {
       setMessage(error instanceof Error ? error.message : 'Embedding 服务测试失败。')
@@ -695,7 +755,7 @@ function App() {
   }
 
   function scrollReaderPage(direction: 'up' | 'down') {
-    const distance = Math.max(320, window.innerHeight * 0.82)
+    const distance = Math.max(320, window.innerHeight * 0.72)
     window.scrollBy({
       top: direction === 'down' ? distance : -distance,
       behavior: 'smooth',
@@ -736,6 +796,7 @@ function App() {
     setRagError('')
     setHasRagSearched(false)
     setRagSearchStatus('')
+    setRagGenerationStatus('')
   }
 
   function switchSearchMode(nextMode: SearchMode) {
@@ -747,6 +808,7 @@ function App() {
     setRagError('')
     setHasRagSearched(false)
     setRagSearchStatus('')
+    setRagGenerationStatus('')
   }
 
   function submitSearch() {
@@ -764,6 +826,7 @@ function App() {
     setRagError('')
     setHasRagSearched(false)
     setRagSearchStatus('')
+    setRagGenerationStatus('')
   }
 
   async function runRagSearch(queryOverride?: string) {
@@ -774,6 +837,7 @@ function App() {
     setIsRagSearching(true)
     setRagError('')
     setRagAnswer('')
+    setRagGenerationStatus('')
     setHasRagSearched(true)
     setRagSearchStatus('正在检索本地正文、概要和 chunk...')
 
@@ -789,20 +853,24 @@ function App() {
       }
 
       if (ragUseSemantic) {
+        setRagSearchStatus('正在调用 Embedding 服务计算查询向量...')
         const queryEmbedding = await createQueryEmbedding(
           { baseUrl: embeddingBaseUrl, apiKey: embeddingApiKey, model: embeddingModel },
           query,
+          client,
         )
         const indexedDimension = activePackage.embeddings.chunks.find((chunk) => chunk.embedding.length > 0)?.embedding.length
         if (indexedDimension && indexedDimension !== queryEmbedding.length) {
           throw new Error(`查询 embedding 维度 ${queryEmbedding.length} 与已同步 chunk 维度 ${indexedDimension} 不一致，请使用同一个 embedding 模型。`)
         }
+        setRagSearchStatus(`正在计算语义相似度（${activePackage.embeddings.chunks.length} 个 chunk）...`)
         const semanticChunks = activePackage.embeddings.chunks
           .map((chunk) => ({ chunk, score: cosineSimilarity(queryEmbedding, chunk.embedding) }))
           .filter((entry) => entry.score > 0)
           .sort((a, b) => b.score - a.score)
           .slice(0, 24)
 
+        setRagSearchStatus(`语义召回 ${semanticChunks.length} 个 chunk，正在关联章节...`)
         for (const { chunk, score } of semanticChunks) {
           const chapter = chapterById.get(chunk.chapterId)
           if (!chapter) continue
@@ -817,7 +885,13 @@ function App() {
         }
       }
 
+      const totalChunks = activePackage.embeddings.chunks.length
+      let scannedChunks = 0
       for (const chunk of activePackage.embeddings.chunks) {
+        scannedChunks++
+        if (scannedChunks % 100 === 0 || scannedChunks === totalChunks) {
+          setRagSearchStatus(`正在扫描 chunk 中...（${scannedChunks} / ${totalChunks}）`)
+        }
         const score = scoreSearchText(chunk.text, query)
         if (!score) continue
         const chapter = chapterById.get(chunk.chapterId)
@@ -832,7 +906,13 @@ function App() {
         })
       }
 
+      const totalSummaries = activePackage.summaries.length
+      let scannedSummaries = 0
       for (const summary of activePackage.summaries) {
+        scannedSummaries++
+        if (scannedSummaries % 50 === 0 || scannedSummaries === totalSummaries) {
+          setRagSearchStatus(`正在扫描概要中...（${scannedSummaries} / ${totalSummaries}）`)
+        }
         const chapter = chapterById.get(summary.chapterId)
         if (!chapter) continue
         const haystack = [chapter.title, summary.short, summary.detail, summary.keyPoints.join(' ')].join('\n')
@@ -848,7 +928,13 @@ function App() {
         })
       }
 
+      const totalChapters = activePackage.chapters.length
+      let scannedChapters = 0
       for (const chapter of activePackage.chapters) {
+        scannedChapters++
+        if (scannedChapters % 100 === 0 || scannedChapters === totalChapters) {
+          setRagSearchStatus(`正在扫描章节内容...（${scannedChapters} / ${totalChapters}）`)
+        }
         const score = scoreSearchText(`${chapter.title}\n${chapter.content}`, query)
         if (!score) continue
         addCandidate({
@@ -902,19 +988,27 @@ ${context}
 
     setIsGeneratingAnswer(true)
     setRagError('')
+    setRagGenerationStatus('')
     try {
+      const chapterCount = ragResults.length
+      setRagGenerationStatus(`正在构建 RAG 上下文（${chapterCount} 个相关章节）...`)
+      const prompt = buildRagPrompt()
+      setRagGenerationStatus(`已提交 ${chapterCount} 个章节，等待 LLM 响应...`)
       const answer = await generateAnswerWithExternalLlm(
         {
           baseUrl: llmBaseUrl,
           apiKey: llmApiKey,
           model: llmModel,
           temperature: llmTemperature,
+          thinkingEnabled: false,
         },
-        buildRagPrompt(),
+        prompt,
       )
       setRagAnswer(answer || '外部 LLM 没有返回内容。')
+      setRagGenerationStatus('')
     } catch (error) {
       setRagError(error instanceof Error ? error.message : '生成回答失败。')
+      setRagGenerationStatus('')
     } finally {
       setIsGeneratingAnswer(false)
     }
@@ -1220,6 +1314,7 @@ ${context}
                         </button>
                       </div>
                     )}
+                    {ragGenerationStatus && <p className="muted search-status">{ragGenerationStatus}</p>}
                     <div className="search-results">
                       {ragResults.map((result) => (
                         <button className="search-result" key={`${result.source}-${result.chapterId}`} type="button" onClick={() => openChapter(result.chapterId)}>

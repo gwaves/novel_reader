@@ -73,6 +73,7 @@ export type EmbeddingConfig = {
   baseUrl: string
   model: string
   apiKey: string
+  concurrency: number
   dimension: number | null
 }
 export type ModelConfigDraft = Pick<
@@ -139,6 +140,7 @@ const initialState: StoredState = {
     baseUrl: 'http://localhost:11434',
     model: 'nomic-embed-text',
     apiKey: '',
+    concurrency: 3,
     dimension: null,
   },
 }
@@ -368,12 +370,16 @@ export function sanitizeEmbeddingConfig(value: unknown): EmbeddingConfig {
       ? config.model.trim()
       : fallback.model
   const apiKey = typeof config.apiKey === 'string' ? config.apiKey : fallback.apiKey
+  const concurrency =
+    typeof config.concurrency === 'number' && Number.isFinite(config.concurrency)
+      ? normalizeConcurrency(config.concurrency, fallback.concurrency)
+      : fallback.concurrency
   const dimension =
     typeof config.dimension === 'number' && Number.isFinite(config.dimension)
       ? config.dimension
       : fallback.dimension
 
-  return { provider, baseUrl, model, apiKey, dimension }
+  return { provider, baseUrl, model, apiKey, concurrency, dimension }
 }
 
 export function sanitizeOpenAIConfigs(
@@ -1527,7 +1533,7 @@ async function validateEmbeddingConfig(embeddingConfig: EmbeddingConfig): Promis
     throw new Error('[Embedding] 请填写模型名。')
   }
 
-  const response = await fetch('/api/rag/embeddings/validate', {
+  const requestInit: RequestInit = {
     body: JSON.stringify({
       provider: embeddingConfig.provider,
       model,
@@ -1536,7 +1542,14 @@ async function validateEmbeddingConfig(embeddingConfig: EmbeddingConfig): Promis
     }),
     headers: { 'Content-Type': 'application/json' },
     method: 'POST',
-  })
+  }
+
+  let response: Response
+  try {
+    response = await fetch('/api/rag/embeddings/validate', requestInit)
+  } catch (error) {
+    response = await fetch('http://127.0.0.1:5174/api/rag/embeddings/validate', requestInit)
+  }
 
   if (!response.ok) {
     const payload = (await response.json()) as { error?: string }

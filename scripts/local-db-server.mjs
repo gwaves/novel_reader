@@ -290,6 +290,14 @@ const countEmbeddingsForBookStatement = db.prepare(`
 const countChunkEmbeddingsForBookStatement = db.prepare(`
   SELECT COUNT(*) AS count FROM chapter_chunk_embeddings WHERE book_id = ? AND model = ?
 `)
+const deleteSummaryEmbeddingsForBookStatement = db.prepare(`
+  DELETE FROM summary_embeddings
+  WHERE book_id = ?
+`)
+const deleteChunkEmbeddingsForBookStatement = db.prepare(`
+  DELETE FROM chapter_chunk_embeddings
+  WHERE book_id = ?
+`)
 const getEmbeddingDimensionStatement = db.prepare(`
   SELECT dimension FROM summary_embeddings WHERE book_id = ? AND model = ? LIMIT 1
 `)
@@ -1793,6 +1801,11 @@ function splitChapterIntoChunks(chapter) {
   return chunks
 }
 
+function buildChunkEmbeddingId(chunkId, model) {
+  const modelHash = createHash('sha1').update(String(model ?? '')).digest('hex').slice(0, 12)
+  return `${chunkId}:model:${modelHash}`
+}
+
 function getEmbeddingCoverage(bookId, model) {
   const chapters = getChapterRowsForBookStatement.all(bookId)
   const totalChapters = chapters.length
@@ -1833,7 +1846,7 @@ function getEmbeddingTargetChapterIds(bookId, model, force = false) {
 }
 
 const EMBEDDING_BATCH_SIZE_OLLAMA = 5
-const EMBEDDING_BATCH_SIZE_OPENAI = 50
+const EMBEDDING_BATCH_SIZE_OPENAI = 5
 const EMBEDDING_REQUEST_TIMEOUT_MS = 300000
 
 async function callOllamaEmbedding(text, config) {
@@ -4286,6 +4299,72 @@ const server = createServer(async (request, response) => {
         return
       }
 
+      if (request.method === 'POST' && url.pathname === '/api/mobile/proxy/embeddings') {
+        const body = await readJson(request)
+        const targetBaseUrl = String(body?.baseUrl ?? '').trim().replace(/\/+$/, '')
+        const model = String(body?.model ?? '').trim()
+        const input = String(body?.input ?? '')
+        const apiKey = String(body?.apiKey ?? '').trim()
+
+        if (!targetBaseUrl || !model || !input) {
+          sendJson(response, 400, { error: 'Missing baseUrl, model, or input.' })
+          return
+        }
+
+        if (!/^https?:\/\//i.test(targetBaseUrl)) {
+          sendJson(response, 400, { error: 'Embedding Base URL must start with http:// or https://.' })
+          return
+        }
+
+        const headers = { 'Content-Type': 'application/json' }
+        if (apiKey) {
+          headers.Authorization = `Bearer ${apiKey}`
+        }
+
+        const openAiResponse = await fetch(`${targetBaseUrl}/embeddings`, {
+          body: JSON.stringify({ model, input, encoding_format: 'float' }),
+          headers,
+          method: 'POST',
+        })
+        const openAiText = await openAiResponse.text()
+
+        if (openAiResponse.ok) {
+          sendJson(response, 200, JSON.parse(openAiText))
+          return
+        }
+
+        const shouldTryOllama = openAiResponse.status === 404 || targetBaseUrl.includes('11434')
+        if (shouldTryOllama) {
+          const ollamaResponse = await fetch(`${targetBaseUrl}/api/embeddings`, {
+            body: JSON.stringify({ model, prompt: input }),
+            headers: { 'Content-Type': 'application/json' },
+            method: 'POST',
+          })
+          const ollamaText = await ollamaResponse.text()
+
+          if (ollamaResponse.ok) {
+            const payload = JSON.parse(ollamaText)
+            sendJson(response, 200, {
+              data: [{ embedding: payload.embedding }],
+              model,
+              object: 'list',
+              usage: payload.prompt_eval_count ? { prompt_tokens: payload.prompt_eval_count, total_tokens: payload.prompt_eval_count } : undefined,
+            })
+            return
+          }
+
+          sendJson(response, ollamaResponse.status, {
+            error: `Embedding proxy failed ${ollamaResponse.status}: ${ollamaText || 'Request failed.'}`,
+          })
+          return
+        }
+
+        sendJson(response, openAiResponse.status, {
+          error: `Embedding proxy failed ${openAiResponse.status}: ${openAiText || 'Request failed.'}`,
+        })
+        return
+      }
+
       sendJson(response, 404, { error: 'Mobile sync endpoint not found.' })
       return
     }
@@ -5009,6 +5088,7 @@ const server = createServer(async (request, response) => {
       const apiKey = body?.apiKey || ''
       const requestedChapterIds = Array.isArray(body?.chapterIds) ? body.chapterIds : null
       const force = body?.force === true
+      const requestedConcurrency = Number(body?.concurrency)
 
       if (!bookId || typeof bookId !== 'string') {
         sendJson(response, 400, { error: 'Missing bookId.' })
@@ -5047,11 +5127,16 @@ const server = createServer(async (request, response) => {
       })
 
       const embeddingConfig = { provider, model, baseUrl, apiKey }
-      const batchSize = provider === 'ollama' ? EMBEDDING_BATCH_SIZE_OLLAMA : EMBEDDING_BATCH_SIZE_OPENAI
+      const defaultBatchSize = provider === 'ollama' ? EMBEDDING_BATCH_SIZE_OLLAMA : EMBEDDING_BATCH_SIZE_OPENAI
+      const batchSize = Number.isFinite(requestedConcurrency)
+        ? Math.max(1, Math.min(20, Math.floor(requestedConcurrency)))
+        : defaultBatchSize
       let completed = 0
       let failed = 0
       let chunkCompleted = 0
       let chunkFailed = 0
+      const errors = []
+      const chunkErrors = []
 
       for (let i = 0; i < targetChapters.length; i += batchSize) {
         const batch = targetChapters.slice(i, i + batchSize)
@@ -5088,7 +5173,7 @@ const server = createServer(async (request, response) => {
                     )
                     const chunkEmbedding = l2Normalize(chunkEmbeddingRaw)
                     upsertChunkEmbeddingStatement.run(
-                      chunk.id,
+                      buildChunkEmbeddingId(chunk.id, model),
                       bookId,
                       chapter.id,
                       chapter.chapterIndex,
@@ -5101,14 +5186,29 @@ const server = createServer(async (request, response) => {
                       JSON.stringify(chunkEmbedding),
                     )
                     chunkCompleted++
-                  } catch {
+                  } catch (error) {
                     chunkFailed++
+                    if (chunkErrors.length < 5) {
+                      chunkErrors.push({
+                        chapterId: chapter.id,
+                        chapterIndex: chapter.chapterIndex,
+                        chunkIndex: chunk.chunkIndex,
+                        error: error instanceof Error ? error.message : 'Unknown chunk embedding error.',
+                      })
+                    }
                   }
                 }
               }
               completed++
-            } catch {
+            } catch (error) {
               failed++
+              if (errors.length < 5) {
+                errors.push({
+                  chapterId: chapter.id,
+                  chapterIndex: chapter.chapterIndex,
+                  error: error instanceof Error ? error.message : 'Unknown embedding error.',
+                })
+              }
             }
           }),
         )
@@ -5120,6 +5220,33 @@ const server = createServer(async (request, response) => {
         total: targetChapters.length,
         chunkCompleted,
         chunkFailed,
+        errors,
+        chunkErrors,
+      })
+      return
+    }
+
+    if (request.method === 'POST' && url.pathname === '/api/rag/embeddings/clear') {
+      const body = await readJson(request)
+      const bookId = body?.bookId
+
+      if (!bookId || typeof bookId !== 'string') {
+        sendJson(response, 400, { error: 'Missing bookId.' })
+        return
+      }
+
+      const book = getBookStatement.get(bookId)
+      if (!book) {
+        sendJson(response, 404, { error: 'Book not found.' })
+        return
+      }
+
+      const summaryResult = deleteSummaryEmbeddingsForBookStatement.run(bookId)
+      const chunkResult = deleteChunkEmbeddingsForBookStatement.run(bookId)
+      sendJson(response, 200, {
+        ok: true,
+        deletedSummaries: summaryResult.changes ?? 0,
+        deletedChunks: chunkResult.changes ?? 0,
       })
       return
     }

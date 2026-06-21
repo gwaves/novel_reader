@@ -1,3 +1,5 @@
+import { Capacitor, CapacitorHttp } from '@capacitor/core'
+
 export type MobileManifest = {
   serverVersion: string
   schemaVersion: number
@@ -157,6 +159,13 @@ export type MobileApiSettings = {
   syncToken: string
 }
 
+export type MobileEmbeddingProxyRequest = {
+  baseUrl: string
+  apiKey: string
+  model: string
+  input: string
+}
+
 function normalizeBaseUrl(baseUrl: string): string {
   return baseUrl.trim().replace(/\/+$/, '')
 }
@@ -192,11 +201,41 @@ export class MobileApiClient {
     return readJson<MobileBookPackage>(await this.fetch(`/api/mobile/books/${encodeURIComponent(bookId)}/package`))
   }
 
-  private fetch(path: string, init?: RequestInit): Promise<Response> {
+  async createEmbedding(payload: MobileEmbeddingProxyRequest): Promise<{ data?: Array<{ embedding?: number[] }> }> {
+    if (!this.baseUrl) {
+      throw new Error('Web 调试外部 Embedding 需要先配置 PC API 地址，用 PC 后端代理以绕过浏览器 CORS。')
+    }
+    return readJson<{ data?: Array<{ embedding?: number[] }> }>(
+      await this.fetch('/api/mobile/proxy/embeddings', {
+        body: JSON.stringify(payload),
+        headers: { 'Content-Type': 'application/json' },
+        method: 'POST',
+      }),
+    )
+  }
+
+  private async fetch(path: string, init?: RequestInit): Promise<Response> {
+    const url = `${this.baseUrl}${path}`
     const headers = new Headers(init?.headers)
     if (this.syncToken) {
       headers.set('Authorization', `Bearer ${this.syncToken}`)
     }
-    return fetch(`${this.baseUrl}${path}`, { ...init, headers })
+
+    if (Capacitor.isNativePlatform()) {
+      const response = await CapacitorHttp.request({
+        url,
+        method: (init?.method || 'GET') as 'GET' | 'POST' | 'PUT' | 'DELETE' | 'PATCH' | 'HEAD' | 'OPTIONS',
+        headers: Object.fromEntries(headers.entries()),
+        data: init?.body,
+      })
+
+      const body = typeof response.data === 'string' ? response.data : JSON.stringify(response.data)
+      return new Response(body, {
+        status: response.status,
+        headers: new Headers(response.headers),
+      })
+    }
+
+    return fetch(url, { ...init, headers })
   }
 }
