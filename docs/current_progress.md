@@ -1,5 +1,11 @@
 2026-06-21 最新状态：main 已同步到 PR #21 和 PR #22。
 
+2026-06-21 更新：`mobile-app-dev` 分支已推进到可安装 Android 调试包。
+- `mobile-app` 已生成 Capacitor Android 工程，并可通过 Gradle 编译 `app-debug.apk`。
+- 本机 Android 构建环境已验证：Homebrew `openjdk@21`、`android-commandlinetools`、Android 36 platform/build tools。
+- PC 端 `/api/mobile/*` 同步接口已可返回真实书架和单书完整数据包；后端可用 `NOVEL_READER_API_HOST=0.0.0.0 npm run api` 监听局域网。
+- Android App 已修复 LAN HTTP 同步限制和系统状态栏覆盖问题：允许 cleartext HTTP，并通过 Capacitor StatusBar + CSS safe-area 处理顶部布局。
+
 2026-06-21 更新：独立 Android 移动端方向已确定，并新增 PC 端配套计划。
 - 移动端将作为独立 `mobile-app` workspace 开发，定位为离线可用的完整数据消费端，而不是 PC 局域网 API 的实时面板。
 - PC 端继续负责书籍导入、概要、知识图谱、正文 chunk embedding 和概要 embedding 生成；移动端不生成书籍/章节/chunk embedding。
