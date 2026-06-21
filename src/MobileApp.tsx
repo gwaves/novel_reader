@@ -442,7 +442,10 @@ ${context}
   useEffect(() => {
     if (mobileTab !== 'search' || !state.book) return
 
-    void fetchEmbeddingStatus()
+    const frame = window.requestAnimationFrame(() => {
+      void fetchEmbeddingStatus()
+    })
+    return () => window.cancelAnimationFrame(frame)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [mobileTab, state.book?.id])
 
