@@ -2,36 +2,49 @@
 
 [English](README.en.md) | [中文](README.md)
 
-A local-first web reader for long Chinese web novels, with AI-powered summaries, RAG search, and a knowledge graph for tracking characters, factions, items, skills, locations, and more.
+Offline-first novel reader with EPUB import, RAG search, knowledge graph extraction, and an Android companion app.
 
-## Features
+![Novel Reader Assistant visual](src/assets/hero.png)
 
-- Import `.txt` novels with automatic UTF-8 / GB18030 decoding, or `.epub` books by reading the OPF spine and XHTML chapters.
-- Split imported books into chapters and paginate the chapter list by 100 chapters.
-- Persist imported chapters, reading progress, summaries, knowledge graph data, embeddings, and settings in a local SQLite database under `~/.novel_reader`.
-- Android companion app under `mobile-app`: sync complete PC-generated book packages over the LAN, then read chapters, summaries, and graph data offline. The mobile app consumes PC-generated embeddings and does not generate corpus embeddings itself.
+Novel Reader Assistant is built for long web novels where remembering every character, item, faction, and plot thread becomes part of the reading work. It keeps your library in a local SQLite database, lets local or OpenAI-compatible models summarize chapters, builds a searchable story knowledge graph, and syncs PC-generated book packages to Android for offline reading.
+
+## Highlights
+
+- **Local-first reading**: import `.txt` or `.epub`, split chapters, save reading progress, and keep data under `~/.novel_reader`.
+- **RAG search for long stories**: create summary/body embeddings, retrieve relevant chapters, and generate grounded answers from local book context.
+- **Knowledge graph extraction**: track characters, factions, items, skills, locations, beasts, events, and relations with evidence links.
+- **Graph cleanup workflow**: review low-confidence entities, merge duplicates, split mistakes, replay saved JSON, and export JSON or GraphML.
+- **Flexible model setup**: use Ollama or OpenAI-compatible endpoints for generation and embeddings, with separate validation and profiles.
+- **Android companion app**: sync full book packages over LAN, then read chapters, summaries, and graph data offline on Android.
+- **Offline batch scanner**: run summary and knowledge graph jobs outside the browser with resumable CLI workflows.
+
+## Quick Start
+
+```bash
+npm install
+npm run dev
+```
+
+This starts both the Vite frontend and the local database API. Open:
+
+```text
+http://127.0.0.1:5173/
+```
+
+The SQLite database is stored at:
+
+```text
+~/.novel_reader/novel_reader.sqlite
+```
+
+## What You Can Do
+
+- Import UTF-8 / GB18030 `.txt` novels or `.epub` books by reading OPF spine and XHTML chapters.
 - Generate single-chapter, current-page, or all-missing chapter summaries.
-- Configure local Ollama models and OpenAI-compatible external models, with separate validation for generation and embedding models.
-- Support multiple external model profiles, each with its own model name, base URL, API key, temperature, thinking mode, and an independent embedding configuration.
-- Adjust reader font size.
-- Navigate chapters from both the top and bottom of the desktop reader.
-- Export or restore the full SQLite database from the web UI.
-- **RAG Search**:
-  - Generate summary embeddings with Ollama or OpenAI-compatible embedding models.
-  - Search across chapters with vector recall and knowledge-graph entity boosting.
-  - Generate an answer from retrieved chapter summaries/snippets.
-- **Knowledge Graph**:
-  - Extract entities (characters, sects, items, skills, locations, beasts, events) and relations from each chapter.
-  - Batch scan the whole book with resumable jobs, override rescans, saved-JSON replay, and graph change previews.
-  - Review low-confidence entities and relations in a review queue, including batch deletes.
-  - Merge, edit, split, and delete entities and relations.
-  - Run an LLM-assisted global coreference pass to merge duplicate character identities.
-  - Browse entity/relation lists with filters and search.
-  - Search evidence, visualize entity neighborhoods/global graph slices, and export JSON or GraphML.
-- **Offline Scanner CLI** (`scripts/offline-scanner.mjs`):
-  - Batch scan summaries and/or knowledge graph extractions outside the browser.
-  - Resume interrupted scans and export results back to the main database.
-  - Supports the same Ollama/OpenAI configuration as the web app.
+- Build and inspect a knowledge graph with filters, evidence search, graph visualization, and review queues.
+- Run RAG search across chapter summaries, body chunks, and knowledge graph matches.
+- Export or restore the full local SQLite database from the web UI.
+- Build an Android debug APK from the `mobile-app` workspace.
 
 ## Documentation
 
@@ -42,25 +55,6 @@ A local-first web reader for long Chinese web novels, with AI-powered summaries,
 - [Android App Guide](mobile-app/docs/android.md)
 - [Knowledge Graph Roadmap](docs/knowledge-graph-roadmap.md)
 - [Current Progress](docs/current_progress.md) (Chinese)
-
-## Quick Start
-
-```bash
-npm install
-npm run dev
-```
-
-This starts both the Vite frontend and the local database API. The SQLite database is stored at:
-
-```text
-~/.novel_reader/novel_reader.sqlite
-```
-
-Open:
-
-```text
-http://127.0.0.1:5173/
-```
 
 ## Android Mobile App
 
