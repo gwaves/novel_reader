@@ -1,7 +1,24 @@
 {
   "name": "novel_reader",
   "private": true,
-  "version": "0.0.0",
+  "version": "0.7.0",
+  "description": "Offline-first novel reader with EPUB import, RAG search, knowledge graph extraction, and an Android companion app.",
+  "license": "MIT",
+  "author": "gwaves",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/gwaves/novel_reader.git"
+  },
+  "keywords": [
+    "novel-reader",
+    "epub-reader",
+    "rag",
+    "knowledge-graph",
+    "llm",
+    "react",
+    "typescript",
+    "android"
+  ],
   "type": "module",
   "scripts": {
     "api": "node --no-warnings scripts/local-db-server.mjs",
