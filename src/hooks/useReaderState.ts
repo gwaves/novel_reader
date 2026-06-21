@@ -637,7 +637,7 @@ const CN_NUM = '[一二三四五六七八九十百千万亿〇零廿卅\\d]+'
 const LOCAL_CHAPTER_PATTERNS: LocalPattern[] = [
   {
     name: 'bracket-volume-colon-chapter',
-    regex: new RegExp(`^【第(${CN_NUM})卷[：:](.+?)】第(${CN_NUM})折[：:\\s　]+(.+)$`, 'im'),
+    regex: new RegExp(`^【第(${CN_NUM})卷[：:](.+?)】第(${CN_NUM})折[：:\\s\\u3000]+(.+)$`, 'im'),
     extract: (m) => {
       const vol = convertChineseNumber(m[1])
       const ch = convertChineseNumber(m[3])
@@ -647,7 +647,7 @@ const LOCAL_CHAPTER_PATTERNS: LocalPattern[] = [
   },
   {
     name: 'plain-volume-bracket-chapter',
-    regex: new RegExp(`^卷(${CN_NUM})\\s+(.+?)\\s+【第(${CN_NUM})折[\\s　]+(.+?)】$`, 'im'),
+    regex: new RegExp(`^卷(${CN_NUM})\\s+(.+?)\\s+【第(${CN_NUM})折[\\s\\u3000]+(.+?)】$`, 'im'),
     extract: (m) => {
       const vol = convertChineseNumber(m[1])
       const ch = convertChineseNumber(m[3])
@@ -657,7 +657,7 @@ const LOCAL_CHAPTER_PATTERNS: LocalPattern[] = [
   },
   {
     name: 'plain-volume-space-chapter',
-    regex: new RegExp(`^卷(${CN_NUM})\\s+(.+?)\\s+第(${CN_NUM})折[\\s　]+(.+)$`, 'im'),
+    regex: new RegExp(`^卷(${CN_NUM})\\s+(.+?)\\s+第(${CN_NUM})折[\\s\\u3000]+(.+)$`, 'im'),
     extract: (m) => {
       const vol = convertChineseNumber(m[1])
       const ch = convertChineseNumber(m[3])
@@ -667,7 +667,7 @@ const LOCAL_CHAPTER_PATTERNS: LocalPattern[] = [
   },
   {
     name: 'plain-volume-tight-chapter',
-    regex: new RegExp(`^卷(${CN_NUM})\\s*(.+?)第(${CN_NUM})折[\\s　]*(.+)$`, 'im'),
+    regex: new RegExp(`^卷(${CN_NUM})\\s*(.+?)第(${CN_NUM})折[\\s\\u3000]*(.+)$`, 'im'),
     extract: (m) => {
       const vol = convertChineseNumber(m[1])
       const ch = convertChineseNumber(m[3])
@@ -677,7 +677,7 @@ const LOCAL_CHAPTER_PATTERNS: LocalPattern[] = [
   },
   {
     name: 'plain-chapter-only',
-    regex: new RegExp(`^第(${CN_NUM})折[：:\\s　]+(.+)$`, 'im'),
+    regex: new RegExp(`^第(${CN_NUM})折[：:\\s\\u3000]+(.+)$`, 'im'),
     extract: (m) => {
       const ch = convertChineseNumber(m[1])
       if (ch == null) return null
@@ -1547,7 +1547,7 @@ async function validateEmbeddingConfig(embeddingConfig: EmbeddingConfig): Promis
   let response: Response
   try {
     response = await fetch('/api/rag/embeddings/validate', requestInit)
-  } catch (error) {
+  } catch {
     response = await fetch('http://127.0.0.1:5174/api/rag/embeddings/validate', requestInit)
   }
 

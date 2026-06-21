@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState, type CSSProperties, type MouseEvent } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type MouseEvent } from 'react'
 import { Capacitor, CapacitorHttp } from '@capacitor/core'
 import {
   MobileApiClient,
@@ -539,9 +539,28 @@ function App() {
     return [...entityResults, ...relationResults, ...evidenceResults].slice(0, 30)
   }, [activePackage, searchMode, submittedSearchQuery])
 
-  useEffect(() => {
-    void hydrate()
+  const hydrate = useCallback(async () => {
+    const [settings, books] = await Promise.all([loadSettings(), listLocalBooks()])
+    setBaseUrl(settings.baseUrl)
+    setSyncToken(settings.syncToken)
+    setLlmBaseUrl(settings.externalLlm.baseUrl)
+    setLlmApiKey(settings.externalLlm.apiKey)
+    setLlmModel(settings.externalLlm.model)
+    setLlmTemperature(settings.externalLlm.temperature)
+    setEmbeddingBaseUrl(settings.embeddingService.baseUrl)
+    setEmbeddingApiKey(settings.embeddingService.apiKey)
+    setEmbeddingModel(settings.embeddingService.model)
+    setReaderFontSize(settings.reader.fontSize)
+    setReaderBackground(settings.reader.background)
+    setLocalBooks(books)
   }, [])
+
+  useEffect(() => {
+    const frame = window.requestAnimationFrame(() => {
+      void hydrate()
+    })
+    return () => window.cancelAnimationFrame(frame)
+  }, [hydrate])
 
   useEffect(() => {
     if (tab !== 'reader' || !activePackage || !activeChapterId) return
@@ -586,22 +605,6 @@ function App() {
       })
     }
   }, [activeChapterId, activePackage, tab])
-
-  async function hydrate() {
-    const [settings, books] = await Promise.all([loadSettings(), listLocalBooks()])
-    setBaseUrl(settings.baseUrl)
-    setSyncToken(settings.syncToken)
-    setLlmBaseUrl(settings.externalLlm.baseUrl)
-    setLlmApiKey(settings.externalLlm.apiKey)
-    setLlmModel(settings.externalLlm.model)
-    setLlmTemperature(settings.externalLlm.temperature)
-    setEmbeddingBaseUrl(settings.embeddingService.baseUrl)
-    setEmbeddingApiKey(settings.embeddingService.apiKey)
-    setEmbeddingModel(settings.embeddingService.model)
-    setReaderFontSize(settings.reader.fontSize)
-    setReaderBackground(settings.reader.background)
-    setLocalBooks(books)
-  }
 
   function getCurrentSettings(overrides: Partial<MobileAppSettings> = {}): MobileAppSettings {
     return {

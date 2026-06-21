@@ -644,12 +644,6 @@ function App() {
   } = useReaderState()
 
   useEffect(() => {
-    if (isConfigOpen) {
-      setConfigTab('llm')
-    }
-  }, [isConfigOpen])
-
-  useEffect(() => {
     if (view !== 'reader' || !activeChapter) return
 
     window.requestAnimationFrame(() => {
@@ -865,9 +859,17 @@ function App() {
   useEffect(() => {
     if (view !== 'search' || !state.book) return
 
-    void fetchEmbeddingStatus()
+    const frame = window.requestAnimationFrame(() => {
+      void fetchEmbeddingStatus()
+    })
+    return () => window.cancelAnimationFrame(frame)
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [view, state.book?.id])
+
+  function handleOpenModelConfig() {
+    setConfigTab('llm')
+    openModelConfig()
+  }
 
   async function checkKgScanStatus() {
     if (!state.book) return
@@ -3105,7 +3107,7 @@ ${context}
             {activeModelName || '未配置'} · Temp {activeTemperature} · 并发 {activeConcurrency} · Thinking{' '}
             {activeThinkingEnabled ? '开' : '关'}
           </small>
-          <button type="button" className="ghost-button" onClick={openModelConfig}>
+          <button type="button" className="ghost-button" onClick={handleOpenModelConfig}>
             模型配置
           </button>
         </div>
