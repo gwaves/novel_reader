@@ -1,5 +1,12 @@
 2026-06-21 最新状态：main 已同步到 PR #21 和 PR #22。
 
+2026-06-21 更新：独立 Android 移动端方向已确定，并新增 PC 端配套计划。
+- 移动端将作为独立 `mobile-app` workspace 开发，定位为离线可用的完整数据消费端，而不是 PC 局域网 API 的实时面板。
+- PC 端继续负责书籍导入、概要、知识图谱、正文 chunk embedding 和概要 embedding 生成；移动端不生成书籍/章节/chunk embedding。
+- PC 端后续需要提供 `/api/mobile/manifest`、`/api/mobile/books`、`/api/mobile/books/:bookId/package` 等同步接口，导出单书完整移动数据包。
+- 第一版移动数据包使用 JSON 验证端到端流程，包含章节、概要、图谱证据和 PC 端已生成 embedding；不包含 LLM API Key 或桌面端敏感模型配置。
+- 移动端离线 RAG 第一版应优先使用本地 FTS/摘要/图谱匹配构造上下文，再调用移动端配置的公共 LLM 生成回答。
+
 本轮合入内容：
 - PR #21：离线扫描数据包导入闭环完成。离线扫描器可按书导出 JSON 数据包，首页可导入单书概要与知识图谱数据；导入时有阶段提示和忙碌进度，章节扫描 UI 改为更紧凑的范围选择和并发 worker 进度列表。
 - PR #22：长章节 RAG embedding 策略完成 v1。新增 `chapter_chunk_embeddings`，搜索融合章节概要向量、正文 chunk 向量和知识图谱实体召回，避免 2 万字长章节被压成单个向量。

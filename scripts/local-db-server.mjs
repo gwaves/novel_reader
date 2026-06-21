@@ -10,13 +10,15 @@ import {
 import { createServer } from 'node:http'
 import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { DatabaseSync } from 'node:sqlite'
 
 const host = process.env.NOVEL_READER_API_HOST || '127.0.0.1'
 const port = Number(process.env.NOVEL_READER_API_PORT || 5174)
 const dataDir = process.env.NOVEL_READER_DATA_DIR || join(homedir(), '.novel_reader')
 const dbPath = process.env.NOVEL_READER_DB_PATH || join(dataDir, 'novel_reader.sqlite')
+const mobileSyncToken = process.env.NOVEL_READER_MOBILE_SYNC_TOKEN || ''
+const mobileSchemaVersion = 1
 const pendingRestorePath = join(dataDir, 'novel_reader.restore-pending.sqlite')
 const stateKey = 'novel-reader-mvp-state'
 
@@ -437,6 +439,192 @@ const getBookStatement = db.prepare(`
   SELECT id, title, imported_at AS importedAt, chapter_count AS chapterCount
   FROM books
   WHERE id = ?
+`)
+const listMobileBooksStatement = db.prepare(`
+  SELECT
+    b.id,
+    b.title,
+    b.imported_at AS importedAt,
+    b.updated_at AS updatedAt,
+    COUNT(c.id) AS chapterCount,
+    COALESCE(SUM(c.word_count), 0) AS wordCount,
+    COUNT(s.chapter_id) AS summarizedChapters,
+    (SELECT COUNT(*) FROM kg_chapter_extractions kgc WHERE kgc.book_id = b.id) AS scannedChapters,
+    (SELECT COUNT(*) FROM kg_entities e WHERE e.book_id = b.id) AS entityCount,
+    (SELECT COUNT(*) FROM kg_relations r WHERE r.book_id = b.id) AS relationCount,
+    (SELECT COUNT(*) FROM summary_embeddings se WHERE se.book_id = b.id) AS embeddedSummaries,
+    (SELECT COUNT(*) FROM chapter_chunk_embeddings cce WHERE cce.book_id = b.id) AS embeddedChunks,
+    (
+      SELECT se.model
+      FROM summary_embeddings se
+      WHERE se.book_id = b.id
+      GROUP BY se.model
+      ORDER BY COUNT(*) DESC, MAX(se.generated_at) DESC
+      LIMIT 1
+    ) AS summaryEmbeddingModel,
+    (
+      SELECT cce.model
+      FROM chapter_chunk_embeddings cce
+      WHERE cce.book_id = b.id
+      GROUP BY cce.model
+      ORDER BY COUNT(*) DESC, MAX(cce.generated_at) DESC
+      LIMIT 1
+    ) AS chunkEmbeddingModel,
+    (
+      SELECT se.dimension
+      FROM summary_embeddings se
+      WHERE se.book_id = b.id
+      ORDER BY se.generated_at DESC
+      LIMIT 1
+    ) AS summaryEmbeddingDimension,
+    (
+      SELECT cce.dimension
+      FROM chapter_chunk_embeddings cce
+      WHERE cce.book_id = b.id
+      ORDER BY cce.generated_at DESC
+      LIMIT 1
+    ) AS chunkEmbeddingDimension,
+    (
+      SELECT COUNT(*)
+      FROM chapter_chunk_embeddings cce
+      WHERE cce.book_id = b.id
+    ) AS totalChunks
+  FROM books b
+  LEFT JOIN chapters c ON c.book_id = b.id
+  LEFT JOIN summaries s ON s.chapter_id = c.id
+  GROUP BY b.id
+  ORDER BY b.updated_at DESC, b.imported_at DESC, b.title ASC
+`)
+const getMobileBookStatement = db.prepare(`
+  SELECT
+    b.id,
+    b.title,
+    b.imported_at AS importedAt,
+    b.updated_at AS updatedAt,
+    COUNT(c.id) AS chapterCount,
+    COALESCE(SUM(c.word_count), 0) AS wordCount
+  FROM books b
+  LEFT JOIN chapters c ON c.book_id = b.id
+  WHERE b.id = ?
+  GROUP BY b.id
+`)
+const listMobileChaptersStatement = db.prepare(`
+  SELECT
+    id,
+    book_id AS bookId,
+    chapter_index AS "index",
+    title,
+    content,
+    word_count AS wordCount,
+    updated_at AS updatedAt
+  FROM chapters
+  WHERE book_id = ?
+  ORDER BY chapter_index ASC
+`)
+const listMobileSummariesStatement = db.prepare(`
+  SELECT
+    s.chapter_id AS chapterId,
+    s.short,
+    s.detail,
+    s.key_points_json AS keyPointsJson,
+    s.skippable,
+    s.generated_by AS generatedBy,
+    s.updated_at AS updatedAt
+  FROM summaries s
+  JOIN chapters c ON c.id = s.chapter_id
+  WHERE c.book_id = ?
+  ORDER BY c.chapter_index ASC
+`)
+const listMobileEntitiesStatement = db.prepare(`
+  SELECT
+    id,
+    book_id AS bookId,
+    type,
+    name,
+    normalized_name AS normalizedName,
+    aliases_json AS aliasesJson,
+    description,
+    confidence,
+    first_chapter_index AS firstChapterIndex,
+    last_chapter_index AS lastChapterIndex,
+    review_status AS reviewStatus,
+    updated_at AS updatedAt
+  FROM kg_entities
+  WHERE book_id = ?
+  ORDER BY type ASC, name ASC
+`)
+const listMobileEntityMentionsStatement = db.prepare(`
+  SELECT
+    id,
+    entity_id AS entityId,
+    book_id AS bookId,
+    chapter_id AS chapterId,
+    chapter_index AS chapterIndex,
+    evidence,
+    confidence
+  FROM kg_entity_mentions
+  WHERE book_id = ?
+  ORDER BY chapter_index ASC
+`)
+const listMobileRelationsStatement = db.prepare(`
+  SELECT
+    id,
+    book_id AS bookId,
+    source_entity_id AS sourceEntityId,
+    target_entity_id AS targetEntityId,
+    type,
+    description,
+    confidence,
+    first_chapter_index AS firstChapterIndex,
+    last_chapter_index AS lastChapterIndex,
+    review_status AS reviewStatus,
+    updated_at AS updatedAt
+  FROM kg_relations
+  WHERE book_id = ?
+  ORDER BY type ASC, updated_at DESC
+`)
+const listMobileRelationMentionsStatement = db.prepare(`
+  SELECT
+    id,
+    relation_id AS relationId,
+    book_id AS bookId,
+    chapter_id AS chapterId,
+    chapter_index AS chapterIndex,
+    evidence,
+    confidence
+  FROM kg_relation_mentions
+  WHERE book_id = ?
+  ORDER BY chapter_index ASC
+`)
+const listMobileSummaryEmbeddingsStatement = db.prepare(`
+  SELECT
+    chapter_id AS chapterId,
+    book_id AS bookId,
+    model,
+    dimension,
+    embedding_json AS embeddingJson,
+    generated_at AS generatedAt
+  FROM summary_embeddings
+  WHERE book_id = ?
+  ORDER BY model ASC, chapter_id ASC
+`)
+const listMobileChunkEmbeddingsStatement = db.prepare(`
+  SELECT
+    id,
+    book_id AS bookId,
+    chapter_id AS chapterId,
+    chapter_index AS chapterIndex,
+    chunk_index AS chunkIndex,
+    start_offset AS startOffset,
+    end_offset AS endOffset,
+    text,
+    model,
+    dimension,
+    embedding_json AS embeddingJson,
+    generated_at AS generatedAt
+  FROM chapter_chunk_embeddings
+  WHERE book_id = ?
+  ORDER BY model ASC, chapter_index ASC, chunk_index ASC
 `)
 const getKgOverviewStatement = db.prepare(`
   SELECT
@@ -1280,7 +1468,7 @@ const insertKgRelationMentionStatement = db.prepare(`
 
 function sendJson(response, statusCode, payload) {
   response.writeHead(statusCode, {
-    'Access-Control-Allow-Headers': 'Content-Type',
+    'Access-Control-Allow-Headers': 'Authorization, Content-Type',
     'Access-Control-Allow-Methods': 'GET,PUT,POST,DELETE,OPTIONS',
     'Access-Control-Allow-Origin': '*',
     'Content-Type': 'application/json; charset=utf-8',
@@ -1290,7 +1478,7 @@ function sendJson(response, statusCode, payload) {
 
 function sendFile(response, statusCode, body, contentType, filename) {
   response.writeHead(statusCode, {
-    'Access-Control-Allow-Headers': 'Content-Type',
+    'Access-Control-Allow-Headers': 'Authorization, Content-Type',
     'Access-Control-Allow-Methods': 'GET,PUT,POST,DELETE,OPTIONS',
     'Access-Control-Allow-Origin': '*',
     'Content-Disposition': `attachment; filename="${filename}"`,
@@ -2532,6 +2720,163 @@ function mapEntityRow(row) {
     aliases: safeJsonParse(row.aliasesJson, []),
     aliasesJson: undefined,
   }
+}
+
+function requireMobileAuth(request, response) {
+  if (!mobileSyncToken) return true
+
+  const header = request.headers.authorization ?? ''
+  const token = header.startsWith('Bearer ') ? header.slice('Bearer '.length).trim() : ''
+  if (token === mobileSyncToken) return true
+
+  sendJson(response, 401, {
+    code: 'UNAUTHORIZED',
+    error: 'Missing or invalid mobile sync token.',
+  })
+  return false
+}
+
+function getMobilePackageVersion(book) {
+  return createHash('sha256')
+    .update([
+      book.id,
+      book.updatedAt ?? '',
+      book.chapterCount ?? 0,
+      book.wordCount ?? 0,
+      book.summarizedChapters ?? 0,
+      book.scannedChapters ?? 0,
+      book.entityCount ?? 0,
+      book.relationCount ?? 0,
+      book.embeddedSummaries ?? 0,
+      book.embeddedChunks ?? 0,
+    ].join('|'))
+    .digest('hex')
+    .slice(0, 16)
+}
+
+function mapMobileBook(row) {
+  const chapterCount = Number(row.chapterCount) || 0
+  const summarizedChapters = Number(row.summarizedChapters) || 0
+  const embeddedSummaries = Number(row.embeddedSummaries) || 0
+  const embeddedChunks = Number(row.embeddedChunks) || 0
+  const model = row.chunkEmbeddingModel ?? row.summaryEmbeddingModel ?? null
+  const dimension = row.chunkEmbeddingDimension ?? row.summaryEmbeddingDimension ?? null
+
+  return {
+    id: row.id,
+    title: row.title,
+    importedAt: row.importedAt,
+    updatedAt: row.updatedAt,
+    chapterCount,
+    wordCount: Number(row.wordCount) || 0,
+    summaryCoverage: {
+      completed: summarizedChapters,
+      total: chapterCount,
+    },
+    graphCoverage: {
+      scannedChapters: Number(row.scannedChapters) || 0,
+      totalChapters: chapterCount,
+      entityCount: Number(row.entityCount) || 0,
+      relationCount: Number(row.relationCount) || 0,
+    },
+    embeddingCoverage: {
+      model,
+      dimension,
+      embeddedSummaries,
+      totalSummaries: summarizedChapters,
+      embeddedChunks,
+      totalChunks: Number(row.totalChunks) || embeddedChunks,
+    },
+    packageVersion: getMobilePackageVersion(row),
+  }
+}
+
+function mapMobileSummary(row) {
+  return {
+    chapterId: row.chapterId,
+    short: row.short,
+    detail: row.detail,
+    keyPoints: safeJsonParse(row.keyPointsJson, []),
+    skippable: row.skippable,
+    generatedBy: row.generatedBy,
+    updatedAt: row.updatedAt,
+  }
+}
+
+function mapMobileEntity(row) {
+  return {
+    ...row,
+    aliases: safeJsonParse(row.aliasesJson, []),
+    aliasesJson: undefined,
+  }
+}
+
+function mapMobileEmbedding(row) {
+  return {
+    ...row,
+    embedding: safeJsonParse(row.embeddingJson, []),
+    embeddingJson: undefined,
+  }
+}
+
+function createMobileContentHash(payload) {
+  return createHash('sha256')
+    .update(JSON.stringify({
+      schemaVersion: payload.schemaVersion,
+      packageVersion: payload.packageVersion,
+      book: payload.book,
+      chapters: payload.chapters,
+      summaries: payload.summaries,
+      knowledgeGraph: payload.knowledgeGraph,
+      embeddings: payload.embeddings,
+    }))
+    .digest('hex')
+}
+
+function getMobileBookPackage(bookId) {
+  const bookRow = getMobileBookStatement.get(bookId)
+  if (!bookRow) return null
+
+  const listRow = listMobileBooksStatement.all().find((book) => book.id === bookId) ?? {
+    ...bookRow,
+    summarizedChapters: 0,
+    scannedChapters: 0,
+    entityCount: 0,
+    relationCount: 0,
+    embeddedSummaries: 0,
+    embeddedChunks: 0,
+  }
+  const mobileBook = mapMobileBook(listRow)
+  const payload = {
+    schemaVersion: mobileSchemaVersion,
+    packageVersion: mobileBook.packageVersion,
+    generatedAt: new Date().toISOString(),
+    book: {
+      id: bookRow.id,
+      title: bookRow.title,
+      importedAt: bookRow.importedAt,
+      chapterCount: Number(bookRow.chapterCount) || 0,
+      wordCount: Number(bookRow.wordCount) || 0,
+    },
+    chapters: listMobileChaptersStatement.all(bookId),
+    summaries: listMobileSummariesStatement.all(bookId).map(mapMobileSummary),
+    knowledgeGraph: {
+      entities: listMobileEntitiesStatement.all(bookId).map(mapMobileEntity),
+      entityMentions: listMobileEntityMentionsStatement.all(bookId),
+      relations: listMobileRelationsStatement.all(bookId),
+      relationMentions: listMobileRelationMentionsStatement.all(bookId),
+    },
+    embeddings: {
+      summaries: listMobileSummaryEmbeddingsStatement.all(bookId).map(mapMobileEmbedding),
+      chunks: listMobileChunkEmbeddingsStatement.all(bookId).map(mapMobileEmbedding),
+    },
+    integrity: {
+      contentHash: null,
+      algorithm: 'sha256',
+    },
+  }
+  payload.integrity.contentHash = createMobileContentHash(payload)
+  return payload
 }
 
 function mapReviewEntity(row) {
@@ -3888,6 +4233,63 @@ const server = createServer(async (request, response) => {
   const url = new URL(request.url ?? '/', `http://${request.headers.host ?? 'localhost'}`)
 
   try {
+    if (url.pathname.startsWith('/api/mobile/')) {
+      if (!requireMobileAuth(request, response)) return
+
+      if (request.method === 'GET' && url.pathname === '/api/mobile/manifest') {
+        sendJson(response, 200, {
+          serverVersion: '0.1.0',
+          schemaVersion: mobileSchemaVersion,
+          capabilities: ['full-book-package', 'reading-progress'],
+          generatedAt: new Date().toISOString(),
+        })
+        return
+      }
+
+      if (request.method === 'GET' && url.pathname === '/api/mobile/books') {
+        sendJson(response, 200, {
+          books: listMobileBooksStatement.all().map(mapMobileBook),
+        })
+        return
+      }
+
+      const mobileBookPackageMatch = url.pathname.match(/^\/api\/mobile\/books\/([^/]+)\/package$/)
+      if (request.method === 'GET' && mobileBookPackageMatch) {
+        const bookId = decodeURIComponent(mobileBookPackageMatch[1])
+        const payload = getMobileBookPackage(bookId)
+
+        if (!payload) {
+          sendJson(response, 404, { code: 'BOOK_NOT_FOUND', error: 'Book not found.' })
+          return
+        }
+
+        sendJson(response, 200, payload)
+        return
+      }
+
+      const mobileBookChangesMatch = url.pathname.match(/^\/api\/mobile\/books\/([^/]+)\/changes$/)
+      if (request.method === 'GET' && mobileBookChangesMatch) {
+        sendJson(response, 501, {
+          code: 'NOT_IMPLEMENTED',
+          error: 'Incremental mobile sync is not implemented yet. Use the full package endpoint.',
+        })
+        return
+      }
+
+      if (request.method === 'POST' && url.pathname === '/api/mobile/progress') {
+        const body = await readJson(request)
+        if (!body?.bookId || !body?.chapterId) {
+          sendJson(response, 400, { error: 'Missing bookId or chapterId.' })
+          return
+        }
+        sendJson(response, 200, { ok: true })
+        return
+      }
+
+      sendJson(response, 404, { error: 'Mobile sync endpoint not found.' })
+      return
+    }
+
     if (request.method === 'GET' && url.pathname === '/api/state') {
       const row = getStateStatement.get(stateKey)
       const state = row ? JSON.parse(row.value_json) : null

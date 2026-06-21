@@ -79,6 +79,7 @@ novel_reader/
 │   ├── local-db-server.mjs # SQLite REST API server
 │   ├── offline-scanner.mjs # Offline batch scanner CLI
 │   └── offline-scanner/    # Scanner modules (config, db, llm, scanner)
+├── mobile-app/             # Independent Android mobile workspace (planned)
 ├── src/                    # React frontend
 │   ├── main.tsx            # Entry point (desktop / mobile routing)
 │   ├── App.tsx             # Main desktop UI
@@ -111,7 +112,7 @@ Main tables:
 - `kg_scan_jobs`, `kg_chapter_extractions` — knowledge graph scan state
 - `kg_entities`, `kg_entity_mentions` — extracted entities
 - `kg_relations`, `kg_relation_mentions` — extracted relations
-- `summary_embeddings` — per-chapter summary embeddings for RAG search
+- `summary_embeddings`, `chapter_chunk_embeddings` — summary and chapter-content embeddings for RAG search
 - `app_state` — app settings and model configuration
 
 ## Knowledge Graph
@@ -140,7 +141,49 @@ RAG search combines summary embeddings, chapter chunk embeddings, and knowledge 
 - Search calls `/api/rag/search`, which fuses summary vector recall, best-per-chapter chunk recall, and entity recall with reciprocal-rank-style scoring.
 - Search results include chapter summaries, matched entity names, similarity, match type, and optional best-matching chunk snippets.
 - If fewer than 80% of chapters have embeddings for the selected model, the API returns `409 EMBEDDINGS_NOT_READY`.
-- The desktop and mobile UIs can generate embeddings, search, and ask the configured generation model to answer from retrieved results.
+- The current web desktop UI and `/mobile` route can still generate embeddings, search, and ask the configured generation model to answer from retrieved results.
+- The independent Android mobile app must not generate book, chapter, or chunk embeddings. It consumes PC-generated embeddings synced into local mobile storage.
+
+## Independent Mobile Support Plan
+
+The detailed Android mobile plan lives in [`../mobile-app/development-plan.md`](../mobile-app/development-plan.md). In that architecture, the PC app is the data production and sync service, not a runtime dependency after the phone leaves the home LAN.
+
+PC responsibilities:
+
+- Keep owning book import, chapter splitting, summary generation, knowledge graph extraction, entity cleanup, summary embeddings, and chapter chunk embeddings.
+- Expose `/api/mobile/*` read APIs so the mobile app can pull complete book packages while on the same LAN.
+- Include books, chapters, summaries, graph entities, graph relations, evidence rows, `summary_embeddings`, and `chapter_chunk_embeddings` in exported mobile packages.
+- Exclude LLM API keys, sensitive desktop model configuration fields, and unnecessary desktop UI state from mobile packages.
+- Optionally accept reading progress from mobile later; Phase 1 should prioritize one-way PC -> mobile sync.
+
+Recommended PC endpoints:
+
+```text
+GET /api/mobile/manifest
+GET /api/mobile/books
+GET /api/mobile/books/:bookId/package
+GET /api/mobile/books/:bookId/changes?since=...
+POST /api/mobile/progress
+```
+
+Phase 1 only needs the first three:
+
+- `/api/mobile/manifest`: server version, mobile package schema version, capabilities, and current time.
+- `/api/mobile/books`: library list with chapter count, word count, summary coverage, graph coverage, embedding coverage, and update timestamps.
+- `/api/mobile/books/:bookId/package`: complete single-book mobile package for import into mobile SQLite.
+
+Security requirements:
+
+- `/api/mobile/*` should not be reachable from the LAN without a sync token.
+- When `NOVEL_READER_API_HOST=0.0.0.0`, the UI or logs should make the LAN exposure explicit.
+- Phase 1 can use a static user-configured sync token; QR pairing, token rotation, and HTTPS can come later.
+
+Mobile package implementation notes:
+
+- Phase 1 can use JSON to prove the end-to-end flow.
+- Packages must include `schemaVersion`, `bookId`, `generatedAt`, and validation metadata.
+- If large books make sync slow, upgrade later to compressed JSON, NDJSON streaming, or SQLite export packages.
+- Packages should be idempotent, complete, and verifiable so failed mobile imports do not corrupt existing local data.
 
 ## Reader UX Polish Plan
 
