@@ -8,6 +8,31 @@ Offline-first novel reader with EPUB import, RAG search, knowledge graph extract
 
 Novel Reader Assistant is built for long web novels where remembering every character, item, faction, and plot thread becomes part of the reading work. It keeps your library in a local SQLite database, lets local or OpenAI-compatible models summarize chapters, builds a searchable story knowledge graph, and syncs PC-generated book packages to Android for offline reading.
 
+## Real UI Preview
+
+These screenshots come from an isolated demo data directory seeded with public-domain texts from *Romance of the Three Kingdoms* and *Journey to the West*. They do not use a personal reading library.
+
+![Demo library home](docs/screenshots/demo-home-library.png)
+![Demo reader](docs/screenshots/demo-reader.png)
+![Demo smart search](docs/screenshots/demo-search.png)
+
+## Quick Demo
+
+You can reach the core experience in about five minutes:
+
+1. Start the app:
+
+   ```bash
+   npm install
+   npm run dev
+   ```
+
+2. Open `http://127.0.0.1:5173/` and import a `.txt` or `.epub` novel.
+3. Go to the reader first to verify chapter splitting, navigation, reading theme, and progress restore.
+4. Open `Model Config` and set up either Ollama or an OpenAI-compatible endpoint.
+5. Generate summaries for a few chapters, then open `Smart Search`, create embeddings, and ask one cross-chapter question.
+6. Open `Knowledge Graph`, scan the current chapter or a small range, and inspect entities, relations, and evidence search.
+
 ## Highlights
 
 - **Local-first reading**: import `.txt` or `.epub`, split chapters, save reading progress, and keep data under `~/.novel_reader`.
