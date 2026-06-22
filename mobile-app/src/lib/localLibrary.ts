@@ -20,10 +20,20 @@ export type ReaderSettings = {
   background: ReaderBackground
 }
 
+export type TtsSettings = {
+  locale: string
+  voiceId: string
+  rate: number
+  pitch: number
+  autoFollow: boolean
+  resumeFromProgress: boolean
+}
+
 export type MobileAppSettings = MobileApiSettings & {
   externalLlm: ExternalLlmSettings
   embeddingService: EmbeddingServiceSettings
   reader: ReaderSettings
+  tts: TtsSettings
 }
 
 export type LocalBook = {
@@ -46,8 +56,19 @@ export type ReadingProgress = {
   updatedAt: string
 }
 
+export type SpeechProgress = {
+  bookId: string
+  chapterId: string
+  segmentId: string
+  segmentIndex: number
+  voiceId: string | null
+  rate: number
+  pitch: number
+  updatedAt: string
+}
+
 const DB_NAME = 'novel-reader-mobile'
-const DB_VERSION = 2
+const DB_VERSION = 3
 const SETTINGS_KEY = 'settings'
 const DEFAULT_SETTINGS: MobileAppSettings = {
   baseUrl: 'http://localhost:5174',
@@ -67,6 +88,14 @@ const DEFAULT_SETTINGS: MobileAppSettings = {
     fontSize: 19,
     background: 'paper',
   },
+  tts: {
+    locale: 'zh-CN',
+    voiceId: '',
+    rate: 1,
+    pitch: 1,
+    autoFollow: true,
+    resumeFromProgress: true,
+  },
 }
 
 function openDb(): Promise<IDBDatabase> {
@@ -84,6 +113,9 @@ function openDb(): Promise<IDBDatabase> {
       }
       if (!db.objectStoreNames.contains('progress')) {
         db.createObjectStore('progress', { keyPath: 'bookId' })
+      }
+      if (!db.objectStoreNames.contains('speechProgress')) {
+        db.createObjectStore('speechProgress', { keyPath: 'bookId' })
       }
     }
   })
@@ -143,6 +175,32 @@ function sanitizeSettings(settings: Partial<MobileAppSettings> | undefined): Mob
         settings?.reader?.background === 'dark'
           ? settings.reader.background
           : DEFAULT_SETTINGS.reader.background,
+    },
+    tts: {
+      locale:
+        typeof settings?.tts?.locale === 'string' && settings.tts.locale.trim()
+          ? settings.tts.locale.trim()
+          : DEFAULT_SETTINGS.tts.locale,
+      voiceId:
+        typeof settings?.tts?.voiceId === 'string'
+          ? settings.tts.voiceId
+          : DEFAULT_SETTINGS.tts.voiceId,
+      rate:
+        typeof settings?.tts?.rate === 'number' && Number.isFinite(settings.tts.rate)
+          ? Math.max(0.5, Math.min(2, settings.tts.rate))
+          : DEFAULT_SETTINGS.tts.rate,
+      pitch:
+        typeof settings?.tts?.pitch === 'number' && Number.isFinite(settings.tts.pitch)
+          ? Math.max(0.5, Math.min(2, settings.tts.pitch))
+          : DEFAULT_SETTINGS.tts.pitch,
+      autoFollow:
+        typeof settings?.tts?.autoFollow === 'boolean'
+          ? settings.tts.autoFollow
+          : DEFAULT_SETTINGS.tts.autoFollow,
+      resumeFromProgress:
+        typeof settings?.tts?.resumeFromProgress === 'boolean'
+          ? settings.tts.resumeFromProgress
+          : DEFAULT_SETTINGS.tts.resumeFromProgress,
     },
   }
 }
@@ -214,6 +272,25 @@ export async function saveReadingProgress(progress: Omit<ReadingProgress, 'updat
     tx.objectStore('progress').put({
       ...progress,
       scrollY: Math.max(0, Math.round(progress.scrollY)),
+      updatedAt: new Date().toISOString(),
+    }),
+  )
+}
+
+export async function getSpeechProgress(bookId: string): Promise<SpeechProgress | null> {
+  const db = await openDb()
+  const tx = db.transaction('speechProgress', 'readonly')
+  const progress = await requestToPromise<SpeechProgress | undefined>(tx.objectStore('speechProgress').get(bookId))
+  return progress ?? null
+}
+
+export async function saveSpeechProgress(progress: Omit<SpeechProgress, 'updatedAt'>): Promise<void> {
+  const db = await openDb()
+  const tx = db.transaction('speechProgress', 'readwrite')
+  await requestToPromise(
+    tx.objectStore('speechProgress').put({
+      ...progress,
+      segmentIndex: Math.max(0, Math.round(progress.segmentIndex)),
       updatedAt: new Date().toISOString(),
     }),
   )

@@ -108,6 +108,7 @@ button:disabled {
 }
 
 .field input,
+.field select,
 .chapter-toolbar select,
 .search-input {
   width: 100%;
@@ -322,6 +323,50 @@ button:disabled {
   color: #fff;
 }
 
+.speech-control-panel {
+  display: grid;
+  gap: 10px;
+  margin-bottom: 12px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.speech-control-panel strong,
+.speech-control-panel span {
+  display: block;
+}
+
+.speech-control-panel span,
+.speech-status {
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.speech-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.speech-actions button:not(:disabled) {
+  background: var(--primary);
+  border-color: var(--primary);
+  color: #fff;
+}
+
+.speech-actions button:last-child:not(:first-child) {
+  background: var(--surface);
+  border-color: var(--border);
+  color: var(--text);
+}
+
+.speech-status {
+  margin: 0 0 12px;
+}
+
 .reader-card {
   padding: 16px 14px;
   border-radius: 8px;
@@ -367,6 +412,11 @@ button:disabled {
 
 .reader-card.dark .summary-skip {
   color: #7dd3c7 !important;
+}
+
+.reader-card.dark .speech-segment.active {
+  background: rgba(125, 211, 199, 0.2);
+  box-shadow: 0 0 0 3px rgba(125, 211, 199, 0.2);
 }
 
 .reader-card h2 {
@@ -419,6 +469,16 @@ button:disabled {
 
 .chapter-text p {
   margin: 0 0 1em;
+}
+
+.speech-segment {
+  border-radius: 4px;
+  transition: background 0.2s ease, box-shadow 0.2s ease;
+}
+
+.speech-segment.active {
+  background: rgba(47, 111, 95, 0.14);
+  box-shadow: 0 0 0 3px rgba(47, 111, 95, 0.14);
 }
 
 .search-input {
