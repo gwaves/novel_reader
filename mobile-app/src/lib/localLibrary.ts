@@ -200,6 +200,13 @@ export async function getReadingProgress(bookId: string): Promise<ReadingProgres
   return progress ?? null
 }
 
+export async function getLatestReadingProgress(): Promise<ReadingProgress | null> {
+  const db = await openDb()
+  const tx = db.transaction('progress', 'readonly')
+  const progresses = await requestToPromise<ReadingProgress[]>(tx.objectStore('progress').getAll())
+  return progresses.sort((a, b) => b.updatedAt.localeCompare(a.updatedAt))[0] ?? null
+}
+
 export async function saveReadingProgress(progress: Omit<ReadingProgress, 'updatedAt'>): Promise<void> {
   const db = await openDb()
   const tx = db.transaction('progress', 'readwrite')

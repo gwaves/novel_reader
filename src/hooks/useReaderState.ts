@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
+import { getCachedChapters, saveCachedChapters } from '../lib/chapterCache'
 
 export type Chapter = {
   id: string
@@ -191,7 +192,7 @@ function loadStateFromLegacyDb(): Promise<unknown> {
 }
 
 async function loadStateFromLocalDb(): Promise<unknown> {
-  const response = await fetch('/api/state')
+  const response = await fetch('/api/state?source=structured&content=metadata')
 
   if (!response.ok) {
     throw new Error('Local database API is not available.')
@@ -199,6 +200,42 @@ async function loadStateFromLocalDb(): Promise<unknown> {
 
   const payload = (await response.json()) as { state?: unknown }
   return payload.state ?? null
+}
+
+async function loadLibraryBookFromLocalDb(bookId: string, includeContent = false): Promise<LibraryBook> {
+  const contentMode = includeContent ? 'full' : 'metadata'
+  const response = await fetch(`/api/books/${encodeURIComponent(bookId)}/library-state?content=${contentMode}`)
+
+  if (!response.ok) {
+    throw new Error('Local database API could not load the selected book.')
+  }
+
+  const payload = (await response.json()) as { libraryBook?: unknown }
+  const libraryBook = payload.libraryBook as LibraryBook | undefined
+  if (!libraryBook?.book) {
+    throw new Error('Selected book payload is invalid.')
+  }
+
+  return libraryBook
+}
+
+async function loadChaptersFromLocalDb(bookId: string, params: { start?: number; end?: number; ids?: string[] }): Promise<Chapter[]> {
+  const search = new URLSearchParams()
+  if (params.ids?.length) {
+    search.set('ids', params.ids.join(','))
+  } else if (params.start && params.end) {
+    search.set('start', String(params.start))
+    search.set('end', String(params.end))
+  }
+
+  const response = await fetch(`/api/books/${encodeURIComponent(bookId)}/chapters?${search}`)
+
+  if (!response.ok) {
+    throw new Error('Local database API could not load chapters.')
+  }
+
+  const payload = (await response.json()) as { chapters?: Chapter[] }
+  return Array.isArray(payload.chapters) ? payload.chapters : []
 }
 
 async function saveStateToLocalDb(state: StoredState): Promise<void> {
@@ -1770,7 +1807,7 @@ export interface UseReaderStateReturn {
   importedDate: string
   handleImport: (file: File) => Promise<void>
   generateMissingSummariesForBook: (bookId: string) => Promise<void>
-  selectBook: (bookId: string) => void
+  selectBook: (bookId: string) => Promise<void>
   deleteBook: (bookId: string) => void
   updateActiveChapter: (id: string) => void
   navigateToPreviousChapter: () => void
@@ -1825,6 +1862,72 @@ function getChapterPageForState(state: StoredState): number {
 
   const chapter = state.book.chapters.find((item) => item.id === state.activeChapterId)
   return chapter ? Math.ceil(chapter.index / CHAPTERS_PER_PAGE) : 1
+}
+
+function mergeChapters(libraryBook: LibraryBook, chapters: Chapter[]): LibraryBook {
+  if (!chapters.length) return libraryBook
+
+  const chapterById = new Map(chapters.map((chapter) => [chapter.id, chapter]))
+  return {
+    ...libraryBook,
+    book: {
+      ...libraryBook.book,
+      chapters: libraryBook.book.chapters.map((chapter) => chapterById.get(chapter.id) ?? chapter),
+    },
+  }
+}
+
+function getPriorityChapterWindow(libraryBook: LibraryBook): { chapters: Chapter[]; start: number; end: number } {
+  const chapters = libraryBook.book.chapters
+  const activeChapter =
+    chapters.find((chapter) => chapter.id === libraryBook.activeChapterId) ?? chapters[0] ?? null
+
+  if (!activeChapter) {
+    return { chapters: [], start: 1, end: 0 }
+  }
+
+  const hasProgress = Boolean(libraryBook.activeChapterId)
+  const start = hasProgress ? Math.max(1, activeChapter.index - 3) : 1
+  const end = hasProgress
+    ? Math.min(chapters.length, activeChapter.index + 5)
+    : Math.min(chapters.length, 8)
+
+  return {
+    chapters: chapters.filter((chapter) => chapter.index >= start && chapter.index <= end),
+    start,
+    end,
+  }
+}
+
+async function hydratePriorityChapters(libraryBook: LibraryBook): Promise<LibraryBook> {
+  const { chapters: priorityChapters, start, end } = getPriorityChapterWindow(libraryBook)
+  if (!priorityChapters.length) return libraryBook
+
+  const bookId = libraryBook.book.id
+  const priorityIds = priorityChapters.map((chapter) => chapter.id)
+  const cached = await getCachedChapters(bookId, priorityIds)
+  const missingIds = priorityIds.filter((chapterId) => !cached[chapterId])
+  let nextLibraryBook = mergeChapters(libraryBook, Object.values(cached))
+
+  if (missingIds.length) {
+    const fetched = await loadChaptersFromLocalDb(bookId, { start, end })
+    await saveCachedChapters(bookId, fetched)
+    nextLibraryBook = mergeChapters(nextLibraryBook, fetched)
+  }
+
+  return nextLibraryBook
+}
+
+async function prefetchBookChapters(libraryBook: LibraryBook): Promise<void> {
+  const bookId = libraryBook.book.id
+  const batchSize = 80
+  const total = libraryBook.book.chapters.length
+
+  for (let start = 1; start <= total; start += batchSize) {
+    const end = Math.min(total, start + batchSize - 1)
+    const chapters = await loadChaptersFromLocalDb(bookId, { start, end })
+    await saveCachedChapters(bookId, chapters)
+  }
 }
 
 export function useReaderState(): UseReaderStateReturn {
@@ -1888,11 +1991,28 @@ export function useReaderState(): UseReaderStateReturn {
     localStorage.removeItem(STORAGE_KEY)
 
     loadStateFromLocalDb()
-      .then((storedState) => {
+      .then(async (storedState) => {
         if (storedState) {
           const nextState = normalizeStoredState(storedState as Partial<StoredState> & Record<string, unknown>)
-          setState(nextState)
-          setChapterPage(getChapterPageForState(nextState))
+          const activeLibraryBook = nextState.books.find((entry) => entry.book.id === nextState.activeBookId)
+          const hydratedLibraryBook = activeLibraryBook ? await hydratePriorityChapters(activeLibraryBook) : null
+          const hydratedState = hydratedLibraryBook
+            ? {
+                ...nextState,
+                books: nextState.books.map((entry) =>
+                  entry.book.id === hydratedLibraryBook.book.id ? hydratedLibraryBook : entry,
+                ),
+                book: hydratedLibraryBook.book,
+                activeChapterId: hydratedLibraryBook.activeChapterId,
+                summaries: hydratedLibraryBook.summaries,
+              }
+            : nextState
+
+          setState(hydratedState)
+          setChapterPage(getChapterPageForState(hydratedState))
+          if (hydratedLibraryBook) {
+            void prefetchBookChapters(hydratedLibraryBook)
+          }
           return
         }
 
@@ -1920,6 +2040,42 @@ export function useReaderState(): UseReaderStateReturn {
       setError('保存到本地 SQLite 失败，请确认本地数据库服务仍在运行。')
     })
   }, [isHydrated, state])
+
+  useEffect(() => {
+    if (!isHydrated || !state.activeBookId || !state.activeChapterId) return
+
+    const activeLibraryBook = state.books.find((entry) => entry.book.id === state.activeBookId)
+    const activeChapter = activeLibraryBook?.book.chapters.find((chapter) => chapter.id === state.activeChapterId)
+    if (!activeLibraryBook || activeChapter?.content) return
+
+    let isCancelled = false
+
+    hydratePriorityChapters(activeLibraryBook)
+      .then((hydratedLibraryBook) => {
+        if (isCancelled) return
+
+        setState((current) => ({
+          ...current,
+          books: current.books.map((entry) =>
+            entry.book.id === hydratedLibraryBook.book.id ? hydratedLibraryBook : entry,
+          ),
+          ...(current.activeBookId === hydratedLibraryBook.book.id
+            ? {
+                book: hydratedLibraryBook.book,
+                activeChapterId: hydratedLibraryBook.activeChapterId,
+                summaries: hydratedLibraryBook.summaries,
+              }
+            : {}),
+        }))
+      })
+      .catch(() => {
+        if (!isCancelled) setError('读取章节内容失败，请确认本地数据库服务仍在运行。')
+      })
+
+    return () => {
+      isCancelled = true
+    }
+  }, [isHydrated, state.activeBookId, state.activeChapterId, state.books])
 
   useEffect(() => {
     if (!isHydrated) return
@@ -2147,16 +2303,27 @@ export function useReaderState(): UseReaderStateReturn {
     updateActiveChapter(nextChapter.id)
   }
 
-  function selectBook(bookId: string) {
-    const nextBook = state.books.find((entry) => entry.book.id === bookId)
+  async function selectBook(bookId: string) {
+    let nextBook = state.books.find((entry) => entry.book.id === bookId)
     if (!nextBook) return
+
+    try {
+      if (nextBook.book.chapters.some((chapter) => !chapter.content)) {
+        nextBook = await loadLibraryBookFromLocalDb(bookId)
+      }
+      nextBook = await hydratePriorityChapters(nextBook)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '读取书籍内容失败。')
+      return
+    }
 
     setState((current) => ({
       ...current,
-      activeBookId: nextBook.book.id,
-      book: nextBook.book,
-      activeChapterId: nextBook.activeChapterId ?? nextBook.book.chapters[0]?.id ?? null,
-      summaries: nextBook.summaries,
+      books: current.books.map((entry) => (entry.book.id === bookId ? nextBook : entry)),
+      activeBookId: nextBook!.book.id,
+      book: nextBook!.book,
+      activeChapterId: nextBook!.activeChapterId ?? nextBook!.book.chapters[0]?.id ?? null,
+      summaries: nextBook!.summaries,
     }))
     setChapterPage(getChapterPageForState({
       ...state,
@@ -2168,6 +2335,7 @@ export function useReaderState(): UseReaderStateReturn {
     setChapterSearch('')
     setView('reader')
     setMobileTab('reader')
+    void prefetchBookChapters(nextBook)
   }
 
   function deleteBook(bookId: string) {

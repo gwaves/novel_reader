@@ -465,6 +465,8 @@ function App() {
   const chapterListRef = useRef<HTMLDivElement | null>(null)
   const activeChapterButtonRef = useRef<HTMLButtonElement | null>(null)
   const readerScrollSaveTimerRef = useRef<number | null>(null)
+  const readerProgressFrameRef = useRef<number | null>(null)
+  const pendingReaderScrollPositionRef = useRef<{ key: string; top: number } | null>(null)
   const databaseImportInputRef = useRef<HTMLInputElement | null>(null)
   const offlineImportInputRef = useRef<HTMLInputElement | null>(null)
   const shouldStopScanningRef = useRef(false)
@@ -649,6 +651,13 @@ function App() {
   const hasEmbeddingConfig = Boolean(embeddingModelName && state.embeddingConfig.baseUrl.trim())
   const totalChapters = state.book?.chapters.length ?? 0
   const summariesComplete = totalChapters > 0 && processedCount === totalChapters
+  const activeChapterParagraphs = useMemo(() => {
+    if (!activeChapter) return []
+
+    return activeChapter.content.split('\n').map((line, index) => (
+      <p key={`${activeChapter.id}-${index}`}>{line || ' '}</p>
+    ))
+  }, [activeChapter?.content, activeChapter?.id])
   const onboardingSteps = [
     {
       id: 'import',
@@ -770,25 +779,50 @@ function App() {
     const readerElement = readerRef.current
 
     const key = `${state.book?.id ?? 'book'}:${activeChapter.id}`
+    let lastProgress = -1
+
+    function commitReaderScrollPosition() {
+      const pending = pendingReaderScrollPositionRef.current
+      if (!pending) return
+
+      pendingReaderScrollPositionRef.current = null
+      setState((current) => {
+        if (current.chapterScrollPositions[pending.key] === pending.top) return current
+
+        return {
+          ...current,
+          chapterScrollPositions: {
+            ...current.chapterScrollPositions,
+            [pending.key]: pending.top,
+          },
+        }
+      })
+    }
 
     function updateReaderProgress() {
-      const scrollable = Math.max(1, readerElement.scrollHeight - readerElement.clientHeight)
-      const nextProgress = Math.max(0, Math.min(100, (readerElement.scrollTop / scrollable) * 100))
-      setReaderProgress(nextProgress)
+      pendingReaderScrollPositionRef.current = {
+        key,
+        top: Math.max(0, Math.round(readerElement.scrollTop)),
+      }
+
+      if (readerProgressFrameRef.current == null) {
+        readerProgressFrameRef.current = window.requestAnimationFrame(() => {
+          readerProgressFrameRef.current = null
+          const scrollable = Math.max(1, readerElement.scrollHeight - readerElement.clientHeight)
+          const nextProgress = Math.max(0, Math.min(100, (readerElement.scrollTop / scrollable) * 100))
+
+          if (Math.abs(nextProgress - lastProgress) >= 0.25) {
+            lastProgress = nextProgress
+            setReaderProgress(nextProgress)
+          }
+        })
+      }
 
       if (readerScrollSaveTimerRef.current) {
         window.clearTimeout(readerScrollSaveTimerRef.current)
       }
 
-      readerScrollSaveTimerRef.current = window.setTimeout(() => {
-        setState((current) => ({
-          ...current,
-          chapterScrollPositions: {
-            ...current.chapterScrollPositions,
-            [key]: readerElement.scrollTop,
-          },
-        }))
-      }, 500)
+      readerScrollSaveTimerRef.current = window.setTimeout(commitReaderScrollPosition, 2500)
     }
 
     updateReaderProgress()
@@ -796,10 +830,15 @@ function App() {
 
     return () => {
       readerElement.removeEventListener('scroll', updateReaderProgress)
+      if (readerProgressFrameRef.current != null) {
+        window.cancelAnimationFrame(readerProgressFrameRef.current)
+        readerProgressFrameRef.current = null
+      }
       if (readerScrollSaveTimerRef.current) {
         window.clearTimeout(readerScrollSaveTimerRef.current)
         readerScrollSaveTimerRef.current = null
       }
+      commitReaderScrollPosition()
     }
   }, [view, activeChapter, activeChapter?.id, state.book?.id, setState])
 
@@ -3833,7 +3872,7 @@ ${context}
                         </div>
                       )}
                       <div className="book-row-actions">
-                        <button type="button" onClick={() => selectBook(libraryBook.book.id)}>
+                        <button type="button" onClick={() => void selectBook(libraryBook.book.id)}>
                           {isActive ? '继续阅读' : '打开'}
                         </button>
                         <button
@@ -6546,9 +6585,7 @@ ${context}
                   style={{ fontSize: `${state.readerFontSize}px` }}
                   onMouseUp={captureReaderSelection}
                 >
-                  {activeChapter.content.split('\n').map((line, index) => (
-                    <p key={`${activeChapter.id}-${index}`}>{line || ' '}</p>
-                  ))}
+                  {activeChapterParagraphs}
                 </div>
                 <nav className="chapter-bottom-nav" aria-label="章节底部导航">
                   <button

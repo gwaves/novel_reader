@@ -9,6 +9,7 @@ import {
 } from './lib/mobileApi'
 import {
   getBookPackage,
+  getLatestReadingProgress,
   getReadingProgress,
   listLocalBooks,
   loadSettings,
@@ -405,6 +406,7 @@ function App() {
   const activeChapterIdRef = useRef<string | null>(null)
   const tabRef = useRef<Tab>('library')
   const isRestoringScrollRef = useRef(false)
+  const skipNextCleanupProgressSaveRef = useRef(false)
 
   const client = useMemo(() => new MobileApiClient({ baseUrl, syncToken }), [baseUrl, syncToken])
 
@@ -550,7 +552,7 @@ function App() {
   }, [activePackage, searchMode, submittedSearchQuery])
 
   const hydrate = useCallback(async () => {
-    const [settings, books] = await Promise.all([loadSettings(), listLocalBooks()])
+    const [settings, books, latestProgress] = await Promise.all([loadSettings(), listLocalBooks(), getLatestReadingProgress()])
     setBaseUrl(settings.baseUrl)
     setSyncToken(settings.syncToken)
     setLlmBaseUrl(settings.externalLlm.baseUrl)
@@ -563,6 +565,20 @@ function App() {
     setReaderFontSize(settings.reader.fontSize)
     setReaderBackground(settings.reader.background)
     setLocalBooks(books)
+
+    if (!latestProgress || !books.some((book) => book.id === latestProgress.bookId)) return
+
+    const pkg = await getBookPackage(latestProgress.bookId)
+    if (!pkg) return
+
+    const progressChapter = pkg.chapters.some((chapter) => chapter.id === latestProgress.chapterId)
+      ? latestProgress.chapterId
+      : pkg.chapters[0]?.id ?? null
+
+    setActivePackage(pkg)
+    setActiveChapterId(progressChapter)
+    pendingRestoreScrollRef.current = latestProgress.chapterId === progressChapter ? latestProgress.scrollY : 0
+    setTab('reader')
   }, [])
 
   useEffect(() => {
@@ -572,14 +588,14 @@ function App() {
     return () => window.cancelAnimationFrame(frame)
   }, [hydrate])
 
-  const saveCurrentReadingProgress = useCallback(() => {
+  const saveCurrentReadingProgress = useCallback((scrollY = window.scrollY) => {
     const currentPackage = activePackageRef.current
     const currentChapterId = activeChapterIdRef.current
     if (tabRef.current !== 'reader' || !currentPackage || !currentChapterId) return
     void saveReadingProgress({
       bookId: currentPackage.book.id,
       chapterId: currentChapterId,
-      scrollY: window.scrollY,
+      scrollY,
     })
   }, [])
 
@@ -653,6 +669,10 @@ function App() {
       if (progressSaveTimerRef.current != null) {
         window.clearTimeout(progressSaveTimerRef.current)
         progressSaveTimerRef.current = null
+      }
+      if (skipNextCleanupProgressSaveRef.current) {
+        skipNextCleanupProgressSaveRef.current = false
+        return
       }
       void saveReadingProgress({
         bookId: activePackage.book.id,
@@ -865,7 +885,10 @@ function App() {
 
   function switchTab(nextTab: Tab) {
     if (tab === 'reader' && nextTab !== 'reader') {
-      saveCurrentReadingProgress()
+      const currentScrollY = window.scrollY
+      pendingRestoreScrollRef.current = currentScrollY
+      skipNextCleanupProgressSaveRef.current = true
+      saveCurrentReadingProgress(currentScrollY)
     }
     if (nextTab !== tab) {
       setMessage('')

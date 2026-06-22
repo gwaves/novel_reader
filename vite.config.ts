@@ -25,6 +25,9 @@ export default defineConfig({
     host,
     port,
     strictPort: true,
+    watch: {
+      ignored: ['**/mobile-app/android/**', '**/mobile-app/dist/**'],
+    },
     proxy: {
       '/api': `http://127.0.0.1:${apiPort}`,
     },
