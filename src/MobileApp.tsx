@@ -726,7 +726,7 @@ ${context}
 	                          </p>
                         </div>
                         <div className="mobile-book-row-actions">
-                          <button type="button" className="mobile-primary-button" onClick={() => selectBook(libraryBook.book.id)}>
+                          <button type="button" className="mobile-primary-button" onClick={() => void selectBook(libraryBook.book.id)}>
                             {isActive ? '继续' : '打开'}
                           </button>
                           <button

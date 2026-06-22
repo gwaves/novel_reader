@@ -12,6 +12,7 @@ import { homedir } from 'node:os'
 import { dirname, join } from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
 import { DatabaseSync } from 'node:sqlite'
+import { gzipSync } from 'node:zlib'
 
 const host = process.env.NOVEL_READER_API_HOST || '127.0.0.1'
 const port = Number(process.env.NOVEL_READER_API_PORT || 5174)
@@ -220,6 +221,11 @@ const saveStateStatement = db.prepare(`
     updated_at = excluded.updated_at
 `)
 const listBookIdsStatement = db.prepare('SELECT id FROM books')
+const listBooksStatement = db.prepare(`
+  SELECT id, title, imported_at AS importedAt, chapter_count AS chapterCount
+  FROM books
+  ORDER BY updated_at DESC, imported_at DESC, title ASC
+`)
 const deleteBookStatement = db.prepare('DELETE FROM books WHERE id = ?')
 const upsertBookStatement = db.prepare(`
   INSERT INTO books (id, title, imported_at, chapter_count, updated_at)
@@ -240,6 +246,11 @@ const upsertChapterStatement = db.prepare(`
     content = excluded.content,
     word_count = excluded.word_count,
     updated_at = excluded.updated_at
+`)
+const updateChapterMetadataStatement = db.prepare(`
+  UPDATE chapters
+  SET book_id = ?, chapter_index = ?, title = ?, word_count = ?, updated_at = CURRENT_TIMESTAMP
+  WHERE id = ?
 `)
 const upsertSummaryStatement = db.prepare(`
   INSERT INTO summaries (
@@ -355,6 +366,12 @@ const getChapterRowsByIdsStatement = db.prepare(`
   SELECT id, book_id AS bookId, chapter_index AS chapterIndex, title, content, word_count AS wordCount
   FROM chapters
   WHERE book_id = ? AND id IN (SELECT value FROM json_each(?))
+  ORDER BY chapter_index ASC
+`)
+const getChapterRowsByRangeStatement = db.prepare(`
+  SELECT id, book_id AS bookId, chapter_index AS chapterIndex, title, content, word_count AS wordCount
+  FROM chapters
+  WHERE book_id = ? AND chapter_index BETWEEN ? AND ?
   ORDER BY chapter_index ASC
 `)
 const upsertEmbeddingStatement = db.prepare(`
@@ -1474,14 +1491,28 @@ const insertKgRelationMentionStatement = db.prepare(`
   VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
 `)
 
-function sendJson(response, statusCode, payload) {
-  response.writeHead(statusCode, {
+function sendJson(response, statusCode, payload, request) {
+  const body = JSON.stringify(payload)
+  const acceptsGzip = request?.headers?.['accept-encoding']?.includes('gzip')
+  const headers = {
     'Access-Control-Allow-Headers': 'Authorization, Content-Type',
     'Access-Control-Allow-Methods': 'GET,PUT,POST,DELETE,OPTIONS',
     'Access-Control-Allow-Origin': '*',
     'Content-Type': 'application/json; charset=utf-8',
-  })
-  response.end(JSON.stringify(payload))
+  }
+
+  if (acceptsGzip && body.length > 1024) {
+    response.writeHead(statusCode, {
+      ...headers,
+      'Content-Encoding': 'gzip',
+      Vary: 'Accept-Encoding',
+    })
+    response.end(gzipSync(body))
+    return
+  }
+
+  response.writeHead(statusCode, headers)
+  response.end(body)
 }
 
 function sendFile(response, statusCode, body, contentType, filename) {
@@ -3976,6 +4007,65 @@ function loadSummariesForBook(bookId) {
   return summaries
 }
 
+function loadLibraryBookSnapshot(bookId, options = {}) {
+  const book = getBookStatement.get(bookId)
+  if (!book) return null
+
+  const chapters = getChapterRowsForBookStatement.all(book.id).map((chapter) => ({
+    id: chapter.id,
+    index: chapter.chapterIndex,
+    title: chapter.title,
+    content: options.includeContent === false ? '' : chapter.content,
+    wordCount: chapter.wordCount,
+  }))
+  const summaries = loadSummariesForBook(book.id)
+  const baseLibraryBook = Array.isArray(options.baseState?.books)
+    ? options.baseState.books.find((entry) => entry?.book?.id === book.id)
+    : null
+  const activeChapterId =
+    typeof baseLibraryBook?.activeChapterId === 'string'
+      ? baseLibraryBook.activeChapterId
+      : chapters[0]?.id ?? null
+
+  return {
+    book: {
+      id: book.id,
+      title: book.title,
+      chapters,
+      importedAt: book.importedAt,
+    },
+    activeChapterId,
+    summaries,
+  }
+}
+
+function loadStructuredStateSnapshot(baseState = {}, options = {}) {
+  const preferredActiveBookId =
+    typeof baseState?.activeBookId === 'string' ? baseState.activeBookId : null
+  const bookRows = listBooksStatement.all()
+  const activeBookId = preferredActiveBookId && bookRows.some((book) => book.id === preferredActiveBookId)
+    ? preferredActiveBookId
+    : bookRows[0]?.id ?? null
+  const books = bookRows.map((book) => {
+    return loadLibraryBookSnapshot(book.id, {
+      baseState,
+      includeContent:
+        options.contentMode === 'full' ||
+        (options.contentMode === 'active' && book.id === activeBookId),
+    })
+  }).filter(Boolean)
+  const activeLibraryBook = books.find((entry) => entry.book.id === activeBookId) ?? null
+
+  return {
+    ...baseState,
+    books,
+    activeBookId,
+    book: activeLibraryBook?.book ?? null,
+    activeChapterId: activeLibraryBook?.activeChapterId ?? null,
+    summaries: activeLibraryBook?.summaries ?? {},
+  }
+}
+
 function mirrorStructuredState(state) {
   const libraryBooks = Array.isArray(state?.books)
     ? state.books
@@ -3997,14 +4087,24 @@ function mirrorStructuredState(state) {
     upsertBookStatement.run(book.id, book.title, book.importedAt, book.chapters.length)
 
     for (const chapter of book.chapters) {
-      upsertChapterStatement.run(
-        chapter.id,
-        book.id,
-        chapter.index,
-        chapter.title,
-        chapter.content,
-        chapter.wordCount,
-      )
+      if (chapter.content) {
+        upsertChapterStatement.run(
+          chapter.id,
+          book.id,
+          chapter.index,
+          chapter.title,
+          chapter.content,
+          chapter.wordCount,
+        )
+      } else {
+        updateChapterMetadataStatement.run(
+          book.id,
+          chapter.index,
+          chapter.title,
+          chapter.wordCount,
+          chapter.id,
+        )
+      }
 
       const summary = summaries[chapter.id]
       if (summary) {
@@ -4371,7 +4471,12 @@ const server = createServer(async (request, response) => {
 
     if (request.method === 'GET' && url.pathname === '/api/state') {
       const row = getStateStatement.get(stateKey)
-      const state = row ? JSON.parse(row.value_json) : null
+      const baseState = row ? JSON.parse(row.value_json) : null
+      const state = url.searchParams.get('source') === 'structured'
+        ? loadStructuredStateSnapshot(baseState ?? {}, {
+            contentMode: url.searchParams.get('content') ?? 'full',
+          })
+        : baseState
 
       // 用 summaries 表里的最新数据刷新 state 中的快照，
       // 这样离线扫描器 export 到数据库后前端刷新就能看到最新计数。
@@ -4388,7 +4493,61 @@ const server = createServer(async (request, response) => {
         }
       }
 
-      sendJson(response, 200, { state })
+      sendJson(response, 200, { state }, request)
+      return
+    }
+
+    const bookStateMatch = url.pathname.match(/^\/api\/books\/([^/]+)\/library-state$/)
+    if (request.method === 'GET' && bookStateMatch) {
+      const bookId = decodeURIComponent(bookStateMatch[1])
+      const row = getStateStatement.get(stateKey)
+      const baseState = row ? JSON.parse(row.value_json) : {}
+      const libraryBook = loadLibraryBookSnapshot(bookId, {
+        baseState,
+        includeContent: url.searchParams.get('content') !== 'metadata',
+      })
+
+      if (!libraryBook) {
+        sendJson(response, 404, { error: 'Book not found.' }, request)
+        return
+      }
+
+      sendJson(response, 200, { libraryBook }, request)
+      return
+    }
+
+    const bookChaptersMatch = url.pathname.match(/^\/api\/books\/([^/]+)\/chapters$/)
+    if (request.method === 'GET' && bookChaptersMatch) {
+      const bookId = decodeURIComponent(bookChaptersMatch[1])
+      const book = getBookStatement.get(bookId)
+
+      if (!book) {
+        sendJson(response, 404, { error: 'Book not found.' }, request)
+        return
+      }
+
+      const ids = url.searchParams.get('ids')
+      const start = Number(url.searchParams.get('start') ?? 0)
+      const end = Number(url.searchParams.get('end') ?? 0)
+      let rows
+
+      if (ids) {
+        rows = getChapterRowsByIdsStatement.all(bookId, JSON.stringify(ids.split(',').filter(Boolean)))
+      } else if (Number.isFinite(start) && Number.isFinite(end) && start > 0 && end >= start) {
+        rows = getChapterRowsByRangeStatement.all(bookId, Math.floor(start), Math.floor(end))
+      } else {
+        rows = getChapterRowsForBookStatement.all(bookId)
+      }
+
+      sendJson(response, 200, {
+        chapters: rows.map((chapter) => ({
+          id: chapter.id,
+          index: chapter.chapterIndex,
+          title: chapter.title,
+          content: chapter.content,
+          wordCount: chapter.wordCount,
+        })),
+      }, request)
       return
     }
 
@@ -4401,7 +4560,7 @@ const server = createServer(async (request, response) => {
       }
 
       saveStateTransaction(body.state)
-      sendJson(response, 200, { ok: true })
+      sendJson(response, 200, { ok: true }, request)
       return
     }
 
