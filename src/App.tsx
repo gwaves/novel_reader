@@ -643,6 +643,104 @@ function App() {
     saveModelConfig,
   } = useReaderState()
 
+  const hasBooks = state.books.length > 0
+  const hasLlmConfig = Boolean(activeModelName)
+  const embeddingModelName = state.embeddingConfig.model.trim()
+  const hasEmbeddingConfig = Boolean(embeddingModelName && state.embeddingConfig.baseUrl.trim())
+  const totalChapters = state.book?.chapters.length ?? 0
+  const summariesComplete = totalChapters > 0 && processedCount === totalChapters
+  const onboardingSteps = [
+    {
+      id: 'import',
+      title: '导入第一本书',
+      description: hasBooks
+        ? `当前书架已有 ${state.books.length} 本书，可以继续补齐 AI 能力。`
+        : '先导入一本 txt 或 epub，确认章节切分、目录和阅读进度都符合预期。',
+      statusLabel: hasBooks ? '已完成' : '先做这一步',
+      statusTone: hasBooks ? 'done' : 'current',
+      actionLabel: null,
+      onAction: null,
+      disabled: false,
+    },
+    {
+      id: 'llm',
+      title: '配置 LLM',
+      description: '用于生成章节概要和知识图谱抽取。建议先配 Ollama，本地跑通后再接外部模型。',
+      statusLabel: hasLlmConfig ? `已配置 · ${activeModelName}` : hasBooks ? '建议下一步' : '导入后进行',
+      statusTone: hasLlmConfig ? 'done' : hasBooks ? 'current' : 'pending',
+      actionLabel: '配置 LLM',
+      onAction: () => {
+        setConfigTab('llm')
+        openModelConfig()
+      },
+      disabled: !hasBooks,
+    },
+    {
+      id: 'embedding',
+      title: '配置 embedding 模型',
+      description: '智能搜索依赖 embedding。配置好之后，搜索页才能为章节生成向量并回答跨章节问题。',
+      statusLabel: hasEmbeddingConfig ? `已配置 · ${embeddingModelName}` : hasBooks ? '随后配置' : '导入后进行',
+      statusTone: hasEmbeddingConfig ? 'done' : hasBooks ? 'current' : 'pending',
+      actionLabel: '配置 embedding',
+      onAction: () => {
+        setConfigTab('embedding')
+        openModelConfig()
+      },
+      disabled: !hasBooks,
+    },
+    {
+      id: 'summary',
+      title: '生成章节概要',
+      description: '先为当前书生成几章概要，确认模型输出风格是否合适，再决定是否批量补齐整本书。',
+      statusLabel: !hasBooks
+        ? '导入后可用'
+        : summariesComplete
+          ? '已完成'
+          : processedCount > 0
+            ? `进行中 · ${processedCount}/${totalChapters}`
+            : hasLlmConfig
+              ? '可以开始'
+              : '先配 LLM',
+      statusTone: !hasBooks ? 'pending' : summariesComplete ? 'done' : hasLlmConfig ? 'current' : 'pending',
+      actionLabel: summariesComplete ? '去阅读页' : '生成概要',
+      onAction: () => {
+        if (!state.book) return
+        if (summariesComplete) {
+          setView('reader')
+          return
+        }
+        void generateMissingSummariesForBook(state.book.id)
+      },
+      disabled: !state.book || !hasLlmConfig,
+    },
+    {
+      id: 'knowledge',
+      title: '生成知识图谱',
+      description: '先扫描当前章节或一个小范围，检查人物、门派、关系抽取是否符合你的小说类型。',
+      statusLabel: !hasBooks ? '导入后可用' : hasLlmConfig ? '在知识图谱页执行' : '先配 LLM',
+      statusTone: !hasBooks ? 'pending' : hasLlmConfig ? 'current' : 'pending',
+      actionLabel: '打开知识图谱',
+      onAction: () => setView('knowledge'),
+      disabled: !state.book || !hasLlmConfig,
+    },
+    {
+      id: 'rag',
+      title: '生成 embeddings 并试一次 RAG',
+      description: '回到智能搜索页生成向量，问一个跨章节问题，验证搜索和回答质量。',
+      statusLabel: !hasBooks
+        ? '导入后可用'
+        : !hasEmbeddingConfig
+          ? '先配 embedding'
+          : !processedCount
+            ? '先生成概要'
+            : '在智能搜索页执行',
+      statusTone: !hasBooks ? 'pending' : hasEmbeddingConfig && processedCount > 0 ? 'current' : 'pending',
+      actionLabel: '打开智能搜索',
+      onAction: () => setView('search'),
+      disabled: !state.book || !hasEmbeddingConfig || processedCount === 0,
+    },
+  ] as const
+
   useEffect(() => {
     if (view !== 'reader' || !activeChapter) return
 
@@ -3514,10 +3612,44 @@ ${context}
         <section className="home-panel">
           <div className="import-copy">
             <p className="eyebrow">首页</p>
-            <h2>{state.books.length ? '本地书架' : '导入一本 txt 小说'}</h2>
+            <h2>{hasBooks ? '本地书架' : '导入第一本小说，按步骤启用 AI'}</h2>
             <p>
-              章节切分结果、每本书的阅读位置和已生成概要都会保存在本机 SQLite 数据库里。导入新 txt 会新增到书架，不会替换已有书籍。
+              章节切分结果、每本书的阅读位置和已生成概要都会保存在本机 SQLite 数据库里。你可以先只导入一本书开始阅读，后面再逐步配置模型、生成概要、知识图谱和智能搜索。
             </p>
+          </div>
+
+          <div className="book-card onboarding-card">
+            <p className="eyebrow">{hasBooks ? '下一步建议' : '上手步骤'}</p>
+            <h2>{hasBooks ? '继续把这本书的 AI 能力补齐' : '第一次上手建议按这个顺序走'}</h2>
+            <p className="onboarding-intro">
+              {hasBooks
+                ? '不用一次把所有功能都跑完。先把当前书的模型配置和概要打通，再去做图谱和 RAG，成功率会高很多。'
+                : '先确认导入和阅读体验，再进入模型配置。这样遇到问题时更容易判断是导入、模型还是搜索链路出了状况。'}
+            </p>
+            <div className="onboarding-steps">
+              {onboardingSteps.map((step, index) => (
+                <div className="onboarding-step" key={step.id}>
+                  <div className="onboarding-step-header">
+                    <div>
+                      <span className="onboarding-step-number">{index + 1}</span>
+                      <h3>{step.title}</h3>
+                    </div>
+                    <span className={`onboarding-step-status ${step.statusTone}`}>{step.statusLabel}</span>
+                  </div>
+                  <p>{step.description}</p>
+                  {step.actionLabel && step.onAction && (
+                    <button
+                      type="button"
+                      className="ghost-button onboarding-step-action"
+                      disabled={step.disabled}
+                      onClick={step.onAction}
+                    >
+                      {step.actionLabel}
+                    </button>
+                  )}
+                </div>
+              ))}
+            </div>
           </div>
 
           {state.book && (
@@ -3750,8 +3882,8 @@ ${context}
                 if (file) void handleImport(file)
               }}
             />
-            <span>{state.books.length ? '导入新书到书架' : '选择 txt / epub 文件'}</span>
-            <small>txt 支持常见章节标题；epub 会按目录 spine 导入章节</small>
+            <span>{hasBooks ? '导入新书到书架' : '导入第一本 txt / epub 小说'}</span>
+            <small>{hasBooks ? 'txt 支持常见章节标题；epub 会按目录 spine 导入章节' : '先用一本熟悉的书验证导入、阅读和章节切分，再继续配置 AI'}</small>
           </label>
 
           <div className="database-backup-card">

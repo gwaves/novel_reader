@@ -106,6 +106,97 @@ function MobileApp() {
   const [embeddingProgress, setEmbeddingProgress] = useState('')
   const [ragError, setRagError] = useState('')
   const [readerProgress, setReaderProgress] = useState(0)
+  const hasBooks = state.books.length > 0
+  const hasLlmConfig = Boolean(activeModelName)
+  const embeddingModelName = state.embeddingConfig.model.trim()
+  const hasEmbeddingConfig = Boolean(embeddingModelName && state.embeddingConfig.baseUrl.trim())
+  const totalChapters = state.book?.chapters.length ?? 0
+  const summariesComplete = totalChapters > 0 && processedCount === totalChapters
+  const onboardingSteps = [
+    {
+      id: 'import',
+      title: '导入第一本书',
+      description: hasBooks
+        ? `当前书架已有 ${state.books.length} 本书，可以继续把 AI 能力补齐。`
+        : '先导入一本 txt 或 epub，确认章节切分和阅读体验都正常。',
+      statusLabel: hasBooks ? '已完成' : '先做这一步',
+      statusTone: hasBooks ? 'done' : 'current',
+      actionLabel: null,
+      onAction: null,
+      disabled: false,
+    },
+    {
+      id: 'llm',
+      title: '配置 LLM',
+      description: '章节概要和知识图谱都依赖 LLM。移动端可以先把配置保存好。',
+      statusLabel: hasLlmConfig ? `已配置 · ${activeModelName}` : hasBooks ? '建议下一步' : '导入后进行',
+      statusTone: hasLlmConfig ? 'done' : hasBooks ? 'current' : 'pending',
+      actionLabel: '打开模型配置',
+      onAction: openModelConfig,
+      disabled: !hasBooks,
+    },
+    {
+      id: 'embedding',
+      title: '配置 embedding 模型',
+      description: '智能搜索依赖 embedding。先在模型配置里把模型和接口地址补齐。',
+      statusLabel: hasEmbeddingConfig ? `已配置 · ${embeddingModelName}` : hasBooks ? '随后配置' : '导入后进行',
+      statusTone: hasEmbeddingConfig ? 'done' : hasBooks ? 'current' : 'pending',
+      actionLabel: '继续配置',
+      onAction: openModelConfig,
+      disabled: !hasBooks,
+    },
+    {
+      id: 'summary',
+      title: '生成章节概要',
+      description: '先为当前书生成几章概要，确认模型输出风格，再决定是否补齐整本书。',
+      statusLabel: !hasBooks
+        ? '导入后可用'
+        : summariesComplete
+          ? '已完成'
+          : processedCount > 0
+            ? `进行中 · ${processedCount}/${totalChapters}`
+            : hasLlmConfig
+              ? '可以开始'
+              : '先配 LLM',
+      statusTone: !hasBooks ? 'pending' : summariesComplete ? 'done' : hasLlmConfig ? 'current' : 'pending',
+      actionLabel: summariesComplete ? '继续阅读' : '生成概要',
+      onAction: () => {
+        if (!state.book) return
+        if (summariesComplete) {
+          setMobileTab('reader')
+          return
+        }
+        void generateMissingSummariesForBook(state.book.id)
+      },
+      disabled: !state.book || !hasLlmConfig,
+    },
+    {
+      id: 'kg',
+      title: '生成知识图谱',
+      description: '知识图谱建议在桌面端继续：先扫描当前章节或一小段章节，再检查人物和关系抽取。',
+      statusLabel: !hasBooks ? '导入后可用' : hasLlmConfig ? '桌面端继续' : '先配 LLM',
+      statusTone: !hasBooks ? 'pending' : hasLlmConfig ? 'current' : 'pending',
+      actionLabel: null,
+      onAction: null,
+      disabled: true,
+    },
+    {
+      id: 'rag',
+      title: '生成 embeddings 并试一次智能搜索',
+      description: '进入智能搜索页生成向量，然后问一个跨章节问题，验证召回和回答质量。',
+      statusLabel: !hasBooks
+        ? '导入后可用'
+        : !hasEmbeddingConfig
+          ? '先配 embedding'
+          : !processedCount
+            ? '先生成概要'
+            : '可以开始',
+      statusTone: !hasBooks ? 'pending' : hasEmbeddingConfig && processedCount > 0 ? 'current' : 'pending',
+      actionLabel: '打开智能搜索',
+      onAction: () => setMobileTab('search'),
+      disabled: !state.book || !hasEmbeddingConfig || processedCount === 0,
+    },
+  ] as const
 
   useEffect(() => {
     if (mobileTab === 'reader' && activeChapter) {
@@ -513,8 +604,41 @@ ${context}
             <div className="mobile-section">
               <h2>书架</h2>
               <p className="mobile-hint">
-                书籍、阅读进度和概要都会保存在本机 SQLite 数据库里。
+                书籍、阅读进度和概要都会保存在本机 SQLite 数据库里。你可以先导入并阅读，再逐步配置模型、生成概要、知识图谱和智能搜索。
               </p>
+            </div>
+
+            <div className="mobile-card mobile-onboarding-card">
+              <h3>{hasBooks ? '下一步建议' : '第一次上手建议按这个顺序走'}</h3>
+              <p className="mobile-hint">
+                {hasBooks
+                  ? '先把当前书的模型配置和概要打通，再去做图谱和智能搜索，会更容易判断效果。'
+                  : '先确认导入和阅读体验，再进入模型配置。这样排查问题会轻松很多。'}
+              </p>
+              <div className="mobile-onboarding-steps">
+                {onboardingSteps.map((step, index) => (
+                  <div className="mobile-onboarding-step" key={step.id}>
+                    <div className="mobile-onboarding-step-header">
+                      <div>
+                        <span className="mobile-onboarding-step-number">{index + 1}</span>
+                        <strong>{step.title}</strong>
+                      </div>
+                      <span className={`mobile-onboarding-step-status ${step.statusTone}`}>{step.statusLabel}</span>
+                    </div>
+                    <p>{step.description}</p>
+                    {step.actionLabel && step.onAction && (
+                      <button
+                        type="button"
+                        className="mobile-ghost-button mobile-onboarding-step-action"
+                        disabled={step.disabled}
+                        onClick={step.onAction}
+                      >
+                        {step.actionLabel}
+                      </button>
+                    )}
+                  </div>
+                ))}
+              </div>
             </div>
 
             {state.book ? (
@@ -642,8 +766,8 @@ ${context}
                     event.target.value = ''
                   }}
                 />
-                <span className="mobile-primary-button">{state.books.length ? '导入新书到书架' : '选择 txt / epub 文件'}</span>
-                <small>txt 自动拆章，epub 按 spine 导入</small>
+                <span className="mobile-primary-button">{hasBooks ? '导入新书到书架' : '导入第一本 txt / epub 小说'}</span>
+                <small>{hasBooks ? 'txt 自动拆章，epub 按 spine 导入' : '先用一本熟悉的书验证导入和阅读体验，再继续配置 AI'}</small>
               </label>
 
               <label className="mobile-field mobile-font-field">

@@ -325,6 +325,103 @@ button:disabled {
   font-size: 24px;
 }
 
+.onboarding-card {
+  display: grid;
+  gap: 18px;
+}
+
+.onboarding-card h2 {
+  margin: 0;
+}
+
+.onboarding-intro {
+  margin: 0;
+  max-width: 760px;
+  color: #5e5549;
+  line-height: 1.7;
+}
+
+.onboarding-steps {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.onboarding-step {
+  display: grid;
+  gap: 10px;
+  border: 1px solid #e4dbcf;
+  border-radius: 8px;
+  background: #fffdf8;
+  padding: 16px;
+}
+
+.onboarding-step-header {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.onboarding-step-header > div {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.onboarding-step-number {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 999px;
+  background: #f1eadf;
+  color: #5e5549;
+  font-size: 13px;
+  font-weight: 750;
+}
+
+.onboarding-step h3 {
+  margin: 0;
+  color: #24211c;
+  font-size: 17px;
+}
+
+.onboarding-step p {
+  margin: 0;
+  color: #6b6256;
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+.onboarding-step-status {
+  flex-shrink: 0;
+  border-radius: 999px;
+  padding: 5px 10px;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.onboarding-step-status.done {
+  background: #e7f2ec;
+  color: #2c5b4b;
+}
+
+.onboarding-step-status.current {
+  background: #f8efe0;
+  color: #8a5a2b;
+}
+
+.onboarding-step-status.pending {
+  background: #f1eadf;
+  color: #786d60;
+}
+
+.onboarding-step-action {
+  justify-self: start;
+}
+
 .book-card dl {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -2423,6 +2520,16 @@ button.kg-relation-row:hover {
 
   .book-card dl {
     grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .onboarding-steps {
+    grid-template-columns: 1fr;
+  }
+
+  .onboarding-step-header,
+  .onboarding-step-header > div {
+    align-items: flex-start;
+    flex-direction: column;
   }
 
   .chapter-nav,

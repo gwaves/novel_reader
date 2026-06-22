@@ -435,7 +435,11 @@ export function getActiveOpenAIConfig(
 }
 
 const CHAPTER_PATTERN =
-  /^\s*(?:第\s*[0-9零一二三四五六七八九十百千万亿]+\s*[集卷部]\s+第\s*[0-9零一二三四五六七八九十百千万亿]+\s*[章卷节回][^\n]*|第\s*[0-9零一二三四五六七八九十百千万亿]+\s*[章卷节回][^\n]*|Chapter\s*\d+[^\n]*|\d+[.、]\s*[^\n]+)\s*$/gim
+  /^\s*(?:(?:正文\s*)?第\s*[0-9零一二三四五六七八九十百千万亿〇○]+\s*[集卷部]\s+第\s*[0-9零一二三四五六七八九十百千万亿〇○]+\s*[章卷节回][^\n]*|(?:正文\s*)?第\s*[0-9零一二三四五六七八九十百千万亿〇○]+\s*[章卷节回][^\n]*|Chapter\s*\d+[^\n]*|\d+[.、]\s*[^\n]+)\s*$/gim
+
+function normalizeChapterTitle(title: string): string {
+  return title.replace(/^正文\s+/, '').trim()
+}
 
 export function splitChapters(rawText: string): Chapter[] {
   const matches = Array.from(rawText.matchAll(CHAPTER_PATTERN))
@@ -449,7 +453,7 @@ export function splitChapters(rawText: string): Chapter[] {
     const end = idx < matches.length - 1 ? (matches[idx + 1].index ?? rawText.length) : rawText.length
     const block = rawText.slice(start, end).trim()
     const lines = block.split(/\r?\n/)
-    const title = lines[0].trim()
+    const title = normalizeChapterTitle(lines[0].trim())
     const content = lines.slice(1).join('\n').trim()
 
     return {
@@ -468,7 +472,7 @@ function chunkFallback(text: string): Chapter[] {
   let currentTitle = '正文开始'
   let currentLines: string[] = []
 
-  const fallbackPattern = /^(第\s*[0-9零一二三四五六七八九十百千万亿]+\s*[集卷部]\s+第\s*[0-9零一二三四五六七八九十百千万亿]+\s*[章卷节回]|第\s*[0-9零一二三四五六七八九十百千万亿]+\s*[章卷节回]|Chapter\s*\d+|\d+[.、])/
+  const fallbackPattern = /^((?:正文\s*)?第\s*[0-9零一二三四五六七八九十百千万亿〇○]+\s*[集卷部]\s+第\s*[0-9零一二三四五六七八九十百千万亿〇○]+\s*[章卷节回]|(?:正文\s*)?第\s*[0-9零一二三四五六七八九十百千万亿〇○]+\s*[章卷节回]|Chapter\s*\d+|\d+[.、])/
 
   for (let index = 0; index < lines.length; index += 1) {
     const line = lines[index].trim()
@@ -488,7 +492,7 @@ function chunkFallback(text: string): Chapter[] {
         })
       }
 
-      currentTitle = line
+      currentTitle = normalizeChapterTitle(line)
       currentLines = []
     } else {
       currentLines.push(line)
@@ -520,6 +524,22 @@ export function countBookWords(book: Pick<Book, 'chapters'>) {
 
 function cleanFormattingTags(text: string): string {
   return text.replace(/\[\/?(?:color|b|i|u|size)(?:=[^\]]*)?\]/gi, '')
+}
+
+function stripPublicDomainBoilerplate(text: string): string {
+  let output = text
+  const startMarker =
+    /\*\*\*\s*START OF (?:THE|THIS) PROJECT GUTENBERG EBOOK[^\n]*\*\*\*[\s\r\n]*/i
+  const endMarker =
+    /[\s\r\n]*\*\*\*\s*END OF (?:THE|THIS) PROJECT GUTENBERG EBOOK[^\n]*\*\*\*[\s\S]*$/i
+
+  const startMatch = output.match(startMarker)
+  if (startMatch?.index != null) {
+    output = output.slice(startMatch.index + startMatch[0].length)
+  }
+
+  output = output.replace(endMarker, '')
+  return output.trim()
 }
 
 function isBadSplit(chapters: Chapter[], rawText: string): boolean {
@@ -580,6 +600,7 @@ function convertChineseNumber(input: string): number | null {
     .replace(/廿/g, '二十')
     .replace(/卅/g, '三十')
     .replace(/〇/g, '零')
+    .replace(/○/g, '零')
 
   const digitMap: Record<string, number> = {
     零: 0,
@@ -624,6 +645,7 @@ type HeadingInfo = {
   vol: number
   ch: number
   title: string
+  displayTitle?: string
 }
 
 type LocalPattern = {
@@ -632,7 +654,7 @@ type LocalPattern = {
   extract: (match: RegExpMatchArray) => { vol: number; ch: number; title: string } | null
 }
 
-const CN_NUM = '[一二三四五六七八九十百千万亿〇零廿卅\\d]+'
+const CN_NUM = '[一二三四五六七八九十百千万亿〇○零廿卅\\d]+'
 
 const LOCAL_CHAPTER_PATTERNS: LocalPattern[] = [
   {
@@ -678,6 +700,24 @@ const LOCAL_CHAPTER_PATTERNS: LocalPattern[] = [
   {
     name: 'plain-chapter-only',
     regex: new RegExp(`^第(${CN_NUM})折[：:\\s\\u3000]+(.+)$`, 'im'),
+    extract: (m) => {
+      const ch = convertChineseNumber(m[1])
+      if (ch == null) return null
+      return { vol: 1, ch, title: m[2].trim() }
+    },
+  },
+  {
+    name: 'plain-hui-chapter',
+    regex: new RegExp(`^(?:正文\\s*)?第(${CN_NUM})回[：:、\\s\\u3000]*(.+)$`, 'im'),
+    extract: (m) => {
+      const ch = convertChineseNumber(m[1])
+      if (ch == null) return null
+      return { vol: 1, ch, title: m[2].trim() }
+    },
+  },
+  {
+    name: 'plain-zhang-chapter',
+    regex: new RegExp(`^(?:正文\\s*)?第(${CN_NUM})章[：:、\\s\\u3000]*(.+)$`, 'im'),
     extract: (m) => {
       const ch = convertChineseNumber(m[1])
       if (ch == null) return null
@@ -750,6 +790,113 @@ function standardizeHeading(vol: number, ch: number, title: string): string {
   return `第${vol}卷第${ch}章：${title}`
 }
 
+function escapeRegExp(text: string): string {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+function collectFormatExamples(analysis: FormatAnalysis | null): string[] {
+  const examples = analysis?.formats.flatMap((format) => format.examples) ?? []
+  const seen = new Set<string>()
+
+  return examples
+    .map((example) => example.replace(/\s+/g, ' ').trim())
+    .filter((example) => {
+      if (!example || seen.has(example)) return false
+      seen.add(example)
+      return true
+    })
+}
+
+function buildExamplePattern(example: string): LocalPattern | null {
+  const match = new RegExp(`^(.*?)第\\s*(${CN_NUM})\\s*([章卷节回折])([：:、\\s\\u3000]*)(.+)$`, 'i').exec(
+    example,
+  )
+  if (!match) return null
+
+  const prefix = match[1].trim()
+  const unit = match[3]
+  const prefixPattern = prefix ? `${escapeRegExp(prefix)}\\s*` : ''
+
+  return {
+    name: `llm-example-${example.slice(0, 24)}`,
+    regex: new RegExp(`^${prefixPattern}第\\s*(${CN_NUM})\\s*${escapeRegExp(unit)}[：:、\\s\\u3000]*(.+)$`, 'im'),
+    extract: (m) => {
+      const ch = convertChineseNumber(m[1])
+      if (ch == null) return null
+      return { vol: 1, ch, title: m[2].trim() }
+    },
+  }
+}
+
+function extractChapterHeadingsWithPatterns(
+  rawText: string,
+  patterns: LocalPattern[],
+  extraMarkers: string[] = [],
+): HeadingInfo[] {
+  const lines = rawText.split(/\r?\n/)
+  const headings: HeadingInfo[] = []
+
+  let globalIndex = 0
+  for (const line of lines) {
+    const trimmed = line.trim()
+    if (!trimmed) {
+      globalIndex += line.length + 1
+      continue
+    }
+
+    if (isNonChapterMarker(trimmed, extraMarkers)) {
+      globalIndex += line.length + 1
+      continue
+    }
+
+    for (const pattern of patterns) {
+      const match = trimmed.match(pattern.regex)
+      if (!match) continue
+
+      const info = pattern.extract(match)
+      if (!info) continue
+
+      headings.push({
+        index: globalIndex,
+        raw: trimmed,
+        vol: info.vol,
+        ch: info.ch,
+        title: info.title,
+        displayTitle: normalizeChapterTitle(trimmed),
+      })
+      break
+    }
+
+    globalIndex += line.length + 1
+  }
+
+  return headings
+}
+
+function extractChapterHeadingsFromExamples(
+  rawText: string,
+  analysis: FormatAnalysis | null,
+  extraMarkers: string[] = [],
+): HeadingInfo[] {
+  const patterns = collectFormatExamples(analysis)
+    .map(buildExamplePattern)
+    .filter((pattern): pattern is LocalPattern => Boolean(pattern))
+
+  if (!patterns.length) return []
+
+  return extractChapterHeadingsWithPatterns(rawText, patterns, extraMarkers)
+}
+
+function isPlausibleHeadingSet(headings: HeadingInfo[], rawText: string): boolean {
+  if (headings.length < 2) return false
+
+  const nonEmptyLines = rawText.split(/\r?\n/).filter((line) => line.trim()).length
+  if (nonEmptyLines > 0 && headings.length > nonEmptyLines * 0.05) return false
+
+  const uniqueIndexes = new Set(headings.map((heading) => heading.index))
+  return uniqueIndexes.size === headings.length
+}
+
 function splitWithHeadings(rawText: string, headings: HeadingInfo[]): Chapter[] {
   if (headings.length < 2) return []
 
@@ -758,7 +905,7 @@ function splitWithHeadings(rawText: string, headings: HeadingInfo[]): Chapter[] 
     const end = idx < headings.length - 1 ? headings[idx + 1].index : rawText.length
     const block = rawText.slice(start, end).trim()
     const lines = block.split(/\r?\n/)
-    const title = standardizeHeading(heading.vol, heading.ch, heading.title)
+    const title = heading.displayTitle ?? standardizeHeading(heading.vol, heading.ch, heading.title)
     const content = lines.slice(1).join('\n').trim()
 
     return {
@@ -783,7 +930,7 @@ function buildFormatAnalysisPrompt(sample: string): string {
 2. JSON 格式必须是：
    {"formats": [{"description": "格式描述", "examples": ["示例1", "示例2"]}], "nonChapterMarkers": ["完", "后记"]}
 3. description 用自然语言描述一种章节标题格式。
-4. examples 列出该格式的真实示例（从片段中截取）。
+4. examples 必须列出完整的真实章节标题行（从片段中原样截取），不要只返回章节号或摘要。
 5. nonChapterMarkers 列出看起来像章节标题但不是正文章节的标记（如"第一卷完"、"后记"、"待续"等）。
 
 文本片段：
@@ -924,12 +1071,16 @@ function tryExtractChaptersHybrid(
   const extraMarkers = analysis?.nonChapterMarkers ?? []
   const headings = extractChapterHeadings(rawText, extraMarkers)
 
-  if (headings.length < 2) return null
+  if (isPlausibleHeadingSet(headings, rawText)) {
+    return splitWithHeadings(rawText, headings)
+  }
 
-  const nonEmptyLines = rawText.split(/\r?\n/).filter((line) => line.trim()).length
-  if (nonEmptyLines > 0 && headings.length > nonEmptyLines * 0.05) return null
+  const exampleHeadings = extractChapterHeadingsFromExamples(rawText, analysis, extraMarkers)
+  if (isPlausibleHeadingSet(exampleHeadings, rawText)) {
+    return splitWithHeadings(rawText, exampleHeadings)
+  }
 
-  return splitWithHeadings(rawText, headings)
+  return null
 }
 
 export function formatWordCount(count: number) {
@@ -947,6 +1098,8 @@ export function inferTitle(fileName: string) {
 function parseChineseNumber(input: string): number | null {
   const digits: Record<string, number> = {
     零: 0,
+    〇: 0,
+    '○': 0,
     一: 1,
     二: 2,
     三: 3,
@@ -998,7 +1151,7 @@ function parseChineseNumber(input: string): number | null {
 }
 
 function getChapterTitleNumber(title: string) {
-  const match = /第\s*([0-9零一二三四五六七八九十百千万亿]+)\s*[章卷节回]/.exec(title)
+  const match = /第\s*([0-9零一二三四五六七八九十百千万亿〇○]+)\s*[章卷节回]/.exec(title)
 
   return match ? parseChineseNumber(match[1]) : null
 }
@@ -1241,7 +1394,7 @@ async function parseImportedBook(
   }
 
   const text = await decodeTextFile(file)
-  const cleanedText = cleanFormattingTags(text)
+  const cleanedText = stripPublicDomainBoilerplate(cleanFormattingTags(text))
   let chapters = splitChapters(cleanedText)
 
   if (isBadSplit(chapters, cleanedText) && modelConfig) {
