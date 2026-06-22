@@ -401,6 +401,10 @@ function App() {
   const [readerBackground, setReaderBackground] = useState<ReaderBackground>('paper')
   const pendingRestoreScrollRef = useRef<number | null>(null)
   const progressSaveTimerRef = useRef<number | null>(null)
+  const activePackageRef = useRef<MobileBookPackage | null>(null)
+  const activeChapterIdRef = useRef<string | null>(null)
+  const tabRef = useRef<Tab>('library')
+  const isRestoringScrollRef = useRef(false)
 
   const client = useMemo(() => new MobileApiClient({ baseUrl, syncToken }), [baseUrl, syncToken])
 
@@ -421,6 +425,12 @@ function App() {
     activePackage && activeChapterPosition >= 0 && activeChapterPosition < activePackage.chapters.length - 1
       ? activePackage.chapters[activeChapterPosition + 1]
       : null
+
+  useEffect(() => {
+    activePackageRef.current = activePackage
+    activeChapterIdRef.current = activeChapterId
+    tabRef.current = tab
+  }, [activeChapterId, activePackage, tab])
 
   const textSearchResults = useMemo<SearchResult[]>(() => {
     const query = submittedSearchQuery.trim()
@@ -562,20 +572,67 @@ function App() {
     return () => window.cancelAnimationFrame(frame)
   }, [hydrate])
 
+  const saveCurrentReadingProgress = useCallback(() => {
+    const currentPackage = activePackageRef.current
+    const currentChapterId = activeChapterIdRef.current
+    if (tabRef.current !== 'reader' || !currentPackage || !currentChapterId) return
+    void saveReadingProgress({
+      bookId: currentPackage.book.id,
+      chapterId: currentChapterId,
+      scrollY: window.scrollY,
+    })
+  }, [])
+
+  const restoreReaderScroll = useCallback((scrollY: number) => {
+    isRestoringScrollRef.current = true
+    const target = Math.max(0, Math.round(scrollY))
+    const scrollToTarget = () => window.scrollTo({ top: target })
+
+    window.requestAnimationFrame(() => {
+      scrollToTarget()
+      window.requestAnimationFrame(() => {
+        scrollToTarget()
+        window.setTimeout(() => {
+          scrollToTarget()
+          isRestoringScrollRef.current = false
+        }, 120)
+      })
+    })
+  }, [])
+
   useEffect(() => {
     if (tab !== 'reader' || !activePackage || !activeChapterId) return
-    const pendingScroll = pendingRestoreScrollRef.current
-    if (pendingScroll == null) return
-    pendingRestoreScrollRef.current = null
-    window.requestAnimationFrame(() => {
-      window.scrollTo({ top: pendingScroll })
-    })
-  }, [activeChapterId, activePackage, tab])
+
+    let cancelled = false
+    const bookId = activePackage.book.id
+
+    async function restoreProgress() {
+      const explicitScroll = pendingRestoreScrollRef.current
+      pendingRestoreScrollRef.current = null
+
+      if (explicitScroll != null) {
+        restoreReaderScroll(explicitScroll)
+        return
+      }
+
+      const progress = await getReadingProgress(bookId)
+      if (cancelled) return
+
+      restoreReaderScroll(progress?.chapterId === activeChapterId ? progress.scrollY : 0)
+    }
+
+    void restoreProgress()
+
+    return () => {
+      cancelled = true
+    }
+  }, [activeChapterId, activePackage, restoreReaderScroll, tab])
 
   useEffect(() => {
     if (tab !== 'reader' || !activePackage || !activeChapterId) return
 
     function scheduleSaveProgress() {
+      if (isRestoringScrollRef.current) return
       if (progressSaveTimerRef.current != null) {
         window.clearTimeout(progressSaveTimerRef.current)
       }
@@ -590,7 +647,6 @@ function App() {
     }
 
     window.addEventListener('scroll', scheduleSaveProgress, { passive: true })
-    scheduleSaveProgress()
 
     return () => {
       window.removeEventListener('scroll', scheduleSaveProgress)
@@ -605,6 +661,28 @@ function App() {
       })
     }
   }, [activeChapterId, activePackage, tab])
+
+  useEffect(() => {
+    function saveBeforePageLeaves() {
+      saveCurrentReadingProgress()
+    }
+
+    function saveWhenHidden() {
+      if (document.visibilityState === 'hidden') {
+        saveCurrentReadingProgress()
+      }
+    }
+
+    window.addEventListener('pagehide', saveBeforePageLeaves)
+    window.addEventListener('beforeunload', saveBeforePageLeaves)
+    document.addEventListener('visibilitychange', saveWhenHidden)
+
+    return () => {
+      window.removeEventListener('pagehide', saveBeforePageLeaves)
+      window.removeEventListener('beforeunload', saveBeforePageLeaves)
+      document.removeEventListener('visibilitychange', saveWhenHidden)
+    }
+  }, [saveCurrentReadingProgress])
 
   function getCurrentSettings(overrides: Partial<MobileAppSettings> = {}): MobileAppSettings {
     return {
@@ -742,6 +820,7 @@ function App() {
   }
 
   function openChapter(chapterId: string) {
+    saveCurrentReadingProgress()
     setActiveChapterId(chapterId)
     if (activePackage) {
       void saveReadingProgress({ bookId: activePackage.book.id, chapterId, scrollY: 0 })
@@ -785,6 +864,9 @@ function App() {
   }
 
   function switchTab(nextTab: Tab) {
+    if (tab === 'reader' && nextTab !== 'reader') {
+      saveCurrentReadingProgress()
+    }
     if (nextTab !== tab) {
       setMessage('')
     }
