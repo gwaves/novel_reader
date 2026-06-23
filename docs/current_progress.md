@@ -18,6 +18,7 @@
 - 《妖刀记》第 1 章完整功能验证已跑通：分批生成 206 段导演脚本，校验 0 错误 0 警告；TTS 并发 3 合成并编码为 MP3，用时约 325 秒，输出 `tmp/tts/yaodao/ch001-full/audio/chapter.mp3`，成品约 55 分钟、39.6 MB、96 kbps。
 - 导演脚本生成已支持 LLM 批次并发：`director.concurrency` 或 `draft-script --concurrency` 控制并发数，结果按原始批次顺序合并。第 20 章实测并发 10 时 7 个批次约 66 秒生成 188 段脚本，校验 0 错误 0 警告。
 - 《妖刀记》第 20 章完整语音已生成：TTS 并发 3 合成并编码为 MP3，用时约 263 秒，输出 `tmp/tts/yaodao/ch020-full/audio/chapter.mp3`，成品约 40 分 50 秒、29.4 MB、96 kbps。
+- 多 agent 并发生成第 19、21、22、23、24 章时观察到：多个章节同时进入高并发 LLM 阶段会造成内网模型超时或卡顿；已新增 `batch-pipeline` 命令，采用章节级流水线，LLM 阶段串行、TTS 阶段并行，推荐后续批量生成整本时使用。
 
 2026-06-21 最新状态：main 已同步到 PR #21 和 PR #22。
 

@@ -22,6 +22,9 @@
     "segmentBatchSize": 30,
     "concurrency": 10
   },
+  "batchPipeline": {
+    "ttsChapterConcurrency": 2
+  },
   "voices": {
     "characters": [
       {

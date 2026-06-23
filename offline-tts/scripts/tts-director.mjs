@@ -27,17 +27,23 @@ Novel Reader 离线多角色 TTS 导演脚本工具
   draft-script                 调用模型生成导演脚本 JSON
   validate-script              校验已有导演脚本 JSON
   synth                        按导演脚本调用 MIMO TTS，输出 MP3
+  batch-pipeline               按流水线批量生成多章音频：LLM 串行，TTS 并行
 
 参数:
   --config <path>              配置文件路径，默认 ~/.novel_reader/tts-director.config.json
   --book-id <id>               书籍 ID
   --chapter <number>           章节序号，从 1 开始
+  --chapters <list>            batch-pipeline 章节列表，如 19,21-24
   --limit <number>             本次交给模型处理的章节字数上限
   --out <path>                 draft-script 输出路径
+  --out-root <path>            batch-pipeline 输出根目录
   --script <path>              validate-script 输入路径
   --out-dir <path>             synth 输出目录，默认与脚本同目录下的 audio/
   --concurrency <number>       draft-script 的 LLM 并发数，或 synth 的 TTS 并发数，覆盖配置文件
   --batch-size <number>        draft-script 每批提交给模型的预切分片段数
+  --director-concurrency <n>   batch-pipeline 单章 LLM 批次并发，默认取 director.concurrency
+  --tts-concurrency <number>   batch-pipeline 单章 TTS 片段并发，默认取 tts.concurrency
+  --tts-chapters <number>      batch-pipeline 同时进行 TTS 的章节数，默认 2
 
 示例:
   node offline-tts/scripts/tts-director.mjs --config offline-tts/config.example.json test-model
@@ -129,6 +135,9 @@ function loadConfig(configPath) {
       maxCharactersPerRequest: finiteNumber(config.director?.maxCharactersPerRequest, 3000),
       segmentBatchSize: Math.max(1, Math.floor(finiteNumber(config.director?.segmentBatchSize, 30))),
       concurrency: Math.max(1, Math.floor(finiteNumber(config.director?.concurrency, 1))),
+    },
+    batchPipeline: {
+      ttsChapterConcurrency: Math.max(1, Math.floor(finiteNumber(config.batchPipeline?.ttsChapterConcurrency, 2))),
     },
     voices: {
       characters: Array.isArray(config.voices?.characters) ? config.voices.characters : [],
@@ -749,6 +758,37 @@ function safeFilePart(value) {
     .slice(0, 80) || 'book'
 }
 
+function parseChapterList(value) {
+  const chapters = new Set()
+  for (const part of String(value || '').split(',')) {
+    const trimmed = part.trim()
+    if (!trimmed) continue
+    const range = trimmed.match(/^(\d+)-(\d+)$/)
+    if (range) {
+      const start = Number(range[1])
+      const end = Number(range[2])
+      if (!Number.isInteger(start) || !Number.isInteger(end) || start < 1 || end < start) {
+        throw new Error(`非法章节范围：${trimmed}`)
+      }
+      for (let chapter = start; chapter <= end; chapter += 1) chapters.add(chapter)
+      continue
+    }
+    const chapter = Number(trimmed)
+    if (!Number.isInteger(chapter) || chapter < 1) {
+      throw new Error(`非法章节序号：${trimmed}`)
+    }
+    chapters.add(chapter)
+  }
+  return Array.from(chapters).sort((a, b) => a - b)
+}
+
+function makeChapterArgs(baseArgs, chapterIndex, scriptPath = null, audioDir = null) {
+  const args = { ...baseArgs, chapter: String(chapterIndex) }
+  if (scriptPath) args.out = scriptPath
+  if (audioDir) args['out-dir'] = audioDir
+  return args
+}
+
 async function runValidateScript(args) {
   const scriptPath = args.script ? resolve(args.script) : null
   if (!scriptPath) throw new Error('validate-script 需要 --script。')
@@ -940,6 +980,125 @@ async function runSynth(config, args) {
   }
 }
 
+async function runBatchPipeline(config, args) {
+  const bookId = args['book-id']
+  const chapters = parseChapterList(args.chapters)
+  if (!bookId || chapters.length === 0) {
+    throw new Error('batch-pipeline 需要 --book-id 和 --chapters。')
+  }
+
+  const limit = args.limit ? Number(args.limit) : config.director.maxCharactersPerRequest
+  const batchSize = args['batch-size']
+    ? Math.max(1, Math.floor(Number(args['batch-size'])))
+    : config.director.segmentBatchSize
+  const directorConcurrency = args['director-concurrency']
+    ? Math.max(1, Math.floor(Number(args['director-concurrency'])))
+    : config.director.concurrency
+  const ttsConcurrency = args['tts-concurrency']
+    ? Math.max(1, Math.floor(Number(args['tts-concurrency'])))
+    : config.tts.concurrency
+  const ttsChapterConcurrency = args['tts-chapters']
+    ? Math.max(1, Math.floor(Number(args['tts-chapters'])))
+    : config.batchPipeline.ttsChapterConcurrency
+
+  if (!Number.isInteger(limit) || limit < 100) throw new Error('--limit 必须是大于等于 100 的整数。')
+  if (!Number.isFinite(batchSize) || batchSize < 1) throw new Error('--batch-size 必须是大于等于 1 的整数。')
+  if (!Number.isFinite(directorConcurrency) || directorConcurrency < 1) throw new Error('--director-concurrency 必须是大于等于 1 的整数。')
+  if (!Number.isFinite(ttsConcurrency) || ttsConcurrency < 1) throw new Error('--tts-concurrency 必须是大于等于 1 的整数。')
+  if (!Number.isFinite(ttsChapterConcurrency) || ttsChapterConcurrency < 1) throw new Error('--tts-chapters 必须是大于等于 1 的整数。')
+
+  const firstChapter = getChapter(config, bookId, chapters[0])
+  const outRoot = args['out-root']
+    ? resolve(args['out-root'])
+    : resolve(`tmp/tts/${safeFilePart(firstChapter.book.title)}`)
+  const startedAt = Date.now()
+  const results = []
+  const synthPromises = []
+  let activeSynthCount = 0
+  const synthQueue = []
+
+  console.log(`🚂 批量流水线启动：章节 ${chapters.join(', ')}`)
+  console.log(`   LLM 阶段：章节串行，单章批次并发 ${directorConcurrency}，batchSize ${batchSize}`)
+  console.log(`   TTS 阶段：章节并发 ${ttsChapterConcurrency}，单章片段并发 ${ttsConcurrency}`)
+
+  const acquireSynthSlot = async () => {
+    if (activeSynthCount < ttsChapterConcurrency) {
+      activeSynthCount += 1
+      return
+    }
+    await new Promise(resolve => synthQueue.push(resolve))
+    activeSynthCount += 1
+  }
+
+  const releaseSynthSlot = () => {
+    activeSynthCount -= 1
+    const next = synthQueue.shift()
+    if (next) next()
+  }
+
+  const launchSynth = (chapterIndex, scriptPath, audioDir) => {
+    const started = Date.now()
+    const synthPromise = (async () => {
+      await acquireSynthSlot()
+      console.log(`🎧 第 ${chapterIndex} 章进入 TTS 阶段`)
+      await runSynth(config, {
+        script: scriptPath,
+        'out-dir': audioDir,
+        concurrency: String(ttsConcurrency),
+      })
+      const elapsedSeconds = Math.round((Date.now() - started) / 1000)
+      results.push({ chapterIndex, scriptPath, audioDir, elapsedSeconds })
+      console.log(`✅ 第 ${chapterIndex} 章 TTS 完成，用时 ${elapsedSeconds}s`)
+      return { ok: true }
+    })()
+      .catch(error => {
+      error.message = `第 ${chapterIndex} 章 TTS 失败：${error.message}`
+      return { ok: false, error }
+    })
+      .finally(releaseSynthSlot)
+    synthPromises.push(synthPromise)
+  }
+
+  for (const chapterIndex of chapters) {
+    const chapterDir = join(outRoot, `ch${String(chapterIndex).padStart(3, '0')}-full`)
+    const scriptPath = join(chapterDir, 'director-script.json')
+    const audioDir = join(chapterDir, 'audio')
+    const draftStarted = Date.now()
+    console.log(`\n🎬 第 ${chapterIndex} 章进入 LLM 阶段`)
+    await runDraftScript(config, makeChapterArgs({
+      'book-id': bookId,
+      limit: String(limit),
+      'batch-size': String(batchSize),
+      concurrency: String(directorConcurrency),
+    }, chapterIndex, scriptPath))
+    const draftElapsed = Math.round((Date.now() - draftStarted) / 1000)
+    console.log(`✅ 第 ${chapterIndex} 章 LLM 阶段完成，用时 ${draftElapsed}s，进入 TTS 阶段`)
+    launchSynth(chapterIndex, scriptPath, audioDir)
+  }
+
+  console.log('\n⏳ 所有章节已完成 LLM 阶段，等待剩余 TTS 收尾。')
+  const outcomes = await Promise.all(synthPromises)
+  const failed = outcomes.find(outcome => !outcome.ok)
+  if (failed) throw failed.error
+  results.sort((a, b) => a.chapterIndex - b.chapterIndex)
+  const elapsedSeconds = Math.round((Date.now() - startedAt) / 1000)
+  const summary = {
+    kind: 'novel-reader-tts-batch-pipeline-summary',
+    generatedAt: new Date().toISOString(),
+    elapsedSeconds,
+    bookId,
+    chapters,
+    outRoot,
+    director: { limit, batchSize, concurrency: directorConcurrency },
+    tts: { segmentConcurrency: ttsConcurrency, chapterConcurrency: ttsChapterConcurrency },
+    results,
+  }
+  const summaryPath = join(outRoot, `batch-pipeline-${chapters[0]}-${chapters.at(-1)}.summary.json`)
+  writeFileSync(summaryPath, `${JSON.stringify(summary, null, 2)}\n`, 'utf8')
+  console.log(`✅ 批量流水线完成，总用时 ${elapsedSeconds}s`)
+  console.log(`   汇总文件：${summaryPath}`)
+}
+
 async function runTestModel(config) {
   const result = await callOpenAICompatible(config, [
     { role: 'system', content: '你只输出严格 JSON。' },
@@ -974,6 +1133,7 @@ async function main() {
       },
       database: config.database,
       director: config.director,
+      batchPipeline: config.batchPipeline,
       tts: {
         provider: config.tts.provider,
         model: config.tts.model,
@@ -1032,6 +1192,11 @@ async function main() {
 
   if (command === 'synth') {
     await runSynth(config, args)
+    return
+  }
+
+  if (command === 'batch-pipeline') {
+    await runBatchPipeline(config, args)
     return
   }
 

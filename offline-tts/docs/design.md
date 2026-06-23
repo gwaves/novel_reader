@@ -78,6 +78,19 @@ Novel Reader SQLite
 
 `director.concurrency` 或 `draft-script --concurrency` 控制导演脚本生成阶段的 LLM 批次并发。程序会并发请求多个批次，但按原始批次顺序合并判定结果，避免片段乱序。
 
+## 批量流水线策略
+
+批量生成多章时，不建议让多个章节同时进入 LLM 阶段。实测多个 agent 同时以高并发调用本地 LLM，容易导致模型服务卡死或触发超时；但 TTS 阶段使用的是另一类服务，可以和下一章的 LLM 阶段重叠。
+
+`batch-pipeline` 命令采用两阶段流水线：
+
+1. LLM 阶段按章节串行执行，单章内部仍可用 `--director-concurrency` 控制批次并发。
+2. 每章导演脚本生成并校验后，立即启动该章 TTS。
+3. TTS 阶段按章节并发，`--tts-chapters` 控制同时合成的章节数，`--tts-concurrency` 控制每章片段并发。
+4. 主流程继续处理下一章 LLM，从而实现“上一章 TTS + 下一章 LLM”的重叠。
+
+这比多个 agent 全量并发更稳定，也比完全串行更高效。
+
 ## 导演脚本结构
 
 ```json

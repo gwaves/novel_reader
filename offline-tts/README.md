@@ -91,6 +91,22 @@ node offline-tts/scripts/tts-director.mjs synth \
   --concurrency 3
 ```
 
+批量生成多章时，推荐使用流水线模式，避免多个章节同时压住本地 LLM：
+
+```bash
+node offline-tts/scripts/tts-director.mjs batch-pipeline \
+  --book-id 9679077f-2288-4bc7-9080-854784fc7f94 \
+  --chapters 19,21-24 \
+  --limit 20000 \
+  --batch-size 30 \
+  --director-concurrency 10 \
+  --tts-concurrency 3 \
+  --tts-chapters 2 \
+  --out-root tmp/tts/yaodao
+```
+
+这个命令会让章节的 LLM 阶段串行执行；当前一章进入 TTS 阶段后，下一章会立刻开始生成导演脚本。TTS 阶段可按章节并发，默认最多同时合成 2 章。
+
 ## 边界
 
 - Codex 只负责开发和调试工具，不负责批量大模型推理。
