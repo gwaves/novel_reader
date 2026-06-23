@@ -1,6 +1,10 @@
 package com.gwaves.novelreader.mobile;
 
+import android.content.Intent;
+import android.content.pm.ResolveInfo;
 import android.os.Build;
+import android.os.Handler;
+import android.os.Looper;
 import android.speech.tts.TextToSpeech;
 import android.speech.tts.UtteranceProgressListener;
 import android.speech.tts.Voice;
@@ -19,10 +23,15 @@ import java.util.Set;
 
 @CapacitorPlugin(name = "NovelReaderTts")
 public class NovelReaderTtsPlugin extends Plugin {
+    private static final String XIAOMI_TTS_ENGINE = "com.xiaomi.mibrain.speech";
+    private static final long INIT_TIMEOUT_MS = 8000L;
+
     private TextToSpeech tts;
     private boolean initializing = false;
     private boolean ready = false;
     private int initStatus = TextToSpeech.ERROR;
+    private Handler mainHandler;
+    private Runnable initTimeoutRunnable;
     private final List<PendingAction> pendingActions = new ArrayList<>();
 
     private static class PendingAction {
@@ -133,8 +142,28 @@ public class NovelReaderTtsPlugin extends Plugin {
         if (initializing) return;
 
         initializing = true;
+        if (mainHandler == null) {
+            mainHandler = new Handler(Looper.getMainLooper());
+        }
         getActivity().runOnUiThread(() -> {
-            tts = new TextToSpeech(getContext(), status -> {
+            String engine = resolveTtsEngine();
+            initTimeoutRunnable = () -> {
+                if (!initializing) return;
+                initializing = false;
+                ready = false;
+                rejectPending("系统 TTS 初始化超时，请在系统设置中选择默认文字转语音引擎。");
+                if (tts != null) {
+                    tts.shutdown();
+                    tts = null;
+                }
+            };
+            mainHandler.postDelayed(initTimeoutRunnable, INIT_TIMEOUT_MS);
+
+            tts = new TextToSpeech(getContext().getApplicationContext(), status -> {
+                if (initTimeoutRunnable != null) {
+                    mainHandler.removeCallbacks(initTimeoutRunnable);
+                    initTimeoutRunnable = null;
+                }
                 initStatus = status;
                 ready = status == TextToSpeech.SUCCESS;
                 initializing = false;
@@ -163,9 +192,7 @@ public class NovelReaderTtsPlugin extends Plugin {
                     });
                 }
 
-                List<PendingAction> actions = new ArrayList<>(pendingActions);
-                pendingActions.clear();
-
+                List<PendingAction> actions = drainPendingActions();
                 for (PendingAction pending : actions) {
                     if (ready) {
                         pending.action.run();
@@ -173,8 +200,42 @@ public class NovelReaderTtsPlugin extends Plugin {
                         pending.call.reject("系统 TTS 初始化失败：" + initStatus);
                     }
                 }
-            });
+            }, engine);
         });
+    }
+
+    private String resolveTtsEngine() {
+        if (tts != null && tts.getDefaultEngine() != null) {
+            return tts.getDefaultEngine();
+        }
+
+        Intent intent = new Intent(TextToSpeech.Engine.INTENT_ACTION_TTS_SERVICE);
+        List<ResolveInfo> services = getContext().getPackageManager().queryIntentServices(intent, 0);
+        String firstEngine = null;
+        for (ResolveInfo service : services) {
+            if (service.serviceInfo == null || service.serviceInfo.packageName == null) continue;
+            String packageName = service.serviceInfo.packageName;
+            if (firstEngine == null) {
+                firstEngine = packageName;
+            }
+            if (XIAOMI_TTS_ENGINE.equals(packageName)) {
+                return packageName;
+            }
+        }
+        return firstEngine;
+    }
+
+    private List<PendingAction> drainPendingActions() {
+        List<PendingAction> actions = new ArrayList<>(pendingActions);
+        pendingActions.clear();
+        return actions;
+    }
+
+    private void rejectPending(String message) {
+        List<PendingAction> actions = drainPendingActions();
+        for (PendingAction pending : actions) {
+            pending.call.reject(message);
+        }
     }
 
     private JSArray listVoices(Locale preferredLocale) {
@@ -237,6 +298,10 @@ public class NovelReaderTtsPlugin extends Plugin {
 
     @Override
     protected void handleOnDestroy() {
+        if (mainHandler != null && initTimeoutRunnable != null) {
+            mainHandler.removeCallbacks(initTimeoutRunnable);
+            initTimeoutRunnable = null;
+        }
         if (tts != null) {
             tts.stop();
             tts.shutdown();
@@ -246,4 +311,3 @@ public class NovelReaderTtsPlugin extends Plugin {
         super.handleOnDestroy();
     }
 }
-

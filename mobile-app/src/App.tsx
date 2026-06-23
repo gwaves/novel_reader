@@ -160,6 +160,18 @@ function backgroundLabel(background: ReaderBackground): string {
   return '纸白'
 }
 
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  let timer: number | null = null
+  const timeout = new Promise<never>((_, reject) => {
+    timer = window.setTimeout(() => reject(new Error(message)), timeoutMs)
+  })
+  return Promise.race([promise, timeout]).finally(() => {
+    if (timer != null) {
+      window.clearTimeout(timer)
+    }
+  })
+}
+
 function cosineSimilarity(left: number[], right: number[]): number {
   const length = Math.min(left.length, right.length)
   if (!length) return 0
@@ -998,7 +1010,11 @@ function App() {
     }
 
     setTtsStatusMessage('正在检测系统语音引擎...')
-    const availability = await NovelReaderTts.getAvailability({ locale: ttsLocale })
+    const availability = await withTimeout(
+      NovelReaderTts.getAvailability({ locale: ttsLocale }),
+      10000,
+      '系统 TTS 检测超时，请在系统设置中选择默认文字转语音引擎。',
+    )
     setTtsVoices(availability.voices)
     if (!availability.available || !availability.languageAvailable) {
       setTtsStatusMessage(availability.error || '当前系统 TTS 不可用，请检查系统语音设置。')
