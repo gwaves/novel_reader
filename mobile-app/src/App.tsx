@@ -471,7 +471,8 @@ function App() {
   const chapterAudioObjectUrlRef = useRef<string | null>(null)
   const chapterAudioTimelineRef = useRef<Array<{ endTime: number; index: number }>>([])
   const speechAutoFollowRef = useRef(true)
-  const speechFollowSuspendedUntilRef = useRef(0)
+  const speechFollowSuspendedRef = useRef(false)
+  const speechQueueIdRef = useRef(0)
   const speechFollowTimerRef = useRef<number | null>(null)
   const isSpeechAutoScrollingRef = useRef(false)
   const lastReaderCenterTapAtRef = useRef(0)
@@ -751,15 +752,15 @@ function App() {
       if (
         speechPlaybackRef.current.status === 'playing' &&
         !isSpeechAutoScrollingRef.current &&
-        Date.now() > speechFollowSuspendedUntilRef.current
+        !speechFollowSuspendedRef.current
       ) {
-        speechFollowSuspendedUntilRef.current = Date.now() + 7000
+        speechFollowSuspendedRef.current = true
         setSpeechAutoFollowSuspended(true)
         if (speechFollowTimerRef.current != null) {
           window.clearTimeout(speechFollowTimerRef.current)
         }
         speechFollowTimerRef.current = window.setTimeout(() => {
-          speechFollowSuspendedUntilRef.current = 0
+          speechFollowSuspendedRef.current = false
           setSpeechAutoFollowSuspended(false)
         }, 7000)
       }
@@ -1163,7 +1164,7 @@ function App() {
     const xRatio = (event.clientX - bounds.left) / bounds.width
 
     if (xRatio >= 0.25 && xRatio <= 0.75) {
-      const now = Date.now()
+      const now = event.timeStamp
       if (now - lastReaderCenterTapAtRef.current < 360) {
         lastReaderCenterTapAtRef.current = 0
         setReaderMenuOpen(true)
@@ -1331,7 +1332,7 @@ function App() {
   }
 
   function scrollToSpeechSegment(segmentId: string, force = false) {
-    if (!force && (!speechAutoFollowRef.current || Date.now() < speechFollowSuspendedUntilRef.current)) return
+    if (!force && (!speechAutoFollowRef.current || speechFollowSuspendedRef.current)) return
     const target = document.querySelector(`[data-speech-segment-id="${CSS.escape(segmentId)}"]`)
     if (!target) return
 
@@ -1382,7 +1383,8 @@ function App() {
       return
     }
 
-    const queueId = Date.now()
+    speechQueueIdRef.current += 1
+    const queueId = speechQueueIdRef.current
     const utterances = speechSegmentsRef.current.slice(segmentIndex).map((entry, offset) => {
       const utteranceId = `speech-${queueId}-${segmentIndex + offset}`
       return { text: entry.text, utteranceId }
@@ -1536,7 +1538,7 @@ function App() {
   function followSpeechSegment() {
     const current = speechPlaybackRef.current
     if (current.status !== 'playing' && current.status !== 'paused') return
-    speechFollowSuspendedUntilRef.current = 0
+    speechFollowSuspendedRef.current = false
     setSpeechAutoFollowSuspended(false)
     scrollToSpeechSegment(current.segmentId, true)
   }
