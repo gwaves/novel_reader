@@ -891,7 +891,10 @@ function App() {
     setIsBusy(true)
     setMessage('')
     try {
-      const pkg = await client.downloadBookPackage(bookId)
+      const remoteBook = remoteBooks.find((book) => book.id === bookId)
+      setMessage(`正在下载《${remoteBook?.title ?? '本书'}》轻量离线包...`)
+      const pkg = await client.downloadBookPackage(bookId, { includeEmbeddings: false })
+      setMessage(`正在导入《${pkg.book.title}》到本地...`)
       await saveBookPackage(pkg)
       setLocalBooks(await listLocalBooks())
       setActivePackage(pkg)

@@ -197,8 +197,9 @@ export class MobileApiClient {
     return payload.books
   }
 
-  async downloadBookPackage(bookId: string): Promise<MobileBookPackage> {
-    return readJson<MobileBookPackage>(await this.fetch(`/api/mobile/books/${encodeURIComponent(bookId)}/package`))
+  async downloadBookPackage(bookId: string, options: { includeEmbeddings?: boolean } = {}): Promise<MobileBookPackage> {
+    const search = options.includeEmbeddings === false ? '?embeddings=none' : ''
+    return readJson<MobileBookPackage>(await this.fetch(`/api/mobile/books/${encodeURIComponent(bookId)}/package${search}`))
   }
 
   async createEmbedding(payload: MobileEmbeddingProxyRequest): Promise<{ data?: Array<{ embedding?: number[] }> }> {

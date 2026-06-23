@@ -2877,9 +2877,10 @@ function createMobileContentHash(payload) {
     .digest('hex')
 }
 
-function getMobileBookPackage(bookId) {
+function getMobileBookPackage(bookId, options = {}) {
   const bookRow = getMobileBookStatement.get(bookId)
   if (!bookRow) return null
+  const includeEmbeddings = options.includeEmbeddings !== false
 
   const listRow = listMobileBooksStatement.all().find((book) => book.id === bookId) ?? {
     ...bookRow,
@@ -2911,8 +2912,8 @@ function getMobileBookPackage(bookId) {
       relationMentions: listMobileRelationMentionsStatement.all(bookId),
     },
     embeddings: {
-      summaries: listMobileSummaryEmbeddingsStatement.all(bookId).map(mapMobileEmbedding),
-      chunks: listMobileChunkEmbeddingsStatement.all(bookId).map(mapMobileEmbedding),
+      summaries: includeEmbeddings ? listMobileSummaryEmbeddingsStatement.all(bookId).map(mapMobileEmbedding) : [],
+      chunks: includeEmbeddings ? listMobileChunkEmbeddingsStatement.all(bookId).map(mapMobileEmbedding) : [],
     },
     integrity: {
       contentHash: null,
@@ -4369,7 +4370,8 @@ const server = createServer(async (request, response) => {
       const mobileBookPackageMatch = url.pathname.match(/^\/api\/mobile\/books\/([^/]+)\/package$/)
       if (request.method === 'GET' && mobileBookPackageMatch) {
         const bookId = decodeURIComponent(mobileBookPackageMatch[1])
-        const payload = getMobileBookPackage(bookId)
+        const embeddingsMode = (url.searchParams.get('embeddings') || 'full').trim().toLowerCase()
+        const payload = getMobileBookPackage(bookId, { includeEmbeddings: embeddingsMode !== 'none' })
 
         if (!payload) {
           sendJson(response, 404, { code: 'BOOK_NOT_FOUND', error: 'Book not found.' })
