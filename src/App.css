@@ -382,6 +382,18 @@ button:disabled {
   gap: 8px;
 }
 
+.audio-directory-preview {
+  max-height: 360px;
+  overflow: auto;
+  padding-right: 4px;
+}
+
+.audio-directory-summary {
+  color: #5f6f89;
+  font-size: 13px;
+  font-weight: 700;
+}
+
 .audio-directory-rules span,
 .audio-directory-row {
   border: 1px solid #e4dbcf;

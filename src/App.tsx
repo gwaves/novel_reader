@@ -3915,7 +3915,8 @@ ${context}
               {audioDirectoryMessage && <p className="database-backup-status">{audioDirectoryMessage}</p>}
               {audioDirectoryStatus?.audio.length ? (
                 <div className="audio-directory-preview">
-                  {audioDirectoryStatus.audio.slice(0, 10).map((audio) => (
+                  <div className="audio-directory-summary">已匹配 {audioDirectoryStatus.audio.length} 个章节 MP3</div>
+                  {audioDirectoryStatus.audio.map((audio) => (
                     <div className="audio-directory-row" key={audio.id}>
                       <strong>{audio.chapterIndex}. {audio.chapterTitle}</strong>
                       <span>{audio.filename} · {formatBytes(audio.bytes)}</span>
