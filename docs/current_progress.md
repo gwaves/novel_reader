@@ -16,6 +16,8 @@
 - 已确认 MIMO `mimo-v2.5-tts-voicedesign` 可用于音色设计实验，但不是当前预置音色 voice id 的直接替代；后续应先做采蓝/黄缨小样本 A/B，验证跨片段声线一致性。
 - 整章导演脚本生成已改为分批模式：`director.segmentBatchSize` 或 `draft-script --batch-size` 控制每批预切分片段数，避免整章单请求超时。
 - 《妖刀记》第 1 章完整功能验证已跑通：分批生成 206 段导演脚本，校验 0 错误 0 警告；TTS 并发 3 合成并编码为 MP3，用时约 325 秒，输出 `tmp/tts/yaodao/ch001-full/audio/chapter.mp3`，成品约 55 分钟、39.6 MB、96 kbps。
+- 导演脚本生成已支持 LLM 批次并发：`director.concurrency` 或 `draft-script --concurrency` 控制并发数，结果按原始批次顺序合并。第 20 章实测并发 10 时 7 个批次约 66 秒生成 188 段脚本，校验 0 错误 0 警告。
+- 《妖刀记》第 20 章完整语音已生成：TTS 并发 3 合成并编码为 MP3，用时约 263 秒，输出 `tmp/tts/yaodao/ch020-full/audio/chapter.mp3`，成品约 40 分 50 秒、29.4 MB、96 kbps。
 
 2026-06-21 最新状态：main 已同步到 PR #21 和 PR #22。
 

@@ -36,7 +36,7 @@ Novel Reader 离线多角色 TTS 导演脚本工具
   --out <path>                 draft-script 输出路径
   --script <path>              validate-script 输入路径
   --out-dir <path>             synth 输出目录，默认与脚本同目录下的 audio/
-  --concurrency <number>       synth 的 TTS 并发数，覆盖配置文件
+  --concurrency <number>       draft-script 的 LLM 并发数，或 synth 的 TTS 并发数，覆盖配置文件
   --batch-size <number>        draft-script 每批提交给模型的预切分片段数
 
 示例:
@@ -128,6 +128,7 @@ function loadConfig(configPath) {
       performanceStyle: optionalString(config.director?.performanceStyle),
       maxCharactersPerRequest: finiteNumber(config.director?.maxCharactersPerRequest, 3000),
       segmentBatchSize: Math.max(1, Math.floor(finiteNumber(config.director?.segmentBatchSize, 30))),
+      concurrency: Math.max(1, Math.floor(finiteNumber(config.director?.concurrency, 1))),
     },
     voices: {
       characters: Array.isArray(config.voices?.characters) ? config.voices.characters : [],
@@ -642,7 +643,7 @@ function validateDirectorScript(script, preSegments = null) {
   return { errors, warnings }
 }
 
-function diagnosticsFor({ config, preSegments, kgCandidates, characterCandidates, validation, batchSize }) {
+function diagnosticsFor({ config, preSegments, kgCandidates, characterCandidates, validation, batchSize, directorConcurrency }) {
   return {
     generatedAt: new Date().toISOString(),
     configPath: config.configPath,
@@ -653,6 +654,7 @@ function diagnosticsFor({ config, preSegments, kgCandidates, characterCandidates
     },
     preSegmentCount: preSegments.length,
     batchSize,
+    directorConcurrency,
     kgCandidateCount: kgCandidates.length,
     characterCandidateCount: characterCandidates.length,
     validationErrors: validation.errors,
@@ -677,18 +679,32 @@ async function runDraftScript(config, args) {
   if (!Number.isFinite(batchSize) || batchSize < 1) {
     throw new Error('--batch-size 必须是大于等于 1 的整数。')
   }
+  const directorConcurrency = args.concurrency
+    ? Math.max(1, Math.floor(Number(args.concurrency)))
+    : config.director.concurrency
+  if (!Number.isFinite(directorConcurrency) || directorConcurrency < 1) {
+    throw new Error('--concurrency 必须是大于等于 1 的整数。')
+  }
 
   const { book, chapter } = getChapter(config, bookId, chapterIndex)
   const kgCandidates = getKgCharacterCandidates(config, bookId, chapterIndex)
   const preSegments = preSegmentText(chapter.content, limit)
   const sourceText = chapter.content.slice(0, limit)
   const characterCandidates = filterVoiceCandidates(buildVoiceCandidates(config, kgCandidates), sourceText)
-  const allDecisions = []
+  const batches = []
   for (let start = 0; start < preSegments.length; start += batchSize) {
-    const batch = preSegments.slice(start, start + batchSize)
-    const currentBatch = Math.floor(start / batchSize) + 1
-    const totalBatches = Math.ceil(preSegments.length / batchSize)
-    console.log(`🧾 生成导演判定 ${currentBatch}/${totalBatches}，片段 ${start + 1}-${start + batch.length}/${preSegments.length}`)
+    batches.push({
+      index: batches.length,
+      start,
+      segments: preSegments.slice(start, start + batchSize),
+    })
+  }
+  const batchResults = new Array(batches.length)
+  console.log(`🚀 导演脚本 LLM 并发：${directorConcurrency}，批次：${batches.length}`)
+  await runConcurrent(batches, directorConcurrency, async (batchInfo) => {
+    const currentBatch = batchInfo.index + 1
+    const batch = batchInfo.segments
+    console.log(`🧾 生成导演判定 ${currentBatch}/${batches.length}，片段 ${batchInfo.start + 1}-${batchInfo.start + batch.length}/${preSegments.length}`)
     const prompt = buildDirectorPrompt({ config, book, chapter, preSegments: batch, characterCandidates })
     const batchDecisions = await callOpenAICompatible(config, [
       { role: 'system', content: '你只输出严格 JSON，不输出 Markdown，不输出思考过程。' },
@@ -697,12 +713,14 @@ async function runDraftScript(config, args) {
     if (!Array.isArray(batchDecisions?.decisions)) {
       throw new Error(`第 ${currentBatch} 批模型输出缺少 decisions 数组。`)
     }
-    allDecisions.push(...batchDecisions.decisions)
-  }
+    batchResults[batchInfo.index] = batchDecisions.decisions
+    console.log(`✅ 导演判定完成 ${currentBatch}/${batches.length}`)
+  })
+  const allDecisions = batchResults.flat()
   const decisions = { decisions: allDecisions }
   const script = buildDirectorScript({ config, book, chapter, preSegments, decisions, characterCandidates })
   const validation = validateDirectorScript(script, preSegments)
-  script.diagnostics = diagnosticsFor({ config, preSegments, kgCandidates, characterCandidates, validation, batchSize })
+  script.diagnostics = diagnosticsFor({ config, preSegments, kgCandidates, characterCandidates, validation, batchSize, directorConcurrency })
 
   const outputPath = args.out
     ? resolve(args.out)

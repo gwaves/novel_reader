@@ -59,6 +59,7 @@ node offline-tts/scripts/tts-director.mjs \
   --chapter 1 \
   --limit 20000 \
   --batch-size 30 \
+  --concurrency 10 \
   --out tmp/tts/yaodao/ch001/director-script.json
 ```
 

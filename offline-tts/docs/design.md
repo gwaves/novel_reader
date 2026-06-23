@@ -76,6 +76,8 @@ Novel Reader SQLite
 
 `director.segmentBatchSize` 控制导演脚本生成时每次提交给模型的预切分片段数。整章单次请求容易超时或产生过长 JSON，默认按 30 段分批生成判定，再由程序合并回完整导演脚本。
 
+`director.concurrency` 或 `draft-script --concurrency` 控制导演脚本生成阶段的 LLM 批次并发。程序会并发请求多个批次，但按原始批次顺序合并判定结果，避免片段乱序。
+
 ## 导演脚本结构
 
 ```json

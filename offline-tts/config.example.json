@@ -19,7 +19,8 @@
     },
     "performanceStyle": "按照中文有声小说的朗读语速和节奏，整体语速略快，吐字清晰，节奏紧凑但不抢字；旁白保留必要停顿，对白保留角色表演感。",
     "maxCharactersPerRequest": 3000,
-    "segmentBatchSize": 30
+    "segmentBatchSize": 30,
+    "concurrency": 10
   },
   "voices": {
     "characters": [
