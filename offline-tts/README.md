@@ -14,6 +14,7 @@
 
 - `docs/design.md`：总体设计与数据结构。
 - `docs/development-plan.md`：分阶段开发计划。
+- `docs/mp3-production.md`：章节 MP3 生产、输出目录和移动端同步说明。
 - `config.example.json`：本地模型、音色和 TTS 示例配置。
 - `scripts/tts-director.mjs`：Node.js CLI，负责导演脚本生成与校验。
 
@@ -115,6 +116,12 @@ node offline-tts/scripts/tts-director.mjs batch-pipeline \
 - LLM 批次会自动重试；如果整章脚本生成失败，流水线会降低 batch size 和 LLM 并发后重试。
 - 每章会生成 `director-script.audit.json`，统计未知角色、默认音色、疑似错别字 speaker 和别名 speaker。
 - 当前实测更稳的 LLM 参数是 `--batch-size 10 --director-concurrency 3`；不要盲目提高到 10 并发。
+
+完整的 MP3 生产流程、产物目录结构和移动端配置方式见：
+
+```text
+offline-tts/docs/mp3-production.md
+```
 
 单独检查导演脚本质量：
 
