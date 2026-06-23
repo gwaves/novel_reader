@@ -37,6 +37,7 @@ Novel Reader 离线多角色 TTS 导演脚本工具
   --script <path>              validate-script 输入路径
   --out-dir <path>             synth 输出目录，默认与脚本同目录下的 audio/
   --concurrency <number>       synth 的 TTS 并发数，覆盖配置文件
+  --batch-size <number>        draft-script 每批提交给模型的预切分片段数
 
 示例:
   node offline-tts/scripts/tts-director.mjs --config offline-tts/config.example.json test-model
@@ -126,6 +127,7 @@ function loadConfig(configPath) {
       },
       performanceStyle: optionalString(config.director?.performanceStyle),
       maxCharactersPerRequest: finiteNumber(config.director?.maxCharactersPerRequest, 3000),
+      segmentBatchSize: Math.max(1, Math.floor(finiteNumber(config.director?.segmentBatchSize, 30))),
     },
     voices: {
       characters: Array.isArray(config.voices?.characters) ? config.voices.characters : [],
@@ -542,6 +544,10 @@ function buildDirectorScript({ config, book, chapter, preSegments, decisions, ch
       ? config.director.defaultNarrator.style
       : optionalString(decision.style) || character?.style || ''
 
+    const confidence = inferredCharacter && rawSpeaker === '未知角色' && type === 'thought'
+      ? Math.max(normalizeConfidence(decision.confidence, 0), 0.75)
+      : normalizeConfidence(decision.confidence, isNarration ? 1 : 0)
+
     return {
       id: `ch${String(chapter.chapter_index).padStart(3, '0')}-s${String(index + 1).padStart(4, '0')}`,
       preSegmentId: preSegment.id,
@@ -553,9 +559,7 @@ function buildDirectorScript({ config, book, chapter, preSegments, decisions, ch
       text: preSegment.text,
       sourceStart: preSegment.sourceStart,
       sourceEnd: preSegment.sourceEnd,
-      confidence: inferredCharacter && rawSpeaker === '未知角色' && type === 'thought'
-        ? Math.max(normalizeConfidence(decision.confidence, 0), 0.75)
-        : normalizeConfidence(decision.confidence, isNarration ? 1 : 0),
+      confidence: speaker === '未知角色' ? Math.min(confidence, 0.45) : confidence,
       evidence: inferredCharacter && rawSpeaker === '未知角色' && type === 'thought'
         ? `程序根据上下文中的角色名或别名推断为 ${inferredCharacter.name}。`
         : optionalString(decision.evidence) || (isNarration ? '规则切分：引号外旁白。' : '模型未提供依据。'),
@@ -638,7 +642,7 @@ function validateDirectorScript(script, preSegments = null) {
   return { errors, warnings }
 }
 
-function diagnosticsFor({ config, preSegments, kgCandidates, characterCandidates, validation }) {
+function diagnosticsFor({ config, preSegments, kgCandidates, characterCandidates, validation, batchSize }) {
   return {
     generatedAt: new Date().toISOString(),
     configPath: config.configPath,
@@ -648,6 +652,7 @@ function diagnosticsFor({ config, preSegments, kgCandidates, characterCandidates
       hasApiKey: Boolean(getApiKey(config)),
     },
     preSegmentCount: preSegments.length,
+    batchSize,
     kgCandidateCount: kgCandidates.length,
     characterCandidateCount: characterCandidates.length,
     validationErrors: validation.errors,
@@ -666,20 +671,38 @@ async function runDraftScript(config, args) {
   if (!Number.isInteger(limit) || limit < 100) {
     throw new Error('--limit 必须是大于等于 100 的整数。')
   }
+  const batchSize = args['batch-size']
+    ? Math.max(1, Math.floor(Number(args['batch-size'])))
+    : config.director.segmentBatchSize
+  if (!Number.isFinite(batchSize) || batchSize < 1) {
+    throw new Error('--batch-size 必须是大于等于 1 的整数。')
+  }
 
   const { book, chapter } = getChapter(config, bookId, chapterIndex)
   const kgCandidates = getKgCharacterCandidates(config, bookId, chapterIndex)
   const preSegments = preSegmentText(chapter.content, limit)
   const sourceText = chapter.content.slice(0, limit)
   const characterCandidates = filterVoiceCandidates(buildVoiceCandidates(config, kgCandidates), sourceText)
-  const prompt = buildDirectorPrompt({ config, book, chapter, preSegments, characterCandidates })
-  const decisions = await callOpenAICompatible(config, [
-    { role: 'system', content: '你只输出严格 JSON，不输出 Markdown，不输出思考过程。' },
-    { role: 'user', content: prompt },
-  ])
+  const allDecisions = []
+  for (let start = 0; start < preSegments.length; start += batchSize) {
+    const batch = preSegments.slice(start, start + batchSize)
+    const currentBatch = Math.floor(start / batchSize) + 1
+    const totalBatches = Math.ceil(preSegments.length / batchSize)
+    console.log(`🧾 生成导演判定 ${currentBatch}/${totalBatches}，片段 ${start + 1}-${start + batch.length}/${preSegments.length}`)
+    const prompt = buildDirectorPrompt({ config, book, chapter, preSegments: batch, characterCandidates })
+    const batchDecisions = await callOpenAICompatible(config, [
+      { role: 'system', content: '你只输出严格 JSON，不输出 Markdown，不输出思考过程。' },
+      { role: 'user', content: prompt },
+    ])
+    if (!Array.isArray(batchDecisions?.decisions)) {
+      throw new Error(`第 ${currentBatch} 批模型输出缺少 decisions 数组。`)
+    }
+    allDecisions.push(...batchDecisions.decisions)
+  }
+  const decisions = { decisions: allDecisions }
   const script = buildDirectorScript({ config, book, chapter, preSegments, decisions, characterCandidates })
   const validation = validateDirectorScript(script, preSegments)
-  script.diagnostics = diagnosticsFor({ config, preSegments, kgCandidates, characterCandidates, validation })
+  script.diagnostics = diagnosticsFor({ config, preSegments, kgCandidates, characterCandidates, validation, batchSize })
 
   const outputPath = args.out
     ? resolve(args.out)

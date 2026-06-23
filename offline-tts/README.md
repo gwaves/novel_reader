@@ -57,7 +57,8 @@ node offline-tts/scripts/tts-director.mjs \
   draft-script \
   --book-id 9679077f-2288-4bc7-9080-854784fc7f94 \
   --chapter 1 \
-  --limit 2000 \
+  --limit 20000 \
+  --batch-size 30 \
   --out tmp/tts/yaodao/ch001/director-script.json
 ```
 
