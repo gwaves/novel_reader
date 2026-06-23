@@ -6,6 +6,7 @@ import android.provider.Settings;
 import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.PowerManager;
 import android.speech.tts.TextToSpeech;
 import android.speech.tts.UtteranceProgressListener;
 import android.speech.tts.Voice;
@@ -16,6 +17,8 @@ import com.getcapacitor.Plugin;
 import com.getcapacitor.PluginCall;
 import com.getcapacitor.PluginMethod;
 import com.getcapacitor.annotation.CapacitorPlugin;
+
+import org.json.JSONObject;
 
 import java.util.ArrayList;
 import java.util.LinkedHashSet;
@@ -34,6 +37,8 @@ public class NovelReaderTtsPlugin extends Plugin {
     private int initStatus = TextToSpeech.ERROR;
     private Handler mainHandler;
     private Runnable initTimeoutRunnable;
+    private PowerManager.WakeLock speechWakeLock;
+    private String queuedLastUtteranceId = null;
     private final List<PendingAction> pendingActions = new ArrayList<>();
 
     private static class PendingAction {
@@ -114,28 +119,74 @@ public class NovelReaderTtsPlugin extends Plugin {
             }
 
             Locale locale = Locale.forLanguageTag(localeTag);
-            int languageStatus = tts.setLanguage(locale);
-            if (languageStatus == TextToSpeech.LANG_MISSING_DATA || languageStatus == TextToSpeech.LANG_NOT_SUPPORTED) {
+            if (!applySpeechSettings(locale, voiceId, rate, pitch)) {
                 call.reject("当前系统 TTS 不支持 " + localeTag + "，请安装或启用对应语音包。");
                 return;
             }
 
-            if (!voiceId.trim().isEmpty() && Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-                Voice voice = findVoice(voiceId);
-                if (voice != null) {
-                    tts.setVoice(voice);
-                }
-            }
-
-            tts.setSpeechRate(rate);
-            tts.setPitch(pitch);
-
+            queuedLastUtteranceId = utteranceId;
+            acquireSpeechWakeLock();
             int status = tts.speak(text, TextToSpeech.QUEUE_FLUSH, null, utteranceId);
             if (status == TextToSpeech.SUCCESS) {
                 call.resolve();
             } else {
+                releaseSpeechWakeLock();
                 call.reject("系统 TTS 启动朗读失败。");
             }
+        });
+    }
+
+    @PluginMethod
+    public void speakQueue(PluginCall call) {
+        ensureTts(call, () -> {
+            JSArray utterances = call.getArray("utterances");
+            String localeTag = call.getString("locale", "zh-CN");
+            String voiceId = call.getString("voiceId", "");
+            float rate = floatValue(call, "rate", 1.0f, 0.5f, 2.0f);
+            float pitch = floatValue(call, "pitch", 1.0f, 0.5f, 2.0f);
+
+            if (utterances == null || utterances.length() == 0) {
+                call.reject("Missing utterances.");
+                return;
+            }
+
+            Locale locale = Locale.forLanguageTag(localeTag);
+            if (!applySpeechSettings(locale, voiceId, rate, pitch)) {
+                call.reject("当前系统 TTS 不支持 " + localeTag + "，请安装或启用对应语音包。");
+                return;
+            }
+
+            tts.stop();
+            queuedLastUtteranceId = null;
+            acquireSpeechWakeLock();
+
+            for (int index = 0; index < utterances.length(); index++) {
+                JSONObject item = utterances.optJSONObject(index);
+                if (item == null) continue;
+
+                String text = item.optString("text", "");
+                String utteranceId = item.optString("utteranceId", "");
+                if (text.trim().isEmpty() || utteranceId.trim().isEmpty()) continue;
+
+                queuedLastUtteranceId = utteranceId;
+                int queueMode = index == 0 ? TextToSpeech.QUEUE_FLUSH : TextToSpeech.QUEUE_ADD;
+                int status = tts.speak(text, queueMode, null, utteranceId);
+                if (status != TextToSpeech.SUCCESS) {
+                    tts.stop();
+                    queuedLastUtteranceId = null;
+                    releaseSpeechWakeLock();
+                    call.reject("系统 TTS 启动朗读失败。");
+                    return;
+                }
+            }
+
+            if (queuedLastUtteranceId == null) {
+                releaseSpeechWakeLock();
+                call.reject("Missing valid utterances.");
+                return;
+            }
+
+            call.resolve();
         });
     }
 
@@ -143,6 +194,8 @@ public class NovelReaderTtsPlugin extends Plugin {
     public void stop(PluginCall call) {
         ensureTts(call, () -> {
             tts.stop();
+            queuedLastUtteranceId = null;
+            releaseSpeechWakeLock();
             call.resolve();
         });
     }
@@ -228,15 +281,23 @@ public class NovelReaderTtsPlugin extends Plugin {
                 @Override
                 public void onDone(String utteranceId) {
                     notifyUtterance("utteranceDone", utteranceId, null);
+                    if (utteranceId != null && utteranceId.equals(queuedLastUtteranceId)) {
+                        queuedLastUtteranceId = null;
+                        releaseSpeechWakeLock();
+                    }
                 }
 
                 @Override
                 public void onError(String utteranceId) {
+                    queuedLastUtteranceId = null;
+                    releaseSpeechWakeLock();
                     notifyUtterance("utteranceError", utteranceId, "系统 TTS 朗读失败。");
                 }
 
                 @Override
                 public void onError(String utteranceId, int errorCode) {
+                    queuedLastUtteranceId = null;
+                    releaseSpeechWakeLock();
                     notifyUtterance("utteranceError", utteranceId, "系统 TTS 朗读失败：" + errorCode);
                 }
             });
@@ -331,6 +392,41 @@ public class NovelReaderTtsPlugin extends Plugin {
         return null;
     }
 
+    private boolean applySpeechSettings(Locale locale, String voiceId, float rate, float pitch) {
+        int languageStatus = tts.setLanguage(locale);
+        if (languageStatus == TextToSpeech.LANG_MISSING_DATA || languageStatus == TextToSpeech.LANG_NOT_SUPPORTED) {
+            return false;
+        }
+
+        if (!voiceId.trim().isEmpty() && Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+            Voice voice = findVoice(voiceId);
+            if (voice != null) {
+                tts.setVoice(voice);
+            }
+        }
+
+        tts.setSpeechRate(rate);
+        tts.setPitch(pitch);
+        return true;
+    }
+
+    private void acquireSpeechWakeLock() {
+        if (speechWakeLock == null) {
+            PowerManager powerManager = (PowerManager) getContext().getSystemService(android.content.Context.POWER_SERVICE);
+            speechWakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "NovelReader:TtsPlayback");
+            speechWakeLock.setReferenceCounted(false);
+        }
+        if (!speechWakeLock.isHeld()) {
+            speechWakeLock.acquire();
+        }
+    }
+
+    private void releaseSpeechWakeLock() {
+        if (speechWakeLock != null && speechWakeLock.isHeld()) {
+            speechWakeLock.release();
+        }
+    }
+
     private float floatValue(PluginCall call, String key, float fallback, float min, float max) {
         Double value = call.getDouble(key);
         if (value == null || value.isNaN() || value.isInfinite()) return fallback;
@@ -357,6 +453,8 @@ public class NovelReaderTtsPlugin extends Plugin {
             tts.shutdown();
             tts = null;
         }
+        queuedLastUtteranceId = null;
+        releaseSpeechWakeLock();
         ready = false;
         super.handleOnDestroy();
     }

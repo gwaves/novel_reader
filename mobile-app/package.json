@@ -9,7 +9,11 @@
     "preview": "vite preview",
     "android:add": "npx cap add android",
     "android:sync": "npm run build && npx cap sync android",
-    "android:open": "npx cap open android"
+    "android:open": "npx cap open android",
+    "android:copy-assets": "rm -rf android/app/src/main/assets/public && mkdir -p android/app/src/main/assets/public && cp -R dist/. android/app/src/main/assets/public/",
+    "android:build-fast": "npm run build && npm run android:copy-assets && cd android && ./gradlew assembleDebug",
+    "android:install-fast": "npm run android:build-fast && adb install -r android/app/build/outputs/apk/debug/novel_tts.apk",
+    "android:build-clean": "npm run build && npm run android:copy-assets && (cd android && ./gradlew --stop || true) && rm -rf android/.gradle android/app/build && cd android && ./gradlew --no-daemon --no-build-cache assembleDebug"
   },
   "dependencies": {
     "@capacitor/status-bar": "^8.0.2",

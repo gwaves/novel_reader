@@ -633,6 +633,21 @@ const listMobileSummaryEmbeddingsStatement = db.prepare(`
   WHERE book_id = ?
   ORDER BY model ASC, chapter_id ASC
 `)
+const listMobileSummaryEmbeddingsRangeStatement = db.prepare(`
+  SELECT
+    se.chapter_id AS chapterId,
+    se.book_id AS bookId,
+    se.model,
+    se.dimension,
+    se.embedding_json AS embeddingJson,
+    se.generated_at AS generatedAt
+  FROM summary_embeddings se
+  JOIN chapters c ON c.id = se.chapter_id
+  WHERE se.book_id = ?
+    AND c.chapter_index >= ?
+    AND c.chapter_index < ?
+  ORDER BY se.model ASC, c.chapter_index ASC
+`)
 const listMobileChunkEmbeddingsStatement = db.prepare(`
   SELECT
     id,
@@ -649,6 +664,26 @@ const listMobileChunkEmbeddingsStatement = db.prepare(`
     generated_at AS generatedAt
   FROM chapter_chunk_embeddings
   WHERE book_id = ?
+  ORDER BY model ASC, chapter_index ASC, chunk_index ASC
+`)
+const listMobileChunkEmbeddingsRangeStatement = db.prepare(`
+  SELECT
+    id,
+    book_id AS bookId,
+    chapter_id AS chapterId,
+    chapter_index AS chapterIndex,
+    chunk_index AS chunkIndex,
+    start_offset AS startOffset,
+    end_offset AS endOffset,
+    text,
+    model,
+    dimension,
+    embedding_json AS embeddingJson,
+    generated_at AS generatedAt
+  FROM chapter_chunk_embeddings
+  WHERE book_id = ?
+    AND chapter_index >= ?
+    AND chapter_index < ?
   ORDER BY model ASC, chapter_index ASC, chunk_index ASC
 `)
 const getKgOverviewStatement = db.prepare(`
@@ -2881,6 +2916,11 @@ function getMobileBookPackage(bookId, options = {}) {
   const bookRow = getMobileBookStatement.get(bookId)
   if (!bookRow) return null
   const includeEmbeddings = options.includeEmbeddings !== false
+  const embeddingsOnly = options.sections === 'embeddings'
+  const embeddingStart = Number.isFinite(options.embeddingStart) ? Math.max(0, Math.floor(options.embeddingStart)) : 0
+  const embeddingLimit = Number.isFinite(options.embeddingLimit) ? Math.max(1, Math.floor(options.embeddingLimit)) : null
+  const chapterIndexStart = embeddingStart + 1
+  const chapterIndexEnd = embeddingLimit == null ? null : chapterIndexStart + embeddingLimit
 
   const listRow = listMobileBooksStatement.all().find((book) => book.id === bookId) ?? {
     ...bookRow,
@@ -2903,17 +2943,29 @@ function getMobileBookPackage(bookId, options = {}) {
       chapterCount: Number(bookRow.chapterCount) || 0,
       wordCount: Number(bookRow.wordCount) || 0,
     },
-    chapters: listMobileChaptersStatement.all(bookId),
-    summaries: listMobileSummariesStatement.all(bookId).map(mapMobileSummary),
+    chapters: embeddingsOnly ? [] : listMobileChaptersStatement.all(bookId),
+    summaries: embeddingsOnly ? [] : listMobileSummariesStatement.all(bookId).map(mapMobileSummary),
     knowledgeGraph: {
-      entities: listMobileEntitiesStatement.all(bookId).map(mapMobileEntity),
-      entityMentions: listMobileEntityMentionsStatement.all(bookId),
-      relations: listMobileRelationsStatement.all(bookId),
-      relationMentions: listMobileRelationMentionsStatement.all(bookId),
+      entities: embeddingsOnly ? [] : listMobileEntitiesStatement.all(bookId).map(mapMobileEntity),
+      entityMentions: embeddingsOnly ? [] : listMobileEntityMentionsStatement.all(bookId),
+      relations: embeddingsOnly ? [] : listMobileRelationsStatement.all(bookId),
+      relationMentions: embeddingsOnly ? [] : listMobileRelationMentionsStatement.all(bookId),
     },
     embeddings: {
-      summaries: includeEmbeddings ? listMobileSummaryEmbeddingsStatement.all(bookId).map(mapMobileEmbedding) : [],
-      chunks: includeEmbeddings ? listMobileChunkEmbeddingsStatement.all(bookId).map(mapMobileEmbedding) : [],
+      summaries: includeEmbeddings
+        ? (
+            chapterIndexEnd == null
+              ? listMobileSummaryEmbeddingsStatement.all(bookId)
+              : listMobileSummaryEmbeddingsRangeStatement.all(bookId, chapterIndexStart, chapterIndexEnd)
+          ).map(mapMobileEmbedding)
+        : [],
+      chunks: includeEmbeddings
+        ? (
+            chapterIndexEnd == null
+              ? listMobileChunkEmbeddingsStatement.all(bookId)
+              : listMobileChunkEmbeddingsRangeStatement.all(bookId, chapterIndexStart, chapterIndexEnd)
+          ).map(mapMobileEmbedding)
+        : [],
     },
     integrity: {
       contentHash: null,
@@ -4371,7 +4423,15 @@ const server = createServer(async (request, response) => {
       if (request.method === 'GET' && mobileBookPackageMatch) {
         const bookId = decodeURIComponent(mobileBookPackageMatch[1])
         const embeddingsMode = (url.searchParams.get('embeddings') || 'full').trim().toLowerCase()
-        const payload = getMobileBookPackage(bookId, { includeEmbeddings: embeddingsMode !== 'none' })
+        const sectionsMode = (url.searchParams.get('sections') || 'full').trim().toLowerCase()
+        const embeddingStart = Number(url.searchParams.get('embeddingStart') ?? Number.NaN)
+        const embeddingLimit = Number(url.searchParams.get('embeddingLimit') ?? Number.NaN)
+        const payload = getMobileBookPackage(bookId, {
+          includeEmbeddings: embeddingsMode !== 'none',
+          sections: sectionsMode,
+          embeddingStart,
+          embeddingLimit,
+        })
 
         if (!payload) {
           sendJson(response, 404, { code: 'BOOK_NOT_FOUND', error: 'Book not found.' })

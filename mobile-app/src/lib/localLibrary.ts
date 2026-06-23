@@ -224,6 +224,26 @@ export async function saveBookPackage(pkg: MobileBookPackage): Promise<void> {
   await requestToPromise(tx.objectStore('packages').put(pkg))
 }
 
+export async function saveBookEmbeddings(embeddingPackage: MobileBookPackage): Promise<MobileBookPackage> {
+  const db = await openDb()
+  const tx = db.transaction('packages', 'readwrite')
+  const store = tx.objectStore('packages')
+  const current = await requestToPromise<MobileBookPackage | undefined>(store.get(embeddingPackage.book.id))
+  if (!current) {
+    throw new Error('请先下载正文包，再补下载 Embedding。')
+  }
+
+  const nextPackage: MobileBookPackage = {
+    ...current,
+    generatedAt: embeddingPackage.generatedAt,
+    packageVersion: embeddingPackage.packageVersion,
+    embeddings: embeddingPackage.embeddings,
+    integrity: embeddingPackage.integrity,
+  }
+  await requestToPromise(store.put(nextPackage))
+  return nextPackage
+}
+
 export async function listLocalBooks(): Promise<LocalBook[]> {
   const db = await openDb()
   const tx = db.transaction('packages', 'readonly')

@@ -197,8 +197,29 @@ export class MobileApiClient {
     return payload.books
   }
 
-  async downloadBookPackage(bookId: string, options: { includeEmbeddings?: boolean } = {}): Promise<MobileBookPackage> {
-    const search = options.includeEmbeddings === false ? '?embeddings=none' : ''
+  async downloadBookPackage(
+    bookId: string,
+    options: {
+      embeddingLimit?: number
+      embeddingStart?: number
+      includeEmbeddings?: boolean
+      sections?: 'full' | 'embeddings'
+    } = {},
+  ): Promise<MobileBookPackage> {
+    const params = new URLSearchParams()
+    if (options.includeEmbeddings === false) {
+      params.set('embeddings', 'none')
+    }
+    if (options.sections === 'embeddings') {
+      params.set('sections', 'embeddings')
+    }
+    if (typeof options.embeddingStart === 'number') {
+      params.set('embeddingStart', String(options.embeddingStart))
+    }
+    if (typeof options.embeddingLimit === 'number') {
+      params.set('embeddingLimit', String(options.embeddingLimit))
+    }
+    const search = params.toString() ? `?${params}` : ''
     return readJson<MobileBookPackage>(await this.fetch(`/api/mobile/books/${encodeURIComponent(bookId)}/package${search}`))
   }
 

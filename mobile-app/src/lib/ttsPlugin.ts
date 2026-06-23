@@ -26,6 +26,14 @@ export type SpeakRequest = {
   pitch: number
 }
 
+export type SpeakQueueRequest = {
+  utterances: Array<{ text: string; utteranceId: string }>
+  locale: string
+  voiceId?: string | null
+  rate: number
+  pitch: number
+}
+
 export type TtsUtteranceEvent = {
   utteranceId: string
   error?: string
@@ -36,6 +44,7 @@ export interface NovelReaderTtsPlugin {
   openTtsSettings(): Promise<void>
   checkTtsData(): Promise<void>
   speak(request: SpeakRequest): Promise<void>
+  speakQueue(request: SpeakQueueRequest): Promise<void>
   stop(): Promise<void>
   setRate(options: { rate: number }): Promise<void>
   setPitch(options: { pitch: number }): Promise<void>

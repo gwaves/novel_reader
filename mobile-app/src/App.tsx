@@ -15,6 +15,7 @@ import {
   listLocalBooks,
   loadSettings,
   saveBookPackage,
+  saveBookEmbeddings,
   saveReadingProgress,
   saveSpeechProgress,
   saveSettings,
@@ -408,6 +409,9 @@ function App() {
   const [activePackage, setActivePackage] = useState<MobileBookPackage | null>(null)
   const [activeChapterId, setActiveChapterId] = useState<string | null>(null)
   const [message, setMessage] = useState('')
+  const [syncStatusMessage, setSyncStatusMessage] = useState('')
+  const [llmStatusMessage, setLlmStatusMessage] = useState('')
+  const [embeddingStatusMessage, setEmbeddingStatusMessage] = useState('')
   const [isBusy, setIsBusy] = useState(false)
   const [searchInput, setSearchInput] = useState('')
   const [submittedSearchQuery, setSubmittedSearchQuery] = useState('')
@@ -431,9 +435,11 @@ function App() {
   const [ttsResumeFromProgress, setTtsResumeFromProgress] = useState(true)
   const [ttsVoices, setTtsVoices] = useState<TtsVoice[]>([])
   const [ttsStatusMessage, setTtsStatusMessage] = useState('')
+  const [ttsSettingsMessage, setTtsSettingsMessage] = useState('')
   const [speechPlayback, setSpeechPlayback] = useState<SpeechPlaybackState>({ status: 'idle' })
   const [activeSpeechSegmentId, setActiveSpeechSegmentId] = useState<string | null>(null)
   const [speechAutoFollowSuspended, setSpeechAutoFollowSuspended] = useState(false)
+  const [readerMenuOpen, setReaderMenuOpen] = useState(false)
   const pendingRestoreScrollRef = useRef<number | null>(null)
   const progressSaveTimerRef = useRef<number | null>(null)
   const activePackageRef = useRef<MobileBookPackage | null>(null)
@@ -444,10 +450,12 @@ function App() {
   const speechPlaybackRef = useRef<SpeechPlaybackState>({ status: 'idle' })
   const speechSegmentsRef = useRef<SpeechSegment[]>([])
   const currentUtteranceIdRef = useRef<string | null>(null)
+  const speechUtteranceIndexRef = useRef<Map<string, number>>(new Map())
   const speechAutoFollowRef = useRef(true)
   const speechFollowSuspendedUntilRef = useRef(0)
   const speechFollowTimerRef = useRef<number | null>(null)
   const isSpeechAutoScrollingRef = useRef(false)
+  const lastReaderCenterTapAtRef = useRef(0)
 
   const client = useMemo(() => new MobileApiClient({ baseUrl, syncToken }), [baseUrl, syncToken])
 
@@ -824,9 +832,14 @@ function App() {
     await saveSettings(getCurrentSettings({ tts: nextTts }))
   }
 
+  async function saveTtsSettingsFromPanel() {
+    await persistTtsSettings(getCurrentTtsSettings())
+    setTtsSettingsMessage('语音阅读配置已保存。')
+  }
+
   async function testExternalLlm() {
     setIsBusy(true)
-    setMessage('')
+    setLlmStatusMessage('正在测试外部 LLM...')
     try {
       await testExternalLlmConfig({
         baseUrl: llmBaseUrl,
@@ -834,9 +847,9 @@ function App() {
         model: llmModel,
         temperature: llmTemperature,
       })
-      setMessage('外部 LLM 测试通过。')
+      setLlmStatusMessage('外部 LLM 测试通过。')
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : '外部 LLM 测试失败。')
+      setLlmStatusMessage(error instanceof Error ? error.message : '外部 LLM 测试失败。')
     } finally {
       setIsBusy(false)
     }
@@ -844,16 +857,16 @@ function App() {
 
   async function testEmbeddingService() {
     setIsBusy(true)
-    setMessage('')
+    setEmbeddingStatusMessage('正在测试 Embedding 服务...')
     try {
       const dimension = await testEmbeddingServiceConfig({
         baseUrl: embeddingBaseUrl,
         apiKey: embeddingApiKey,
         model: embeddingModel,
       }, client)
-      setMessage(`Embedding 服务测试通过，维度 ${dimension}。`)
+      setEmbeddingStatusMessage(`Embedding 服务测试通过，维度 ${dimension}。`)
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : 'Embedding 服务测试失败。')
+      setEmbeddingStatusMessage(error instanceof Error ? error.message : 'Embedding 服务测试失败。')
     } finally {
       setIsBusy(false)
     }
@@ -861,12 +874,12 @@ function App() {
 
   async function testConnection() {
     setIsBusy(true)
-    setMessage('')
+    setSyncStatusMessage('正在测试 PC API 连接...')
     try {
       const manifest = await client.getManifest()
-      setMessage(`连接成功：schema v${manifest.schemaVersion}，服务时间 ${new Date(manifest.generatedAt).toLocaleString()}。`)
+      setSyncStatusMessage(`连接成功：schema v${manifest.schemaVersion}，服务时间 ${new Date(manifest.generatedAt).toLocaleString()}。`)
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : '连接失败。')
+      setSyncStatusMessage(error instanceof Error ? error.message : '连接失败。')
     } finally {
       setIsBusy(false)
     }
@@ -874,39 +887,114 @@ function App() {
 
   async function loadRemoteBooks() {
     setIsBusy(true)
-    setMessage('')
+    setSyncStatusMessage('正在读取 PC 书架...')
     try {
       await persistSettings()
       const books = await client.listBooks()
       setRemoteBooks(books)
-      setMessage(`发现 ${books.length} 本可同步书籍。`)
+      setSyncStatusMessage(`发现 ${books.length} 本可同步书籍。`)
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : '读取 PC 书架失败。')
+      setSyncStatusMessage(error instanceof Error ? error.message : '读取 PC 书架失败。')
     } finally {
       setIsBusy(false)
     }
   }
 
-  async function downloadBook(bookId: string) {
+  function bookHasRemoteEmbeddings(book: MobileBookListItem): boolean {
+    return book.embeddingCoverage.embeddedSummaries > 0 || book.embeddingCoverage.embeddedChunks > 0
+  }
+
+  function getLocalBook(bookId: string): LocalBook | null {
+    return localBooks.find((book) => book.id === bookId) ?? null
+  }
+
+  async function downloadEmbeddingPatch(bookId: string, remoteBook?: MobileBookListItem): Promise<MobileBookPackage> {
+    const totalChapters = Math.max(1, remoteBook?.chapterCount ?? 1)
+    const pageSize = 10
+    let downloadedChapters = 0
+    let embeddingPackage: MobileBookPackage | null = null
+
+    for (let start = 0; start < totalChapters; start += pageSize) {
+      const remainingChapters = Math.max(0, totalChapters - downloadedChapters)
+      const currentPageSize = Math.min(pageSize, totalChapters - start)
+      setSyncStatusMessage(
+        `正在补下载《${remoteBook?.title ?? '本书'}》Embedding：已下载 ${downloadedChapters}/${totalChapters} 章，还剩 ${remainingChapters} 章...`,
+      )
+
+      const page = await client.downloadBookPackage(bookId, {
+        embeddingLimit: currentPageSize,
+        embeddingStart: start,
+        includeEmbeddings: true,
+        sections: 'embeddings',
+      })
+
+      downloadedChapters = Math.min(totalChapters, start + currentPageSize)
+      if (embeddingPackage) {
+        embeddingPackage.generatedAt = page.generatedAt
+        embeddingPackage.integrity = page.integrity
+        embeddingPackage.packageVersion = page.packageVersion
+        embeddingPackage.embeddings = {
+          summaries: [...embeddingPackage.embeddings.summaries, ...page.embeddings.summaries],
+          chunks: [...embeddingPackage.embeddings.chunks, ...page.embeddings.chunks],
+        }
+      } else {
+        embeddingPackage = page
+      }
+
+      setSyncStatusMessage(
+        `正在补下载《${remoteBook?.title ?? '本书'}》Embedding：已下载 ${downloadedChapters}/${totalChapters} 章，还剩 ${Math.max(0, totalChapters - downloadedChapters)} 章，已收到 ${embeddingPackage.embeddings.chunks.length} 个 chunk。`,
+      )
+    }
+
+    if (!embeddingPackage) {
+      throw new Error('没有收到可导入的 Embedding 数据。')
+    }
+    return embeddingPackage
+  }
+
+  async function downloadBook(bookId: string, options: { includeEmbeddings: boolean }) {
     setIsBusy(true)
-    setMessage('')
+    setSyncStatusMessage('')
     try {
       const remoteBook = remoteBooks.find((book) => book.id === bookId)
-      setMessage(`正在下载《${remoteBook?.title ?? '本书'}》轻量离线包...`)
-      const pkg = await client.downloadBookPackage(bookId, { includeEmbeddings: false })
-      setMessage(`正在导入《${pkg.book.title}》到本地...`)
-      await saveBookPackage(pkg)
-      setLocalBooks(await listLocalBooks())
-      setActivePackage(pkg)
-      setActiveChapterId(pkg.chapters[0]?.id ?? null)
-      pendingRestoreScrollRef.current = 0
-      if (pkg.chapters[0]) {
-        void saveReadingProgress({ bookId: pkg.book.id, chapterId: pkg.chapters[0].id, scrollY: 0 })
+      const localBook = getLocalBook(bookId)
+      const shouldPatchEmbeddings = options.includeEmbeddings && Boolean(localBook)
+      const packageLabel = shouldPatchEmbeddings
+        ? 'Embedding 精简包'
+        : options.includeEmbeddings
+          ? '完整离线包（含 Embedding）'
+          : '轻量离线包'
+      setSyncStatusMessage(`正在下载《${remoteBook?.title ?? '本书'}》${packageLabel}...`)
+      const pkg = shouldPatchEmbeddings
+        ? await downloadEmbeddingPatch(bookId, remoteBook)
+        : await client.downloadBookPackage(bookId, {
+            includeEmbeddings: options.includeEmbeddings,
+            sections: 'full',
+          })
+      setSyncStatusMessage(`正在导入《${pkg.book.title}》到本地...`)
+      const savedPackage = shouldPatchEmbeddings ? await saveBookEmbeddings(pkg) : pkg
+      if (!shouldPatchEmbeddings) {
+        await saveBookPackage(pkg)
       }
-      setMessage('')
-      setTab('reader')
+      setLocalBooks(await listLocalBooks())
+      setActivePackage(savedPackage)
+      if (!shouldPatchEmbeddings) {
+        setActiveChapterId(savedPackage.chapters[0]?.id ?? null)
+        pendingRestoreScrollRef.current = 0
+        if (savedPackage.chapters[0]) {
+          void saveReadingProgress({ bookId: savedPackage.book.id, chapterId: savedPackage.chapters[0].id, scrollY: 0 })
+        }
+      }
+      setSyncStatusMessage(
+        options.includeEmbeddings
+          ? `已导入《${savedPackage.book.title}》，包含 ${savedPackage.embeddings.summaries.length} 个概要 embedding、${savedPackage.embeddings.chunks.length} 个 chunk embedding。`
+          : `已导入《${savedPackage.book.title}》轻量包。`,
+      )
+      if (!shouldPatchEmbeddings) {
+        setTab('reader')
+      }
     } catch (error) {
-      setMessage(error instanceof Error ? error.message : '同步书籍失败。')
+      setSyncStatusMessage(error instanceof Error ? error.message : '同步书籍失败。')
     } finally {
       setIsBusy(false)
     }
@@ -934,6 +1022,7 @@ function App() {
     if (speechPlaybackRef.current.status === 'playing' || speechPlaybackRef.current.status === 'paused') {
       void stopSpeechReading()
     }
+    setReaderMenuOpen(false)
     saveCurrentReadingProgress()
     setActiveChapterId(chapterId)
     if (activePackage) {
@@ -962,8 +1051,21 @@ function App() {
     const target = event.target as HTMLElement
     if (target.closest('button, input, select, textarea, a, label')) return
     const bounds = event.currentTarget.getBoundingClientRect()
-    const isLeftSide = event.clientX - bounds.left < bounds.width / 2
-    scrollReaderPage(isLeftSide ? 'up' : 'down')
+    const xRatio = (event.clientX - bounds.left) / bounds.width
+
+    if (xRatio >= 0.25 && xRatio <= 0.75) {
+      const now = Date.now()
+      if (now - lastReaderCenterTapAtRef.current < 360) {
+        lastReaderCenterTapAtRef.current = 0
+        setReaderMenuOpen(true)
+        return
+      }
+      lastReaderCenterTapAtRef.current = now
+      return
+    }
+
+    lastReaderCenterTapAtRef.current = 0
+    scrollReaderPage(xRatio < 0.25 ? 'up' : 'down')
   }
 
   function updateReaderFontSize(fontSize: number) {
@@ -979,9 +1081,7 @@ function App() {
 
   function switchTab(nextTab: Tab) {
     if (tab === 'reader' && nextTab !== 'reader') {
-      if (speechPlaybackRef.current.status === 'playing' || speechPlaybackRef.current.status === 'paused') {
-        void stopSpeechReading()
-      }
+      setReaderMenuOpen(false)
       const currentScrollY = window.scrollY
       pendingRestoreScrollRef.current = currentScrollY
       skipNextCleanupProgressSaveRef.current = true
@@ -1006,6 +1106,7 @@ function App() {
   }
 
   async function refreshTtsAvailability() {
+    setTtsSettingsMessage('')
     if (!Capacitor.isNativePlatform()) {
       setTtsVoices([])
       setTtsStatusMessage('语音阅读需要在 Android App 中使用。')
@@ -1038,6 +1139,7 @@ function App() {
   }
 
   async function openSystemTtsSettings() {
+    setTtsSettingsMessage('')
     if (!Capacitor.isNativePlatform()) {
       setTtsStatusMessage('系统语音设置只能在 Android App 中打开。')
       return
@@ -1087,33 +1189,71 @@ function App() {
     }, 800)
   }
 
+  function findCurrentVisibleSpeechSegmentIndex(): number | null {
+    const segments = speechSegmentsRef.current
+    if (!segments.length) return null
+
+    const viewportTop = 0
+    const viewportBottom = window.innerHeight || document.documentElement.clientHeight
+    const viewportCenter = viewportBottom * 0.45
+    let nearestVisible: { index: number; distance: number } | null = null
+
+    for (let index = 0; index < segments.length; index += 1) {
+      const segment = segments[index]
+      const target = document.querySelector(`[data-speech-segment-id="${CSS.escape(segment.id)}"]`)
+      if (!(target instanceof HTMLElement)) continue
+
+      const bounds = target.getBoundingClientRect()
+      if (bounds.bottom < viewportTop || bounds.top > viewportBottom) continue
+      if (bounds.top <= viewportCenter && bounds.bottom >= viewportCenter) {
+        return index
+      }
+
+      const segmentCenter = (bounds.top + bounds.bottom) / 2
+      const distance = Math.abs(segmentCenter - viewportCenter)
+      if (!nearestVisible || distance < nearestVisible.distance) {
+        nearestVisible = { index, distance }
+      }
+    }
+
+    return nearestVisible?.index ?? null
+  }
+
   async function playSpeechSegment(segmentIndex: number) {
     const segment = speechSegmentsRef.current[segmentIndex]
     if (!segment) {
       currentUtteranceIdRef.current = null
+      speechUtteranceIndexRef.current.clear()
       setActiveSpeechSegmentId(null)
       setSpeechPlayback({ status: 'idle' })
       return
     }
 
-    const utteranceId = `speech-${segment.id}-${Date.now()}`
-    currentUtteranceIdRef.current = utteranceId
+    const queueId = Date.now()
+    const utterances = speechSegmentsRef.current.slice(segmentIndex).map((entry, offset) => {
+      const utteranceId = `speech-${queueId}-${segmentIndex + offset}`
+      return { text: entry.text, utteranceId }
+    })
+    speechUtteranceIndexRef.current = new Map(
+      utterances.map((utterance, offset) => [utterance.utteranceId, segmentIndex + offset]),
+    )
+    currentUtteranceIdRef.current = utterances.at(-1)?.utteranceId ?? null
     setActiveSpeechSegmentId(segment.id)
     setSpeechPlayback({ status: 'playing', segmentIndex, segmentId: segment.id })
     scrollToSpeechSegment(segment.id)
     saveCurrentSpeechProgress(segment, segmentIndex)
 
     try {
-      await NovelReaderTts.speak({
+      await NovelReaderTts.speakQueue({
         locale: ttsLocale,
         pitch: ttsPitch,
         rate: ttsRate,
-        text: segment.text,
-        utteranceId,
+        utterances,
         voiceId: ttsVoiceId || undefined,
       })
     } catch (error) {
       currentUtteranceIdRef.current = null
+      speechUtteranceIndexRef.current.clear()
       setSpeechPlayback({ status: 'error', message: error instanceof Error ? error.message : '语音朗读失败。' })
       setTtsStatusMessage(error instanceof Error ? error.message : '语音朗读失败。')
     }
@@ -1131,8 +1271,9 @@ function App() {
         return
       }
 
-      let startIndex = 0
-      if (ttsResumeFromProgress) {
+      const visibleStartIndex = findCurrentVisibleSpeechSegmentIndex()
+      let startIndex = visibleStartIndex ?? 0
+      if (visibleStartIndex == null && ttsResumeFromProgress) {
         const progress = await getSpeechProgress(activePackage.book.id)
         if (progress?.chapterId === activeChapter.id) {
           startIndex = Math.min(Math.max(0, progress.segmentIndex), speechChapter.segments.length - 1)
@@ -1150,6 +1291,7 @@ function App() {
     const current = speechPlaybackRef.current
     if (current.status !== 'playing') return
     currentUtteranceIdRef.current = null
+    speechUtteranceIndexRef.current.clear()
     await NovelReaderTts.stop().catch(() => undefined)
     setSpeechPlayback({ status: 'paused', segmentIndex: current.segmentIndex, segmentId: current.segmentId })
   }
@@ -1162,6 +1304,7 @@ function App() {
 
   async function stopSpeechReading() {
     currentUtteranceIdRef.current = null
+    speechUtteranceIndexRef.current.clear()
     await NovelReaderTts.stop().catch(() => undefined)
     setActiveSpeechSegmentId(null)
     setSpeechPlayback({ status: 'idle' })
@@ -1175,7 +1318,42 @@ function App() {
     scrollToSpeechSegment(current.segmentId, true)
   }
 
+  function getSpeechPlaybackLabel() {
+    if (speechPlayback.status === 'playing') return `正在朗读 ${speechPlayback.segmentIndex + 1}/${speechChapter?.segments.length ?? 0}`
+    if (speechPlayback.status === 'paused') return `已暂停在 ${speechPlayback.segmentIndex + 1}/${speechChapter?.segments.length ?? 0}`
+    if (speechPlayback.status === 'checking') return '正在检测系统语音'
+    if (speechPlayback.status === 'error') return speechPlayback.message
+    return `本章 ${speechChapter?.segments.length ?? 0} 个朗读片段`
+  }
+
+  function renderSpeechActions() {
+    return (
+      <div className="speech-actions">
+        {(speechPlayback.status === 'idle' || speechPlayback.status === 'error') && (
+          <button type="button" onClick={() => void startSpeechReading()} disabled={!speechChapter?.segments.length}>语音阅读</button>
+        )}
+        {speechPlayback.status === 'checking' && <button type="button" disabled>检测中</button>}
+        {speechPlayback.status === 'playing' && (
+          <>
+            <button type="button" onClick={() => void pauseSpeechReading()}>暂停</button>
+            <button type="button" onClick={() => void stopSpeechReading()}>停止</button>
+          </>
+        )}
+        {speechPlayback.status === 'paused' && (
+          <>
+            <button type="button" onClick={() => void resumeSpeechReading()}>继续</button>
+            <button type="button" onClick={() => void stopSpeechReading()}>停止</button>
+          </>
+        )}
+        {speechAutoFollowSuspended && (
+          <button type="button" onClick={followSpeechSegment}>跟随朗读</button>
+        )}
+      </div>
+    )
+  }
+
   async function updateTtsSettings(nextTts: MobileAppSettings['tts']) {
+    setTtsSettingsMessage('')
     setTtsLocale(nextTts.locale)
     setTtsVoiceId(nextTts.voiceId)
     setTtsRate(nextTts.rate)
@@ -1193,25 +1371,36 @@ function App() {
 
     async function bindTtsEvents() {
       handles.push(
+        await NovelReaderTts.addListener('utteranceStart', (event) => {
+          if (cancelled) return
+          const segmentIndex = speechUtteranceIndexRef.current.get(event.utteranceId)
+          if (segmentIndex == null) return
+          const segment = speechSegmentsRef.current[segmentIndex]
+          if (!segment) return
+          setActiveSpeechSegmentId(segment.id)
+          setSpeechPlayback({ status: 'playing', segmentIndex, segmentId: segment.id })
+          scrollToSpeechSegment(segment.id)
+          saveCurrentSpeechProgress(segment, segmentIndex)
+        }),
+      )
+      handles.push(
         await NovelReaderTts.addListener('utteranceDone', (event) => {
           if (cancelled || event.utteranceId !== currentUtteranceIdRef.current) return
           const current = speechPlaybackRef.current
-          if (current.status !== 'playing') return
-          const nextIndex = current.segmentIndex + 1
-          if (nextIndex >= speechSegmentsRef.current.length) {
+          if (current.status === 'playing') {
             currentUtteranceIdRef.current = null
+            speechUtteranceIndexRef.current.clear()
             setActiveSpeechSegmentId(null)
             setSpeechPlayback({ status: 'idle' })
-            return
           }
-          void playSpeechSegment(nextIndex)
         }),
       )
       handles.push(
         await NovelReaderTts.addListener('utteranceError', (event) => {
-          if (cancelled || event.utteranceId !== currentUtteranceIdRef.current) return
+          if (cancelled || !speechUtteranceIndexRef.current.has(event.utteranceId)) return
           const message = event.error || '系统 TTS 朗读失败。'
           currentUtteranceIdRef.current = null
+          speechUtteranceIndexRef.current.clear()
           setSpeechPlayback({ status: 'error', message })
           setTtsStatusMessage(message)
         }),
@@ -1612,44 +1801,121 @@ ${context}
                 />
                 从上次语音进度继续
               </label>
-              <div className="button-row two">
-                <button type="button" onClick={() => void persistSettings()} disabled={isBusy}>保存配置</button>
-                <button type="button" onClick={() => void refreshTtsAvailability()} disabled={isBusy}>检测语音</button>
+              <div className="tts-action-panel">
+                <button className="tts-primary-action" type="button" onClick={() => void refreshTtsAvailability()} disabled={isBusy}>
+                  检测语音
+                </button>
+                <div className="tts-secondary-actions">
+                  <button type="button" onClick={() => void saveTtsSettingsFromPanel()} disabled={isBusy}>保存配置</button>
+                  <button type="button" onClick={() => void openSystemTtsSettings()}>系统语音设置</button>
+                </div>
               </div>
-              <div className="button-row two">
-                <button type="button" onClick={() => void openSystemTtsSettings()}>系统语音设置</button>
-                <button type="button" onClick={() => void openSystemTtsDataCheck()}>语音数据检查</button>
-              </div>
-              {ttsStatusMessage && <p className="muted">{ttsStatusMessage}</p>}
+              {(ttsSettingsMessage || ttsStatusMessage) && <p className="tts-status-note">{ttsSettingsMessage || ttsStatusMessage}</p>}
             </section>
-            <h3 className="settings-subheading">PC 同步</h3>
-            <label className="field">
-              <span>PC API 地址</span>
-              <input value={baseUrl} onChange={(event) => setBaseUrl(event.target.value)} placeholder="http://192.168.1.8:5174" />
-            </label>
-            <label className="field">
-              <span>同步 Token</span>
-              <input value={syncToken} onChange={(event) => setSyncToken(event.target.value)} placeholder="开发期可为空" />
-            </label>
-            <div className="button-row">
-              <button type="button" onClick={() => void persistSettings()} disabled={isBusy}>保存</button>
-              <button type="button" onClick={() => void testConnection()} disabled={isBusy || !baseUrl}>测试连接</button>
-              <button type="button" onClick={() => void loadRemoteBooks()} disabled={isBusy || !baseUrl}>读取书架</button>
-            </div>
+            <section className="settings-group">
+              <h3>PC 同步</h3>
+              <label className="field">
+                <span>PC API 地址</span>
+                <input
+                  value={baseUrl}
+                  onChange={(event) => {
+                    setBaseUrl(event.target.value)
+                    setSyncStatusMessage('')
+                  }}
+                  placeholder="http://192.168.1.8:5174"
+                />
+              </label>
+              <label className="field">
+                <span>同步 Token</span>
+                <input
+                  value={syncToken}
+                  onChange={(event) => {
+                    setSyncToken(event.target.value)
+                    setSyncStatusMessage('')
+                  }}
+                  placeholder="开发期可为空"
+                />
+              </label>
+              <div className="button-row">
+                <button type="button" onClick={() => void persistSettings()} disabled={isBusy}>保存</button>
+                <button type="button" onClick={() => void testConnection()} disabled={isBusy || !baseUrl}>测试连接</button>
+                <button type="button" onClick={() => void loadRemoteBooks()} disabled={isBusy || !baseUrl}>读取书架</button>
+              </div>
+              {syncStatusMessage && <p className="inline-status">{syncStatusMessage}</p>}
+              {remoteBooks.length > 0 && (
+                <div className="book-list remote-book-list">
+                  {remoteBooks.map((book) => {
+                    const localBook = getLocalBook(book.id)
+                    return (
+                      <article className="remote-book" key={book.id}>
+                        <div>
+                          <h3>{book.title}</h3>
+                          <p>
+                            {book.chapterCount} 章 · 摘要 {book.summaryCoverage.completed}/{book.summaryCoverage.total} ·
+                            图谱 {book.graphCoverage.entityCount} 实体/{book.graphCoverage.relationCount} 关系
+                          </p>
+                          <p>
+                            Embedding {book.embeddingCoverage.embeddedSummaries}/{book.embeddingCoverage.totalSummaries} 概要，
+                            {book.embeddingCoverage.embeddedChunks}/{book.embeddingCoverage.totalChunks} chunk
+                          </p>
+                          {localBook && (
+                            <p>本地：已下载正文，chunk embedding {localBook.chunkEmbeddingCount}</p>
+                          )}
+                        </div>
+                        <div className="remote-book-actions">
+                          <button type="button" onClick={() => void downloadBook(book.id, { includeEmbeddings: false })} disabled={isBusy}>
+                            {localBook ? '更新正文' : '下载正文'}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => void downloadBook(book.id, { includeEmbeddings: true })}
+                            disabled={isBusy || !bookHasRemoteEmbeddings(book)}
+                          >
+                            {localBook ? '补 Embedding' : '含 Embedding'}
+                          </button>
+                        </div>
+                      </article>
+                    )
+                  })}
+                </div>
+              )}
+            </section>
             <section className="settings-group">
               <h3>外部 LLM</h3>
               <label className="field">
                 <span>Base URL</span>
-                <input value={llmBaseUrl} onChange={(event) => setLlmBaseUrl(event.target.value)} placeholder="https://api.openai.com/v1" />
+                <input
+                  value={llmBaseUrl}
+                  onChange={(event) => {
+                    setLlmBaseUrl(event.target.value)
+                    setLlmStatusMessage('')
+                  }}
+                  placeholder="https://api.openai.com/v1"
+                />
               </label>
               <label className="field">
                 <span>API Key</span>
-                <input value={llmApiKey} onChange={(event) => setLlmApiKey(event.target.value)} placeholder="可留空，按服务要求填写" type="password" />
+                <input
+                  value={llmApiKey}
+                  onChange={(event) => {
+                    setLlmApiKey(event.target.value)
+                    setLlmStatusMessage('')
+                  }}
+                  placeholder="可留空，按服务要求填写"
+                  type="password"
+                />
               </label>
               <div className="settings-grid">
                 <label className="field">
                   <span>Model</span>
-                  <input value={llmModel} onChange={(event) => setLlmModel(event.target.value)} placeholder="gpt-4.1-mini" />
+                  <input
+                    value={llmModel}
+                    onChange={(event) => {
+                      setLlmModel(event.target.value)
+                      setLlmStatusMessage('')
+                    }}
+                    placeholder="gpt-4.1-mini"
+                  />
                 </label>
                 <label className="field">
                   <span>Temperature</span>
@@ -1659,7 +1925,10 @@ ${context}
                     step={0.1}
                     type="number"
                     value={llmTemperature}
-                    onChange={(event) => setLlmTemperature(Number(event.target.value))}
+                    onChange={(event) => {
+                      setLlmTemperature(Number(event.target.value))
+                      setLlmStatusMessage('')
+                    }}
                   />
                 </label>
               </div>
@@ -1667,6 +1936,7 @@ ${context}
                 <button type="button" onClick={() => void persistSettings()} disabled={isBusy}>保存配置</button>
                 <button type="button" onClick={() => void testExternalLlm()} disabled={isBusy}>测试 LLM</button>
               </div>
+              {llmStatusMessage && <p className="inline-status">{llmStatusMessage}</p>}
             </section>
             <section className="settings-group">
               <h3>Embedding 服务</h3>
@@ -1676,7 +1946,7 @@ ${context}
                   value={embeddingBaseUrl}
                   onChange={(event) => {
                     setEmbeddingBaseUrl(event.target.value)
-                    setMessage('')
+                    setEmbeddingStatusMessage('')
                     setRagError('')
                   }}
                   placeholder="http://localhost:11434"
@@ -1688,7 +1958,7 @@ ${context}
                   value={embeddingApiKey}
                   onChange={(event) => {
                     setEmbeddingApiKey(event.target.value)
-                    setMessage('')
+                    setEmbeddingStatusMessage('')
                     setRagError('')
                   }}
                   placeholder="可留空，按服务要求填写"
@@ -1701,7 +1971,7 @@ ${context}
                   value={embeddingModel}
                   onChange={(event) => {
                     setEmbeddingModel(event.target.value)
-                    setMessage('')
+                    setEmbeddingStatusMessage('')
                     setRagError('')
                   }}
                   placeholder="bge-m3"
@@ -1711,25 +1981,8 @@ ${context}
                 <button type="button" onClick={() => void persistSettings()} disabled={isBusy}>保存配置</button>
                 <button type="button" onClick={() => void testEmbeddingService()} disabled={isBusy}>测试 Embedding</button>
               </div>
+              {embeddingStatusMessage && <p className="inline-status">{embeddingStatusMessage}</p>}
             </section>
-            <div className="book-list">
-              {remoteBooks.map((book) => (
-                <article className="remote-book" key={book.id}>
-                  <div>
-                    <h3>{book.title}</h3>
-                    <p>
-                      {book.chapterCount} 章 · 摘要 {book.summaryCoverage.completed}/{book.summaryCoverage.total} ·
-                      图谱 {book.graphCoverage.entityCount} 实体/{book.graphCoverage.relationCount} 关系
-                    </p>
-                    <p>
-                      Embedding {book.embeddingCoverage.embeddedSummaries}/{book.embeddingCoverage.totalSummaries} 概要，
-                      {book.embeddingCoverage.embeddedChunks}/{book.embeddingCoverage.totalChunks} chunk
-                    </p>
-                  </div>
-                  <button type="button" onClick={() => void downloadBook(book.id)} disabled={isBusy}>下载</button>
-                </article>
-              ))}
-            </div>
           </section>
         )}
 
@@ -1759,35 +2012,9 @@ ${context}
                 <div className="speech-control-panel">
                   <div>
                     <strong>语音阅读</strong>
-                    <span>
-                      {speechPlayback.status === 'playing' && `正在朗读 ${speechPlayback.segmentIndex + 1}/${speechChapter?.segments.length ?? 0}`}
-                      {speechPlayback.status === 'paused' && `已暂停在 ${speechPlayback.segmentIndex + 1}/${speechChapter?.segments.length ?? 0}`}
-                      {speechPlayback.status === 'checking' && '正在检测系统语音'}
-                      {speechPlayback.status === 'idle' && `本章 ${speechChapter?.segments.length ?? 0} 个朗读片段`}
-                      {speechPlayback.status === 'error' && speechPlayback.message}
-                    </span>
+                    <span>{getSpeechPlaybackLabel()}</span>
                   </div>
-                  <div className="speech-actions">
-                    {(speechPlayback.status === 'idle' || speechPlayback.status === 'error') && (
-                      <button type="button" onClick={() => void startSpeechReading()} disabled={!speechChapter?.segments.length}>语音阅读</button>
-                    )}
-                    {speechPlayback.status === 'checking' && <button type="button" disabled>检测中</button>}
-                    {speechPlayback.status === 'playing' && (
-                      <>
-                        <button type="button" onClick={() => void pauseSpeechReading()}>暂停</button>
-                        <button type="button" onClick={() => void stopSpeechReading()}>停止</button>
-                      </>
-                    )}
-                    {speechPlayback.status === 'paused' && (
-                      <>
-                        <button type="button" onClick={() => void resumeSpeechReading()}>继续</button>
-                        <button type="button" onClick={() => void stopSpeechReading()}>停止</button>
-                      </>
-                    )}
-                    {speechAutoFollowSuspended && (
-                      <button type="button" onClick={followSpeechSegment}>跟随朗读</button>
-                    )}
-                  </div>
+                  {renderSpeechActions()}
                 </div>
                 {ttsStatusMessage && <p className="speech-status">{ttsStatusMessage}</p>}
                 <article
@@ -1972,6 +2199,61 @@ ${context}
           </section>
         )}
       </main>
+
+      {tab === 'reader' && activePackage && activeChapter && readerMenuOpen && (
+        <div className="reader-menu-overlay" role="presentation" onClick={() => setReaderMenuOpen(false)}>
+          <section className="reader-menu-sheet" role="dialog" aria-modal="true" aria-label="阅读控制菜单" onClick={(event) => event.stopPropagation()}>
+            <div className="reader-menu-header">
+              <div>
+                <strong>{activeChapter.title}</strong>
+                <span>{activeChapter.index}/{activePackage.chapters.length}</span>
+              </div>
+              <button type="button" onClick={() => setReaderMenuOpen(false)}>关闭</button>
+            </div>
+
+            <div className="chapter-nav-row reader-menu-nav">
+              <button type="button" onClick={() => changeChapter(previousChapter?.id ?? null)} disabled={!previousChapter}>上一章</button>
+              <button type="button" onClick={() => changeChapter(nextChapter?.id ?? null)} disabled={!nextChapter}>下一章</button>
+            </div>
+
+            <div className="speech-control-panel reader-menu-group">
+              <div>
+                <strong>语音阅读</strong>
+                <span>{getSpeechPlaybackLabel()}</span>
+              </div>
+              {renderSpeechActions()}
+            </div>
+
+            <div className="reader-settings reader-menu-group">
+              <strong>阅读设置</strong>
+              <div className="reader-size-control" aria-label="字体大小">
+                <button type="button" onClick={() => updateReaderFontSize(readerFontSize - 1)}>A-</button>
+                <input
+                  aria-label="字体大小"
+                  max={28}
+                  min={15}
+                  type="range"
+                  value={readerFontSize}
+                  onChange={(event) => updateReaderFontSize(Number(event.target.value))}
+                />
+                <button type="button" onClick={() => updateReaderFontSize(readerFontSize + 1)}>A+</button>
+                <span>{readerFontSize}px</span>
+              </div>
+              <div className="reader-background-control" aria-label="背景色">
+                {(['paper', 'warm', 'green', 'dark'] as ReaderBackground[]).map((background) => (
+                  <button
+                    aria-label={backgroundLabel(background)}
+                    className={`reader-swatch ${background} ${readerBackground === background ? 'active' : ''}`}
+                    key={background}
+                    type="button"
+                    onClick={() => updateReaderBackground(background)}
+                  />
+                ))}
+              </div>
+            </div>
+          </section>
+        </div>
+      )}
 
       <nav className="bottom-nav">
         <button className={tab === 'library' ? 'active' : ''} type="button" onClick={() => switchTab('library')}>书架</button>
