@@ -1,7 +1,7 @@
 <?xml version='1.0' encoding='utf-8'?>
 <resources>
-    <string name="app_name">Novel Reader</string>
-    <string name="title_activity_main">Novel Reader</string>
-    <string name="package_name">com.gwaves.novelreader.mobile</string>
-    <string name="custom_url_scheme">com.gwaves.novelreader.mobile</string>
+    <string name="app_name">Novel TTS</string>
+    <string name="title_activity_main">Novel TTS</string>
+    <string name="package_name">com.gwaves.novelreader.tts</string>
+    <string name="custom_url_scheme">com.gwaves.novelreader.tts</string>
 </resources>
