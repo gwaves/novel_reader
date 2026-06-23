@@ -5,6 +5,7 @@ import {
   type MobileBookListItem,
   type MobileBookPackage,
   type MobileChapterAudio,
+  type MobileChapterAudioTimelineEntry,
   type MobileKgEntity,
   type MobileKgRelation,
 } from './lib/mobileApi'
@@ -27,7 +28,7 @@ import {
   type ReaderBackground,
   type LocalBook,
 } from './lib/localLibrary'
-import { createSpeechChapter, type SpeechSegment } from './lib/speechSegments'
+import { createSpeechChapter, type SpeechChapter, type SpeechSegment } from './lib/speechSegments'
 import { NovelReaderTts, type TtsVoice } from './lib/ttsPlugin'
 
 type Tab = 'library' | 'sync' | 'reader' | 'search'
@@ -40,7 +41,61 @@ type SpeechPlaybackState =
   | { status: 'paused'; segmentIndex: number; segmentId: string }
   | { status: 'error'; message: string }
 
+type ChapterAudioTimelineItem = {
+  startTime: number
+  endTime: number
+  nextStartTime: number
+  index: number
+}
+
+function createChapterAudioSpeechChapter(
+  chapter: MobileBookPackage['chapters'][number],
+  audioTimeline: MobileChapterAudioTimelineEntry[],
+): SpeechChapter {
+  const paragraphRanges: Array<{ paragraphIndex: number; start: number; end: number }> = []
+  let cursor = 0
+  chapter.content
+    .split(/\n+/)
+    .map((paragraph) => paragraph.trim())
+    .filter(Boolean)
+    .forEach((paragraph, paragraphIndex) => {
+      const start = chapter.content.indexOf(paragraph, cursor)
+      const safeStart = start >= 0 ? start : cursor
+      const end = safeStart + paragraph.length
+      paragraphRanges.push({ paragraphIndex, start: safeStart, end })
+      cursor = end
+    })
+
+  const segments = audioTimeline.map((entry, index) => {
+    const sourceStart = Math.max(0, Math.min(chapter.content.length, Math.floor(entry.sourceStart)))
+    const sourceEnd = Math.max(sourceStart, Math.min(chapter.content.length, Math.ceil(entry.sourceEnd)))
+    const paragraph = paragraphRanges.find((range) => sourceStart >= range.start && sourceStart <= range.end)
+    const text = chapter.content.slice(sourceStart, sourceEnd).replace(/\s+/g, ' ').trim() || entry.text
+    return {
+      id: `audio-${entry.id || index}`,
+      bookId: chapter.bookId,
+      chapterId: chapter.id,
+      chapterIndex: chapter.index,
+      paragraphIndex: paragraph?.paragraphIndex ?? 0,
+      sentenceIndex: index,
+      text,
+      startChar: sourceStart,
+      endChar: sourceEnd,
+    }
+  })
+
+  const paragraphs = Array.from(new Set(segments.map((segment) => segment.paragraphIndex)))
+    .sort((a, b) => a - b)
+    .map((paragraphIndex) => ({
+      paragraphIndex,
+      segments: segments.filter((segment) => segment.paragraphIndex === paragraphIndex),
+    }))
+
+  return { paragraphs, segments }
+}
+
 const TTS_RATE_PRESETS = [0.75, 1, 1.25, 1.5, 2, 3] as const
+const TTS_PREFETCH_WINDOW = 8
 
 type SearchResult = {
   chapterId: string
@@ -450,12 +505,14 @@ function App() {
   const [ttsStatusMessage, setTtsStatusMessage] = useState('')
   const [ttsSettingsMessage, setTtsSettingsMessage] = useState('')
   const [remoteChapterAudio, setRemoteChapterAudio] = useState<MobileChapterAudio[]>([])
+  const [activeChapterAudioTimeline, setActiveChapterAudioTimeline] = useState<MobileChapterAudioTimelineEntry[]>([])
   const [cachedChapterAudioCount, setCachedChapterAudioCount] = useState(0)
   const [cachedChapterAudioKeys, setCachedChapterAudioKeys] = useState<Record<string, string>>({})
   const [speechPlayback, setSpeechPlayback] = useState<SpeechPlaybackState>({ status: 'idle' })
   const [activeSpeechSegmentId, setActiveSpeechSegmentId] = useState<string | null>(null)
   const [speechAutoFollowSuspended, setSpeechAutoFollowSuspended] = useState(false)
   const [readerMenuOpen, setReaderMenuOpen] = useState(false)
+  const [readerMenuSpeechAnchorIndex, setReaderMenuSpeechAnchorIndex] = useState<number | null>(null)
   const pendingRestoreScrollRef = useRef<number | null>(null)
   const progressSaveTimerRef = useRef<number | null>(null)
   const activePackageRef = useRef<MobileBookPackage | null>(null)
@@ -469,7 +526,7 @@ function App() {
   const speechUtteranceIndexRef = useRef<Map<string, number>>(new Map())
   const chapterAudioElementRef = useRef<HTMLAudioElement | null>(null)
   const chapterAudioObjectUrlRef = useRef<string | null>(null)
-  const chapterAudioTimelineRef = useRef<Array<{ endTime: number; index: number }>>([])
+  const chapterAudioTimelineRef = useRef<ChapterAudioTimelineItem[]>([])
   const speechAutoFollowRef = useRef(true)
   const speechFollowSuspendedRef = useRef(false)
   const speechQueueIdRef = useRef(0)
@@ -486,7 +543,13 @@ function App() {
 
   const activeSummary = activeChapter ? activePackage?.summaries.find((summary) => summary.chapterId === activeChapter.id) : null
 
-  const speechChapter = useMemo(() => (activeChapter ? createSpeechChapter(activeChapter) : null), [activeChapter])
+  const localSpeechChapter = useMemo(() => (activeChapter ? createSpeechChapter(activeChapter) : null), [activeChapter])
+  const speechChapter = useMemo(() => {
+    if (activeChapter && ttsEngine === 'cloud-mp3' && activeChapterAudioTimeline.length) {
+      return createChapterAudioSpeechChapter(activeChapter, activeChapterAudioTimeline)
+    }
+    return localSpeechChapter
+  }, [activeChapter, activeChapterAudioTimeline, localSpeechChapter, ttsEngine])
 
   const activeChapterPosition = useMemo(() => {
     if (!activePackage || !activeChapterId) return -1
@@ -512,6 +575,26 @@ function App() {
   useEffect(() => {
     speechSegmentsRef.current = speechChapter?.segments ?? []
   }, [speechChapter])
+
+  useEffect(() => {
+    let cancelled = false
+
+    async function loadActiveChapterAudioTimeline() {
+      if (!activePackage || !activeChapter || ttsEngine !== 'cloud-mp3') {
+        setActiveChapterAudioTimeline([])
+        return
+      }
+      const cached = await getChapterAudioCache(activePackage.book.id, activeChapter.id).catch(() => null)
+      if (!cancelled) {
+        setActiveChapterAudioTimeline(cached?.timeline ?? [])
+      }
+    }
+
+    void loadActiveChapterAudioTimeline()
+    return () => {
+      cancelled = true
+    }
+  }, [activeChapter, activePackage, cachedChapterAudioKeys, ttsEngine])
 
   useEffect(() => {
     speechAutoFollowRef.current = ttsAutoFollow
@@ -1067,9 +1150,15 @@ function App() {
       chapterId: audio.chapterId,
       chapterIndex: audio.chapterIndex,
       chapterTitle: audio.chapterTitle,
+      duration: audio.duration,
       filename: audio.filename,
+      timeline: audio.timeline,
+      timelineVersion: audio.timelineVersion,
       updatedAt: audio.updatedAt,
     })
+    if (audio.chapterId === activeChapterId) {
+      setActiveChapterAudioTimeline(audio.timeline)
+    }
     await refreshCachedChapterAudioState(audio.bookId)
   }
 
@@ -1133,6 +1222,7 @@ function App() {
       void stopSpeechReading()
     }
     setReaderMenuOpen(false)
+    setReaderMenuSpeechAnchorIndex(null)
     saveCurrentReadingProgress()
     setActiveChapterId(chapterId)
     if (activePackage) {
@@ -1167,6 +1257,7 @@ function App() {
       const now = event.timeStamp
       if (now - lastReaderCenterTapAtRef.current < 360) {
         lastReaderCenterTapAtRef.current = 0
+        setReaderMenuSpeechAnchorIndex(findSpeechSegmentIndexNearViewportY(event.clientY))
         setReaderMenuOpen(true)
         return
       }
@@ -1192,6 +1283,7 @@ function App() {
   function switchTab(nextTab: Tab) {
     if (tab === 'reader' && nextTab !== 'reader') {
       setReaderMenuOpen(false)
+      setReaderMenuSpeechAnchorIndex(null)
       const currentScrollY = window.scrollY
       pendingRestoreScrollRef.current = currentScrollY
       skipNextCleanupProgressSaveRef.current = true
@@ -1309,26 +1401,85 @@ function App() {
     audio.playbackRate = rate
   }
 
-  function buildChapterAudioTimeline(duration: number) {
+  function clampAudioRatio(value: number): number {
+    if (!Number.isFinite(value)) return 0
+    return Math.min(1, Math.max(0, value))
+  }
+
+  function mapSpeechSegmentToAudioTimeline(
+    segment: SpeechSegment,
+    index: number,
+    audioTimeline: MobileChapterAudioTimelineEntry[],
+  ): ChapterAudioTimelineItem | null {
+    let startTime = Number.POSITIVE_INFINITY
+    let endTime = Number.NEGATIVE_INFINITY
+    let nextStartTime = Number.NEGATIVE_INFINITY
+
+    for (const entry of audioTimeline) {
+      const overlapStart = Math.max(segment.startChar, entry.sourceStart)
+      const overlapEnd = Math.min(segment.endChar, entry.sourceEnd)
+      if (overlapEnd <= overlapStart) continue
+
+      const sourceLength = Math.max(1, entry.sourceEnd - entry.sourceStart)
+      const speechDuration = Math.max(0, entry.endTime - entry.startTime)
+      const mappedStart = entry.startTime + clampAudioRatio((overlapStart - entry.sourceStart) / sourceLength) * speechDuration
+      const mappedEnd = entry.startTime + clampAudioRatio((overlapEnd - entry.sourceStart) / sourceLength) * speechDuration
+      startTime = Math.min(startTime, mappedStart)
+      endTime = Math.max(endTime, mappedEnd)
+      nextStartTime = Math.max(nextStartTime, entry.nextStartTime)
+    }
+
+    if (!Number.isFinite(startTime) || !Number.isFinite(endTime)) return null
+    return {
+      index,
+      startTime,
+      endTime,
+      nextStartTime: Number.isFinite(nextStartTime) ? Math.max(nextStartTime, endTime) : endTime,
+    }
+  }
+
+  function buildChapterAudioTimeline(audioTimeline: MobileChapterAudioTimelineEntry[]) {
     const segments = speechSegmentsRef.current
-    const totalWeight = Math.max(1, segments.reduce((sum, segment) => sum + Math.max(1, segment.text.length), 0))
-    let elapsed = 0
-    chapterAudioTimelineRef.current = segments.map((segment, index) => {
-      elapsed += (Math.max(1, segment.text.length) / totalWeight) * duration
-      return { endTime: elapsed, index }
-    })
+    chapterAudioTimelineRef.current = segments
+      .map((segment, index) => mapSpeechSegmentToAudioTimeline(segment, index, audioTimeline))
+      .filter((item): item is ChapterAudioTimelineItem => Boolean(item))
+      .sort((a, b) => a.startTime - b.startTime)
   }
 
   function findAudioSegmentIndex(currentTime: number): number {
     const timeline = chapterAudioTimelineRef.current
     if (!timeline.length) return 0
-    return timeline.find((item) => currentTime <= item.endTime)?.index ?? timeline.at(-1)?.index ?? 0
+    const active = timeline.find((item) => currentTime >= item.startTime && currentTime < item.nextStartTime)
+    if (active) return active.index
+    return timeline.find((item) => currentTime < item.startTime)?.index ?? timeline.at(-1)?.index ?? 0
   }
 
   function getAudioTimeForSegment(segmentIndex: number): number {
     const timeline = chapterAudioTimelineRef.current
-    if (!timeline.length || segmentIndex <= 0) return 0
-    return timeline[Math.min(segmentIndex - 1, timeline.length - 1)]?.endTime ?? 0
+    if (!timeline.length) return 0
+    const exact = timeline.find((item) => item.index === segmentIndex)
+    if (exact) return exact.startTime
+    return timeline.find((item) => item.index > segmentIndex)?.startTime ?? timeline.at(-1)?.startTime ?? 0
+  }
+
+  function waitForAudioMetadata(audio: HTMLAudioElement): Promise<void> {
+    if (audio.readyState >= 1) return Promise.resolve()
+    return new Promise((resolve, reject) => {
+      const cleanup = () => {
+        audio.removeEventListener('loadedmetadata', handleLoaded)
+        audio.removeEventListener('error', handleError)
+      }
+      const handleLoaded = () => {
+        cleanup()
+        resolve()
+      }
+      const handleError = () => {
+        cleanup()
+        reject(new Error('MP3 播放失败。'))
+      }
+      audio.addEventListener('loadedmetadata', handleLoaded)
+      audio.addEventListener('error', handleError)
+    })
   }
 
   function scrollToSpeechSegment(segmentId: string, force = false) {
@@ -1373,6 +1524,31 @@ function App() {
     return nearestVisible?.index ?? null
   }
 
+  function findSpeechSegmentIndexNearViewportY(clientY: number): number | null {
+    const segments = speechSegmentsRef.current
+    if (!segments.length) return null
+
+    let nearestVisible: { index: number; distance: number } | null = null
+    for (let index = 0; index < segments.length; index += 1) {
+      const segment = segments[index]
+      const target = document.querySelector(`[data-speech-segment-id="${CSS.escape(segment.id)}"]`)
+      if (!(target instanceof HTMLElement)) continue
+
+      const bounds = target.getBoundingClientRect()
+      if (bounds.bottom < 0 || bounds.top > window.innerHeight) continue
+      if (clientY >= bounds.top && clientY <= bounds.bottom) {
+        return index
+      }
+
+      const distance = clientY < bounds.top ? bounds.top - clientY : clientY - bounds.bottom
+      if (!nearestVisible || distance < nearestVisible.distance) {
+        nearestVisible = { index, distance }
+      }
+    }
+
+    return nearestVisible?.index ?? null
+  }
+
   async function playSpeechSegment(segmentIndex: number) {
     const segment = speechSegmentsRef.current[segmentIndex]
     if (!segment) {
@@ -1399,6 +1575,18 @@ function App() {
     saveCurrentSpeechProgress(segment, segmentIndex)
 
     try {
+      if (typeof NovelReaderTts.speakPrefetchedQueue === 'function') {
+        await NovelReaderTts.speakPrefetchedQueue({
+          locale: ttsLocale,
+          pitch: ttsPitch,
+          prefetchWindow: TTS_PREFETCH_WINDOW,
+          rate: ttsRate,
+          utterances,
+          voiceId: ttsVoiceId || undefined,
+        })
+        return
+      }
+
       await NovelReaderTts.speakQueue({
         locale: ttsLocale,
         pitch: ttsPitch,
@@ -1422,23 +1610,30 @@ function App() {
       setTtsStatusMessage('本章 MP3 尚未下载，请先到同步页刷新并下载章节音频。')
       return
     }
+    if (!cached.timeline?.length) {
+      setSpeechPlayback({ status: 'error', message: '本章 MP3 缺少时间轴，请重新生成并下载章节音频。' })
+      setTtsStatusMessage('本章 MP3 缺少时间轴，请重新生成并下载章节音频。')
+      return
+    }
 
     releaseChapterAudio()
-    const audio = new Audio()
-    const objectUrl = URL.createObjectURL(cached.blob)
     const startSegment = speechSegmentsRef.current[segmentIndex]
     if (!startSegment) return
+    buildChapterAudioTimeline(cached.timeline)
+    if (!chapterAudioTimelineRef.current.length) {
+      setSpeechPlayback({ status: 'error', message: '本章 MP3 时间轴无法匹配当前章节文字，请重新生成并下载章节音频。' })
+      setTtsStatusMessage('本章 MP3 时间轴无法匹配当前章节文字，请重新生成并下载章节音频。')
+      return
+    }
+    const startTime = getAudioTimeForSegment(segmentIndex)
 
+    const audio = new Audio()
+    const objectUrl = URL.createObjectURL(cached.blob)
     chapterAudioElementRef.current = audio
     chapterAudioObjectUrlRef.current = objectUrl
-    audio.src = objectUrl
     audio.preload = 'auto'
     audio.defaultPlaybackRate = ttsRate
     audio.playbackRate = ttsRate
-    audio.onloadedmetadata = () => {
-      buildChapterAudioTimeline(audio.duration || 0)
-      audio.currentTime = getAudioTimeForSegment(segmentIndex)
-    }
     audio.ontimeupdate = () => {
       const currentIndex = findAudioSegmentIndex(audio.currentTime)
       const segment = speechSegmentsRef.current[currentIndex]
@@ -1459,6 +1654,20 @@ function App() {
       setSpeechPlayback({ status: 'error', message: 'MP3 播放失败。' })
       setTtsStatusMessage('MP3 播放失败。')
     }
+    audio.src = objectUrl
+    audio.load()
+
+    try {
+      await waitForAudioMetadata(audio)
+      const maxSeekTime = Number.isFinite(audio.duration) && audio.duration > 0 ? Math.max(0, audio.duration - 0.05) : startTime
+      audio.currentTime = Math.min(startTime, maxSeekTime)
+    } catch (error) {
+      releaseChapterAudio()
+      const message = error instanceof Error ? error.message : 'MP3 播放失败。'
+      setSpeechPlayback({ status: 'error', message })
+      setTtsStatusMessage(message)
+      return
+    }
 
     setActiveSpeechSegmentId(startSegment.id)
     setSpeechPlayback({ status: 'playing', segmentIndex, segmentId: startSegment.id })
@@ -1467,15 +1676,15 @@ function App() {
     await audio.play()
   }
 
-  async function startSpeechReading() {
+  async function startSpeechReading(startIndexOverride: number | null = null) {
     if (!activePackage || !activeChapter || !speechChapter?.segments.length) return
 
     setSpeechPlayback({ status: 'checking' })
     setTtsStatusMessage('')
     try {
       const visibleStartIndex = findCurrentVisibleSpeechSegmentIndex()
-      let startIndex = visibleStartIndex ?? 0
-      if (visibleStartIndex == null && ttsResumeFromProgress) {
+      let startIndex = startIndexOverride ?? visibleStartIndex ?? 0
+      if (startIndexOverride == null && visibleStartIndex == null && ttsResumeFromProgress) {
         const progress = await getSpeechProgress(activePackage.book.id)
         if (progress?.chapterId === activeChapter.id) {
           startIndex = Math.min(Math.max(0, progress.segmentIndex), speechChapter.segments.length - 1)
@@ -1561,7 +1770,7 @@ function App() {
     return (
       <div className="speech-actions">
         {(speechPlayback.status === 'idle' || speechPlayback.status === 'error') && (
-          <button type="button" onClick={() => void startSpeechReading()} disabled={!speechChapter?.segments.length}>语音阅读</button>
+          <button type="button" onClick={() => void startSpeechReading(readerMenuOpen ? readerMenuSpeechAnchorIndex : null)} disabled={!speechChapter?.segments.length}>语音阅读</button>
         )}
         {speechPlayback.status === 'checking' && <button type="button" disabled>检测中</button>}
         {speechPlayback.status === 'playing' && (
@@ -1653,8 +1862,21 @@ function App() {
       )
       handles.push(
         await NovelReaderTts.addListener('utteranceDone', (event) => {
-          if (cancelled || event.utteranceId !== currentUtteranceIdRef.current) return
+          if (cancelled) return
           const current = speechPlaybackRef.current
+          const segmentIndex = speechUtteranceIndexRef.current.get(event.utteranceId)
+          if (segmentIndex != null && current.status === 'playing') {
+            const nextSegment = speechSegmentsRef.current[segmentIndex + 1]
+            if (nextSegment) {
+              setActiveSpeechSegmentId(nextSegment.id)
+              setSpeechPlayback({ status: 'playing', segmentIndex: segmentIndex + 1, segmentId: nextSegment.id })
+              scrollToSpeechSegment(nextSegment.id)
+              saveCurrentSpeechProgress(nextSegment, segmentIndex + 1)
+              return
+            }
+          }
+
+          if (event.utteranceId !== currentUtteranceIdRef.current) return
           if (current.status === 'playing') {
             currentUtteranceIdRef.current = null
             speechUtteranceIndexRef.current.clear()
@@ -2556,14 +2778,20 @@ ${context}
       </main>
 
       {tab === 'reader' && activePackage && activeChapter && readerMenuOpen && (
-        <div className="reader-menu-overlay" role="presentation" onClick={() => setReaderMenuOpen(false)}>
+        <div className="reader-menu-overlay" role="presentation" onClick={() => {
+          setReaderMenuOpen(false)
+          setReaderMenuSpeechAnchorIndex(null)
+        }}>
           <section className="reader-menu-sheet" role="dialog" aria-modal="true" aria-label="阅读控制菜单" onClick={(event) => event.stopPropagation()}>
             <div className="reader-menu-header">
               <div>
                 <strong>{activeChapter.title}</strong>
                 <span>{activeChapter.index}/{activePackage.chapters.length}</span>
               </div>
-              <button type="button" onClick={() => setReaderMenuOpen(false)}>关闭</button>
+              <button type="button" onClick={() => {
+                setReaderMenuOpen(false)
+                setReaderMenuSpeechAnchorIndex(null)
+              }}>关闭</button>
             </div>
 
             <div className="chapter-nav-row reader-menu-nav">

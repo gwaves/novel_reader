@@ -2,6 +2,9 @@ package com.gwaves.novelreader.mobile;
 
 import android.content.Intent;
 import android.content.pm.ResolveInfo;
+import android.media.AudioAttributes;
+import android.media.MediaPlayer;
+import android.os.Bundle;
 import android.provider.Settings;
 import android.os.Build;
 import android.os.Handler;
@@ -20,16 +23,21 @@ import com.getcapacitor.annotation.CapacitorPlugin;
 
 import org.json.JSONObject;
 
+import java.io.File;
+import java.io.IOException;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
+import java.util.Map;
 import java.util.Set;
 
 @CapacitorPlugin(name = "NovelReaderTts")
 public class NovelReaderTtsPlugin extends Plugin {
     private static final String XIAOMI_TTS_ENGINE = "com.xiaomi.mibrain.speech";
     private static final long INIT_TIMEOUT_MS = 8000L;
+    private static final int INITIAL_PREFETCH_READY_COUNT = 3;
     private static final float MIN_SPEECH_RATE = 0.5f;
     private static final float MAX_SPEECH_RATE = 3.0f;
     private static final float MIN_SPEECH_PITCH = 0.5f;
@@ -43,7 +51,16 @@ public class NovelReaderTtsPlugin extends Plugin {
     private Runnable initTimeoutRunnable;
     private PowerManager.WakeLock speechWakeLock;
     private String queuedLastUtteranceId = null;
+    private MediaPlayer prefetchedPlayer;
+    private int prefetchGeneration = 0;
+    private int prefetchWindow = 4;
+    private int nextSynthesisIndex = 0;
+    private int nextPlaybackIndex = 0;
+    private boolean prefetchedPlaybackActive = false;
+    private boolean prefetchSynthesisBusy = false;
     private final List<PendingAction> pendingActions = new ArrayList<>();
+    private final List<PrefetchItem> prefetchItems = new ArrayList<>();
+    private final Map<String, Integer> synthesisIndexByUtteranceId = new HashMap<>();
 
     private static class PendingAction {
         final PluginCall call;
@@ -52,6 +69,22 @@ public class NovelReaderTtsPlugin extends Plugin {
         PendingAction(PluginCall call, Runnable action) {
             this.call = call;
             this.action = action;
+        }
+    }
+
+    private static class PrefetchItem {
+        final String utteranceId;
+        final String synthesisId;
+        final String text;
+        final File file;
+        boolean ready = false;
+        String error = null;
+
+        PrefetchItem(String utteranceId, String synthesisId, String text, File file) {
+            this.utteranceId = utteranceId;
+            this.synthesisId = synthesisId;
+            this.text = text;
+            this.file = file;
         }
     }
 
@@ -195,8 +228,78 @@ public class NovelReaderTtsPlugin extends Plugin {
     }
 
     @PluginMethod
+    public void speakPrefetchedQueue(PluginCall call) {
+        ensureTts(call, () -> {
+            JSArray utterances = call.getArray("utterances");
+            String localeTag = call.getString("locale", "zh-CN");
+            String voiceId = call.getString("voiceId", "");
+            float rate = floatValue(call, "rate", 1.0f, MIN_SPEECH_RATE, MAX_SPEECH_RATE);
+            float pitch = floatValue(call, "pitch", 1.0f, MIN_SPEECH_PITCH, MAX_SPEECH_PITCH);
+            Double requestedWindow = call.getDouble("prefetchWindow");
+
+            if (utterances == null || utterances.length() == 0) {
+                call.reject("Missing utterances.");
+                return;
+            }
+
+            Locale locale = Locale.forLanguageTag(localeTag);
+            if (!applySpeechSettings(locale, voiceId, rate, pitch)) {
+                call.reject("当前系统 TTS 不支持 " + localeTag + "，请安装或启用对应语音包。");
+                return;
+            }
+
+            stopPrefetchedPlayback();
+            tts.stop();
+            queuedLastUtteranceId = null;
+            prefetchGeneration += 1;
+            prefetchWindow = requestedWindow == null ? 4 : Math.max(1, Math.min(12, requestedWindow.intValue()));
+            nextSynthesisIndex = 0;
+            nextPlaybackIndex = 0;
+            prefetchedPlaybackActive = true;
+            acquireSpeechWakeLock();
+
+            File cacheDir = new File(getContext().getCacheDir(), "novel-reader-tts-prefetch");
+            if (!cacheDir.exists() && !cacheDir.mkdirs()) {
+                prefetchedPlaybackActive = false;
+                releaseSpeechWakeLock();
+                call.reject("无法创建 TTS 预取缓存目录。");
+                return;
+            }
+
+            for (int index = 0; index < utterances.length(); index++) {
+                JSONObject item = utterances.optJSONObject(index);
+                if (item == null) continue;
+
+                String text = item.optString("text", "");
+                String utteranceId = item.optString("utteranceId", "");
+                if (text.trim().isEmpty() || utteranceId.trim().isEmpty()) continue;
+
+                String synthesisId = "tts-prefetch-" + prefetchGeneration + "-" + index;
+                File file = new File(cacheDir, synthesisId + ".wav");
+                if (file.exists()) {
+                    //noinspection ResultOfMethodCallIgnored
+                    file.delete();
+                }
+                prefetchItems.add(new PrefetchItem(utteranceId, synthesisId, text, file));
+            }
+
+            if (prefetchItems.isEmpty()) {
+                prefetchedPlaybackActive = false;
+                releaseSpeechWakeLock();
+                call.reject("Missing valid utterances.");
+                return;
+            }
+
+            startPrefetchSynthesis();
+            tryStartPrefetchedPlayback();
+            call.resolve();
+        });
+    }
+
+    @PluginMethod
     public void stop(PluginCall call) {
         ensureTts(call, () -> {
+            stopPrefetchedPlayback();
             tts.stop();
             queuedLastUtteranceId = null;
             releaseSpeechWakeLock();
@@ -279,11 +382,13 @@ public class NovelReaderTtsPlugin extends Plugin {
             tts.setOnUtteranceProgressListener(new UtteranceProgressListener() {
                 @Override
                 public void onStart(String utteranceId) {
+                    if (isPrefetchSynthesisId(utteranceId)) return;
                     notifyUtterance("utteranceStart", utteranceId, null);
                 }
 
                 @Override
                 public void onDone(String utteranceId) {
+                    if (handlePrefetchSynthesisDone(utteranceId)) return;
                     notifyUtterance("utteranceDone", utteranceId, null);
                     if (utteranceId != null && utteranceId.equals(queuedLastUtteranceId)) {
                         queuedLastUtteranceId = null;
@@ -293,6 +398,7 @@ public class NovelReaderTtsPlugin extends Plugin {
 
                 @Override
                 public void onError(String utteranceId) {
+                    if (handlePrefetchSynthesisError(utteranceId, "系统 TTS 预取失败。")) return;
                     queuedLastUtteranceId = null;
                     releaseSpeechWakeLock();
                     notifyUtterance("utteranceError", utteranceId, "系统 TTS 朗读失败。");
@@ -300,6 +406,7 @@ public class NovelReaderTtsPlugin extends Plugin {
 
                 @Override
                 public void onError(String utteranceId, int errorCode) {
+                    if (handlePrefetchSynthesisError(utteranceId, "系统 TTS 预取失败：" + errorCode)) return;
                     queuedLastUtteranceId = null;
                     releaseSpeechWakeLock();
                     notifyUtterance("utteranceError", utteranceId, "系统 TTS 朗读失败：" + errorCode);
@@ -414,6 +521,180 @@ public class NovelReaderTtsPlugin extends Plugin {
         return true;
     }
 
+    private void startPrefetchSynthesis() {
+        if (!prefetchedPlaybackActive || tts == null) return;
+        if (prefetchSynthesisBusy) return;
+
+        if (nextSynthesisIndex >= prefetchItems.size() || nextSynthesisIndex >= nextPlaybackIndex + prefetchWindow) return;
+
+        PrefetchItem item = prefetchItems.get(nextSynthesisIndex);
+        synthesisIndexByUtteranceId.put(item.synthesisId, nextSynthesisIndex);
+        prefetchSynthesisBusy = true;
+
+        int status;
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+            status = tts.synthesizeToFile(item.text, new Bundle(), item.file, item.synthesisId);
+        } else {
+            status = TextToSpeech.ERROR;
+        }
+
+        if (status != TextToSpeech.SUCCESS) {
+            prefetchSynthesisBusy = false;
+            synthesisIndexByUtteranceId.remove(item.synthesisId);
+            item.error = "系统 TTS 预取启动失败。";
+        }
+
+        nextSynthesisIndex += 1;
+    }
+
+    private void tryStartPrefetchedPlayback() {
+        if (!prefetchedPlaybackActive || prefetchedPlayer != null) return;
+
+        if (nextPlaybackIndex >= prefetchItems.size()) {
+            finishPrefetchedPlayback();
+            return;
+        }
+
+        PrefetchItem item = prefetchItems.get(nextPlaybackIndex);
+        if (item.error != null) {
+            failPrefetchedPlayback(item.utteranceId, item.error);
+            return;
+        }
+        if (nextPlaybackIndex == 0 && countReadyPrefetchItemsFromStart() < Math.min(INITIAL_PREFETCH_READY_COUNT, prefetchItems.size())) {
+            return;
+        }
+        if (!item.ready) return;
+
+        MediaPlayer player = new MediaPlayer();
+        prefetchedPlayer = player;
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+                player.setAudioAttributes(
+                    new AudioAttributes.Builder()
+                        .setUsage(AudioAttributes.USAGE_ASSISTANCE_ACCESSIBILITY)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                        .build()
+                );
+            }
+            player.setDataSource(item.file.getAbsolutePath());
+            player.setOnCompletionListener(donePlayer -> {
+                notifyUtterance("utteranceDone", item.utteranceId, null);
+                releasePrefetchedPlayer(donePlayer);
+                //noinspection ResultOfMethodCallIgnored
+                item.file.delete();
+                nextPlaybackIndex += 1;
+                startPrefetchSynthesis();
+                tryStartPrefetchedPlayback();
+            });
+            player.setOnErrorListener((errorPlayer, what, extra) -> {
+                releasePrefetchedPlayer(errorPlayer);
+                failPrefetchedPlayback(item.utteranceId, "TTS 预取音频播放失败：" + what + "/" + extra);
+                return true;
+            });
+            player.prepare();
+            notifyUtterance("utteranceStart", item.utteranceId, null);
+            player.start();
+        } catch (IOException | IllegalStateException error) {
+            releasePrefetchedPlayer(player);
+            failPrefetchedPlayback(item.utteranceId, "TTS 预取音频播放失败。");
+        }
+    }
+
+    private boolean isPrefetchSynthesisId(String utteranceId) {
+        return utteranceId != null && synthesisIndexByUtteranceId.containsKey(utteranceId);
+    }
+
+    private int countReadyPrefetchItemsFromStart() {
+        int count = 0;
+        for (PrefetchItem item : prefetchItems) {
+            if (!item.ready) break;
+            count += 1;
+        }
+        return count;
+    }
+
+    private boolean handlePrefetchSynthesisDone(String utteranceId) {
+        if (utteranceId == null || !synthesisIndexByUtteranceId.containsKey(utteranceId)) return false;
+        Integer index = synthesisIndexByUtteranceId.remove(utteranceId);
+        prefetchSynthesisBusy = false;
+        if (index != null && index >= 0 && index < prefetchItems.size()) {
+            prefetchItems.get(index).ready = true;
+        }
+        if (mainHandler == null) {
+            mainHandler = new Handler(Looper.getMainLooper());
+        }
+        mainHandler.post(() -> {
+            startPrefetchSynthesis();
+            tryStartPrefetchedPlayback();
+        });
+        return true;
+    }
+
+    private boolean handlePrefetchSynthesisError(String utteranceId, String message) {
+        if (utteranceId == null || !synthesisIndexByUtteranceId.containsKey(utteranceId)) return false;
+        Integer index = synthesisIndexByUtteranceId.remove(utteranceId);
+        prefetchSynthesisBusy = false;
+        if (index != null && index >= 0 && index < prefetchItems.size()) {
+            prefetchItems.get(index).error = message;
+        }
+        if (mainHandler == null) {
+            mainHandler = new Handler(Looper.getMainLooper());
+        }
+        mainHandler.post(() -> {
+            startPrefetchSynthesis();
+            tryStartPrefetchedPlayback();
+        });
+        return true;
+    }
+
+    private void failPrefetchedPlayback(String utteranceId, String message) {
+        stopPrefetchedPlayback();
+        releaseSpeechWakeLock();
+        notifyUtterance("utteranceError", utteranceId, message);
+    }
+
+    private void finishPrefetchedPlayback() {
+        stopPrefetchedPlayback();
+        releaseSpeechWakeLock();
+    }
+
+    private void releasePrefetchedPlayer(MediaPlayer player) {
+        if (player == null) return;
+        if (prefetchedPlayer == player) {
+            prefetchedPlayer = null;
+        }
+        try {
+            player.reset();
+        } catch (Exception ignored) {
+            // Ignore cleanup failures.
+        }
+        player.release();
+    }
+
+    private void stopPrefetchedPlayback() {
+        prefetchedPlaybackActive = false;
+        prefetchGeneration += 1;
+        synthesisIndexByUtteranceId.clear();
+        if (prefetchedPlayer != null) {
+            try {
+                prefetchedPlayer.stop();
+            } catch (Exception ignored) {
+                // Ignore cleanup failures.
+            }
+            releasePrefetchedPlayer(prefetchedPlayer);
+        }
+        for (PrefetchItem item : prefetchItems) {
+            if (item.file.exists()) {
+                //noinspection ResultOfMethodCallIgnored
+                item.file.delete();
+            }
+        }
+        prefetchItems.clear();
+        nextSynthesisIndex = 0;
+        nextPlaybackIndex = 0;
+        prefetchSynthesisBusy = false;
+    }
+
     private void acquireSpeechWakeLock() {
         if (speechWakeLock == null) {
             PowerManager powerManager = (PowerManager) getContext().getSystemService(android.content.Context.POWER_SERVICE);
@@ -453,6 +734,7 @@ public class NovelReaderTtsPlugin extends Plugin {
             initTimeoutRunnable = null;
         }
         if (tts != null) {
+            stopPrefetchedPlayback();
             tts.stop();
             tts.shutdown();
             tts = null;
