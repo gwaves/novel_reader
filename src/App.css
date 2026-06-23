@@ -356,6 +356,52 @@ button:disabled {
   padding: 16px;
 }
 
+.mobile-audio-card {
+  display: grid;
+  gap: 12px;
+}
+
+.mobile-audio-card h2,
+.mobile-audio-card p {
+  margin: 0;
+}
+
+.audio-directory-form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  gap: 10px;
+}
+
+.audio-directory-form input {
+  min-width: 0;
+}
+
+.audio-directory-rules,
+.audio-directory-preview {
+  display: grid;
+  gap: 8px;
+}
+
+.audio-directory-rules span,
+.audio-directory-row {
+  border: 1px solid #e4dbcf;
+  border-radius: 8px;
+  background: #fffdf8;
+  padding: 10px 12px;
+}
+
+.audio-directory-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.audio-directory-row span {
+  color: #786d60;
+  font-size: 13px;
+}
+
 .onboarding-step-header {
   display: flex;
   align-items: start;

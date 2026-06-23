@@ -1,4 +1,8 @@
 2026-06-23 更新：PC 端离线多角色 TTS 方向已启动，先落地本地 Node.js 目录与文档。
+- Android App 高质量 MP3 播放方向已另立 `codex/mobile-mp3-playback` 分支开发：PC Web 端新增当前书“章节 MP3 目录”配置入口，本地服务持久化目录并通过 `/api/mobile/books/:bookId/audio` 暴露移动端音频清单。
+- PC 端章节 MP3 目录规范：推荐根目录直接放 `ch001.mp3`、`ch002.mp3`；兼容 `001-章节标题.mp3`；兼容现有 TTS 批量产物 `ch001/audio/chapter.mp3` 或 `ch001-full/audio/chapter.mp3`。
+- Android App 语音阅读新增播放引擎选择：可在“本地 TTS”和“云端 MP3”之间切换；同步页可刷新 PC 音频清单并下载当前章节 MP3 到 IndexedDB `chapterAudio` 缓存。
+- Android MP3 播放已接入章节正文高亮/滚动：使用整章 MP3 播放，按语音片段文本长度估算时间轴，`timeupdate` 驱动当前片段高亮、自动滚动和独立语音进度保存。
 - 新增 `offline-tts/` 作为独立工作目录，集中放置多角色 TTS 的设计文档、开发计划、示例配置和 Node.js CLI 脚本。
 - 技术选型确定：主流程使用 Node.js，本地程序通过配置文件调用第三方 OpenAI-compatible 模型生成导演脚本 JSON；Codex 不参与批量大模型推理。
 - 第一阶段目标不是直接合成整章音频，而是先把小说章节转换为可检查的导演脚本，严格分离旁白、对白、内心独白，并结合知识图谱与角色音色绑定做 speaker 判定。

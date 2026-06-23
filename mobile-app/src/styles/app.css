@@ -259,6 +259,13 @@ button:disabled {
   font-size: 16px;
 }
 
+.settings-note {
+  margin: 0 0 12px;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
 .tts-action-panel {
   display: grid;
   gap: 10px;
@@ -296,6 +303,37 @@ button:disabled {
   color: var(--primary-strong);
   font-size: 13px;
   line-height: 1.5;
+}
+
+.audio-sync-list {
+  display: grid;
+  gap: 8px;
+}
+
+.audio-sync-row {
+  display: flex;
+  width: 100%;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  text-align: left;
+}
+
+.audio-sync-row.active {
+  border-color: var(--primary);
+}
+
+.audio-sync-row span:first-child {
+  min-width: 0;
+}
+
+.audio-sync-row strong,
+.audio-sync-row small {
+  display: block;
+}
+
+.audio-sync-row small {
+  color: var(--muted);
 }
 
 .settings-grid {

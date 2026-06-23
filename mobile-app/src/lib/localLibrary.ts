@@ -21,6 +21,7 @@ export type ReaderSettings = {
 }
 
 export type TtsSettings = {
+  engine: 'local-tts' | 'cloud-mp3'
   locale: string
   voiceId: string
   rate: number
@@ -67,8 +68,22 @@ export type SpeechProgress = {
   updatedAt: string
 }
 
+export type ChapterAudioCache = {
+  id: string
+  audioId: string
+  bookId: string
+  chapterId: string
+  chapterIndex: number
+  chapterTitle: string
+  filename: string
+  bytes: number
+  updatedAt: string
+  cachedAt: string
+  blob: Blob
+}
+
 const DB_NAME = 'novel-reader-mobile'
-const DB_VERSION = 3
+const DB_VERSION = 4
 const SETTINGS_KEY = 'settings'
 const DEFAULT_SETTINGS: MobileAppSettings = {
   baseUrl: 'http://localhost:5174',
@@ -89,6 +104,7 @@ const DEFAULT_SETTINGS: MobileAppSettings = {
     background: 'paper',
   },
   tts: {
+    engine: 'local-tts',
     locale: 'zh-CN',
     voiceId: '',
     rate: 1,
@@ -116,6 +132,9 @@ function openDb(): Promise<IDBDatabase> {
       }
       if (!db.objectStoreNames.contains('speechProgress')) {
         db.createObjectStore('speechProgress', { keyPath: 'bookId' })
+      }
+      if (!db.objectStoreNames.contains('chapterAudio')) {
+        db.createObjectStore('chapterAudio', { keyPath: 'id' })
       }
     }
   })
@@ -177,6 +196,10 @@ function sanitizeSettings(settings: Partial<MobileAppSettings> | undefined): Mob
           : DEFAULT_SETTINGS.reader.background,
     },
     tts: {
+      engine:
+        settings?.tts?.engine === 'cloud-mp3' || settings?.tts?.engine === 'local-tts'
+          ? settings.tts.engine
+          : DEFAULT_SETTINGS.tts.engine,
       locale:
         typeof settings?.tts?.locale === 'string' && settings.tts.locale.trim()
           ? settings.tts.locale.trim()
@@ -312,6 +335,34 @@ export async function saveSpeechProgress(progress: Omit<SpeechProgress, 'updated
       ...progress,
       segmentIndex: Math.max(0, Math.round(progress.segmentIndex)),
       updatedAt: new Date().toISOString(),
+    }),
+  )
+}
+
+export async function getChapterAudioCache(bookId: string, chapterId: string): Promise<ChapterAudioCache | null> {
+  const db = await openDb()
+  const tx = db.transaction('chapterAudio', 'readonly')
+  const cached = await requestToPromise<ChapterAudioCache | undefined>(tx.objectStore('chapterAudio').get(`${bookId}:${chapterId}`))
+  return cached ?? null
+}
+
+export async function listChapterAudioCache(bookId: string): Promise<ChapterAudioCache[]> {
+  const db = await openDb()
+  const tx = db.transaction('chapterAudio', 'readonly')
+  const cached = await requestToPromise<ChapterAudioCache[]>(tx.objectStore('chapterAudio').getAll())
+  return cached
+    .filter((item) => item.bookId === bookId)
+    .sort((a, b) => a.chapterIndex - b.chapterIndex)
+}
+
+export async function saveChapterAudioCache(audio: Omit<ChapterAudioCache, 'id' | 'cachedAt'>): Promise<void> {
+  const db = await openDb()
+  const tx = db.transaction('chapterAudio', 'readwrite')
+  await requestToPromise(
+    tx.objectStore('chapterAudio').put({
+      ...audio,
+      id: `${audio.bookId}:${audio.chapterId}`,
+      cachedAt: new Date().toISOString(),
     }),
   )
 }

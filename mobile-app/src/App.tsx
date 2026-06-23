@@ -4,16 +4,20 @@ import {
   MobileApiClient,
   type MobileBookListItem,
   type MobileBookPackage,
+  type MobileChapterAudio,
   type MobileKgEntity,
   type MobileKgRelation,
 } from './lib/mobileApi'
 import {
+  getChapterAudioCache,
   getSpeechProgress,
   getBookPackage,
   getLatestReadingProgress,
   getReadingProgress,
+  listChapterAudioCache,
   listLocalBooks,
   loadSettings,
+  saveChapterAudioCache,
   saveBookPackage,
   saveBookEmbeddings,
   saveReadingProgress,
@@ -87,6 +91,12 @@ function formatSyncDate(value: string): string {
   const date = new Date(value)
   if (Number.isNaN(date.getTime())) return value
   return date.toLocaleDateString()
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes >= 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`
+  if (bytes >= 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  return `${bytes} B`
 }
 
 function findSnippet(text: string, query: string): string {
@@ -429,6 +439,7 @@ function App() {
   const [ragSearchStatus, setRagSearchStatus] = useState('')
   const [readerFontSize, setReaderFontSize] = useState(19)
   const [readerBackground, setReaderBackground] = useState<ReaderBackground>('paper')
+  const [ttsEngine, setTtsEngine] = useState<MobileAppSettings['tts']['engine']>('local-tts')
   const [ttsLocale, setTtsLocale] = useState('zh-CN')
   const [ttsVoiceId, setTtsVoiceId] = useState('')
   const [ttsRate, setTtsRate] = useState(1)
@@ -438,6 +449,8 @@ function App() {
   const [ttsVoices, setTtsVoices] = useState<TtsVoice[]>([])
   const [ttsStatusMessage, setTtsStatusMessage] = useState('')
   const [ttsSettingsMessage, setTtsSettingsMessage] = useState('')
+  const [remoteChapterAudio, setRemoteChapterAudio] = useState<MobileChapterAudio[]>([])
+  const [cachedChapterAudioCount, setCachedChapterAudioCount] = useState(0)
   const [speechPlayback, setSpeechPlayback] = useState<SpeechPlaybackState>({ status: 'idle' })
   const [activeSpeechSegmentId, setActiveSpeechSegmentId] = useState<string | null>(null)
   const [speechAutoFollowSuspended, setSpeechAutoFollowSuspended] = useState(false)
@@ -453,6 +466,9 @@ function App() {
   const speechSegmentsRef = useRef<SpeechSegment[]>([])
   const currentUtteranceIdRef = useRef<string | null>(null)
   const speechUtteranceIndexRef = useRef<Map<string, number>>(new Map())
+  const chapterAudioElementRef = useRef<HTMLAudioElement | null>(null)
+  const chapterAudioObjectUrlRef = useRef<string | null>(null)
+  const chapterAudioTimelineRef = useRef<Array<{ endTime: number; index: number }>>([])
   const speechAutoFollowRef = useRef(true)
   const speechFollowSuspendedUntilRef = useRef(0)
   const speechFollowTimerRef = useRef<number | null>(null)
@@ -518,6 +534,11 @@ function App() {
       .filter((result): result is SearchResult => Boolean(result))
       .slice(0, 30)
   }, [activePackage, searchMode, submittedSearchQuery])
+
+  const activeChapterAudio = useMemo(
+    () => remoteChapterAudio.find((audio) => audio.chapterId === activeChapterId) ?? null,
+    [activeChapterId, remoteChapterAudio],
+  )
 
   const graphResults = useMemo<GraphResult[]>(() => {
     const query = submittedSearchQuery.trim()
@@ -629,6 +650,7 @@ function App() {
     setEmbeddingModel(settings.embeddingService.model)
     setReaderFontSize(settings.reader.fontSize)
     setReaderBackground(settings.reader.background)
+    setTtsEngine(settings.tts.engine)
     setTtsLocale(settings.tts.locale)
     setTtsVoiceId(settings.tts.voiceId)
     setTtsRate(settings.tts.rate)
@@ -810,6 +832,7 @@ function App() {
         background: readerBackground,
       },
       tts: {
+        engine: ttsEngine,
         locale: ttsLocale,
         voiceId: ttsVoiceId,
         rate: ttsRate,
@@ -1002,6 +1025,48 @@ function App() {
     }
   }
 
+  async function refreshBookAudio(bookId = activePackage?.book.id) {
+    if (!bookId) return
+    setIsBusy(true)
+    setSyncStatusMessage('正在读取 PC 端音频目录...')
+    try {
+      const audio = await client.listBookAudio(bookId)
+      setRemoteChapterAudio(audio)
+      const cached = await listChapterAudioCache(bookId)
+      setCachedChapterAudioCount(cached.length)
+      setSyncStatusMessage(audio.length ? `发现 ${audio.length} 个章节 MP3，可下载到本机。` : 'PC 端暂未匹配到章节 MP3，请先在 PC Web 端配置音频目录。')
+    } catch (error) {
+      setSyncStatusMessage(error instanceof Error ? error.message : '读取音频目录失败。')
+    } finally {
+      setIsBusy(false)
+    }
+  }
+
+  async function downloadChapterAudio(audio: MobileChapterAudio) {
+    setIsBusy(true)
+    setSyncStatusMessage(`正在下载第 ${audio.chapterIndex} 章 MP3（${formatBytes(audio.bytes)}）...`)
+    try {
+      const blob = await client.downloadAudio(audio)
+      await saveChapterAudioCache({
+        audioId: audio.id,
+        blob,
+        bookId: audio.bookId,
+        bytes: audio.bytes,
+        chapterId: audio.chapterId,
+        chapterIndex: audio.chapterIndex,
+        chapterTitle: audio.chapterTitle,
+        filename: audio.filename,
+        updatedAt: audio.updatedAt,
+      })
+      setCachedChapterAudioCount((await listChapterAudioCache(audio.bookId)).length)
+      setSyncStatusMessage(`已缓存第 ${audio.chapterIndex} 章 MP3。`)
+    } catch (error) {
+      setSyncStatusMessage(error instanceof Error ? error.message : '下载章节 MP3 失败。')
+    } finally {
+      setIsBusy(false)
+    }
+  }
+
   async function openLocalBook(bookId: string) {
     const pkg = await getBookPackage(bookId)
     if (!pkg) {
@@ -1015,6 +1080,8 @@ function App() {
         : pkg.chapters[0]?.id ?? null
     setActivePackage(pkg)
     setActiveChapterId(progressChapter)
+    setRemoteChapterAudio([])
+    setCachedChapterAudioCount((await listChapterAudioCache(bookId)).length)
     pendingRestoreScrollRef.current = progress?.chapterId === progressChapter ? progress.scrollY : 0
     setMessage('')
     setTab('reader')
@@ -1097,6 +1164,7 @@ function App() {
 
   function getCurrentTtsSettings(overrides: Partial<MobileAppSettings['tts']> = {}): MobileAppSettings['tts'] {
     return {
+      engine: ttsEngine,
       locale: ttsLocale,
       voiceId: ttsVoiceId,
       rate: ttsRate,
@@ -1177,6 +1245,42 @@ function App() {
       rate: ttsRate,
       pitch: ttsPitch,
     })
+  }
+
+  function releaseChapterAudio() {
+    if (chapterAudioElementRef.current) {
+      chapterAudioElementRef.current.pause()
+      chapterAudioElementRef.current.src = ''
+      chapterAudioElementRef.current.load()
+      chapterAudioElementRef.current = null
+    }
+    if (chapterAudioObjectUrlRef.current) {
+      URL.revokeObjectURL(chapterAudioObjectUrlRef.current)
+      chapterAudioObjectUrlRef.current = null
+    }
+    chapterAudioTimelineRef.current = []
+  }
+
+  function buildChapterAudioTimeline(duration: number) {
+    const segments = speechSegmentsRef.current
+    const totalWeight = Math.max(1, segments.reduce((sum, segment) => sum + Math.max(1, segment.text.length), 0))
+    let elapsed = 0
+    chapterAudioTimelineRef.current = segments.map((segment, index) => {
+      elapsed += (Math.max(1, segment.text.length) / totalWeight) * duration
+      return { endTime: elapsed, index }
+    })
+  }
+
+  function findAudioSegmentIndex(currentTime: number): number {
+    const timeline = chapterAudioTimelineRef.current
+    if (!timeline.length) return 0
+    return timeline.find((item) => currentTime <= item.endTime)?.index ?? timeline.at(-1)?.index ?? 0
+  }
+
+  function getAudioTimeForSegment(segmentIndex: number): number {
+    const timeline = chapterAudioTimelineRef.current
+    if (!timeline.length || segmentIndex <= 0) return 0
+    return timeline[Math.min(segmentIndex - 1, timeline.length - 1)]?.endTime ?? 0
   }
 
   function scrollToSpeechSegment(segmentId: string, force = false) {
@@ -1261,18 +1365,63 @@ function App() {
     }
   }
 
+  async function playChapterAudio(segmentIndex: number) {
+    if (!activePackage || !activeChapter) return
+    const cached = await getChapterAudioCache(activePackage.book.id, activeChapter.id)
+    if (!cached) {
+      setSpeechPlayback({ status: 'error', message: '本章 MP3 尚未下载，请先到同步页刷新并下载章节音频。' })
+      setTtsStatusMessage('本章 MP3 尚未下载，请先到同步页刷新并下载章节音频。')
+      return
+    }
+
+    releaseChapterAudio()
+    const audio = new Audio()
+    const objectUrl = URL.createObjectURL(cached.blob)
+    const startSegment = speechSegmentsRef.current[segmentIndex]
+    if (!startSegment) return
+
+    chapterAudioElementRef.current = audio
+    chapterAudioObjectUrlRef.current = objectUrl
+    audio.src = objectUrl
+    audio.preload = 'auto'
+    audio.onloadedmetadata = () => {
+      buildChapterAudioTimeline(audio.duration || 0)
+      audio.currentTime = getAudioTimeForSegment(segmentIndex)
+    }
+    audio.ontimeupdate = () => {
+      const currentIndex = findAudioSegmentIndex(audio.currentTime)
+      const segment = speechSegmentsRef.current[currentIndex]
+      if (!segment) return
+      if (speechPlaybackRef.current.status !== 'playing' || speechPlaybackRef.current.segmentIndex === currentIndex) return
+      setActiveSpeechSegmentId(segment.id)
+      setSpeechPlayback({ status: 'playing', segmentIndex: currentIndex, segmentId: segment.id })
+      scrollToSpeechSegment(segment.id)
+      saveCurrentSpeechProgress(segment, currentIndex)
+    }
+    audio.onended = () => {
+      releaseChapterAudio()
+      setActiveSpeechSegmentId(null)
+      setSpeechPlayback({ status: 'idle' })
+    }
+    audio.onerror = () => {
+      releaseChapterAudio()
+      setSpeechPlayback({ status: 'error', message: 'MP3 播放失败。' })
+      setTtsStatusMessage('MP3 播放失败。')
+    }
+
+    setActiveSpeechSegmentId(startSegment.id)
+    setSpeechPlayback({ status: 'playing', segmentIndex, segmentId: startSegment.id })
+    scrollToSpeechSegment(startSegment.id)
+    saveCurrentSpeechProgress(startSegment, segmentIndex)
+    await audio.play()
+  }
+
   async function startSpeechReading() {
     if (!activePackage || !activeChapter || !speechChapter?.segments.length) return
 
     setSpeechPlayback({ status: 'checking' })
     setTtsStatusMessage('')
     try {
-      const available = await refreshTtsAvailability()
-      if (!available) {
-        setSpeechPlayback({ status: 'error', message: '系统 TTS 不可用。' })
-        return
-      }
-
       const visibleStartIndex = findCurrentVisibleSpeechSegmentIndex()
       let startIndex = visibleStartIndex ?? 0
       if (visibleStartIndex == null && ttsResumeFromProgress) {
@@ -1281,6 +1430,18 @@ function App() {
           startIndex = Math.min(Math.max(0, progress.segmentIndex), speechChapter.segments.length - 1)
         }
       }
+
+      if (ttsEngine === 'cloud-mp3') {
+        await playChapterAudio(startIndex)
+        return
+      }
+
+      const available = await refreshTtsAvailability()
+      if (!available) {
+        setSpeechPlayback({ status: 'error', message: '系统 TTS 不可用。' })
+        return
+      }
+
       await playSpeechSegment(startIndex)
     } catch (error) {
       const message = error instanceof Error ? error.message : '语音阅读启动失败。'
@@ -1292,6 +1453,11 @@ function App() {
   async function pauseSpeechReading() {
     const current = speechPlaybackRef.current
     if (current.status !== 'playing') return
+    if (ttsEngine === 'cloud-mp3' && chapterAudioElementRef.current) {
+      chapterAudioElementRef.current.pause()
+      setSpeechPlayback({ status: 'paused', segmentIndex: current.segmentIndex, segmentId: current.segmentId })
+      return
+    }
     currentUtteranceIdRef.current = null
     speechUtteranceIndexRef.current.clear()
     await NovelReaderTts.stop().catch(() => undefined)
@@ -1301,10 +1467,16 @@ function App() {
   async function resumeSpeechReading() {
     const current = speechPlaybackRef.current
     if (current.status !== 'paused') return
+    if (ttsEngine === 'cloud-mp3' && chapterAudioElementRef.current) {
+      await chapterAudioElementRef.current.play()
+      setSpeechPlayback({ status: 'playing', segmentIndex: current.segmentIndex, segmentId: current.segmentId })
+      return
+    }
     await playSpeechSegment(current.segmentIndex)
   }
 
   async function stopSpeechReading() {
+    releaseChapterAudio()
     currentUtteranceIdRef.current = null
     speechUtteranceIndexRef.current.clear()
     await NovelReaderTts.stop().catch(() => undefined)
@@ -1356,6 +1528,7 @@ function App() {
 
   async function updateTtsSettings(nextTts: MobileAppSettings['tts']) {
     setTtsSettingsMessage('')
+    setTtsEngine(nextTts.engine)
     setTtsLocale(nextTts.locale)
     setTtsVoiceId(nextTts.voiceId)
     setTtsRate(nextTts.rate)
@@ -1417,6 +1590,7 @@ function App() {
         void handle.remove()
       }
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ttsLocale, ttsPitch, ttsRate, ttsVoiceId])
 
   useEffect(() => {
@@ -1425,6 +1599,7 @@ function App() {
         window.clearTimeout(speechFollowTimerRef.current)
         speechFollowTimerRef.current = null
       }
+      releaseChapterAudio()
       void NovelReaderTts.stop().catch(() => undefined)
     }
   }, [])
@@ -1726,6 +1901,22 @@ ${context}
             </section>
             <section className="settings-group">
               <h3>语音阅读</h3>
+              <div className="segmented-control" aria-label="播放引擎">
+                <button
+                  className={ttsEngine === 'local-tts' ? 'active' : ''}
+                  type="button"
+                  onClick={() => void updateTtsSettings({ ...getCurrentTtsSettings(), engine: 'local-tts' })}
+                >
+                  本地 TTS
+                </button>
+                <button
+                  className={ttsEngine === 'cloud-mp3' ? 'active' : ''}
+                  type="button"
+                  onClick={() => void updateTtsSettings({ ...getCurrentTtsSettings(), engine: 'cloud-mp3' })}
+                >
+                  云端 MP3
+                </button>
+              </div>
               <label className="field">
                 <span>语言</span>
                 <input
@@ -1892,6 +2083,45 @@ ${context}
                       </article>
                     )
                   })}
+                </div>
+              )}
+            </section>
+            <section className="settings-group">
+              <h3>章节 MP3</h3>
+              <p className="settings-note">PC Web 端为当前书配置音频目录后，可在这里同步到 Android 本机。</p>
+              <div className="button-row two">
+                <button type="button" onClick={() => void refreshBookAudio()} disabled={isBusy || !activePackage || !baseUrl}>
+                  刷新音频
+                </button>
+                <button
+                  type="button"
+                  onClick={() => activeChapterAudio && void downloadChapterAudio(activeChapterAudio)}
+                  disabled={isBusy || !activeChapterAudio}
+                >
+                  下载本章
+                </button>
+              </div>
+              <p className="inline-status">
+                已缓存 {cachedChapterAudioCount} 章
+                {remoteChapterAudio.length ? ` · PC 可用 ${remoteChapterAudio.length} 章` : ' · 暂无 PC 音频清单'}
+              </p>
+              {remoteChapterAudio.length > 0 && (
+                <div className="audio-sync-list">
+                  {remoteChapterAudio.slice(0, 8).map((audio) => (
+                    <button
+                      className={audio.chapterId === activeChapterId ? 'audio-sync-row active' : 'audio-sync-row'}
+                      key={audio.id}
+                      type="button"
+                      onClick={() => void downloadChapterAudio(audio)}
+                      disabled={isBusy}
+                    >
+                      <span>
+                        <strong>{audio.chapterIndex}. {audio.chapterTitle}</strong>
+                        <small>{audio.filename} · {formatBytes(audio.bytes)}</small>
+                      </span>
+                      <span>下载</span>
+                    </button>
+                  ))}
                 </div>
               )}
             </section>
