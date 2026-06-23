@@ -1301,6 +1301,13 @@ function App() {
     chapterAudioTimelineRef.current = []
   }
 
+  function applyChapterAudioRate(rate: number) {
+    const audio = chapterAudioElementRef.current
+    if (!audio) return
+    audio.defaultPlaybackRate = rate
+    audio.playbackRate = rate
+  }
+
   function buildChapterAudioTimeline(duration: number) {
     const segments = speechSegmentsRef.current
     const totalWeight = Math.max(1, segments.reduce((sum, segment) => sum + Math.max(1, segment.text.length), 0))
@@ -1424,6 +1431,8 @@ function App() {
     chapterAudioObjectUrlRef.current = objectUrl
     audio.src = objectUrl
     audio.preload = 'auto'
+    audio.defaultPlaybackRate = ttsRate
+    audio.playbackRate = ttsRate
     audio.onloadedmetadata = () => {
       buildChapterAudioTimeline(audio.duration || 0)
       audio.currentTime = getAudioTimeForSegment(segmentIndex)
@@ -1572,17 +1581,53 @@ function App() {
     )
   }
 
+  function renderSpeechRateField() {
+    return (
+      <label className="field">
+        <span>语速 · {ttsRate.toFixed(ttsRate % 1 === 0 ? 0 : 2)}x</span>
+        <div className="rate-preset-grid" role="group" aria-label="语音朗读倍速">
+          {TTS_RATE_PRESETS.map((rate) => (
+            <button
+              type="button"
+              className={Math.abs(ttsRate - rate) < 0.001 ? 'active' : ''}
+              key={rate}
+              onClick={() => void updateTtsSettings({ ...getCurrentTtsSettings(), rate })}
+            >
+              {rate}x
+            </button>
+          ))}
+        </div>
+        <input
+          max={3}
+          min={0.5}
+          step={0.05}
+          type="number"
+          value={ttsRate}
+          onChange={(event) => {
+            const rate = Number(event.target.value)
+            void updateTtsSettings({ ...getCurrentTtsSettings(), rate })
+          }}
+        />
+      </label>
+    )
+  }
+
   async function updateTtsSettings(nextTts: MobileAppSettings['tts']) {
     setTtsSettingsMessage('')
     setTtsEngine(nextTts.engine)
     setTtsLocale(nextTts.locale)
     setTtsVoiceId(nextTts.voiceId)
     setTtsRate(nextTts.rate)
+    applyChapterAudioRate(nextTts.rate)
     setTtsPitch(nextTts.pitch)
     setTtsAutoFollow(nextTts.autoFollow)
     setTtsResumeFromProgress(nextTts.resumeFromProgress)
     await persistTtsSettings(nextTts)
   }
+
+  useEffect(() => {
+    applyChapterAudioRate(ttsRate)
+  }, [ttsRate])
 
   useEffect(() => {
     if (!Capacitor.isNativePlatform()) return
@@ -1963,75 +2008,58 @@ ${context}
                   云端 MP3
                 </button>
               </div>
-              <label className="field">
-                <span>语言</span>
-                <input
-                  value={ttsLocale}
-                  onChange={(event) => {
-                    const locale = event.target.value
-                    void updateTtsSettings({ ...getCurrentTtsSettings(), locale })
-                  }}
-                  placeholder="zh-CN"
-                />
-              </label>
-              <label className="field">
-                <span>音色</span>
-                <select
-                  value={ttsVoiceId}
-                  onChange={(event) => {
-                    void updateTtsSettings({ ...getCurrentTtsSettings(), voiceId: event.target.value })
-                  }}
-                >
-                  <option value="">系统默认</option>
-                  {ttsVoices.map((voice) => (
-                    <option key={voice.id} value={voice.id}>
-                      {voice.name} · {voice.locale}{voice.requiresNetwork ? ' · 网络' : ''}
-                    </option>
-                  ))}
-                </select>
-              </label>
-              <div className="settings-grid">
-                <label className="field">
-                  <span>语速 · {ttsRate.toFixed(ttsRate % 1 === 0 ? 0 : 2)}x</span>
-                  <div className="rate-preset-grid" role="group" aria-label="语音朗读倍速">
-                    {TTS_RATE_PRESETS.map((rate) => (
-                      <button
-                        type="button"
-                        className={Math.abs(ttsRate - rate) < 0.001 ? 'active' : ''}
-                        key={rate}
-                        onClick={() => void updateTtsSettings({ ...getCurrentTtsSettings(), rate })}
-                      >
-                        {rate}x
-                      </button>
-                    ))}
+              {ttsEngine === 'local-tts' ? (
+                <>
+                  <label className="field">
+                    <span>语言</span>
+                    <input
+                      value={ttsLocale}
+                      onChange={(event) => {
+                        const locale = event.target.value
+                        void updateTtsSettings({ ...getCurrentTtsSettings(), locale })
+                      }}
+                      placeholder="zh-CN"
+                    />
+                  </label>
+                  <label className="field">
+                    <span>音色</span>
+                    <select
+                      value={ttsVoiceId}
+                      onChange={(event) => {
+                        void updateTtsSettings({ ...getCurrentTtsSettings(), voiceId: event.target.value })
+                      }}
+                    >
+                      <option value="">系统默认</option>
+                      {ttsVoices.map((voice) => (
+                        <option key={voice.id} value={voice.id}>
+                          {voice.name} · {voice.locale}{voice.requiresNetwork ? ' · 网络' : ''}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                  <div className="settings-grid">
+                    {renderSpeechRateField()}
+                    <label className="field">
+                      <span>音调</span>
+                      <input
+                        max={2}
+                        min={0.5}
+                        step={0.05}
+                        type="number"
+                        value={ttsPitch}
+                        onChange={(event) => {
+                          const pitch = Number(event.target.value)
+                          void updateTtsSettings({ ...getCurrentTtsSettings(), pitch })
+                        }}
+                      />
+                    </label>
                   </div>
-                  <input
-                    max={3}
-                    min={0.5}
-                    step={0.05}
-                    type="number"
-                    value={ttsRate}
-                    onChange={(event) => {
-                      const rate = Number(event.target.value)
-                      void updateTtsSettings({ ...getCurrentTtsSettings(), rate })
-                    }}
-                  />
-                </label>
-                <label className="field">
-                  <span>音调</span>
-                  <input
-                    max={2}
-                    min={0.5}
-                    step={0.05}
-                    type="number"
-                    value={ttsPitch}
-                    onChange={(event) => {
-                      const pitch = Number(event.target.value)
-                      void updateTtsSettings({ ...getCurrentTtsSettings(), pitch })
-                    }}
-                  />
-                </label>
-              </div>
+                </>
+              ) : (
+                <div className="mp3-settings-panel">
+                  {renderSpeechRateField()}
+                </div>
+              )}
               <label className="inline-toggle">
                 <input
                   checked={ttsAutoFollow}
@@ -2052,16 +2080,18 @@ ${context}
                 />
                 从上次语音进度继续
               </label>
-              <div className="tts-action-panel">
-                <button className="tts-primary-action" type="button" onClick={() => void refreshTtsAvailability()} disabled={isBusy}>
-                  检测语音
-                </button>
-                <div className="tts-secondary-actions">
-                  <button type="button" onClick={() => void saveTtsSettingsFromPanel()} disabled={isBusy}>保存配置</button>
-                  <button type="button" onClick={() => void openSystemTtsSettings()}>系统语音设置</button>
-                  <button type="button" onClick={() => void openSystemTtsDataCheck()}>安装语音包</button>
+              {ttsEngine === 'local-tts' && (
+                <div className="tts-action-panel">
+                  <button className="tts-primary-action" type="button" onClick={() => void refreshTtsAvailability()} disabled={isBusy}>
+                    检测语音
+                  </button>
+                  <div className="tts-secondary-actions">
+                    <button type="button" onClick={() => void saveTtsSettingsFromPanel()} disabled={isBusy}>保存配置</button>
+                    <button type="button" onClick={() => void openSystemTtsSettings()}>系统语音设置</button>
+                    <button type="button" onClick={() => void openSystemTtsDataCheck()}>安装语音包</button>
+                  </div>
                 </div>
-              </div>
+              )}
               {(ttsSettingsMessage || ttsStatusMessage) && <p className="tts-status-note">{ttsSettingsMessage || ttsStatusMessage}</p>}
             </section>
             <section className="settings-group">
@@ -2132,75 +2162,77 @@ ${context}
                 </div>
               )}
             </section>
-            <section className="settings-group">
-              <h3>章节 MP3</h3>
-              <p className="settings-note">PC Web 端为当前书配置音频目录后，可在这里同步到 Android 本机。</p>
-              <div className="button-row">
-                <button type="button" onClick={() => void refreshBookAudio()} disabled={isBusy || !activePackage || !baseUrl}>
-                  刷新音频
-                </button>
-                <button
-                  type="button"
-                  onClick={() => void downloadPendingChapterAudio()}
-                  disabled={isBusy || pendingChapterAudio.length === 0}
-                >
-                  全部下载
-                </button>
-                <button
-                  type="button"
-                  onClick={() => activeChapterAudio && void downloadChapterAudio(activeChapterAudio)}
-                  disabled={
-                    isBusy ||
-                    !activeChapterAudio ||
-                    getChapterAudioDownloadState(activeChapterAudio) === 'downloaded'
-                  }
-                >
-                  {activeChapterAudio && getChapterAudioDownloadState(activeChapterAudio) === 'stale' ? '更新本章' : '下载本章'}
-                </button>
-              </div>
-              <p className="inline-status">
-                {remoteChapterAudio.length
-                  ? `已下载 ${remoteChapterAudio.length - pendingChapterAudio.length}/${remoteChapterAudio.length} 章`
-                  : `已缓存 ${cachedChapterAudioCount} 章 · 暂无 PC 音频清单`}
-                {remoteChapterAudio.length
-                  ? pendingChapterAudio.length ? ` · 可下载 ${pendingChapterAudio.length} 章` : ' · 全部已下载'
-                  : ''}
-              </p>
-              {remoteChapterAudio.length > 0 && (
-                <div className="audio-sync-list">
-                  {remoteChapterAudio.map((audio) => {
-                    const downloadState = getChapterAudioDownloadState(audio)
-                    const isDownloaded = downloadState === 'downloaded'
-                    const isStale = downloadState === 'stale'
-
-                    return (
-                      <button
-                        className={[
-                          'audio-sync-row',
-                          audio.chapterId === activeChapterId ? 'active' : '',
-                          isDownloaded ? 'downloaded' : '',
-                          isStale ? 'stale' : '',
-                        ].filter(Boolean).join(' ')}
-                        key={audio.id}
-                        type="button"
-                        onClick={() => {
-                          if (!isDownloaded) void downloadChapterAudio(audio)
-                        }}
-                        disabled={isBusy || isDownloaded}
-                      >
-                        <span>
-                          <strong>{audio.chapterIndex}. {audio.chapterTitle}</strong>
-                          <small>{audio.filename} · {formatBytes(audio.bytes)}</small>
-                        </span>
-                        <span className="audio-sync-state">
-                          {isDownloaded ? '已下载' : isStale ? '需更新' : '未下载'}
-                        </span>
-                      </button>
-                    )
-                  })}
+            {ttsEngine === 'cloud-mp3' && (
+              <section className="settings-group">
+                <h3>章节 MP3</h3>
+                <p className="settings-note">PC Web 端为当前书配置音频目录后，可在这里同步到 Android 本机。</p>
+                <div className="button-row">
+                  <button type="button" onClick={() => void refreshBookAudio()} disabled={isBusy || !activePackage || !baseUrl}>
+                    刷新音频
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void downloadPendingChapterAudio()}
+                    disabled={isBusy || pendingChapterAudio.length === 0}
+                  >
+                    全部下载
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => activeChapterAudio && void downloadChapterAudio(activeChapterAudio)}
+                    disabled={
+                      isBusy ||
+                      !activeChapterAudio ||
+                      getChapterAudioDownloadState(activeChapterAudio) === 'downloaded'
+                    }
+                  >
+                    {activeChapterAudio && getChapterAudioDownloadState(activeChapterAudio) === 'stale' ? '更新本章' : '下载本章'}
+                  </button>
                 </div>
-              )}
-            </section>
+                <p className="inline-status">
+                  {remoteChapterAudio.length
+                    ? `已下载 ${remoteChapterAudio.length - pendingChapterAudio.length}/${remoteChapterAudio.length} 章`
+                    : `已缓存 ${cachedChapterAudioCount} 章 · 暂无 PC 音频清单`}
+                  {remoteChapterAudio.length
+                    ? pendingChapterAudio.length ? ` · 可下载 ${pendingChapterAudio.length} 章` : ' · 全部已下载'
+                    : ''}
+                </p>
+                {remoteChapterAudio.length > 0 && (
+                  <div className="audio-sync-list">
+                    {remoteChapterAudio.map((audio) => {
+                      const downloadState = getChapterAudioDownloadState(audio)
+                      const isDownloaded = downloadState === 'downloaded'
+                      const isStale = downloadState === 'stale'
+
+                      return (
+                        <button
+                          className={[
+                            'audio-sync-row',
+                            audio.chapterId === activeChapterId ? 'active' : '',
+                            isDownloaded ? 'downloaded' : '',
+                            isStale ? 'stale' : '',
+                          ].filter(Boolean).join(' ')}
+                          key={audio.id}
+                          type="button"
+                          onClick={() => {
+                            if (!isDownloaded) void downloadChapterAudio(audio)
+                          }}
+                          disabled={isBusy || isDownloaded}
+                        >
+                          <span>
+                            <strong>{audio.chapterIndex}. {audio.chapterTitle}</strong>
+                            <small>{audio.filename} · {formatBytes(audio.bytes)}</small>
+                          </span>
+                          <span className="audio-sync-state">
+                            {isDownloaded ? '已下载' : isStale ? '需更新' : '未下载'}
+                          </span>
+                        </button>
+                      )
+                    })}
+                  </div>
+                )}
+              </section>
+            )}
             <section className="settings-group">
               <h3>外部 LLM</h3>
               <label className="field">

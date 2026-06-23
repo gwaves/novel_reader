@@ -294,6 +294,11 @@ button:disabled {
   color: var(--text);
 }
 
+.mp3-settings-panel {
+  display: grid;
+  gap: 12px;
+}
+
 .tts-status-note {
   margin: 0;
   padding: 10px 12px;
