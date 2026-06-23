@@ -182,6 +182,21 @@ type KgGraphEdgeData = {
   relation: KgRelation
 }
 
+type MobileAudioDirectoryStatus = {
+  directory: string
+  exists: boolean
+  rules: string[]
+  audio: Array<{
+    id: string
+    chapterId: string
+    chapterIndex: number
+    chapterTitle: string
+    filename: string
+    bytes: number
+    updatedAt: string
+  }>
+}
+
 type KgReviewEntity = KgEntity & { reasons: string[] }
 
 type KgReviewRelation = KgRelation & { reasons: string[] }
@@ -334,6 +349,12 @@ function formatLocalDateTime(timestamp: string): string {
     dateStyle: 'short',
     timeStyle: 'short',
   }).format(new Date(normalizedTimestamp))
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes >= 1024 * 1024) return `${(bytes / 1024 / 1024).toFixed(1)} MB`
+  if (bytes >= 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  return `${bytes} B`
 }
 
 function getKgEntityTypeLabel(type: string): string {
@@ -526,6 +547,10 @@ function App() {
   const [isOfflineImportBusy, setIsOfflineImportBusy] = useState(false)
   const [offlineImportStatus, setOfflineImportStatus] = useState('')
   const [offlineImportDetail, setOfflineImportDetail] = useState('')
+  const [audioDirectoryDraft, setAudioDirectoryDraft] = useState('')
+  const [audioDirectoryStatus, setAudioDirectoryStatus] = useState<MobileAudioDirectoryStatus | null>(null)
+  const [audioDirectoryMessage, setAudioDirectoryMessage] = useState('')
+  const [isAudioDirectoryBusy, setIsAudioDirectoryBusy] = useState(false)
   const [editingBookTitle, setEditingBookTitle] = useState(false)
   const [bookTitleDraft, setBookTitleDraft] = useState('')
   const [editingBookListId, setEditingBookListId] = useState<string | null>(null)
@@ -969,6 +994,13 @@ function App() {
     void fetchKgReviewQueue()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [view, state.book?.id, showKgReviewQueue, kgReviewKind])
+
+  useEffect(() => {
+    if (!state.book) return
+
+    void loadAudioDirectoryStatus(state.book.id)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [state.book?.id])
 
   useEffect(() => {
     if (!showKgGraph || !kgEntityDetail) return
@@ -1614,6 +1646,52 @@ function App() {
       if (offlineImportInputRef.current) {
         offlineImportInputRef.current.value = ''
       }
+    }
+  }
+
+  async function loadAudioDirectoryStatus(bookId = state.book?.id) {
+    if (!bookId) return
+    setIsAudioDirectoryBusy(true)
+    setAudioDirectoryMessage('')
+    try {
+      const response = await fetch(`/api/books/${encodeURIComponent(bookId)}/audio-directory`)
+      const payload = (await response.json().catch(() => null)) as MobileAudioDirectoryStatus | { error?: string } | null
+      if (!response.ok) {
+        throw new Error(payload && 'error' in payload ? payload.error : '读取音频目录失败。')
+      }
+      const status = payload as MobileAudioDirectoryStatus
+      setAudioDirectoryStatus(status)
+      setAudioDirectoryDraft(status.directory)
+      setAudioDirectoryMessage(status.audio.length ? `已匹配 ${status.audio.length} 个章节 MP3。` : '尚未匹配到章节 MP3。')
+    } catch (err) {
+      setAudioDirectoryMessage(err instanceof Error ? err.message : '读取音频目录失败。')
+    } finally {
+      setIsAudioDirectoryBusy(false)
+    }
+  }
+
+  async function saveAudioDirectory() {
+    if (!state.book) return
+    setIsAudioDirectoryBusy(true)
+    setAudioDirectoryMessage('')
+    try {
+      const response = await fetch(`/api/books/${encodeURIComponent(state.book.id)}/audio-directory`, {
+        body: JSON.stringify({ directory: audioDirectoryDraft }),
+        headers: { 'Content-Type': 'application/json' },
+        method: 'PUT',
+      })
+      const payload = (await response.json().catch(() => null)) as MobileAudioDirectoryStatus | { error?: string } | null
+      if (!response.ok) {
+        throw new Error(payload && 'error' in payload ? payload.error : '保存音频目录失败。')
+      }
+      const status = payload as MobileAudioDirectoryStatus
+      setAudioDirectoryStatus(status)
+      setAudioDirectoryDraft(status.directory)
+      setAudioDirectoryMessage(status.audio.length ? `已保存，匹配 ${status.audio.length} 个章节 MP3。` : '已保存，但暂未匹配到章节 MP3。')
+    } catch (err) {
+      setAudioDirectoryMessage(err instanceof Error ? err.message : '保存音频目录失败。')
+    } finally {
+      setIsAudioDirectoryBusy(false)
     }
   }
 
@@ -3798,6 +3876,54 @@ ${context}
                   删除当前书
                 </button>
               </div>
+            </div>
+          )}
+
+          {state.book && (
+            <div className="book-card mobile-audio-card">
+              <p className="eyebrow">移动端音频</p>
+              <h2>章节 MP3 目录</h2>
+              <p>
+                为当前小说指定 PC 本机上的音频根目录。移动端会通过同步 API 读取清单，并下载 MP3 到 Android 本地缓存。
+              </p>
+              <div className="audio-directory-form">
+                <input
+                  type="text"
+                  value={audioDirectoryDraft}
+                  onChange={(event) => {
+                    setAudioDirectoryDraft(event.target.value)
+                    setAudioDirectoryMessage('')
+                  }}
+                  placeholder="/Users/gwaves/Documents/novel_reader/tmp/tts/yaodao"
+                />
+                <button type="button" onClick={() => void saveAudioDirectory()} disabled={isAudioDirectoryBusy}>
+                  保存目录
+                </button>
+                <button type="button" className="ghost-button" onClick={() => void loadAudioDirectoryStatus()} disabled={isAudioDirectoryBusy}>
+                  检测
+                </button>
+              </div>
+              <div className="audio-directory-rules">
+                {(audioDirectoryStatus?.rules ?? [
+                  '推荐：<目录>/ch001.mp3、<目录>/ch002.mp3。',
+                  '兼容：<目录>/001-章节标题.mp3。',
+                  '兼容 TTS 批量产物：<目录>/ch001/audio/chapter.mp3 或 <目录>/ch001-full/audio/chapter.mp3。',
+                ]).map((rule) => (
+                  <span key={rule}>{rule}</span>
+                ))}
+              </div>
+              {audioDirectoryMessage && <p className="database-backup-status">{audioDirectoryMessage}</p>}
+              {audioDirectoryStatus?.audio.length ? (
+                <div className="audio-directory-preview">
+                  <div className="audio-directory-summary">已匹配 {audioDirectoryStatus.audio.length} 个章节 MP3</div>
+                  {audioDirectoryStatus.audio.map((audio) => (
+                    <div className="audio-directory-row" key={audio.id}>
+                      <strong>{audio.chapterIndex}. {audio.chapterTitle}</strong>
+                      <span>{audio.filename} · {formatBytes(audio.bytes)}</span>
+                    </div>
+                  ))}
+                </div>
+              ) : null}
             </div>
           )}
 

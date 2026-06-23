@@ -3,7 +3,7 @@ import { Capacitor, CapacitorHttp } from '@capacitor/core'
 export type MobileManifest = {
   serverVersion: string
   schemaVersion: number
-  capabilities: Array<'full-book-package' | 'reading-progress' | 'incremental-sync' | 'compressed-package'>
+  capabilities: Array<'full-book-package' | 'reading-progress' | 'incremental-sync' | 'compressed-package' | 'chapter-mp3-audio'>
   generatedAt: string
 }
 
@@ -154,6 +154,19 @@ export type MobileBookPackage = {
   }
 }
 
+export type MobileChapterAudio = {
+  id: string
+  bookId: string
+  chapterId: string
+  chapterIndex: number
+  chapterTitle: string
+  filename: string
+  bytes: number
+  updatedAt: string
+  url: string
+  source: 'configured-directory'
+}
+
 export type MobileApiSettings = {
   baseUrl: string
   syncToken: string
@@ -197,8 +210,53 @@ export class MobileApiClient {
     return payload.books
   }
 
-  async downloadBookPackage(bookId: string): Promise<MobileBookPackage> {
-    return readJson<MobileBookPackage>(await this.fetch(`/api/mobile/books/${encodeURIComponent(bookId)}/package`))
+  async downloadBookPackage(
+    bookId: string,
+    options: {
+      embeddingLimit?: number
+      embeddingStart?: number
+      includeEmbeddings?: boolean
+      sections?: 'full' | 'embeddings'
+    } = {},
+  ): Promise<MobileBookPackage> {
+    const params = new URLSearchParams()
+    if (options.includeEmbeddings === false) {
+      params.set('embeddings', 'none')
+    }
+    if (options.sections === 'embeddings') {
+      params.set('sections', 'embeddings')
+    }
+    if (typeof options.embeddingStart === 'number') {
+      params.set('embeddingStart', String(options.embeddingStart))
+    }
+    if (typeof options.embeddingLimit === 'number') {
+      params.set('embeddingLimit', String(options.embeddingLimit))
+    }
+    const search = params.toString() ? `?${params}` : ''
+    return readJson<MobileBookPackage>(await this.fetch(`/api/mobile/books/${encodeURIComponent(bookId)}/package${search}`))
+  }
+
+  async listBookAudio(bookId: string): Promise<MobileChapterAudio[]> {
+    const payload = await readJson<{ audio: MobileChapterAudio[] }>(
+      await this.fetch(`/api/mobile/books/${encodeURIComponent(bookId)}/audio`),
+    )
+    return payload.audio
+  }
+
+  async downloadAudio(audio: MobileChapterAudio): Promise<Blob> {
+    const path = audio.url.startsWith('/api/mobile/')
+      ? audio.url
+      : `/api/mobile/audio/${encodeURIComponent(audio.id)}`
+    const headers = new Headers()
+    if (this.syncToken) {
+      headers.set('Authorization', `Bearer ${this.syncToken}`)
+    }
+    const response = await fetch(`${this.baseUrl}${path}`, { headers })
+    if (!response.ok) {
+      const message = await response.text().catch(() => '')
+      throw new Error(message || `下载音频失败：${response.status}`)
+    }
+    return response.blob()
   }
 
   async createEmbedding(payload: MobileEmbeddingProxyRequest): Promise<{ data?: Array<{ embedding?: number[] }> }> {

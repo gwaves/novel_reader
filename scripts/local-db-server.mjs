@@ -2,14 +2,16 @@ import {
   copyFileSync,
   existsSync,
   mkdirSync,
+  readdirSync,
   readFileSync,
   renameSync,
+  statSync,
   unlinkSync,
   writeFileSync,
 } from 'node:fs'
 import { createServer } from 'node:http'
 import { homedir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
 import { DatabaseSync } from 'node:sqlite'
 import { gzipSync } from 'node:zlib'
@@ -20,6 +22,7 @@ const dataDir = process.env.NOVEL_READER_DATA_DIR || join(homedir(), '.novel_rea
 const dbPath = process.env.NOVEL_READER_DB_PATH || join(dataDir, 'novel_reader.sqlite')
 const mobileSyncToken = process.env.NOVEL_READER_MOBILE_SYNC_TOKEN || ''
 const mobileSchemaVersion = 1
+const mobileAudioDirectoryStateKey = 'novel-reader-mobile-audio-directories'
 const pendingRestorePath = join(dataDir, 'novel_reader.restore-pending.sqlite')
 const stateKey = 'novel-reader-mvp-state'
 
@@ -633,6 +636,21 @@ const listMobileSummaryEmbeddingsStatement = db.prepare(`
   WHERE book_id = ?
   ORDER BY model ASC, chapter_id ASC
 `)
+const listMobileSummaryEmbeddingsRangeStatement = db.prepare(`
+  SELECT
+    se.chapter_id AS chapterId,
+    se.book_id AS bookId,
+    se.model,
+    se.dimension,
+    se.embedding_json AS embeddingJson,
+    se.generated_at AS generatedAt
+  FROM summary_embeddings se
+  JOIN chapters c ON c.id = se.chapter_id
+  WHERE se.book_id = ?
+    AND c.chapter_index >= ?
+    AND c.chapter_index < ?
+  ORDER BY se.model ASC, c.chapter_index ASC
+`)
 const listMobileChunkEmbeddingsStatement = db.prepare(`
   SELECT
     id,
@@ -649,6 +667,26 @@ const listMobileChunkEmbeddingsStatement = db.prepare(`
     generated_at AS generatedAt
   FROM chapter_chunk_embeddings
   WHERE book_id = ?
+  ORDER BY model ASC, chapter_index ASC, chunk_index ASC
+`)
+const listMobileChunkEmbeddingsRangeStatement = db.prepare(`
+  SELECT
+    id,
+    book_id AS bookId,
+    chapter_id AS chapterId,
+    chapter_index AS chapterIndex,
+    chunk_index AS chunkIndex,
+    start_offset AS startOffset,
+    end_offset AS endOffset,
+    text,
+    model,
+    dimension,
+    embedding_json AS embeddingJson,
+    generated_at AS generatedAt
+  FROM chapter_chunk_embeddings
+  WHERE book_id = ?
+    AND chapter_index >= ?
+    AND chapter_index < ?
   ORDER BY model ASC, chapter_index ASC, chunk_index ASC
 `)
 const getKgOverviewStatement = db.prepare(`
@@ -1522,6 +1560,18 @@ function sendFile(response, statusCode, body, contentType, filename) {
     'Access-Control-Allow-Origin': '*',
     'Content-Disposition': `attachment; filename="${filename}"`,
     'Content-Type': `${contentType}; charset=utf-8`,
+  })
+  response.end(body)
+}
+
+function sendBinaryFile(response, statusCode, body, contentType, filename) {
+  response.writeHead(statusCode, {
+    'Access-Control-Allow-Headers': 'Authorization, Content-Type',
+    'Access-Control-Allow-Methods': 'GET,PUT,POST,DELETE,OPTIONS',
+    'Access-Control-Allow-Origin': '*',
+    'Content-Disposition': `attachment; filename="${filename}"`,
+    'Content-Length': body.byteLength,
+    'Content-Type': contentType,
   })
   response.end(body)
 }
@@ -2877,9 +2927,160 @@ function createMobileContentHash(payload) {
     .digest('hex')
 }
 
-function getMobileBookPackage(bookId) {
+function encodeMobileAudioId(filePath) {
+  return Buffer.from(filePath, 'utf8').toString('base64url')
+}
+
+function decodeMobileAudioId(audioId) {
+  try {
+    const decoded = Buffer.from(audioId, 'base64url').toString('utf8')
+    if (!decoded || decoded.includes('\0') || !existsSync(decoded)) return null
+    return decoded
+  } catch {
+    return null
+  }
+}
+
+function inferChapterIndexFromAudioPath(filePath) {
+  const normalized = filePath.replace(/\\/g, '/')
+  const match =
+    normalized.match(/(?:^|\/)ch(?:apter)?[-_ ]?0*(\d+)(?:[-_a-z]*|\/)/i) ||
+    normalized.match(/(?:^|\/)(?:第)?0*(\d+)(?:章|[-_ ]?chapter)/i)
+  if (!match) return null
+  const index = Number(match[1])
+  return Number.isFinite(index) && index > 0 ? Math.floor(index) : null
+}
+
+function readMobileAudioDirectoryConfig() {
+  const row = getStateStatement.get(mobileAudioDirectoryStateKey)
+  if (!row?.value_json) return {}
+  try {
+    const parsed = JSON.parse(row.value_json)
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {}
+  } catch {
+    return {}
+  }
+}
+
+function writeMobileAudioDirectoryConfig(config) {
+  saveStateStatement.run(mobileAudioDirectoryStateKey, JSON.stringify(config))
+}
+
+function normalizeMobileAudioDirectory(directory) {
+  const value = typeof directory === 'string' ? directory.trim() : ''
+  return value ? resolve(value) : ''
+}
+
+function collectConfiguredMobileMp3Files(root) {
+  if (!root || !existsSync(root)) return []
+  const files = []
+  const walk = (dir, depth) => {
+    if (depth < 0) return
+    let entries = []
+    try {
+      entries = readdirSync(dir, { withFileTypes: true })
+    } catch {
+      return
+    }
+
+    for (const entry of entries) {
+      if (entry.name === 'node_modules' || entry.name === '.git') continue
+      const fullPath = join(dir, entry.name)
+      if (entry.isDirectory()) {
+        walk(fullPath, depth - 1)
+      } else if (entry.isFile() && entry.name.toLowerCase().endsWith('.mp3')) {
+        files.push(fullPath)
+      }
+    }
+  }
+  walk(root, 3)
+  return files
+}
+
+function listMobileBookAudio(bookId) {
+  const chapters = listMobileChaptersStatement.all(bookId)
+  if (!chapters.length) return []
+
+  const chapterByIndex = new Map(chapters.map((chapter) => [Number(chapter.index), chapter]))
+  const config = readMobileAudioDirectoryConfig()
+  const configured = config[bookId]
+  const directory = normalizeMobileAudioDirectory(configured?.directory)
+  const candidates = collectConfiguredMobileMp3Files(directory)
+  const seen = new Set()
+  const bestByChapterId = new Map()
+
+  for (const item of candidates
+    .map((filePath) => {
+      if (seen.has(filePath)) return null
+      seen.add(filePath)
+      const chapterIndex = inferChapterIndexFromAudioPath(filePath)
+      if (chapterIndex == null) return null
+      const chapter = chapterByIndex.get(chapterIndex)
+      if (!chapter) return null
+      const stats = statSync(filePath)
+      const normalized = filePath.replace(/\\/g, '/')
+      return {
+        id: encodeMobileAudioId(filePath),
+        bookId,
+        chapterId: chapter.id,
+        chapterIndex,
+        chapterTitle: chapter.title,
+        filename: normalized.split('/').at(-1) ?? 'chapter.mp3',
+        bytes: stats.size,
+        updatedAt: stats.mtime.toISOString(),
+        url: `/api/mobile/audio/${encodeURIComponent(encodeMobileAudioId(filePath))}`,
+        source: 'configured-directory',
+        score:
+          (normalized.endsWith('/audio/chapter.mp3') ? 100 : 0) +
+          (normalized.includes(`ch${String(chapterIndex).padStart(3, '0')}-full/`) ? 50 : 0) +
+          Math.min(40, stats.size / 1024 / 1024),
+      }
+    })
+    .filter(Boolean)) {
+    const current = bestByChapterId.get(item.chapterId)
+    if (!current || item.score > current.score) {
+      bestByChapterId.set(item.chapterId, item)
+    }
+  }
+
+  return Array.from(bestByChapterId.values())
+    .map(({ score, ...item }) => item)
+    .sort((a, b) => a.chapterIndex - b.chapterIndex)
+}
+
+function getMobileAudioDirectoryStatus(bookId) {
+  const config = readMobileAudioDirectoryConfig()
+  const directory = normalizeMobileAudioDirectory(config[bookId]?.directory)
+  const audio = listMobileBookAudio(bookId)
+  return {
+    directory,
+    exists: Boolean(directory && existsSync(directory)),
+    rules: [
+      '推荐：<目录>/ch001.mp3、<目录>/ch002.mp3。',
+      '兼容：<目录>/001-章节标题.mp3。',
+      '兼容 TTS 批量产物：<目录>/ch001/audio/chapter.mp3 或 <目录>/ch001-full/audio/chapter.mp3。',
+    ],
+    audio,
+  }
+}
+
+function isConfiguredMobileAudioPath(filePath) {
+  const normalizedFile = resolve(filePath)
+  return Object.values(readMobileAudioDirectoryConfig()).some((entry) => {
+    const directory = normalizeMobileAudioDirectory(entry?.directory)
+    return directory && normalizedFile.startsWith(`${directory}/`)
+  })
+}
+
+function getMobileBookPackage(bookId, options = {}) {
   const bookRow = getMobileBookStatement.get(bookId)
   if (!bookRow) return null
+  const includeEmbeddings = options.includeEmbeddings !== false
+  const embeddingsOnly = options.sections === 'embeddings'
+  const embeddingStart = Number.isFinite(options.embeddingStart) ? Math.max(0, Math.floor(options.embeddingStart)) : 0
+  const embeddingLimit = Number.isFinite(options.embeddingLimit) ? Math.max(1, Math.floor(options.embeddingLimit)) : null
+  const chapterIndexStart = embeddingStart + 1
+  const chapterIndexEnd = embeddingLimit == null ? null : chapterIndexStart + embeddingLimit
 
   const listRow = listMobileBooksStatement.all().find((book) => book.id === bookId) ?? {
     ...bookRow,
@@ -2902,17 +3103,29 @@ function getMobileBookPackage(bookId) {
       chapterCount: Number(bookRow.chapterCount) || 0,
       wordCount: Number(bookRow.wordCount) || 0,
     },
-    chapters: listMobileChaptersStatement.all(bookId),
-    summaries: listMobileSummariesStatement.all(bookId).map(mapMobileSummary),
+    chapters: embeddingsOnly ? [] : listMobileChaptersStatement.all(bookId),
+    summaries: embeddingsOnly ? [] : listMobileSummariesStatement.all(bookId).map(mapMobileSummary),
     knowledgeGraph: {
-      entities: listMobileEntitiesStatement.all(bookId).map(mapMobileEntity),
-      entityMentions: listMobileEntityMentionsStatement.all(bookId),
-      relations: listMobileRelationsStatement.all(bookId),
-      relationMentions: listMobileRelationMentionsStatement.all(bookId),
+      entities: embeddingsOnly ? [] : listMobileEntitiesStatement.all(bookId).map(mapMobileEntity),
+      entityMentions: embeddingsOnly ? [] : listMobileEntityMentionsStatement.all(bookId),
+      relations: embeddingsOnly ? [] : listMobileRelationsStatement.all(bookId),
+      relationMentions: embeddingsOnly ? [] : listMobileRelationMentionsStatement.all(bookId),
     },
     embeddings: {
-      summaries: listMobileSummaryEmbeddingsStatement.all(bookId).map(mapMobileEmbedding),
-      chunks: listMobileChunkEmbeddingsStatement.all(bookId).map(mapMobileEmbedding),
+      summaries: includeEmbeddings
+        ? (
+            chapterIndexEnd == null
+              ? listMobileSummaryEmbeddingsStatement.all(bookId)
+              : listMobileSummaryEmbeddingsRangeStatement.all(bookId, chapterIndexStart, chapterIndexEnd)
+          ).map(mapMobileEmbedding)
+        : [],
+      chunks: includeEmbeddings
+        ? (
+            chapterIndexEnd == null
+              ? listMobileChunkEmbeddingsStatement.all(bookId)
+              : listMobileChunkEmbeddingsRangeStatement.all(bookId, chapterIndexStart, chapterIndexEnd)
+          ).map(mapMobileEmbedding)
+        : [],
     },
     integrity: {
       contentHash: null,
@@ -4353,7 +4566,7 @@ const server = createServer(async (request, response) => {
         sendJson(response, 200, {
           serverVersion: '0.1.0',
           schemaVersion: mobileSchemaVersion,
-          capabilities: ['full-book-package', 'reading-progress'],
+          capabilities: ['full-book-package', 'reading-progress', 'chapter-mp3-audio'],
           generatedAt: new Date().toISOString(),
         })
         return
@@ -4369,7 +4582,16 @@ const server = createServer(async (request, response) => {
       const mobileBookPackageMatch = url.pathname.match(/^\/api\/mobile\/books\/([^/]+)\/package$/)
       if (request.method === 'GET' && mobileBookPackageMatch) {
         const bookId = decodeURIComponent(mobileBookPackageMatch[1])
-        const payload = getMobileBookPackage(bookId)
+        const embeddingsMode = (url.searchParams.get('embeddings') || 'full').trim().toLowerCase()
+        const sectionsMode = (url.searchParams.get('sections') || 'full').trim().toLowerCase()
+        const embeddingStart = Number(url.searchParams.get('embeddingStart') ?? Number.NaN)
+        const embeddingLimit = Number(url.searchParams.get('embeddingLimit') ?? Number.NaN)
+        const payload = getMobileBookPackage(bookId, {
+          includeEmbeddings: embeddingsMode !== 'none',
+          sections: sectionsMode,
+          embeddingStart,
+          embeddingLimit,
+        })
 
         if (!payload) {
           sendJson(response, 404, { code: 'BOOK_NOT_FOUND', error: 'Book not found.' })
@@ -4377,6 +4599,30 @@ const server = createServer(async (request, response) => {
         }
 
         sendJson(response, 200, payload)
+        return
+      }
+
+      const mobileBookAudioMatch = url.pathname.match(/^\/api\/mobile\/books\/([^/]+)\/audio$/)
+      if (request.method === 'GET' && mobileBookAudioMatch) {
+        const bookId = decodeURIComponent(mobileBookAudioMatch[1])
+        const bookRow = getMobileBookStatement.get(bookId)
+        if (!bookRow) {
+          sendJson(response, 404, { code: 'BOOK_NOT_FOUND', error: 'Book not found.' })
+          return
+        }
+        sendJson(response, 200, { audio: listMobileBookAudio(bookId) })
+        return
+      }
+
+      const mobileAudioMatch = url.pathname.match(/^\/api\/mobile\/audio\/([^/]+)$/)
+      if (request.method === 'GET' && mobileAudioMatch) {
+        const audioId = decodeURIComponent(mobileAudioMatch[1])
+        const filePath = decodeMobileAudioId(audioId)
+        if (!filePath || !filePath.toLowerCase().endsWith('.mp3') || !isConfiguredMobileAudioPath(filePath)) {
+          sendJson(response, 404, { code: 'AUDIO_NOT_FOUND', error: 'Audio file not found.' })
+          return
+        }
+        sendBinaryFile(response, 200, readFileSync(filePath), 'audio/mpeg', filePath.split('/').at(-1) ?? 'chapter.mp3')
         return
       }
 
@@ -4549,6 +4795,41 @@ const server = createServer(async (request, response) => {
         })),
       }, request)
       return
+    }
+
+    const bookAudioDirectoryMatch = url.pathname.match(/^\/api\/books\/([^/]+)\/audio-directory$/)
+    if (bookAudioDirectoryMatch) {
+      const bookId = decodeURIComponent(bookAudioDirectoryMatch[1])
+      const book = getBookStatement.get(bookId)
+
+      if (!book) {
+        sendJson(response, 404, { error: 'Book not found.' }, request)
+        return
+      }
+
+      if (request.method === 'GET') {
+        sendJson(response, 200, getMobileAudioDirectoryStatus(bookId), request)
+        return
+      }
+
+      if (request.method === 'PUT') {
+        const body = await readJson(request)
+        const directory = normalizeMobileAudioDirectory(body?.directory)
+        const config = readMobileAudioDirectoryConfig()
+
+        if (directory && !existsSync(directory)) {
+          sendJson(response, 400, { error: '目录不存在，请填写 PC 本机上的绝对路径。' }, request)
+          return
+        }
+
+        config[bookId] = {
+          directory,
+          updatedAt: new Date().toISOString(),
+        }
+        writeMobileAudioDirectoryConfig(config)
+        sendJson(response, 200, getMobileAudioDirectoryStatus(bookId), request)
+        return
+      }
     }
 
     if (request.method === 'PUT' && url.pathname === '/api/state') {

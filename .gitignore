@@ -11,6 +11,9 @@ node_modules
 dist
 dist-ssr
 *.local
+tmp/
+mobile-app/android-backups/
+*.bak-*
 
 # Editor directories and files
 .vscode/*

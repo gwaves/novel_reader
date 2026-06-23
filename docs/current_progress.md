@@ -1,3 +1,33 @@
+2026-06-23 更新：PC 端离线多角色 TTS 方向已启动，先落地本地 Node.js 目录与文档。
+- Android App 高质量 MP3 播放方向已另立 `codex/mobile-mp3-playback` 分支开发：PC Web 端新增当前书“章节 MP3 目录”配置入口，本地服务持久化目录并通过 `/api/mobile/books/:bookId/audio` 暴露移动端音频清单。
+- PC 端章节 MP3 目录规范：推荐根目录直接放 `ch001.mp3`、`ch002.mp3`；兼容 `001-章节标题.mp3`；兼容现有 TTS 批量产物 `ch001/audio/chapter.mp3` 或 `ch001-full/audio/chapter.mp3`。
+- Android App 语音阅读新增播放引擎选择：可在“本地 TTS”和“云端 MP3”之间切换；同步页可刷新 PC 音频清单并下载当前章节 MP3 到 IndexedDB `chapterAudio` 缓存。
+- Android App 章节 MP3 下载 UI 已优化：按章节显示“已下载 / 未下载 / 需更新”状态，移除前 8 条截断，新增“全部下载”入口，可一次下载所有可下载但尚未缓存的章节，并在下载过程中显示章节进度。
+- PC Web 端章节 MP3 目录预览已改为完整滚动列表，不再截断前 10 条，便于确认最新生成的章节音频。
+- Android 云端 MP3 播放已同步语速设置：启动播放与播放中调整倍速都会更新 HTMLAudioElement 的播放速度。
+- Android 语音阅读设置已按播放引擎分菜单：本地 TTS 显示语言、音色、音调和系统语音检测；云端 MP3 显示倍速和章节 MP3 同步下载。
+- Android MP3 播放已接入章节正文高亮/滚动：使用整章 MP3 播放，按语音片段文本长度估算时间轴，`timeupdate` 驱动当前片段高亮、自动滚动和独立语音进度保存。
+- 新增 `offline-tts/` 作为独立工作目录，集中放置多角色 TTS 的设计文档、开发计划、示例配置和 Node.js CLI 脚本。
+- 技术选型确定：主流程使用 Node.js，本地程序通过配置文件调用第三方 OpenAI-compatible 模型生成导演脚本 JSON；Codex 不参与批量大模型推理。
+- 第一阶段目标不是直接合成整章音频，而是先把小说章节转换为可检查的导演脚本，严格分离旁白、对白、内心独白，并结合知识图谱与角色音色绑定做 speaker 判定。
+- 初始脚本 `offline-tts/scripts/tts-director.mjs` 已具备配置读取、列书、章节检查、规则预切分、KG 候选角色读取和 `draft-script` 调用形态。
+- 补充音频输出策略：离线多角色 TTS 可用 WAV 作为中间缓存，但最终章节/整书音频默认编码为 MP3，减少磁盘占用。
+- 移动端线上朗读倍速扩展：系统 TTS 语速支持到 3x，设置页新增 0.75x、1x、1.25x、1.5x、2x、3x 快捷档位。
+- 已接入可用第三方模型配置：`http://192.168.88.24:30000/v1` + `qwen3.6-27b`，API key 为空时不带鉴权头。
+- `draft-script` 已完成第一轮功能验证：对《妖刀记》第 1 章前约 1000 字生成导演脚本，输出 16 个片段，校验 0 错误 0 警告；旁白、采蓝、黄缨和黄缨内心独白均能分离。
+- 预切分规则已修正：短名称引号（如「黄缨」「水月停轩」）不再误拆为对白；`心里想` 和括号心理活动会单独切为 `thought`；切片边界会避开未闭合对白引号。
+- `synth` 命令已接入初版 MIMO TTS：读取导演脚本逐段合成 WAV 缓存，使用 ffmpeg 标准化、插入停顿、拼接并默认输出 `chapter.mp3`。
+- TTS 合成已支持 `director.performanceStyle` 公共表演提示，用于统一中文有声小说语速、节奏和角色表演风格。
+- 根据试听反馈，女性角色音色提示已加强“少女声线、清亮轻盈、避免成熟御姐感”的约束，用于改善采蓝和黄缨的年龄感。
+- TTS 合成已支持并发控制：`tts.concurrency` 或 `synth --concurrency` 控制缺失缓存片段的并发合成，拼接与 MP3 编码仍保持顺序串行。
+- 并发 3 已完成实测：16 个片段完整合成、拼接、MP3 编码约 27 秒，输出 `tmp/tts/yaodao/ch001/audio-concurrency-3/chapter.mp3`。
+- 已确认 MIMO `mimo-v2.5-tts-voicedesign` 可用于音色设计实验，但不是当前预置音色 voice id 的直接替代；后续应先做采蓝/黄缨小样本 A/B，验证跨片段声线一致性。
+- 整章导演脚本生成已改为分批模式：`director.segmentBatchSize` 或 `draft-script --batch-size` 控制每批预切分片段数，避免整章单请求超时。
+- 《妖刀记》第 1 章完整功能验证已跑通：分批生成 206 段导演脚本，校验 0 错误 0 警告；TTS 并发 3 合成并编码为 MP3，用时约 325 秒，输出 `tmp/tts/yaodao/ch001-full/audio/chapter.mp3`，成品约 55 分钟、39.6 MB、96 kbps。
+- 导演脚本生成已支持 LLM 批次并发：`director.concurrency` 或 `draft-script --concurrency` 控制并发数，结果按原始批次顺序合并。第 20 章实测并发 10 时 7 个批次约 66 秒生成 188 段脚本，校验 0 错误 0 警告。
+- 《妖刀记》第 20 章完整语音已生成：TTS 并发 3 合成并编码为 MP3，用时约 263 秒，输出 `tmp/tts/yaodao/ch020-full/audio/chapter.mp3`，成品约 40 分 50 秒、29.4 MB、96 kbps。
+- 多 agent 并发生成第 19、21、22、23、24 章时观察到：多个章节同时进入高并发 LLM 阶段会造成内网模型超时或卡顿；已新增 `batch-pipeline` 命令，采用章节级流水线，LLM 阶段串行、TTS 阶段并行，推荐后续批量生成整本时使用。
+
 2026-06-21 最新状态：main 已同步到 PR #21 和 PR #22。
 
 2026-06-21 更新：`mobile-app-dev` 分支已推进到可安装 Android 调试包。
