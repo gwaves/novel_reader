@@ -480,6 +480,26 @@ async function callOpenAICompatible(config, messages) {
   }
 }
 
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms))
+}
+
+async function callOpenAICompatibleWithRetry(config, messages, label, maxAttempts = 3) {
+  let lastError = null
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    try {
+      return await callOpenAICompatible(config, messages)
+    } catch (error) {
+      lastError = error
+      if (attempt >= maxAttempts) break
+      const delayMs = 1000 * attempt
+      console.warn(`⚠️  ${label} 第 ${attempt} 次失败：${error.message.split('\n')[0]}，${delayMs}ms 后重试。`)
+      await sleep(delayMs)
+    }
+  }
+  throw lastError
+}
+
 function parseJsonObject(raw) {
   const text = String(raw || '')
     .trim()
@@ -715,10 +735,10 @@ async function runDraftScript(config, args) {
     const batch = batchInfo.segments
     console.log(`🧾 生成导演判定 ${currentBatch}/${batches.length}，片段 ${batchInfo.start + 1}-${batchInfo.start + batch.length}/${preSegments.length}`)
     const prompt = buildDirectorPrompt({ config, book, chapter, preSegments: batch, characterCandidates })
-    const batchDecisions = await callOpenAICompatible(config, [
+    const batchDecisions = await callOpenAICompatibleWithRetry(config, [
       { role: 'system', content: '你只输出严格 JSON，不输出 Markdown，不输出思考过程。' },
       { role: 'user', content: prompt },
-    ])
+    ], `第 ${currentBatch} 批导演判定`)
     if (!Array.isArray(batchDecisions?.decisions)) {
       throw new Error(`第 ${currentBatch} 批模型输出缺少 decisions 数组。`)
     }
