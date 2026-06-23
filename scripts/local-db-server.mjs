@@ -2997,6 +2997,67 @@ function collectConfiguredMobileMp3Files(root) {
   return files
 }
 
+function getMobileAudioManifestPath(filePath) {
+  const normalized = filePath.replace(/\\/g, '/')
+  if (!normalized.endsWith('/audio/chapter.mp3')) return null
+  return join(dirname(filePath), 'manifest.json')
+}
+
+function normalizeMobileAudioTimelineEntry(entry) {
+  const sourceStart = Number(entry?.sourceStart)
+  const sourceEnd = Number(entry?.sourceEnd)
+  const startTime = Number(entry?.startTime)
+  const endTime = Number(entry?.endTime)
+  const nextStartTime = Number(entry?.nextStartTime ?? entry?.endTime)
+  if (
+    !Number.isFinite(sourceStart) ||
+    !Number.isFinite(sourceEnd) ||
+    !Number.isFinite(startTime) ||
+    !Number.isFinite(endTime) ||
+    !Number.isFinite(nextStartTime) ||
+    sourceEnd <= sourceStart ||
+    endTime < startTime ||
+    nextStartTime < endTime
+  ) {
+    return null
+  }
+  return {
+    id: String(entry.id ?? ''),
+    speaker: typeof entry.speaker === 'string' ? entry.speaker : null,
+    voice: typeof entry.voice === 'string' ? entry.voice : null,
+    text: typeof entry.text === 'string' ? entry.text : '',
+    sourceStart,
+    sourceEnd,
+    startTime,
+    endTime,
+    nextStartTime,
+    speechDuration: Number.isFinite(Number(entry.speechDuration)) ? Number(entry.speechDuration) : endTime - startTime,
+    trailingSilence: Number.isFinite(Number(entry.trailingSilence)) ? Number(entry.trailingSilence) : nextStartTime - endTime,
+  }
+}
+
+function readMobileAudioManifest(filePath) {
+  const manifestPath = getMobileAudioManifestPath(filePath)
+  if (!manifestPath || !existsSync(manifestPath)) return null
+  try {
+    const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'))
+    const timeline = Array.isArray(manifest.timeline)
+      ? manifest.timeline.map(normalizeMobileAudioTimelineEntry).filter(Boolean)
+      : []
+    if (!timeline.length) return null
+    const manifestStats = statSync(manifestPath)
+    return {
+      duration: Number.isFinite(Number(manifest.duration)) ? Number(manifest.duration) : null,
+      manifestPath,
+      manifestUpdatedAt: manifestStats.mtime,
+      timeline,
+      timelineVersion: Number.isFinite(Number(manifest.timelineVersion)) ? Number(manifest.timelineVersion) : 1,
+    }
+  } catch {
+    return null
+  }
+}
+
 function listMobileBookAudio(bookId) {
   const chapters = listMobileChaptersStatement.all(bookId)
   if (!chapters.length) return []
@@ -3018,7 +3079,10 @@ function listMobileBookAudio(bookId) {
       const chapter = chapterByIndex.get(chapterIndex)
       if (!chapter) return null
       const stats = statSync(filePath)
+      const manifest = readMobileAudioManifest(filePath)
+      if (!manifest) return null
       const normalized = filePath.replace(/\\/g, '/')
+      const updatedAt = new Date(Math.max(stats.mtimeMs, manifest.manifestUpdatedAt.getTime())).toISOString()
       return {
         id: encodeMobileAudioId(filePath),
         bookId,
@@ -3027,9 +3091,12 @@ function listMobileBookAudio(bookId) {
         chapterTitle: chapter.title,
         filename: normalized.split('/').at(-1) ?? 'chapter.mp3',
         bytes: stats.size,
-        updatedAt: stats.mtime.toISOString(),
+        duration: manifest.duration,
+        updatedAt,
         url: `/api/mobile/audio/${encodeURIComponent(encodeMobileAudioId(filePath))}`,
         source: 'configured-directory',
+        timeline: manifest.timeline,
+        timelineVersion: manifest.timelineVersion,
         score:
           (normalized.endsWith('/audio/chapter.mp3') ? 100 : 0) +
           (normalized.includes(`ch${String(chapterIndex).padStart(3, '0')}-full/`) ? 50 : 0) +
@@ -3056,9 +3123,9 @@ function getMobileAudioDirectoryStatus(bookId) {
     directory,
     exists: Boolean(directory && existsSync(directory)),
     rules: [
-      '推荐：<目录>/ch001.mp3、<目录>/ch002.mp3。',
-      '兼容：<目录>/001-章节标题.mp3。',
-      '兼容 TTS 批量产物：<目录>/ch001/audio/chapter.mp3 或 <目录>/ch001-full/audio/chapter.mp3。',
+      'MP3 必须来自新版 TTS 批量产物，并包含 audio/manifest.json 时间轴。',
+      '目录结构：<目录>/ch001-full/audio/chapter.mp3 与 <目录>/ch001-full/audio/manifest.json。',
+      '时间轴会按 manifest 的真实片段时长和静音间隔同步到手机。',
     ],
     audio,
   }

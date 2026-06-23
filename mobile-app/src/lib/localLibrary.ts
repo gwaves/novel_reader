@@ -1,4 +1,4 @@
-import type { MobileApiSettings, MobileBookPackage } from './mobileApi'
+import type { MobileApiSettings, MobileBookPackage, MobileChapterAudioTimelineEntry } from './mobileApi'
 
 export type ExternalLlmSettings = {
   baseUrl: string
@@ -77,7 +77,10 @@ export type ChapterAudioCache = {
   chapterTitle: string
   filename: string
   bytes: number
+  duration: number | null
   updatedAt: string
+  timeline: MobileChapterAudioTimelineEntry[]
+  timelineVersion: number
   cachedAt: string
   blob: Blob
 }

@@ -154,6 +154,20 @@ export type MobileBookPackage = {
   }
 }
 
+export type MobileChapterAudioTimelineEntry = {
+  id: string
+  speaker: string | null
+  voice: string | null
+  text: string
+  sourceStart: number
+  sourceEnd: number
+  startTime: number
+  endTime: number
+  nextStartTime: number
+  speechDuration: number
+  trailingSilence: number
+}
+
 export type MobileChapterAudio = {
   id: string
   bookId: string
@@ -162,9 +176,12 @@ export type MobileChapterAudio = {
   chapterTitle: string
   filename: string
   bytes: number
+  duration: number | null
   updatedAt: string
   url: string
   source: 'configured-directory'
+  timeline: MobileChapterAudioTimelineEntry[]
+  timelineVersion: number
 }
 
 export type MobileApiSettings = {

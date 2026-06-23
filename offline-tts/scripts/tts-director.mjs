@@ -1021,6 +1021,22 @@ function runFfmpeg(args, label) {
   }
 }
 
+function probeAudioDurationSeconds(filePath) {
+  const result = spawnSync(
+    'ffprobe',
+    ['-v', 'error', '-show_entries', 'format=duration', '-of', 'default=noprint_wrappers=1:nokey=1', filePath],
+    { encoding: 'utf8' },
+  )
+  if (result.status !== 0) {
+    throw new Error(`读取音频时长失败：${result.stderr || result.stdout || filePath}`)
+  }
+  const duration = Number(result.stdout.trim())
+  if (!Number.isFinite(duration) || duration < 0) {
+    throw new Error(`音频时长无效：${filePath}`)
+  }
+  return duration
+}
+
 async function runConcurrent(items, workerCount, worker) {
   let nextIndex = 0
   const workers = Array.from({ length: Math.min(workerCount, items.length) }, async () => {
@@ -1059,7 +1075,8 @@ async function runSynth(config, args) {
 
   const manifest = {
     kind: 'novel-reader-tts-audio-manifest',
-    version: 1,
+    version: 2,
+    timelineVersion: 1,
     sourceScript: scriptPath,
     generatedAt: new Date().toISOString(),
     tts: {
@@ -1079,6 +1096,9 @@ async function runSynth(config, args) {
       id: segment.id,
       speaker: segment.speaker,
       voice: segment.voice,
+      text: segment.text,
+      sourceStart: segment.sourceStart,
+      sourceEnd: segment.sourceEnd,
       textHash: key,
       wav: wavPath,
       segment,
@@ -1103,16 +1123,39 @@ async function runSynth(config, args) {
   manifest.segments = manifest.segments.map(({ segment, ...item }) => item)
 
   const concatEntries = []
+  const timeline = []
+  let timelineCursor = 0
   for (let index = 0; index < manifest.segments.length; index += 1) {
     const item = manifest.segments[index]
     const normalized = join(workDir, `${String(index + 1).padStart(4, '0')}-${item.id}.wav`)
     runFfmpeg(['-i', item.wav, '-ar', '24000', '-ac', '1', '-sample_fmt', 's16', normalized], `标准化 ${item.id}`)
+    const speechDuration = probeAudioDurationSeconds(normalized)
+    const startTime = timelineCursor
+    const endTime = startTime + speechDuration
     concatEntries.push(normalized)
+    timelineCursor = endTime
+    let trailingSilence = 0
     if (index < manifest.segments.length - 1 && config.tts.silenceSeconds > 0) {
       const silence = join(workDir, `${String(index + 1).padStart(4, '0')}-silence.wav`)
       runFfmpeg(['-f', 'lavfi', '-i', 'anullsrc=r=24000:cl=mono', '-t', String(config.tts.silenceSeconds), '-sample_fmt', 's16', silence], '生成静音')
+      trailingSilence = probeAudioDurationSeconds(silence)
       concatEntries.push(silence)
+      timelineCursor += trailingSilence
     }
+    timeline.push({
+      id: item.id,
+      speaker: item.speaker,
+      voice: item.voice,
+      text: item.text,
+      sourceStart: item.sourceStart,
+      sourceEnd: item.sourceEnd,
+      startTime,
+      endTime,
+      speechDuration,
+      trailingSilence,
+      nextStartTime: timelineCursor,
+      wav: item.wav,
+    })
   }
 
   const concatFile = join(workDir, 'concat.txt')
@@ -1127,6 +1170,8 @@ async function runSynth(config, args) {
     runFfmpeg(['-i', chapterWav, finalPath], `编码 ${config.tts.finalFormat}`)
   }
   manifest.output = finalPath
+  manifest.duration = probeAudioDurationSeconds(finalPath)
+  manifest.timeline = timeline
   const manifestPath = join(outDir, 'manifest.json')
   writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8')
 
