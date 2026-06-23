@@ -88,7 +88,6 @@ node offline-tts/scripts/tts-director.mjs \
   draft-script \
   --book-id 9679077f-2288-4bc7-9080-854784fc7f94 \
   --chapter 19 \
-  --limit 20000 \
   --batch-size 10 \
   --concurrency 3 \
   --out tmp/tts/yaodao/ch019-full/director-script.json
@@ -140,7 +139,6 @@ node offline-tts/scripts/tts-director.mjs \
   batch-pipeline \
   --book-id 9679077f-2288-4bc7-9080-854784fc7f94 \
   --chapters 1-293 \
-  --limit 20000 \
   --batch-size 10 \
   --director-concurrency 3 \
   --min-batch-size 6 \
@@ -156,6 +154,33 @@ node offline-tts/scripts/tts-director.mjs \
 - `--batch-size 10 --director-concurrency 3`：当前比高并发更稳。
 - `--tts-concurrency 4`：单章内 TTS 片段并发。
 - `--tts-chapters 2`：最多两章同时进入 TTS 阶段。
+- 不要在正式生产里使用 `--limit`。新版脚本默认处理整章；`--limit` 只用于小样调试，并且必须同时传 `--allow-partial`，否则脚本会拒绝生成部分章节音频。`synth` 也会默认拒绝部分章节脚本，调试合成 partial 脚本时同样需要传 `--allow-partial`。
+
+调试小样可以这样跑：
+
+```bash
+node offline-tts/scripts/tts-director.mjs \
+  --config ~/.novel_reader/tts-director.config.json \
+  draft-script \
+  --book-id 9679077f-2288-4bc7-9080-854784fc7f94 \
+  --chapter 19 \
+  --allow-partial \
+  --limit 2000 \
+  --batch-size 10 \
+  --concurrency 3 \
+  --out tmp/tts/yaodao/ch019-partial/director-script.json
+```
+
+调试小样合成时：
+
+```bash
+node offline-tts/scripts/tts-director.mjs \
+  --config ~/.novel_reader/tts-director.config.json \
+  synth \
+  --script tmp/tts/yaodao/ch019-partial/director-script.json \
+  --out-dir tmp/tts/yaodao/ch019-partial/audio \
+  --allow-partial
+```
 
 流水线行为：
 

@@ -58,6 +58,7 @@ public class NovelReaderTtsPlugin extends Plugin {
     private int nextPlaybackIndex = 0;
     private boolean prefetchedPlaybackActive = false;
     private boolean prefetchSynthesisBusy = false;
+    private PluginCall pendingPrefetchedPlaybackCall;
     private final List<PendingAction> pendingActions = new ArrayList<>();
     private final List<PrefetchItem> prefetchItems = new ArrayList<>();
     private final Map<String, Integer> synthesisIndexByUtteranceId = new HashMap<>();
@@ -256,13 +257,14 @@ public class NovelReaderTtsPlugin extends Plugin {
             nextSynthesisIndex = 0;
             nextPlaybackIndex = 0;
             prefetchedPlaybackActive = true;
+            pendingPrefetchedPlaybackCall = call;
             acquireSpeechWakeLock();
 
             File cacheDir = new File(getContext().getCacheDir(), "novel-reader-tts-prefetch");
             if (!cacheDir.exists() && !cacheDir.mkdirs()) {
                 prefetchedPlaybackActive = false;
                 releaseSpeechWakeLock();
-                call.reject("无法创建 TTS 预取缓存目录。");
+                rejectPendingPrefetchedPlaybackStart("无法创建 TTS 预取缓存目录。");
                 return;
             }
 
@@ -286,13 +288,12 @@ public class NovelReaderTtsPlugin extends Plugin {
             if (prefetchItems.isEmpty()) {
                 prefetchedPlaybackActive = false;
                 releaseSpeechWakeLock();
-                call.reject("Missing valid utterances.");
+                rejectPendingPrefetchedPlaybackStart("Missing valid utterances.");
                 return;
             }
 
             startPrefetchSynthesis();
             tryStartPrefetchedPlayback();
-            call.resolve();
         });
     }
 
@@ -592,8 +593,9 @@ public class NovelReaderTtsPlugin extends Plugin {
                 return true;
             });
             player.prepare();
-            notifyUtterance("utteranceStart", item.utteranceId, null);
             player.start();
+            resolvePendingPrefetchedPlaybackStart();
+            notifyUtterance("utteranceStart", item.utteranceId, null);
         } catch (IOException | IllegalStateException error) {
             releasePrefetchedPlayer(player);
             failPrefetchedPlayback(item.utteranceId, "TTS 预取音频播放失败。");
@@ -648,8 +650,9 @@ public class NovelReaderTtsPlugin extends Plugin {
     }
 
     private void failPrefetchedPlayback(String utteranceId, String message) {
-        stopPrefetchedPlayback();
+        stopPrefetchedPlayback(false);
         releaseSpeechWakeLock();
+        rejectPendingPrefetchedPlaybackStart(message);
         notifyUtterance("utteranceError", utteranceId, message);
     }
 
@@ -672,6 +675,13 @@ public class NovelReaderTtsPlugin extends Plugin {
     }
 
     private void stopPrefetchedPlayback() {
+        stopPrefetchedPlayback(true);
+    }
+
+    private void stopPrefetchedPlayback(boolean rejectPending) {
+        if (rejectPending) {
+            rejectPendingPrefetchedPlaybackStart("TTS 预取播放已停止。");
+        }
         prefetchedPlaybackActive = false;
         prefetchGeneration += 1;
         synthesisIndexByUtteranceId.clear();
@@ -693,6 +703,18 @@ public class NovelReaderTtsPlugin extends Plugin {
         nextSynthesisIndex = 0;
         nextPlaybackIndex = 0;
         prefetchSynthesisBusy = false;
+    }
+
+    private void resolvePendingPrefetchedPlaybackStart() {
+        if (pendingPrefetchedPlaybackCall == null) return;
+        pendingPrefetchedPlaybackCall.resolve();
+        pendingPrefetchedPlaybackCall = null;
+    }
+
+    private void rejectPendingPrefetchedPlaybackStart(String message) {
+        if (pendingPrefetchedPlaybackCall == null) return;
+        pendingPrefetchedPlaybackCall.reject(message);
+        pendingPrefetchedPlaybackCall = null;
     }
 
     private void acquireSpeechWakeLock() {

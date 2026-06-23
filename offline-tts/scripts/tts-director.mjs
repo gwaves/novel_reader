@@ -35,7 +35,8 @@ Novel Reader 离线多角色 TTS 导演脚本工具
   --book-id <id>               书籍 ID
   --chapter <number>           章节序号，从 1 开始
   --chapters <list>            batch-pipeline 章节列表，如 19,21-24
-  --limit <number>             本次交给模型处理的章节字数上限
+  --limit <number>             只处理章节前 N 个字符；仅用于调试，必须同时传 --allow-partial
+  --allow-partial              允许 draft-script/synth/batch-pipeline 处理非全章脚本
   --out <path>                 draft-script 输出路径
   --out-root <path>            batch-pipeline 输出根目录
   --script <path>              validate-script 输入路径
@@ -52,7 +53,7 @@ Novel Reader 离线多角色 TTS 导演脚本工具
   node offline-tts/scripts/tts-director.mjs --config offline-tts/config.example.json test-model
   node offline-tts/scripts/tts-director.mjs --config offline-tts/config.example.json list-books
   node offline-tts/scripts/tts-director.mjs --config offline-tts/config.example.json inspect-chapter --book-id <id> --chapter 1
-  node offline-tts/scripts/tts-director.mjs --config offline-tts/config.example.json draft-script --book-id <id> --chapter 1 --limit 2000 --out tmp/tts/ch001.script.json
+  node offline-tts/scripts/tts-director.mjs --config offline-tts/config.example.json draft-script --book-id <id> --chapter 1 --allow-partial --limit 2000 --out tmp/tts/ch001.script.json
   MIMO_API_KEY=... node offline-tts/scripts/tts-director.mjs --config offline-tts/config.example.json synth --script tmp/tts/ch001.script.json
 `)
 }
@@ -300,6 +301,39 @@ function getSafeSourceLimit(text, requestedLimit) {
     return Math.max(0, lastOpen)
   }
   return limit
+}
+
+function parseDraftLimit(args) {
+  if (args.limit === undefined) return null
+  const limit = Number(args.limit)
+  if (!Number.isInteger(limit) || limit < 100) {
+    throw new Error('--limit 必须是大于等于 100 的整数。')
+  }
+  return limit
+}
+
+function getDraftSourceLimit(chapter, requestedLimit, allowPartial) {
+  if (requestedLimit == null) return chapter.content.length
+  const safeLimit = getSafeSourceLimit(chapter.content, requestedLimit)
+  if (safeLimit < chapter.content.length && !allowPartial) {
+    throw new Error(
+      `--limit 会只生成章节前 ${safeLimit}/${chapter.content.length} 个字符的部分音频。正式生产请移除 --limit；调试时请显式添加 --allow-partial。`,
+    )
+  }
+  return safeLimit
+}
+
+function isPartialDirectorScript(script) {
+  const sourceLimit = Number(script?.source?.sourceLimit)
+  const chapterCharLength = Number(script?.source?.chapterCharLength)
+  return Number.isFinite(sourceLimit) && Number.isFinite(chapterCharLength) && sourceLimit < chapterCharLength
+}
+
+function assertFullDirectorScript(script, allowPartial) {
+  if (!isPartialDirectorScript(script) || allowPartial) return
+  throw new Error(
+    `导演脚本只覆盖章节前 ${script.source.sourceLimit}/${script.source.chapterCharLength} 个字符。正式生产请重新生成全章脚本；调试合成请显式添加 --allow-partial。`,
+  )
 }
 
 function isLikelyDialogueQuote(text) {
@@ -621,6 +655,7 @@ function buildDirectorScript({ config, book, chapter, preSegments, decisions, ch
       chapterIndex: chapter.chapter_index,
       chapterTitle: chapter.title,
       sourceLimit: preSegments.at(-1)?.sourceEnd ?? 0,
+      chapterCharLength: chapter.content.length,
     },
     segments,
   }
@@ -714,10 +749,7 @@ async function runDraftScript(config, args) {
     throw new Error('draft-script 需要 --book-id 和 --chapter。')
   }
 
-  const limit = args.limit ? Number(args.limit) : config.director.maxCharactersPerRequest
-  if (!Number.isInteger(limit) || limit < 100) {
-    throw new Error('--limit 必须是大于等于 100 的整数。')
-  }
+  const requestedLimit = parseDraftLimit(args)
   const batchSize = args['batch-size']
     ? Math.max(1, Math.floor(Number(args['batch-size'])))
     : config.director.segmentBatchSize
@@ -733,8 +765,9 @@ async function runDraftScript(config, args) {
 
   const { book, chapter } = getChapter(config, bookId, chapterIndex)
   const kgCandidates = getKgCharacterCandidates(config, bookId, chapterIndex)
-  const preSegments = preSegmentText(chapter.content, limit)
-  const sourceText = chapter.content.slice(0, limit)
+  const sourceLimit = getDraftSourceLimit(chapter, requestedLimit, args['allow-partial'] === true)
+  const preSegments = preSegmentText(chapter.content, sourceLimit)
+  const sourceText = chapter.content.slice(0, sourceLimit)
   const characterCandidates = filterVoiceCandidates(buildVoiceCandidates(config, kgCandidates), sourceText)
   const batches = []
   for (let start = 0; start < preSegments.length; start += batchSize) {
@@ -1060,6 +1093,7 @@ async function runSynth(config, args) {
   if (validation.errors.length) {
     throw new Error(`导演脚本校验失败，不能合成：${validation.errors[0]}`)
   }
+  assertFullDirectorScript(script, args['allow-partial'] === true)
 
   const outDir = args['out-dir'] ? resolve(args['out-dir']) : join(dirname(scriptPath), 'audio')
   const concurrency = args.concurrency
@@ -1211,7 +1245,7 @@ async function runBatchPipeline(config, args) {
     throw new Error('batch-pipeline 需要 --book-id 和 --chapters。')
   }
 
-  const limit = args.limit ? Number(args.limit) : config.director.maxCharactersPerRequest
+  const requestedLimit = parseDraftLimit(args)
   const initialBatchSize = args['batch-size']
     ? Math.max(1, Math.floor(Number(args['batch-size'])))
     : config.director.segmentBatchSize
@@ -1229,7 +1263,6 @@ async function runBatchPipeline(config, args) {
     : config.batchPipeline.ttsChapterConcurrency
 
   const resume = args.resume === true
-  if (!Number.isInteger(limit) || limit < 100) throw new Error('--limit 必须是大于等于 100 的整数。')
   if (!Number.isFinite(initialBatchSize) || initialBatchSize < 1) throw new Error('--batch-size 必须是大于等于 1 的整数。')
   if (!Number.isFinite(initialDirectorConcurrency) || initialDirectorConcurrency < 1) throw new Error('--director-concurrency 必须是大于等于 1 的整数。')
   if (!Number.isFinite(minBatchSize) || minBatchSize < 1) throw new Error('--min-batch-size 必须是大于等于 1 的整数。')
@@ -1278,6 +1311,7 @@ async function runBatchPipeline(config, args) {
         script: scriptPath,
         'out-dir': audioDir,
         concurrency: String(ttsConcurrency),
+        ...(args['allow-partial'] === true ? { 'allow-partial': true } : {}),
       })
       const elapsedSeconds = Math.round((Date.now() - started) / 1000)
       results.push({ chapterIndex, scriptPath, audioDir, elapsedSeconds, status: 'synthesized' })
@@ -1298,7 +1332,8 @@ async function runBatchPipeline(config, args) {
       try {
         const result = await runDraftScript(config, makeChapterArgs({
           'book-id': bookId,
-          limit: String(limit),
+          ...(requestedLimit == null ? {} : { limit: String(requestedLimit) }),
+          ...(args['allow-partial'] === true ? { 'allow-partial': true } : {}),
           'batch-size': String(adaptiveBatchSize),
           concurrency: String(adaptiveDirectorConcurrency),
         }, chapterIndex, scriptPath))
@@ -1357,7 +1392,7 @@ async function runBatchPipeline(config, args) {
     bookId,
     chapters,
     outRoot,
-    director: { limit, initialBatchSize, initialConcurrency: initialDirectorConcurrency, finalBatchSize: adaptiveBatchSize, finalConcurrency: adaptiveDirectorConcurrency, minBatchSize },
+    director: { limit: requestedLimit, allowPartial: args['allow-partial'] === true, initialBatchSize, initialConcurrency: initialDirectorConcurrency, finalBatchSize: adaptiveBatchSize, finalConcurrency: adaptiveDirectorConcurrency, minBatchSize },
     tts: { segmentConcurrency: ttsConcurrency, chapterConcurrency: ttsChapterConcurrency },
     results,
     audits,

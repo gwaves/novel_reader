@@ -28,7 +28,7 @@ import {
   type ReaderBackground,
   type LocalBook,
 } from './lib/localLibrary'
-import { createSpeechChapter, type SpeechChapter, type SpeechSegment } from './lib/speechSegments'
+import { createSpeechChapter, type SpeechSegment } from './lib/speechSegments'
 import { NovelReaderTts, type TtsVoice } from './lib/ttsPlugin'
 
 type Tab = 'library' | 'sync' | 'reader' | 'search'
@@ -46,52 +46,6 @@ type ChapterAudioTimelineItem = {
   endTime: number
   nextStartTime: number
   index: number
-}
-
-function createChapterAudioSpeechChapter(
-  chapter: MobileBookPackage['chapters'][number],
-  audioTimeline: MobileChapterAudioTimelineEntry[],
-): SpeechChapter {
-  const paragraphRanges: Array<{ paragraphIndex: number; start: number; end: number }> = []
-  let cursor = 0
-  chapter.content
-    .split(/\n+/)
-    .map((paragraph) => paragraph.trim())
-    .filter(Boolean)
-    .forEach((paragraph, paragraphIndex) => {
-      const start = chapter.content.indexOf(paragraph, cursor)
-      const safeStart = start >= 0 ? start : cursor
-      const end = safeStart + paragraph.length
-      paragraphRanges.push({ paragraphIndex, start: safeStart, end })
-      cursor = end
-    })
-
-  const segments = audioTimeline.map((entry, index) => {
-    const sourceStart = Math.max(0, Math.min(chapter.content.length, Math.floor(entry.sourceStart)))
-    const sourceEnd = Math.max(sourceStart, Math.min(chapter.content.length, Math.ceil(entry.sourceEnd)))
-    const paragraph = paragraphRanges.find((range) => sourceStart >= range.start && sourceStart <= range.end)
-    const text = chapter.content.slice(sourceStart, sourceEnd).replace(/\s+/g, ' ').trim() || entry.text
-    return {
-      id: `audio-${entry.id || index}`,
-      bookId: chapter.bookId,
-      chapterId: chapter.id,
-      chapterIndex: chapter.index,
-      paragraphIndex: paragraph?.paragraphIndex ?? 0,
-      sentenceIndex: index,
-      text,
-      startChar: sourceStart,
-      endChar: sourceEnd,
-    }
-  })
-
-  const paragraphs = Array.from(new Set(segments.map((segment) => segment.paragraphIndex)))
-    .sort((a, b) => a - b)
-    .map((paragraphIndex) => ({
-      paragraphIndex,
-      segments: segments.filter((segment) => segment.paragraphIndex === paragraphIndex),
-    }))
-
-  return { paragraphs, segments }
 }
 
 const TTS_RATE_PRESETS = [0.75, 1, 1.25, 1.5, 2, 3] as const
@@ -505,7 +459,6 @@ function App() {
   const [ttsStatusMessage, setTtsStatusMessage] = useState('')
   const [ttsSettingsMessage, setTtsSettingsMessage] = useState('')
   const [remoteChapterAudio, setRemoteChapterAudio] = useState<MobileChapterAudio[]>([])
-  const [activeChapterAudioTimeline, setActiveChapterAudioTimeline] = useState<MobileChapterAudioTimelineEntry[]>([])
   const [cachedChapterAudioCount, setCachedChapterAudioCount] = useState(0)
   const [cachedChapterAudioKeys, setCachedChapterAudioKeys] = useState<Record<string, string>>({})
   const [speechPlayback, setSpeechPlayback] = useState<SpeechPlaybackState>({ status: 'idle' })
@@ -543,13 +496,7 @@ function App() {
 
   const activeSummary = activeChapter ? activePackage?.summaries.find((summary) => summary.chapterId === activeChapter.id) : null
 
-  const localSpeechChapter = useMemo(() => (activeChapter ? createSpeechChapter(activeChapter) : null), [activeChapter])
-  const speechChapter = useMemo(() => {
-    if (activeChapter && ttsEngine === 'cloud-mp3' && activeChapterAudioTimeline.length) {
-      return createChapterAudioSpeechChapter(activeChapter, activeChapterAudioTimeline)
-    }
-    return localSpeechChapter
-  }, [activeChapter, activeChapterAudioTimeline, localSpeechChapter, ttsEngine])
+  const speechChapter = useMemo(() => (activeChapter ? createSpeechChapter(activeChapter) : null), [activeChapter])
 
   const activeChapterPosition = useMemo(() => {
     if (!activePackage || !activeChapterId) return -1
@@ -575,26 +522,6 @@ function App() {
   useEffect(() => {
     speechSegmentsRef.current = speechChapter?.segments ?? []
   }, [speechChapter])
-
-  useEffect(() => {
-    let cancelled = false
-
-    async function loadActiveChapterAudioTimeline() {
-      if (!activePackage || !activeChapter || ttsEngine !== 'cloud-mp3') {
-        setActiveChapterAudioTimeline([])
-        return
-      }
-      const cached = await getChapterAudioCache(activePackage.book.id, activeChapter.id).catch(() => null)
-      if (!cancelled) {
-        setActiveChapterAudioTimeline(cached?.timeline ?? [])
-      }
-    }
-
-    void loadActiveChapterAudioTimeline()
-    return () => {
-      cancelled = true
-    }
-  }, [activeChapter, activePackage, cachedChapterAudioKeys, ttsEngine])
 
   useEffect(() => {
     speechAutoFollowRef.current = ttsAutoFollow
@@ -1156,9 +1083,6 @@ function App() {
       timelineVersion: audio.timelineVersion,
       updatedAt: audio.updatedAt,
     })
-    if (audio.chapterId === activeChapterId) {
-      setActiveChapterAudioTimeline(audio.timeline)
-    }
     await refreshCachedChapterAudioState(audio.bookId)
   }
 
