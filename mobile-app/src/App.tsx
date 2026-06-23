@@ -1031,6 +1031,32 @@ function App() {
     return true
   }
 
+  async function openSystemTtsSettings() {
+    if (!Capacitor.isNativePlatform()) {
+      setTtsStatusMessage('系统语音设置只能在 Android App 中打开。')
+      return
+    }
+    try {
+      await NovelReaderTts.openTtsSettings()
+      setTtsStatusMessage('请在系统页面选择文字转语音引擎，然后返回本应用重新检测。')
+    } catch (error) {
+      setTtsStatusMessage(error instanceof Error ? error.message : '无法打开系统语音设置。')
+    }
+  }
+
+  async function openSystemTtsDataCheck() {
+    if (!Capacitor.isNativePlatform()) {
+      setTtsStatusMessage('系统语音检查只能在 Android App 中打开。')
+      return
+    }
+    try {
+      await NovelReaderTts.checkTtsData()
+      setTtsStatusMessage('请按系统提示安装或启用语音数据，然后返回本应用重新检测。')
+    } catch (error) {
+      setTtsStatusMessage(error instanceof Error ? error.message : '无法打开系统语音检查。')
+    }
+  }
+
   function saveCurrentSpeechProgress(segment: SpeechSegment, segmentIndex: number) {
     void saveSpeechProgress({
       bookId: segment.bookId,
@@ -1583,6 +1609,10 @@ ${context}
               <div className="button-row two">
                 <button type="button" onClick={() => void persistSettings()} disabled={isBusy}>保存配置</button>
                 <button type="button" onClick={() => void refreshTtsAvailability()} disabled={isBusy}>检测语音</button>
+              </div>
+              <div className="button-row two">
+                <button type="button" onClick={() => void openSystemTtsSettings()}>系统语音设置</button>
+                <button type="button" onClick={() => void openSystemTtsDataCheck()}>语音数据检查</button>
               </div>
               {ttsStatusMessage && <p className="muted">{ttsStatusMessage}</p>}
             </section>

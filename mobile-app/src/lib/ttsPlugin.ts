@@ -33,6 +33,8 @@ export type TtsUtteranceEvent = {
 
 export interface NovelReaderTtsPlugin {
   getAvailability(options: { locale: string }): Promise<TtsAvailability>
+  openTtsSettings(): Promise<void>
+  checkTtsData(): Promise<void>
   speak(request: SpeakRequest): Promise<void>
   stop(): Promise<void>
   setRate(options: { rate: number }): Promise<void>
@@ -44,4 +46,3 @@ export interface NovelReaderTtsPlugin {
 }
 
 export const NovelReaderTts = registerPlugin<NovelReaderTtsPlugin>('NovelReaderTts')
-

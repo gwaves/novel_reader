@@ -2,6 +2,7 @@ package com.gwaves.novelreader.mobile;
 
 import android.content.Intent;
 import android.content.pm.ResolveInfo;
+import android.provider.Settings;
 import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
@@ -61,6 +62,35 @@ public class NovelReaderTtsPlugin extends Plugin {
             }
             call.resolve(result);
         });
+    }
+
+    @PluginMethod
+    public void openTtsSettings(PluginCall call) {
+        Intent intent = new Intent("com.android.settings.TTS_SETTINGS");
+        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        try {
+            getContext().startActivity(intent);
+            call.resolve();
+        } catch (Exception error) {
+            try {
+                getContext().startActivity(new Intent(Settings.ACTION_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK));
+                call.resolve();
+            } catch (Exception fallbackError) {
+                call.reject("无法打开系统语音设置。");
+            }
+        }
+    }
+
+    @PluginMethod
+    public void checkTtsData(PluginCall call) {
+        Intent intent = new Intent(TextToSpeech.Engine.ACTION_CHECK_TTS_DATA);
+        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        try {
+            getContext().startActivity(intent);
+            call.resolve();
+        } catch (Exception error) {
+            call.reject("无法打开系统 TTS 数据检查页面。");
+        }
     }
 
     @PluginMethod
