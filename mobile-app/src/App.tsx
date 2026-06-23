@@ -36,6 +36,8 @@ type SpeechPlaybackState =
   | { status: 'paused'; segmentIndex: number; segmentId: string }
   | { status: 'error'; message: string }
 
+const TTS_RATE_PRESETS = [0.75, 1, 1.25, 1.5, 2, 3] as const
+
 type SearchResult = {
   chapterId: string
   chapterIndex: number
@@ -1753,9 +1755,21 @@ ${context}
               </label>
               <div className="settings-grid">
                 <label className="field">
-                  <span>语速</span>
+                  <span>语速 · {ttsRate.toFixed(ttsRate % 1 === 0 ? 0 : 2)}x</span>
+                  <div className="rate-preset-grid" role="group" aria-label="语音朗读倍速">
+                    {TTS_RATE_PRESETS.map((rate) => (
+                      <button
+                        type="button"
+                        className={Math.abs(ttsRate - rate) < 0.001 ? 'active' : ''}
+                        key={rate}
+                        onClick={() => void updateTtsSettings({ ...getCurrentTtsSettings(), rate })}
+                      >
+                        {rate}x
+                      </button>
+                    ))}
+                  </div>
                   <input
-                    max={2}
+                    max={3}
                     min={0.5}
                     step={0.05}
                     type="number"
@@ -1808,6 +1822,7 @@ ${context}
                 <div className="tts-secondary-actions">
                   <button type="button" onClick={() => void saveTtsSettingsFromPanel()} disabled={isBusy}>保存配置</button>
                   <button type="button" onClick={() => void openSystemTtsSettings()}>系统语音设置</button>
+                  <button type="button" onClick={() => void openSystemTtsDataCheck()}>安装语音包</button>
                 </div>
               </div>
               {(ttsSettingsMessage || ttsStatusMessage) && <p className="tts-status-note">{ttsSettingsMessage || ttsStatusMessage}</p>}

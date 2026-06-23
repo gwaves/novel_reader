@@ -438,6 +438,25 @@ button:disabled {
   color: var(--text);
 }
 
+.rate-preset-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.rate-preset-grid button {
+  min-height: 34px;
+  padding: 6px 8px;
+  border-radius: 7px;
+  font-size: 13px;
+}
+
+.rate-preset-grid button.active {
+  background: var(--primary);
+  border-color: var(--primary);
+  color: #fff;
+}
+
 .speech-status {
   margin: 0 0 12px;
 }

@@ -30,6 +30,10 @@ import java.util.Set;
 public class NovelReaderTtsPlugin extends Plugin {
     private static final String XIAOMI_TTS_ENGINE = "com.xiaomi.mibrain.speech";
     private static final long INIT_TIMEOUT_MS = 8000L;
+    private static final float MIN_SPEECH_RATE = 0.5f;
+    private static final float MAX_SPEECH_RATE = 3.0f;
+    private static final float MIN_SPEECH_PITCH = 0.5f;
+    private static final float MAX_SPEECH_PITCH = 2.0f;
 
     private TextToSpeech tts;
     private boolean initializing = false;
@@ -106,8 +110,8 @@ public class NovelReaderTtsPlugin extends Plugin {
             String utteranceId = call.getString("utteranceId", "");
             String localeTag = call.getString("locale", "zh-CN");
             String voiceId = call.getString("voiceId", "");
-            float rate = floatValue(call, "rate", 1.0f, 0.5f, 2.0f);
-            float pitch = floatValue(call, "pitch", 1.0f, 0.5f, 2.0f);
+            float rate = floatValue(call, "rate", 1.0f, MIN_SPEECH_RATE, MAX_SPEECH_RATE);
+            float pitch = floatValue(call, "pitch", 1.0f, MIN_SPEECH_PITCH, MAX_SPEECH_PITCH);
 
             if (text.trim().isEmpty()) {
                 call.reject("Missing text.");
@@ -142,8 +146,8 @@ public class NovelReaderTtsPlugin extends Plugin {
             JSArray utterances = call.getArray("utterances");
             String localeTag = call.getString("locale", "zh-CN");
             String voiceId = call.getString("voiceId", "");
-            float rate = floatValue(call, "rate", 1.0f, 0.5f, 2.0f);
-            float pitch = floatValue(call, "pitch", 1.0f, 0.5f, 2.0f);
+            float rate = floatValue(call, "rate", 1.0f, MIN_SPEECH_RATE, MAX_SPEECH_RATE);
+            float pitch = floatValue(call, "pitch", 1.0f, MIN_SPEECH_PITCH, MAX_SPEECH_PITCH);
 
             if (utterances == null || utterances.length() == 0) {
                 call.reject("Missing utterances.");
@@ -203,7 +207,7 @@ public class NovelReaderTtsPlugin extends Plugin {
     @PluginMethod
     public void setRate(PluginCall call) {
         ensureTts(call, () -> {
-            tts.setSpeechRate(floatValue(call, "rate", 1.0f, 0.5f, 2.0f));
+            tts.setSpeechRate(floatValue(call, "rate", 1.0f, MIN_SPEECH_RATE, MAX_SPEECH_RATE));
             call.resolve();
         });
     }
@@ -211,7 +215,7 @@ public class NovelReaderTtsPlugin extends Plugin {
     @PluginMethod
     public void setPitch(PluginCall call) {
         ensureTts(call, () -> {
-            tts.setPitch(floatValue(call, "pitch", 1.0f, 0.5f, 2.0f));
+            tts.setPitch(floatValue(call, "pitch", 1.0f, MIN_SPEECH_PITCH, MAX_SPEECH_PITCH));
             call.resolve();
         });
     }

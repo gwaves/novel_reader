@@ -187,7 +187,7 @@ function sanitizeSettings(settings: Partial<MobileAppSettings> | undefined): Mob
           : DEFAULT_SETTINGS.tts.voiceId,
       rate:
         typeof settings?.tts?.rate === 'number' && Number.isFinite(settings.tts.rate)
-          ? Math.max(0.5, Math.min(2, settings.tts.rate))
+          ? Math.max(0.5, Math.min(3, settings.tts.rate))
           : DEFAULT_SETTINGS.tts.rate,
       pitch:
         typeof settings?.tts?.pitch === 'number' && Number.isFinite(settings.tts.pitch)
