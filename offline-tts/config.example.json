@@ -23,7 +23,9 @@
     "concurrency": 10
   },
   "batchPipeline": {
-    "ttsChapterConcurrency": 2
+    "ttsChapterConcurrency": 2,
+    "minBatchSize": 6,
+    "maxDraftAttempts": 3
   },
   "voices": {
     "characters": [

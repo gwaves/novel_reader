@@ -25,6 +25,7 @@ Novel Reader 离线多角色 TTS 导演脚本工具
   list-books                   列出主数据库中的书籍
   inspect-chapter              查看章节元信息与正文预览
   draft-script                 调用模型生成导演脚本 JSON
+  audit-script                 生成导演脚本质量报告
   validate-script              校验已有导演脚本 JSON
   synth                        按导演脚本调用 MIMO TTS，输出 MP3
   batch-pipeline               按流水线批量生成多章音频：LLM 串行，TTS 并行
@@ -39,9 +40,11 @@ Novel Reader 离线多角色 TTS 导演脚本工具
   --out-root <path>            batch-pipeline 输出根目录
   --script <path>              validate-script 输入路径
   --out-dir <path>             synth 输出目录，默认与脚本同目录下的 audio/
+  --resume                     batch-pipeline 断点续跑，跳过已完成脚本或 MP3
   --concurrency <number>       draft-script 的 LLM 并发数，或 synth 的 TTS 并发数，覆盖配置文件
   --batch-size <number>        draft-script 每批提交给模型的预切分片段数
   --director-concurrency <n>   batch-pipeline 单章 LLM 批次并发，默认取 director.concurrency
+  --min-batch-size <number>    batch-pipeline LLM 失败降级后的最小批大小，默认 6
   --tts-concurrency <number>   batch-pipeline 单章 TTS 片段并发，默认取 tts.concurrency
   --tts-chapters <number>      batch-pipeline 同时进行 TTS 的章节数，默认 2
 
@@ -138,6 +141,8 @@ function loadConfig(configPath) {
     },
     batchPipeline: {
       ttsChapterConcurrency: Math.max(1, Math.floor(finiteNumber(config.batchPipeline?.ttsChapterConcurrency, 2))),
+      minBatchSize: Math.max(1, Math.floor(finiteNumber(config.batchPipeline?.minBatchSize, 6))),
+      maxDraftAttempts: Math.max(1, Math.floor(finiteNumber(config.batchPipeline?.maxDraftAttempts, 3))),
     },
     voices: {
       characters: Array.isArray(config.voices?.characters) ? config.voices.characters : [],
@@ -484,14 +489,24 @@ function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms))
 }
 
-async function callOpenAICompatibleWithRetry(config, messages, label, maxAttempts = 3) {
+async function callOpenAICompatibleWithRetry(config, messages, label, maxAttempts = 3, stats = null) {
   let lastError = null
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    if (stats) stats.attempts += 1
     try {
       return await callOpenAICompatible(config, messages)
     } catch (error) {
       lastError = error
+      if (stats) {
+        stats.failures += 1
+        stats.errors.push({
+          label,
+          attempt,
+          message: error.message.split('\n')[0],
+        })
+      }
       if (attempt >= maxAttempts) break
+      if (stats) stats.retries += 1
       const delayMs = 1000 * attempt
       console.warn(`⚠️  ${label} 第 ${attempt} 次失败：${error.message.split('\n')[0]}，${delayMs}ms 后重试。`)
       await sleep(delayMs)
@@ -672,7 +687,7 @@ function validateDirectorScript(script, preSegments = null) {
   return { errors, warnings }
 }
 
-function diagnosticsFor({ config, preSegments, kgCandidates, characterCandidates, validation, batchSize, directorConcurrency }) {
+function diagnosticsFor({ config, preSegments, kgCandidates, characterCandidates, validation, batchSize, directorConcurrency, llmBatchStats = null }) {
   return {
     generatedAt: new Date().toISOString(),
     configPath: config.configPath,
@@ -686,6 +701,7 @@ function diagnosticsFor({ config, preSegments, kgCandidates, characterCandidates
     directorConcurrency,
     kgCandidateCount: kgCandidates.length,
     characterCandidateCount: characterCandidates.length,
+    llmBatchStats,
     validationErrors: validation.errors,
     validationWarnings: validation.warnings,
   }
@@ -729,6 +745,7 @@ async function runDraftScript(config, args) {
     })
   }
   const batchResults = new Array(batches.length)
+  const llmBatchStats = { attempts: 0, retries: 0, failures: 0, errors: [] }
   console.log(`🚀 导演脚本 LLM 并发：${directorConcurrency}，批次：${batches.length}`)
   await runConcurrent(batches, directorConcurrency, async (batchInfo) => {
     const currentBatch = batchInfo.index + 1
@@ -738,7 +755,7 @@ async function runDraftScript(config, args) {
     const batchDecisions = await callOpenAICompatibleWithRetry(config, [
       { role: 'system', content: '你只输出严格 JSON，不输出 Markdown，不输出思考过程。' },
       { role: 'user', content: prompt },
-    ], `第 ${currentBatch} 批导演判定`)
+    ], `第 ${currentBatch} 批导演判定`, 3, llmBatchStats)
     if (!Array.isArray(batchDecisions?.decisions)) {
       throw new Error(`第 ${currentBatch} 批模型输出缺少 decisions 数组。`)
     }
@@ -749,7 +766,7 @@ async function runDraftScript(config, args) {
   const decisions = { decisions: allDecisions }
   const script = buildDirectorScript({ config, book, chapter, preSegments, decisions, characterCandidates })
   const validation = validateDirectorScript(script, preSegments)
-  script.diagnostics = diagnosticsFor({ config, preSegments, kgCandidates, characterCandidates, validation, batchSize, directorConcurrency })
+  script.diagnostics = diagnosticsFor({ config, preSegments, kgCandidates, characterCandidates, validation, batchSize, directorConcurrency, llmBatchStats })
 
   const outputPath = args.out
     ? resolve(args.out)
@@ -768,6 +785,7 @@ async function runDraftScript(config, args) {
   console.log(`   校验错误：${validation.errors.length}`)
   console.log(`   校验警告：${validation.warnings.length}`)
   for (const error of validation.errors.slice(0, 8)) console.log(`   - ${error}`)
+  return { book, chapter, script, outputPath, diagnosticsPath, validation, batchSize, directorConcurrency, llmBatchStats }
 }
 
 function safeFilePart(value) {
@@ -809,6 +827,111 @@ function makeChapterArgs(baseArgs, chapterIndex, scriptPath = null, audioDir = n
   return args
 }
 
+function editDistance(a, b) {
+  const left = Array.from(String(a || ''))
+  const right = Array.from(String(b || ''))
+  const dp = Array.from({ length: left.length + 1 }, () => Array(right.length + 1).fill(0))
+  for (let i = 0; i <= left.length; i += 1) dp[i][0] = i
+  for (let j = 0; j <= right.length; j += 1) dp[0][j] = j
+  for (let i = 1; i <= left.length; i += 1) {
+    for (let j = 1; j <= right.length; j += 1) {
+      dp[i][j] = Math.min(
+        dp[i - 1][j] + 1,
+        dp[i][j - 1] + 1,
+        dp[i - 1][j - 1] + (left[i - 1] === right[j - 1] ? 0 : 1),
+      )
+    }
+  }
+  return dp[left.length][right.length]
+}
+
+function auditDirectorScript(config, script) {
+  const chapterIndex = Number(script?.source?.chapterIndex)
+  const bookId = script?.source?.bookId
+  const kgCandidates = bookId && Number.isInteger(chapterIndex)
+    ? getKgCharacterCandidates(config, bookId, chapterIndex)
+    : []
+  const candidates = buildVoiceCandidates(config, kgCandidates)
+  const canonicalNames = new Set(candidates.map(candidate => candidate.name).filter(Boolean))
+  const aliasToName = new Map()
+  for (const candidate of candidates) {
+    for (const alias of candidate.aliases || []) {
+      if (alias && !aliasToName.has(alias)) aliasToName.set(alias, candidate.name)
+    }
+  }
+
+  const speakerCounts = {}
+  const defaultVoiceSegments = []
+  const unknownSegments = []
+  const aliasSpeakers = []
+  const suspiciousSpeakers = []
+  const seenSuspicious = new Set()
+
+  for (const segment of script.segments || []) {
+    speakerCounts[segment.speaker] = (speakerCounts[segment.speaker] || 0) + 1
+    if (segment.speaker === '未知角色') unknownSegments.push(segment.id)
+    if (segment.type !== 'narration' && !segment.voice) defaultVoiceSegments.push(segment.id)
+    if (segment.speaker && aliasToName.has(segment.speaker)) {
+      aliasSpeakers.push({ speaker: segment.speaker, canonical: aliasToName.get(segment.speaker), segmentId: segment.id })
+    }
+    if (
+      segment.speaker &&
+      segment.speaker !== '旁白' &&
+      segment.speaker !== '未知角色' &&
+      !canonicalNames.has(segment.speaker) &&
+      !aliasToName.has(segment.speaker)
+    ) {
+      let best = null
+      for (const name of canonicalNames) {
+        const distance = editDistance(segment.speaker, name)
+        if (!best || distance < best.distance) best = { name, distance }
+      }
+      const key = `${segment.speaker}:${best?.name || ''}`
+      if (best && best.distance <= 2 && !seenSuspicious.has(key)) {
+        suspiciousSpeakers.push({ speaker: segment.speaker, maybe: best.name, distance: best.distance, segmentId: segment.id })
+        seenSuspicious.add(key)
+      }
+    }
+  }
+
+  const total = script.segments?.length || 0
+  const warnings = []
+  if (unknownSegments.length) warnings.push(`未知角色 ${unknownSegments.length}/${total}`)
+  if (defaultVoiceSegments.length) warnings.push(`默认音色角色片段 ${defaultVoiceSegments.length}/${total}`)
+  if (aliasSpeakers.length) warnings.push(`speaker 使用别名 ${aliasSpeakers.length} 处`)
+  if (suspiciousSpeakers.length) warnings.push(`疑似错别字 speaker ${suspiciousSpeakers.length} 个`)
+
+  return {
+    kind: 'novel-reader-tts-director-audit',
+    generatedAt: new Date().toISOString(),
+    source: script.source,
+    segmentCount: total,
+    speakerCounts,
+    unknown: {
+      count: unknownSegments.length,
+      ratio: total ? unknownSegments.length / total : 0,
+      sampleSegmentIds: unknownSegments.slice(0, 20),
+    },
+    defaultVoice: {
+      count: defaultVoiceSegments.length,
+      ratio: total ? defaultVoiceSegments.length / total : 0,
+      sampleSegmentIds: defaultVoiceSegments.slice(0, 20),
+    },
+    aliasSpeakers: aliasSpeakers.slice(0, 50),
+    suspiciousSpeakers,
+    warnings,
+  }
+}
+
+function writeAuditReport(config, scriptPath, script) {
+  const audit = auditDirectorScript(config, script)
+  const auditPath = scriptPath.replace(/\.json$/i, '.audit.json')
+  writeFileSync(auditPath, `${JSON.stringify(audit, null, 2)}\n`, 'utf8')
+  console.log(`🩺 脚本质检：未知角色 ${audit.unknown.count}，默认音色 ${audit.defaultVoice.count}，疑似错别字 ${audit.suspiciousSpeakers.length}`)
+  console.log(`   质检文件：${auditPath}`)
+  return { audit, auditPath }
+}
+
 async function runValidateScript(args) {
   const scriptPath = args.script ? resolve(args.script) : null
   if (!scriptPath) throw new Error('validate-script 需要 --script。')
@@ -820,6 +943,20 @@ async function runValidateScript(args) {
   for (const error of validation.errors) console.log(`- ${error}`)
   for (const warning of validation.warnings) console.log(`- ${warning}`)
   if (validation.errors.length) process.exitCode = 1
+}
+
+async function runAuditScript(config, args) {
+  const scriptPath = args.script ? resolve(args.script) : null
+  if (!scriptPath) throw new Error('audit-script 需要 --script。')
+  const script = JSON.parse(readFileSync(scriptPath, 'utf8'))
+  const { audit } = writeAuditReport(config, scriptPath, script)
+  console.log(JSON.stringify({
+    segmentCount: audit.segmentCount,
+    unknown: audit.unknown,
+    defaultVoice: audit.defaultVoice,
+    suspiciousSpeakers: audit.suspiciousSpeakers,
+    warnings: audit.warnings,
+  }, null, 2))
 }
 
 function segmentCacheKey(segment) {
@@ -1000,6 +1137,28 @@ async function runSynth(config, args) {
   }
 }
 
+function getChapterOutputPaths(outRoot, chapterIndex, finalFormat = 'mp3') {
+  const chapterDir = join(outRoot, `ch${String(chapterIndex).padStart(3, '0')}-full`)
+  return {
+    chapterDir,
+    scriptPath: join(chapterDir, 'director-script.json'),
+    audioDir: join(chapterDir, 'audio'),
+    finalAudioPath: join(chapterDir, 'audio', `chapter.${finalFormat}`),
+  }
+}
+
+function loadValidScript(scriptPath) {
+  if (!existsSync(scriptPath)) return null
+  try {
+    const script = JSON.parse(readFileSync(scriptPath, 'utf8'))
+    const validation = validateDirectorScript(script)
+    if (validation.errors.length) return null
+    return { script, validation }
+  } catch {
+    return null
+  }
+}
+
 async function runBatchPipeline(config, args) {
   const bookId = args['book-id']
   const chapters = parseChapterList(args.chapters)
@@ -1008,12 +1167,15 @@ async function runBatchPipeline(config, args) {
   }
 
   const limit = args.limit ? Number(args.limit) : config.director.maxCharactersPerRequest
-  const batchSize = args['batch-size']
+  const initialBatchSize = args['batch-size']
     ? Math.max(1, Math.floor(Number(args['batch-size'])))
     : config.director.segmentBatchSize
-  const directorConcurrency = args['director-concurrency']
+  const initialDirectorConcurrency = args['director-concurrency']
     ? Math.max(1, Math.floor(Number(args['director-concurrency'])))
     : config.director.concurrency
+  const minBatchSize = args['min-batch-size']
+    ? Math.max(1, Math.floor(Number(args['min-batch-size'])))
+    : config.batchPipeline.minBatchSize
   const ttsConcurrency = args['tts-concurrency']
     ? Math.max(1, Math.floor(Number(args['tts-concurrency'])))
     : config.tts.concurrency
@@ -1021,9 +1183,11 @@ async function runBatchPipeline(config, args) {
     ? Math.max(1, Math.floor(Number(args['tts-chapters'])))
     : config.batchPipeline.ttsChapterConcurrency
 
+  const resume = args.resume === true
   if (!Number.isInteger(limit) || limit < 100) throw new Error('--limit 必须是大于等于 100 的整数。')
-  if (!Number.isFinite(batchSize) || batchSize < 1) throw new Error('--batch-size 必须是大于等于 1 的整数。')
-  if (!Number.isFinite(directorConcurrency) || directorConcurrency < 1) throw new Error('--director-concurrency 必须是大于等于 1 的整数。')
+  if (!Number.isFinite(initialBatchSize) || initialBatchSize < 1) throw new Error('--batch-size 必须是大于等于 1 的整数。')
+  if (!Number.isFinite(initialDirectorConcurrency) || initialDirectorConcurrency < 1) throw new Error('--director-concurrency 必须是大于等于 1 的整数。')
+  if (!Number.isFinite(minBatchSize) || minBatchSize < 1) throw new Error('--min-batch-size 必须是大于等于 1 的整数。')
   if (!Number.isFinite(ttsConcurrency) || ttsConcurrency < 1) throw new Error('--tts-concurrency 必须是大于等于 1 的整数。')
   if (!Number.isFinite(ttsChapterConcurrency) || ttsChapterConcurrency < 1) throw new Error('--tts-chapters 必须是大于等于 1 的整数。')
 
@@ -1033,13 +1197,17 @@ async function runBatchPipeline(config, args) {
     : resolve(`tmp/tts/${safeFilePart(firstChapter.book.title)}`)
   const startedAt = Date.now()
   const results = []
+  const audits = []
   const synthPromises = []
   let activeSynthCount = 0
   const synthQueue = []
+  let adaptiveBatchSize = initialBatchSize
+  let adaptiveDirectorConcurrency = initialDirectorConcurrency
 
   console.log(`🚂 批量流水线启动：章节 ${chapters.join(', ')}`)
-  console.log(`   LLM 阶段：章节串行，单章批次并发 ${directorConcurrency}，batchSize ${batchSize}`)
+  console.log(`   LLM 阶段：章节串行，单章批次并发 ${initialDirectorConcurrency}，batchSize ${initialBatchSize}`)
   console.log(`   TTS 阶段：章节并发 ${ttsChapterConcurrency}，单章片段并发 ${ttsConcurrency}`)
+  if (resume) console.log('   断点续跑：已完成 MP3 会跳过，已通过校验脚本会复用。')
 
   const acquireSynthSlot = async () => {
     if (activeSynthCount < ttsChapterConcurrency) {
@@ -1067,32 +1235,67 @@ async function runBatchPipeline(config, args) {
         concurrency: String(ttsConcurrency),
       })
       const elapsedSeconds = Math.round((Date.now() - started) / 1000)
-      results.push({ chapterIndex, scriptPath, audioDir, elapsedSeconds })
+      results.push({ chapterIndex, scriptPath, audioDir, elapsedSeconds, status: 'synthesized' })
       console.log(`✅ 第 ${chapterIndex} 章 TTS 完成，用时 ${elapsedSeconds}s`)
       return { ok: true }
     })()
       .catch(error => {
-      error.message = `第 ${chapterIndex} 章 TTS 失败：${error.message}`
-      return { ok: false, error }
-    })
+        error.message = `第 ${chapterIndex} 章 TTS 失败：${error.message}`
+        return { ok: false, error }
+      })
       .finally(releaseSynthSlot)
     synthPromises.push(synthPromise)
   }
 
+  const draftWithFallback = async (chapterIndex, scriptPath) => {
+    let lastError = null
+    for (let attempt = 1; attempt <= config.batchPipeline.maxDraftAttempts; attempt += 1) {
+      try {
+        const result = await runDraftScript(config, makeChapterArgs({
+          'book-id': bookId,
+          limit: String(limit),
+          'batch-size': String(adaptiveBatchSize),
+          concurrency: String(adaptiveDirectorConcurrency),
+        }, chapterIndex, scriptPath))
+        if (result.validation.errors.length) {
+          throw new Error(`导演脚本校验失败：${result.validation.errors[0]}`)
+        }
+        return result
+      } catch (error) {
+        lastError = error
+        if (attempt >= config.batchPipeline.maxDraftAttempts) break
+        adaptiveBatchSize = Math.max(minBatchSize, Math.floor(adaptiveBatchSize * 0.7))
+        adaptiveDirectorConcurrency = Math.max(1, adaptiveDirectorConcurrency - 1)
+        console.warn(`⚠️  第 ${chapterIndex} 章 LLM 失败：${error.message.split('\n')[0]}`)
+        console.warn(`   降级重试 ${attempt + 1}/${config.batchPipeline.maxDraftAttempts}：batchSize=${adaptiveBatchSize}, concurrency=${adaptiveDirectorConcurrency}`)
+      }
+    }
+    throw lastError
+  }
+
   for (const chapterIndex of chapters) {
-    const chapterDir = join(outRoot, `ch${String(chapterIndex).padStart(3, '0')}-full`)
-    const scriptPath = join(chapterDir, 'director-script.json')
-    const audioDir = join(chapterDir, 'audio')
-    const draftStarted = Date.now()
-    console.log(`\n🎬 第 ${chapterIndex} 章进入 LLM 阶段`)
-    await runDraftScript(config, makeChapterArgs({
-      'book-id': bookId,
-      limit: String(limit),
-      'batch-size': String(batchSize),
-      concurrency: String(directorConcurrency),
-    }, chapterIndex, scriptPath))
-    const draftElapsed = Math.round((Date.now() - draftStarted) / 1000)
-    console.log(`✅ 第 ${chapterIndex} 章 LLM 阶段完成，用时 ${draftElapsed}s，进入 TTS 阶段`)
+    const { scriptPath, audioDir, finalAudioPath } = getChapterOutputPaths(outRoot, chapterIndex, config.tts.finalFormat)
+    if (resume && existsSync(finalAudioPath)) {
+      console.log(`⏭️  第 ${chapterIndex} 章已存在 MP3，跳过：${finalAudioPath}`)
+      results.push({ chapterIndex, scriptPath, audioDir, status: 'skipped-audio-exists', elapsedSeconds: 0 })
+      continue
+    }
+
+    let script = null
+    const existing = resume ? loadValidScript(scriptPath) : null
+    if (existing) {
+      script = existing.script
+      console.log(`♻️  第 ${chapterIndex} 章复用已有导演脚本：${scriptPath}`)
+    } else {
+      const draftStarted = Date.now()
+      console.log(`\n🎬 第 ${chapterIndex} 章进入 LLM 阶段`)
+      const draftResult = await draftWithFallback(chapterIndex, scriptPath)
+      script = draftResult.script
+      const draftElapsed = Math.round((Date.now() - draftStarted) / 1000)
+      console.log(`✅ 第 ${chapterIndex} 章 LLM 阶段完成，用时 ${draftElapsed}s，进入 TTS 阶段`)
+    }
+    const auditResult = writeAuditReport(config, scriptPath, script)
+    audits.push({ chapterIndex, auditPath: auditResult.auditPath, warnings: auditResult.audit.warnings })
     launchSynth(chapterIndex, scriptPath, audioDir)
   }
 
@@ -1109,9 +1312,10 @@ async function runBatchPipeline(config, args) {
     bookId,
     chapters,
     outRoot,
-    director: { limit, batchSize, concurrency: directorConcurrency },
+    director: { limit, initialBatchSize, initialConcurrency: initialDirectorConcurrency, finalBatchSize: adaptiveBatchSize, finalConcurrency: adaptiveDirectorConcurrency, minBatchSize },
     tts: { segmentConcurrency: ttsConcurrency, chapterConcurrency: ttsChapterConcurrency },
     results,
+    audits,
   }
   const summaryPath = join(outRoot, `batch-pipeline-${chapters[0]}-${chapters.at(-1)}.summary.json`)
   writeFileSync(summaryPath, `${JSON.stringify(summary, null, 2)}\n`, 'utf8')
@@ -1207,6 +1411,11 @@ async function main() {
 
   if (command === 'validate-script') {
     await runValidateScript(args)
+    return
+  }
+
+  if (command === 'audit-script') {
+    await runAuditScript(config, args)
     return
   }
 

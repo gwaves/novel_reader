@@ -98,14 +98,30 @@ node offline-tts/scripts/tts-director.mjs batch-pipeline \
   --book-id 9679077f-2288-4bc7-9080-854784fc7f94 \
   --chapters 19,21-24 \
   --limit 20000 \
-  --batch-size 30 \
-  --director-concurrency 10 \
-  --tts-concurrency 3 \
+  --batch-size 10 \
+  --director-concurrency 3 \
+  --min-batch-size 6 \
+  --tts-concurrency 4 \
   --tts-chapters 2 \
+  --resume \
   --out-root tmp/tts/yaodao
 ```
 
 这个命令会让章节的 LLM 阶段串行执行；当前一章进入 TTS 阶段后，下一章会立刻开始生成导演脚本。TTS 阶段可按章节并发，默认最多同时合成 2 章。
+
+生产建议：
+
+- `--resume` 会跳过已完成的 `chapter.mp3`，并复用已通过校验的 `director-script.json`。
+- LLM 批次会自动重试；如果整章脚本生成失败，流水线会降低 batch size 和 LLM 并发后重试。
+- 每章会生成 `director-script.audit.json`，统计未知角色、默认音色、疑似错别字 speaker 和别名 speaker。
+- 当前实测更稳的 LLM 参数是 `--batch-size 10 --director-concurrency 3`；不要盲目提高到 10 并发。
+
+单独检查导演脚本质量：
+
+```bash
+node offline-tts/scripts/tts-director.mjs audit-script \
+  --script tmp/tts/yaodao/ch030-full/director-script.json
+```
 
 ## 边界
 

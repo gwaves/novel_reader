@@ -91,6 +91,12 @@ Novel Reader SQLite
 
 这比多个 agent 全量并发更稳定，也比完全串行更高效。
 
+生产模式继续增加了三类保护：
+
+- 断点续跑：`--resume` 会跳过已完成 MP3，复用已通过校验的导演脚本，TTS 继续复用已有片段 WAV 缓存。
+- 失败降级：LLM 批次会自动重试；整章脚本生成失败时，流水线会降低 batch size 和 LLM 并发后重跑该章，直到达到 `batchPipeline.maxDraftAttempts`。
+- 脚本质检：TTS 前生成 `director-script.audit.json`，统计未知角色、默认音色、疑似错别字 speaker 和别名 speaker，用于后续质量审计与角色音色补全。
+
 ## 导演脚本结构
 
 ```json
