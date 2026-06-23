@@ -18,6 +18,7 @@ import com.getcapacitor.PluginMethod;
 import com.getcapacitor.annotation.CapacitorPlugin;
 
 import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Set;
@@ -176,83 +177,102 @@ public class NovelReaderTtsPlugin extends Plugin {
             mainHandler = new Handler(Looper.getMainLooper());
         }
         getActivity().runOnUiThread(() -> {
-            String engine = resolveTtsEngine();
-            initTimeoutRunnable = () -> {
-                if (!initializing) return;
-                initializing = false;
-                ready = false;
-                rejectPending("系统 TTS 初始化超时，请在系统设置中选择默认文字转语音引擎。");
+            List<String> engines = resolveTtsEngines();
+            initializeEngine(engines, 0);
+        });
+    }
+
+    private void initializeEngine(List<String> engines, int index) {
+        if (index >= engines.size()) {
+            initializing = false;
+            ready = false;
+            rejectPending("系统 TTS 初始化失败：" + initStatus + "。请确认系统文字转语音引擎可播放示例语音。");
+            return;
+        }
+
+        String engine = engines.get(index);
+        initTimeoutRunnable = () -> {
+            if (!initializing) return;
+            if (tts != null) {
+                tts.shutdown();
+                tts = null;
+            }
+            initializeEngine(engines, index + 1);
+        };
+        mainHandler.postDelayed(initTimeoutRunnable, INIT_TIMEOUT_MS);
+
+        tts = new TextToSpeech(getContext().getApplicationContext(), status -> {
+            if (initTimeoutRunnable != null) {
+                mainHandler.removeCallbacks(initTimeoutRunnable);
+                initTimeoutRunnable = null;
+            }
+            initStatus = status;
+            ready = status == TextToSpeech.SUCCESS;
+
+            if (!ready) {
                 if (tts != null) {
                     tts.shutdown();
                     tts = null;
                 }
-            };
-            mainHandler.postDelayed(initTimeoutRunnable, INIT_TIMEOUT_MS);
+                initializeEngine(engines, index + 1);
+                return;
+            }
 
-            tts = new TextToSpeech(getContext().getApplicationContext(), status -> {
-                if (initTimeoutRunnable != null) {
-                    mainHandler.removeCallbacks(initTimeoutRunnable);
-                    initTimeoutRunnable = null;
-                }
-                initStatus = status;
-                ready = status == TextToSpeech.SUCCESS;
-                initializing = false;
-
-                if (ready) {
-                    tts.setOnUtteranceProgressListener(new UtteranceProgressListener() {
-                        @Override
-                        public void onStart(String utteranceId) {
-                            notifyUtterance("utteranceStart", utteranceId, null);
-                        }
-
-                        @Override
-                        public void onDone(String utteranceId) {
-                            notifyUtterance("utteranceDone", utteranceId, null);
-                        }
-
-                        @Override
-                        public void onError(String utteranceId) {
-                            notifyUtterance("utteranceError", utteranceId, "系统 TTS 朗读失败。");
-                        }
-
-                        @Override
-                        public void onError(String utteranceId, int errorCode) {
-                            notifyUtterance("utteranceError", utteranceId, "系统 TTS 朗读失败：" + errorCode);
-                        }
-                    });
+            initializing = false;
+            tts.setOnUtteranceProgressListener(new UtteranceProgressListener() {
+                @Override
+                public void onStart(String utteranceId) {
+                    notifyUtterance("utteranceStart", utteranceId, null);
                 }
 
-                List<PendingAction> actions = drainPendingActions();
-                for (PendingAction pending : actions) {
-                    if (ready) {
-                        pending.action.run();
-                    } else {
-                        pending.call.reject("系统 TTS 初始化失败：" + initStatus);
-                    }
+                @Override
+                public void onDone(String utteranceId) {
+                    notifyUtterance("utteranceDone", utteranceId, null);
                 }
-            }, engine);
-        });
+
+                @Override
+                public void onError(String utteranceId) {
+                    notifyUtterance("utteranceError", utteranceId, "系统 TTS 朗读失败。");
+                }
+
+                @Override
+                public void onError(String utteranceId, int errorCode) {
+                    notifyUtterance("utteranceError", utteranceId, "系统 TTS 朗读失败：" + errorCode);
+                }
+            });
+
+            List<PendingAction> actions = drainPendingActions();
+            for (PendingAction pending : actions) {
+                pending.action.run();
+            }
+        }, engine);
     }
 
-    private String resolveTtsEngine() {
-        if (tts != null && tts.getDefaultEngine() != null) {
-            return tts.getDefaultEngine();
+    private List<String> resolveTtsEngines() {
+        LinkedHashSet<String> engines = new LinkedHashSet<>();
+
+        String defaultEngine = Settings.Secure.getString(getContext().getContentResolver(), "tts_default_synth");
+        if (defaultEngine != null && !defaultEngine.trim().isEmpty()) {
+            engines.add(defaultEngine.trim());
         }
 
         Intent intent = new Intent(TextToSpeech.Engine.INTENT_ACTION_TTS_SERVICE);
         List<ResolveInfo> services = getContext().getPackageManager().queryIntentServices(intent, 0);
-        String firstEngine = null;
         for (ResolveInfo service : services) {
             if (service.serviceInfo == null || service.serviceInfo.packageName == null) continue;
-            String packageName = service.serviceInfo.packageName;
-            if (firstEngine == null) {
-                firstEngine = packageName;
-            }
-            if (XIAOMI_TTS_ENGINE.equals(packageName)) {
-                return packageName;
+            if (XIAOMI_TTS_ENGINE.equals(service.serviceInfo.packageName)) {
+                engines.add(service.serviceInfo.packageName);
             }
         }
-        return firstEngine;
+        for (ResolveInfo service : services) {
+            if (service.serviceInfo == null || service.serviceInfo.packageName == null) continue;
+            engines.add(service.serviceInfo.packageName);
+        }
+
+        if (engines.isEmpty()) {
+            engines.add(null);
+        }
+        return new ArrayList<>(engines);
     }
 
     private List<PendingAction> drainPendingActions() {
