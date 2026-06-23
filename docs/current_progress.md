@@ -2,6 +2,7 @@
 - Android App 高质量 MP3 播放方向已另立 `codex/mobile-mp3-playback` 分支开发：PC Web 端新增当前书“章节 MP3 目录”配置入口，本地服务持久化目录并通过 `/api/mobile/books/:bookId/audio` 暴露移动端音频清单。
 - PC 端章节 MP3 目录规范：推荐根目录直接放 `ch001.mp3`、`ch002.mp3`；兼容 `001-章节标题.mp3`；兼容现有 TTS 批量产物 `ch001/audio/chapter.mp3` 或 `ch001-full/audio/chapter.mp3`。
 - Android App 语音阅读新增播放引擎选择：可在“本地 TTS”和“云端 MP3”之间切换；同步页可刷新 PC 音频清单并下载当前章节 MP3 到 IndexedDB `chapterAudio` 缓存。
+- Android App 章节 MP3 下载 UI 已优化：按章节显示“已下载 / 未下载 / 需更新”状态，移除前 8 条截断，新增“全部下载”入口，可一次下载所有可下载但尚未缓存的章节，并在下载过程中显示章节进度。
 - Android MP3 播放已接入章节正文高亮/滚动：使用整章 MP3 播放，按语音片段文本长度估算时间轴，`timeupdate` 驱动当前片段高亮、自动滚动和独立语音进度保存。
 - 新增 `offline-tts/` 作为独立工作目录，集中放置多角色 TTS 的设计文档、开发计划、示例配置和 Node.js CLI 脚本。
 - 技术选型确定：主流程使用 Node.js，本地程序通过配置文件调用第三方 OpenAI-compatible 模型生成导演脚本 JSON；Codex 不参与批量大模型推理。

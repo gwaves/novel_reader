@@ -308,6 +308,9 @@ button:disabled {
 .audio-sync-list {
   display: grid;
   gap: 8px;
+  max-height: 48vh;
+  overflow: auto;
+  padding-right: 2px;
 }
 
 .audio-sync-row {
@@ -323,6 +326,16 @@ button:disabled {
   border-color: var(--primary);
 }
 
+.audio-sync-row.downloaded {
+  background: #f3faf7;
+  border-color: #cfe7dc;
+}
+
+.audio-sync-row.stale {
+  background: #fff8eb;
+  border-color: #ead5a7;
+}
+
 .audio-sync-row span:first-child {
   min-width: 0;
 }
@@ -334,6 +347,28 @@ button:disabled {
 
 .audio-sync-row small {
   color: var(--muted);
+}
+
+.audio-sync-state {
+  flex: 0 0 auto;
+  min-width: 56px;
+  border-radius: 999px;
+  padding: 4px 8px;
+  background: var(--surface-soft);
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+  text-align: center;
+}
+
+.audio-sync-row.downloaded .audio-sync-state {
+  background: #dcefe7;
+  color: var(--primary-strong);
+}
+
+.audio-sync-row.stale .audio-sync-state {
+  background: #f3dfb8;
+  color: #7a4f08;
 }
 
 .settings-grid {

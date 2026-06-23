@@ -451,6 +451,7 @@ function App() {
   const [ttsSettingsMessage, setTtsSettingsMessage] = useState('')
   const [remoteChapterAudio, setRemoteChapterAudio] = useState<MobileChapterAudio[]>([])
   const [cachedChapterAudioCount, setCachedChapterAudioCount] = useState(0)
+  const [cachedChapterAudioKeys, setCachedChapterAudioKeys] = useState<Record<string, string>>({})
   const [speechPlayback, setSpeechPlayback] = useState<SpeechPlaybackState>({ status: 'idle' })
   const [activeSpeechSegmentId, setActiveSpeechSegmentId] = useState<string | null>(null)
   const [speechAutoFollowSuspended, setSpeechAutoFollowSuspended] = useState(false)
@@ -538,6 +539,11 @@ function App() {
   const activeChapterAudio = useMemo(
     () => remoteChapterAudio.find((audio) => audio.chapterId === activeChapterId) ?? null,
     [activeChapterId, remoteChapterAudio],
+  )
+
+  const pendingChapterAudio = useMemo(
+    () => remoteChapterAudio.filter((audio) => cachedChapterAudioKeys[audio.chapterId] !== `${audio.id}:${audio.updatedAt}`),
+    [cachedChapterAudioKeys, remoteChapterAudio],
   )
 
   const graphResults = useMemo<GraphResult[]>(() => {
@@ -1032,8 +1038,7 @@ function App() {
     try {
       const audio = await client.listBookAudio(bookId)
       setRemoteChapterAudio(audio)
-      const cached = await listChapterAudioCache(bookId)
-      setCachedChapterAudioCount(cached.length)
+      await refreshCachedChapterAudioState(bookId)
       setSyncStatusMessage(audio.length ? `发现 ${audio.length} 个章节 MP3，可下载到本机。` : 'PC 端暂未匹配到章节 MP3，请先在 PC Web 端配置音频目录。')
     } catch (error) {
       setSyncStatusMessage(error instanceof Error ? error.message : '读取音频目录失败。')
@@ -1042,26 +1047,61 @@ function App() {
     }
   }
 
+  async function refreshCachedChapterAudioState(bookId = activePackage?.book.id) {
+    if (!bookId) return
+    const cached = await listChapterAudioCache(bookId)
+    setCachedChapterAudioCount(cached.length)
+    setCachedChapterAudioKeys(
+      Object.fromEntries(cached.map((item) => [item.chapterId, `${item.audioId}:${item.updatedAt}`])),
+    )
+  }
+
+  async function saveDownloadedChapterAudio(audio: MobileChapterAudio) {
+    const blob = await client.downloadAudio(audio)
+    await saveChapterAudioCache({
+      audioId: audio.id,
+      blob,
+      bookId: audio.bookId,
+      bytes: audio.bytes,
+      chapterId: audio.chapterId,
+      chapterIndex: audio.chapterIndex,
+      chapterTitle: audio.chapterTitle,
+      filename: audio.filename,
+      updatedAt: audio.updatedAt,
+    })
+    await refreshCachedChapterAudioState(audio.bookId)
+  }
+
   async function downloadChapterAudio(audio: MobileChapterAudio) {
     setIsBusy(true)
     setSyncStatusMessage(`正在下载第 ${audio.chapterIndex} 章 MP3（${formatBytes(audio.bytes)}）...`)
     try {
-      const blob = await client.downloadAudio(audio)
-      await saveChapterAudioCache({
-        audioId: audio.id,
-        blob,
-        bookId: audio.bookId,
-        bytes: audio.bytes,
-        chapterId: audio.chapterId,
-        chapterIndex: audio.chapterIndex,
-        chapterTitle: audio.chapterTitle,
-        filename: audio.filename,
-        updatedAt: audio.updatedAt,
-      })
-      setCachedChapterAudioCount((await listChapterAudioCache(audio.bookId)).length)
+      await saveDownloadedChapterAudio(audio)
       setSyncStatusMessage(`已缓存第 ${audio.chapterIndex} 章 MP3。`)
     } catch (error) {
       setSyncStatusMessage(error instanceof Error ? error.message : '下载章节 MP3 失败。')
+    } finally {
+      setIsBusy(false)
+    }
+  }
+
+  async function downloadPendingChapterAudio() {
+    const queue = pendingChapterAudio
+    if (!queue.length) {
+      setSyncStatusMessage('所有可用章节 MP3 都已下载。')
+      return
+    }
+
+    setIsBusy(true)
+    try {
+      for (let index = 0; index < queue.length; index += 1) {
+        const audio = queue[index]
+        setSyncStatusMessage(`正在下载章节 MP3：${index + 1}/${queue.length} · 第 ${audio.chapterIndex} 章（${formatBytes(audio.bytes)}）`)
+        await saveDownloadedChapterAudio(audio)
+      }
+      setSyncStatusMessage(`已下载 ${queue.length} 个章节 MP3。`)
+    } catch (error) {
+      setSyncStatusMessage(error instanceof Error ? error.message : '批量下载章节 MP3 失败。')
     } finally {
       setIsBusy(false)
     }
@@ -1081,7 +1121,7 @@ function App() {
     setActivePackage(pkg)
     setActiveChapterId(progressChapter)
     setRemoteChapterAudio([])
-    setCachedChapterAudioCount((await listChapterAudioCache(bookId)).length)
+    await refreshCachedChapterAudioState(bookId)
     pendingRestoreScrollRef.current = progress?.chapterId === progressChapter ? progress.scrollY : 0
     setMessage('')
     setTab('reader')
@@ -1498,6 +1538,12 @@ function App() {
     if (speechPlayback.status === 'checking') return '正在检测系统语音'
     if (speechPlayback.status === 'error') return speechPlayback.message
     return `本章 ${speechChapter?.segments.length ?? 0} 个朗读片段`
+  }
+
+  function getChapterAudioDownloadState(audio: MobileChapterAudio): 'downloaded' | 'missing' | 'stale' {
+    const cachedKey = cachedChapterAudioKeys[audio.chapterId]
+    if (!cachedKey) return 'missing'
+    return cachedKey === `${audio.id}:${audio.updatedAt}` ? 'downloaded' : 'stale'
   }
 
   function renderSpeechActions() {
@@ -2089,39 +2135,69 @@ ${context}
             <section className="settings-group">
               <h3>章节 MP3</h3>
               <p className="settings-note">PC Web 端为当前书配置音频目录后，可在这里同步到 Android 本机。</p>
-              <div className="button-row two">
+              <div className="button-row">
                 <button type="button" onClick={() => void refreshBookAudio()} disabled={isBusy || !activePackage || !baseUrl}>
                   刷新音频
                 </button>
                 <button
                   type="button"
-                  onClick={() => activeChapterAudio && void downloadChapterAudio(activeChapterAudio)}
-                  disabled={isBusy || !activeChapterAudio}
+                  onClick={() => void downloadPendingChapterAudio()}
+                  disabled={isBusy || pendingChapterAudio.length === 0}
                 >
-                  下载本章
+                  全部下载
+                </button>
+                <button
+                  type="button"
+                  onClick={() => activeChapterAudio && void downloadChapterAudio(activeChapterAudio)}
+                  disabled={
+                    isBusy ||
+                    !activeChapterAudio ||
+                    getChapterAudioDownloadState(activeChapterAudio) === 'downloaded'
+                  }
+                >
+                  {activeChapterAudio && getChapterAudioDownloadState(activeChapterAudio) === 'stale' ? '更新本章' : '下载本章'}
                 </button>
               </div>
               <p className="inline-status">
-                已缓存 {cachedChapterAudioCount} 章
-                {remoteChapterAudio.length ? ` · PC 可用 ${remoteChapterAudio.length} 章` : ' · 暂无 PC 音频清单'}
+                {remoteChapterAudio.length
+                  ? `已下载 ${remoteChapterAudio.length - pendingChapterAudio.length}/${remoteChapterAudio.length} 章`
+                  : `已缓存 ${cachedChapterAudioCount} 章 · 暂无 PC 音频清单`}
+                {remoteChapterAudio.length
+                  ? pendingChapterAudio.length ? ` · 可下载 ${pendingChapterAudio.length} 章` : ' · 全部已下载'
+                  : ''}
               </p>
               {remoteChapterAudio.length > 0 && (
                 <div className="audio-sync-list">
-                  {remoteChapterAudio.slice(0, 8).map((audio) => (
-                    <button
-                      className={audio.chapterId === activeChapterId ? 'audio-sync-row active' : 'audio-sync-row'}
-                      key={audio.id}
-                      type="button"
-                      onClick={() => void downloadChapterAudio(audio)}
-                      disabled={isBusy}
-                    >
-                      <span>
-                        <strong>{audio.chapterIndex}. {audio.chapterTitle}</strong>
-                        <small>{audio.filename} · {formatBytes(audio.bytes)}</small>
-                      </span>
-                      <span>下载</span>
-                    </button>
-                  ))}
+                  {remoteChapterAudio.map((audio) => {
+                    const downloadState = getChapterAudioDownloadState(audio)
+                    const isDownloaded = downloadState === 'downloaded'
+                    const isStale = downloadState === 'stale'
+
+                    return (
+                      <button
+                        className={[
+                          'audio-sync-row',
+                          audio.chapterId === activeChapterId ? 'active' : '',
+                          isDownloaded ? 'downloaded' : '',
+                          isStale ? 'stale' : '',
+                        ].filter(Boolean).join(' ')}
+                        key={audio.id}
+                        type="button"
+                        onClick={() => {
+                          if (!isDownloaded) void downloadChapterAudio(audio)
+                        }}
+                        disabled={isBusy || isDownloaded}
+                      >
+                        <span>
+                          <strong>{audio.chapterIndex}. {audio.chapterTitle}</strong>
+                          <small>{audio.filename} · {formatBytes(audio.bytes)}</small>
+                        </span>
+                        <span className="audio-sync-state">
+                          {isDownloaded ? '已下载' : isStale ? '需更新' : '未下载'}
+                        </span>
+                      </button>
+                    )
+                  })}
                 </div>
               )}
             </section>
