@@ -3036,22 +3036,51 @@ function normalizeMobileAudioTimelineEntry(entry) {
   }
 }
 
+function validateMobileAudioTimeline(timeline) {
+  if (!Array.isArray(timeline) || !timeline.length) return null
+  const epsilon = 0.001
+  const normalized = []
+  for (const entry of timeline) {
+    const item = normalizeMobileAudioTimelineEntry(entry)
+    if (!item) return null
+    const previous = normalized.at(-1)
+    if (
+      previous &&
+      (
+        item.sourceStart < previous.sourceEnd ||
+        item.startTime + epsilon < previous.nextStartTime ||
+        item.endTime + epsilon < item.startTime ||
+        item.nextStartTime + epsilon < item.endTime
+      )
+    ) {
+      return null
+    }
+    normalized.push(item)
+  }
+  return normalized
+}
+
 function readMobileAudioManifest(filePath) {
   const manifestPath = getMobileAudioManifestPath(filePath)
   if (!manifestPath || !existsSync(manifestPath)) return null
   try {
     const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'))
-    const timeline = Array.isArray(manifest.timeline)
-      ? manifest.timeline.map(normalizeMobileAudioTimelineEntry).filter(Boolean)
-      : []
-    if (!timeline.length) return null
+    if (
+      manifest.kind !== 'novel-reader-tts-audio-manifest' ||
+      manifest.version !== 2 ||
+      manifest.timelineVersion !== 1
+    ) {
+      return null
+    }
+    const timeline = validateMobileAudioTimeline(manifest.timeline)
+    if (!timeline) return null
     const manifestStats = statSync(manifestPath)
     return {
       duration: Number.isFinite(Number(manifest.duration)) ? Number(manifest.duration) : null,
       manifestPath,
       manifestUpdatedAt: manifestStats.mtime,
       timeline,
-      timelineVersion: Number.isFinite(Number(manifest.timelineVersion)) ? Number(manifest.timelineVersion) : 1,
+      timelineVersion: manifest.timelineVersion,
     }
   } catch {
     return null
