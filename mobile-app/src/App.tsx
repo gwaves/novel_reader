@@ -41,6 +41,7 @@ type SpeechPlaybackState =
   | { status: 'error'; message: string }
 
 const TTS_RATE_PRESETS = [0.75, 1, 1.25, 1.5, 2, 3] as const
+const TTS_PREFETCH_WINDOW = 8
 
 type SearchResult = {
   chapterId: string
@@ -1399,6 +1400,18 @@ function App() {
     saveCurrentSpeechProgress(segment, segmentIndex)
 
     try {
+      if (typeof NovelReaderTts.speakPrefetchedQueue === 'function') {
+        await NovelReaderTts.speakPrefetchedQueue({
+          locale: ttsLocale,
+          pitch: ttsPitch,
+          prefetchWindow: TTS_PREFETCH_WINDOW,
+          rate: ttsRate,
+          utterances,
+          voiceId: ttsVoiceId || undefined,
+        })
+        return
+      }
+
       await NovelReaderTts.speakQueue({
         locale: ttsLocale,
         pitch: ttsPitch,
@@ -1653,8 +1666,21 @@ function App() {
       )
       handles.push(
         await NovelReaderTts.addListener('utteranceDone', (event) => {
-          if (cancelled || event.utteranceId !== currentUtteranceIdRef.current) return
+          if (cancelled) return
           const current = speechPlaybackRef.current
+          const segmentIndex = speechUtteranceIndexRef.current.get(event.utteranceId)
+          if (segmentIndex != null && current.status === 'playing') {
+            const nextSegment = speechSegmentsRef.current[segmentIndex + 1]
+            if (nextSegment) {
+              setActiveSpeechSegmentId(nextSegment.id)
+              setSpeechPlayback({ status: 'playing', segmentIndex: segmentIndex + 1, segmentId: nextSegment.id })
+              scrollToSpeechSegment(nextSegment.id)
+              saveCurrentSpeechProgress(nextSegment, segmentIndex + 1)
+              return
+            }
+          }
+
+          if (event.utteranceId !== currentUtteranceIdRef.current) return
           if (current.status === 'playing') {
             currentUtteranceIdRef.current = null
             speechUtteranceIndexRef.current.clear()

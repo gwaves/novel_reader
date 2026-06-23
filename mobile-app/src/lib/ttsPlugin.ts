@@ -34,6 +34,10 @@ export type SpeakQueueRequest = {
   pitch: number
 }
 
+export type SpeakPrefetchedQueueRequest = SpeakQueueRequest & {
+  prefetchWindow?: number
+}
+
 export type TtsUtteranceEvent = {
   utteranceId: string
   error?: string
@@ -45,6 +49,7 @@ export interface NovelReaderTtsPlugin {
   checkTtsData(): Promise<void>
   speak(request: SpeakRequest): Promise<void>
   speakQueue(request: SpeakQueueRequest): Promise<void>
+  speakPrefetchedQueue(request: SpeakPrefetchedQueueRequest): Promise<void>
   stop(): Promise<void>
   setRate(options: { rate: number }): Promise<void>
   setPitch(options: { pitch: number }): Promise<void>
