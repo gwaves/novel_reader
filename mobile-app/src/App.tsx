@@ -1013,22 +1013,28 @@ function App() {
     }
 
     setTtsStatusMessage('正在检测系统语音引擎...')
-    const availability = await withTimeout(
-      NovelReaderTts.getAvailability({ locale: ttsLocale }),
-      10000,
-      '系统 TTS 检测超时，请在系统设置中选择默认文字转语音引擎。',
-    )
-    setTtsVoices(availability.voices)
-    if (!availability.available || !availability.languageAvailable) {
-      setTtsStatusMessage(availability.error || '当前系统 TTS 不可用，请检查系统语音设置。')
+    try {
+      const availability = await withTimeout(
+        NovelReaderTts.getAvailability({ locale: ttsLocale }),
+        10000,
+        '系统 TTS 检测超时，请在系统设置中选择默认文字转语音引擎。',
+      )
+      setTtsVoices(availability.voices)
+      if (!availability.available || !availability.languageAvailable) {
+        setTtsStatusMessage(availability.error || '当前系统 TTS 不可用，请检查系统语音设置。')
+        return false
+      }
+      setTtsStatusMessage(
+        availability.voices.length
+          ? `系统 TTS 可用，发现 ${availability.voices.length} 个 ${ttsLocale} 音色。`
+          : '系统 TTS 可用，将使用默认音色。',
+      )
+      return true
+    } catch (error) {
+      setTtsVoices([])
+      setTtsStatusMessage(error instanceof Error ? error.message : '系统 TTS 检测失败。')
       return false
     }
-    setTtsStatusMessage(
-      availability.voices.length
-        ? `系统 TTS 可用，发现 ${availability.voices.length} 个 ${ttsLocale} 音色。`
-        : '系统 TTS 可用，将使用默认音色。',
-    )
-    return true
   }
 
   async function openSystemTtsSettings() {
