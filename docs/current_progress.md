@@ -1,3 +1,14 @@
+2026-06-25 更新：Gateway 开始补齐开发期鉴权与受保护路由基础。
+- 新增 Gateway 结构化 HTTP 错误与 dev bearer token 鉴权模块，`GATEWAY_DEV_ACCESS_TOKEN` 可用于保护后续移动端数据、AI 和音频接口。
+- 新增 `GET /auth/session` 作为鉴权验证入口，新增受保护占位接口 `GET /mobile/books`，确保移动数据 API 在真实实现前也不会裸露。
+- Gateway 测试覆盖未配置鉴权、缺少 token、错误 token、正确 token，以及受保护移动数据路由的占位行为。
+
+2026-06-24 更新：云端 Gateway 方向已启动，新增 `codex/cloud-gateway` 分支与 `gateway/` 工作目录。
+- 目标：让移动客户端默认连接固定公有域名，通过云端 Gateway 获取书籍数据、阅读进度、AI 检索、embedding 转发和 MP3 播放资源，减少用户手动配置局域网 IP、LLM、embedding 与音频后端的成本。
+- 架构原则：Gateway 作为独立云端服务，不直接把现有本地 SQLite API 暴露到公网；公网接口默认鉴权、限流和审计，移动端不保存上游模型或对象存储密钥。
+- 已新增 `gateway/README.md` 与 `gateway/docs/development-plan.md`，记录产品目标、模块边界、API 草案、安全要求、阶段计划和近期任务。
+- 后续优先级：先搭建最小 Gateway 服务骨架（健康检查、版本、能力接口、配置加载、统一错误格式），再接入鉴权、移动端默认域名、书库同步、AI/embedding 转发和 MP3 资源分发。
+
 2026-06-23 更新：PC 端离线多角色 TTS 方向已启动，先落地本地 Node.js 目录与文档。
 - Android App 高质量 MP3 播放方向已另立 `codex/mobile-mp3-playback` 分支开发：PC Web 端新增当前书“章节 MP3 目录”配置入口，本地服务持久化目录并通过 `/api/mobile/books/:bookId/audio` 暴露移动端音频清单。
 - PC 端章节 MP3 目录规范：推荐根目录直接放 `ch001.mp3`、`ch002.mp3`；兼容 `001-章节标题.mp3`；兼容现有 TTS 批量产物 `ch001/audio/chapter.mp3` 或 `ch001-full/audio/chapter.mp3`。

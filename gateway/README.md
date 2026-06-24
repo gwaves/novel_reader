@@ -41,7 +41,15 @@ npm run test
 - `GET /health`
 - `GET /version`
 - `GET /capabilities`
+- `GET /auth/session`（受保护，用于验证 bearer token）
+- `GET /mobile/books`（受保护，占位接口）
 - 统一错误响应格式
 - 基础限流、安全响应头和可选 CORS 配置
+
+开发期可通过 `GATEWAY_DEV_ACCESS_TOKEN` 启用静态 bearer token 鉴权。受保护接口需要携带：
+
+```text
+Authorization: Bearer <GATEWAY_DEV_ACCESS_TOKEN>
+```
 
 未配置 AI、embedding 或对象存储时，`/capabilities` 会明确返回对应能力不可用，而不是在运行时崩溃。

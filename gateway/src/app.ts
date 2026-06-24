@@ -3,9 +3,10 @@ import helmet from '@fastify/helmet'
 import rateLimit from '@fastify/rate-limit'
 import Fastify, { type FastifyError } from 'fastify'
 import { randomUUID } from 'node:crypto'
-import { ZodError } from 'zod'
+import { requireGatewayAuth } from './auth.js'
 import { buildCapabilities } from './capabilities.js'
 import { type GatewayConfig, loadConfig } from './config.js'
+import { GatewayHttpError, isGatewayHttpError } from './errors.js'
 
 export function buildGatewayApp(config: GatewayConfig = loadConfig()) {
   const app = Fastify({
@@ -84,15 +85,25 @@ export function buildGatewayApp(config: GatewayConfig = loadConfig()) {
 
   app.get('/capabilities', async () => buildCapabilities(config))
 
+  app.get('/auth/session', async (request) => ({
+    authenticated: true,
+    auth: requireGatewayAuth(config, request),
+  }))
+
+  app.get('/mobile/books', async (request) => {
+    requireGatewayAuth(config, request)
+    throw new GatewayHttpError(501, 'not_implemented', 'Book data API is planned for Phase 3.')
+  })
+
   return app
 }
 
 function normalizeError(error: FastifyError | Error) {
-  if (error instanceof ZodError) {
+  if (isGatewayHttpError(error)) {
     return {
-      code: 'invalid_request',
-      message: 'Request validation failed',
-      statusCode: 400,
+      code: error.code,
+      message: error.message,
+      statusCode: error.statusCode,
     }
   }
 
