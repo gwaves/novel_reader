@@ -4,6 +4,7 @@ import { GatewayHttpError } from './errors.js'
 
 export type GatewayAuthContext = {
   mode: 'development-static-token'
+  deviceName?: string
 }
 
 export function requireGatewayAuth(config: GatewayConfig, request: FastifyRequest): GatewayAuthContext {
@@ -26,6 +27,7 @@ export function requireGatewayAuth(config: GatewayConfig, request: FastifyReques
 
   return {
     mode: 'development-static-token',
+    deviceName: parseDeviceName(request.headers['x-device-name']),
   }
 }
 
@@ -38,4 +40,10 @@ function parseBearerToken(authorization: string | undefined) {
   }
 
   return token
+}
+
+function parseDeviceName(value: string | string[] | undefined) {
+  const rawValue = Array.isArray(value) ? value[0] : value
+  const deviceName = rawValue?.trim()
+  return deviceName ? deviceName.slice(0, 80) : undefined
 }

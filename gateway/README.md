@@ -18,6 +18,7 @@
 ## 文档
 
 - [开发计划](docs/development-plan.md)
+- [部署说明](docs/deployment.md)
 
 ## 本地开发
 
@@ -42,7 +43,15 @@ npm run test
 - `GET /version`
 - `GET /capabilities`
 - `GET /auth/session`（受保护，用于验证 bearer token）
-- `GET /mobile/books`（受保护，占位接口）
+- `GET /auth/devices`（受保护，查看已登记设备）
+- `GET /mobile/books`（受保护，返回 Gateway 书库索引）
+- `GET /mobile/books/:bookId`（受保护，返回单书摘要）
+- `GET /mobile/books/:bookId/package`（受保护，返回移动端完整数据包）
+- `PUT /admin/books/:bookId/package`（受保护，导入 PC 端导出的移动数据包）
+- `POST /ai/chat`（受保护，转发 OpenAI-compatible chat completions）
+- `POST /ai/embeddings`（受保护，转发 OpenAI-compatible embeddings）
+- `GET /mobile/books/:bookId/audio`（受保护，返回本地 MP3 清单）
+- `GET /mobile/books/:bookId/audio/:chapterId/download`（受保护，下载章节 MP3）
 - 统一错误响应格式
 - 基础限流、安全响应头和可选 CORS 配置
 
@@ -51,5 +60,59 @@ npm run test
 ```text
 Authorization: Bearer <GATEWAY_DEV_ACCESS_TOKEN>
 ```
+
+新的 Android 客户端应额外携带设备名，Gateway 会记录到 `GATEWAY_DATA_DIR/devices.json`：
+
+```text
+X-Device-Name: Android Phone
+```
+
+第一版书库索引从 `GATEWAY_DATA_DIR/books.json` 读取。文件缺失时返回空书库；文件存在时应使用：
+
+```json
+{
+  "schemaVersion": 1,
+  "books": [
+    {
+      "id": "book-id",
+      "title": "书名",
+      "author": "作者",
+      "chapterCount": 120,
+      "wordCount": 600000,
+      "summaryCoverage": 0.8,
+      "kgCoverage": 0.6,
+      "embeddingCoverage": 0.9,
+      "audioChapterCount": 12,
+      "updatedAt": "2026-06-25T00:00:00.000Z"
+    }
+  ]
+}
+```
+
+单书完整移动数据包从 `GATEWAY_DATA_DIR/books/<bookId>/package.json` 读取。当前 Gateway 只校验顶层 `schemaVersion: 1` 和 `book.id` 必须匹配请求路径，其余章节、概要、图谱、embedding 覆盖等字段先原样返回，后续再随移动端同步 schema 收紧。
+
+PC 端或其他工具可以通过 `PUT /admin/books/:bookId/package` 上传同样格式的数据包。Gateway 会保存到 `books/<bookId>/package.json`，并根据包内 `book` 字段自动更新 `books.json` 书库索引。
+
+AI 转发第一版只支持 OpenAI-compatible 接口。`POST /ai/chat` 转发到 `<GATEWAY_AI_BASE_URL>/chat/completions`，`POST /ai/embeddings` 转发到 `<GATEWAY_EMBEDDING_BASE_URL>/embeddings`。如果请求体未指定 `model`，Gateway 会分别注入 `GATEWAY_AI_MODEL` 或 `GATEWAY_EMBEDDING_MODEL`。
+
+本地 MP3 第一版从 `GATEWAY_AUDIO_DIR/books/<bookId>/audio.json` 读取清单，音频文件与 `audio.json` 放在同一目录或其子目录。清单格式：
+
+```json
+{
+  "schemaVersion": 1,
+  "chapters": [
+    {
+      "chapterId": "chapter-1",
+      "title": "第一章",
+      "fileName": "chapter-1.mp3",
+      "durationMs": 120000,
+      "sizeBytes": 1048576,
+      "updatedAt": "2026-06-25T00:00:00.000Z"
+    }
+  ]
+}
+```
+
+`fileName` 必须是相对路径，不能包含 `..` 或绝对路径。实际下载通过 Gateway 鉴权后的 `/mobile/books/:bookId/audio/:chapterId/download` 完成。
 
 未配置 AI、embedding 或对象存储时，`/capabilities` 会明确返回对应能力不可用，而不是在运行时崩溃。

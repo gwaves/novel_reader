@@ -1,3 +1,16 @@
+2026-06-25 更新：Gateway 移动书库索引 API 已进入最小可用形态。
+- 产品边界补充：后续面向 Gateway 的 Android 移动端应单独新建应用目录/工程，保持现有 `mobile-app/` 不变，避免影响当前已可用的局域网/离线移动端。
+- 新增 Gateway Docker 部署材料：`gateway/Dockerfile`、`gateway/docker-compose.yml` 和 `gateway/docs/deployment.md`，优先支持云服务器/VPS 或家里机器公网映射部署。
+- 新增第一版设备名记录：受保护请求可携带 `X-Device-Name`，`GET /auth/session` 会登记设备到 `GATEWAY_DATA_DIR/devices.json`，`GET /auth/devices` 可查看已登记设备。
+- 新增 `GATEWAY_DATA_DIR` 配置，默认使用用户目录下的 `.novel_reader_gateway`，第一版从 `books.json` 读取书库索引。
+- `GET /mobile/books` 已从占位接口升级为受保护的书库列表接口；缺少 `books.json` 时返回空书库，存在时校验 schema 并按更新时间排序。
+- 新增 `GET /mobile/books/:bookId`，从同一书库索引返回单书摘要，未知书籍返回稳定 `book_not_found` 错误。
+- 新增 `GET /mobile/books/:bookId/package`，从 `GATEWAY_DATA_DIR/books/<bookId>/package.json` 返回完整移动数据包；当前只校验 `schemaVersion` 和 `book.id`，其余内容先透明透传。
+- 新增 `PUT /admin/books/:bookId/package`，支持 PC 端或工具上传移动数据包到 Gateway，并自动维护 `books.json` 书库索引。
+- 新增 OpenAI-compatible 转发入口：`POST /ai/chat` 和 `POST /ai/embeddings`，移动端只访问 Gateway，服务端负责注入上游 API Key 和默认模型。
+- 新增本地 MP3 受保护访问：`GET /mobile/books/:bookId/audio` 读取 `GATEWAY_AUDIO_DIR/books/<bookId>/audio.json`，`GET /mobile/books/:bookId/audio/:chapterId/download` 负责鉴权后下载音频文件。
+- `/capabilities` 现在会标记 books API 可用；README 补充了 `books.json` 第一版格式。
+
 2026-06-25 更新：Gateway 开始补齐开发期鉴权与受保护路由基础。
 - 新增 Gateway 结构化 HTTP 错误与 dev bearer token 鉴权模块，`GATEWAY_DEV_ACCESS_TOKEN` 可用于保护后续移动端数据、AI 和音频接口。
 - 新增 `GET /auth/session` 作为鉴权验证入口，新增受保护占位接口 `GET /mobile/books`，确保移动数据 API 在真实实现前也不会裸露。

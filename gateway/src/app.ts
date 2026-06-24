@@ -3,10 +3,15 @@ import helmet from '@fastify/helmet'
 import rateLimit from '@fastify/rate-limit'
 import Fastify, { type FastifyError } from 'fastify'
 import { randomUUID } from 'node:crypto'
+import { basename } from 'node:path'
 import { requireGatewayAuth } from './auth.js'
+import { openAudioFile, readAudioCatalog } from './audio-store.js'
 import { buildCapabilities } from './capabilities.js'
 import { type GatewayConfig, loadConfig } from './config.js'
-import { GatewayHttpError, isGatewayHttpError } from './errors.js'
+import { readBookCatalog, readBookPackage, readBookSummary, upsertBookPackage } from './data-store.js'
+import { readDeviceRegistry, touchGatewayDevice } from './device-store.js'
+import { isGatewayHttpError } from './errors.js'
+import { forwardChatCompletion, forwardEmbeddings } from './openai-client.js'
 
 export function buildGatewayApp(config: GatewayConfig = loadConfig()) {
   const app = Fastify({
@@ -19,7 +24,8 @@ export function buildGatewayApp(config: GatewayConfig = loadConfig()) {
               paths: ['req.headers.authorization', 'req.headers.cookie'],
               censor: '[redacted]',
             },
-          },
+        },
+    bodyLimit: config.maxBodyBytes,
     genReqId: (request) => {
       const existingRequestId = request.headers['x-request-id']
       const requestId = Array.isArray(existingRequestId) ? existingRequestId[0] : existingRequestId
@@ -85,15 +91,92 @@ export function buildGatewayApp(config: GatewayConfig = loadConfig()) {
 
   app.get('/capabilities', async () => buildCapabilities(config))
 
-  app.get('/auth/session', async (request) => ({
-    authenticated: true,
-    auth: requireGatewayAuth(config, request),
-  }))
+  app.get('/auth/session', async (request) => {
+    const auth = requireGatewayAuth(config, request)
+    await touchGatewayDevice(config, auth)
+    return {
+      authenticated: true,
+      auth,
+    }
+  })
+
+  app.get('/auth/devices', async (request) => {
+    const auth = requireGatewayAuth(config, request)
+    await touchGatewayDevice(config, auth)
+    return {
+      generatedAt: new Date().toISOString(),
+      ...(await readDeviceRegistry(config)),
+    }
+  })
 
   app.get('/mobile/books', async (request) => {
     requireGatewayAuth(config, request)
-    throw new GatewayHttpError(501, 'not_implemented', 'Book data API is planned for Phase 3.')
+    const catalog = await readBookCatalog(config)
+    return {
+      schemaVersion: catalog.schemaVersion,
+      generatedAt: new Date().toISOString(),
+      books: catalog.books,
+    }
   })
+
+  app.get<{ Params: { bookId: string } }>('/mobile/books/:bookId', async (request) => {
+    requireGatewayAuth(config, request)
+    return {
+      schemaVersion: 1,
+      generatedAt: new Date().toISOString(),
+      book: await readBookSummary(config, request.params.bookId),
+    }
+  })
+
+  app.get<{ Params: { bookId: string } }>('/mobile/books/:bookId/package', async (request) => {
+    requireGatewayAuth(config, request)
+    return {
+      generatedAt: new Date().toISOString(),
+      package: await readBookPackage(config, request.params.bookId),
+    }
+  })
+
+  app.put<{ Body: unknown; Params: { bookId: string } }>('/admin/books/:bookId/package', async (request) => {
+    requireGatewayAuth(config, request)
+    return {
+      schemaVersion: 1,
+      importedAt: new Date().toISOString(),
+      book: await upsertBookPackage(config, request.params.bookId, request.body),
+    }
+  })
+
+  app.post<{ Body: unknown }>('/ai/chat', async (request) => {
+    requireGatewayAuth(config, request)
+    return forwardChatCompletion(config, request.body)
+  })
+
+  app.post<{ Body: unknown }>('/ai/embeddings', async (request) => {
+    requireGatewayAuth(config, request)
+    return forwardEmbeddings(config, request.body)
+  })
+
+  app.get<{ Params: { bookId: string } }>('/mobile/books/:bookId/audio', async (request) => {
+    requireGatewayAuth(config, request)
+    const catalog = await readAudioCatalog(config, request.params.bookId)
+    return {
+      schemaVersion: catalog.schemaVersion,
+      generatedAt: new Date().toISOString(),
+      chapters: catalog.chapters,
+    }
+  })
+
+  app.get<{ Params: { bookId: string; chapterId: string } }>(
+    '/mobile/books/:bookId/audio/:chapterId/download',
+    async (request, reply) => {
+      requireGatewayAuth(config, request)
+      const audio = await openAudioFile(config, request.params.bookId, request.params.chapterId)
+      return reply
+        .header('content-type', 'audio/mpeg')
+        .header('content-length', audio.sizeBytes)
+        .header('content-disposition', `inline; filename="${basename(audio.chapter.fileName)}"`)
+        .send(audio.stream)
+    },
+  )
 
   return app
 }

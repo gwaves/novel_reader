@@ -5,8 +5,6 @@ export function buildCapabilities(config: GatewayConfig) {
   const embeddingsConfigured = Boolean(
     config.upstreams.embeddings.baseUrl && config.upstreams.embeddings.apiKeyConfigured,
   )
-  const objectStorageConfigured = Boolean(config.objectStorage.endpoint && config.objectStorage.bucket)
-
   return {
     service: 'novel-reader-gateway',
     version: '0.1.0',
@@ -23,8 +21,7 @@ export function buildCapabilities(config: GatewayConfig) {
     },
     features: {
       books: {
-        available: false,
-        reason: 'book data API is planned for Phase 3',
+        available: true,
       },
       progress: {
         available: false,
@@ -39,8 +36,8 @@ export function buildCapabilities(config: GatewayConfig) {
         reason: embeddingsConfigured ? undefined : 'embedding upstream base URL and API key are not configured',
       },
       audio: {
-        available: objectStorageConfigured,
-        reason: objectStorageConfigured ? undefined : 'object storage endpoint and bucket are not configured',
+        available: true,
+        mode: 'local-directory',
       },
     },
   }
