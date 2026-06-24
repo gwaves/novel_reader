@@ -23,6 +23,10 @@
   "scripts": {
     "api": "node --no-warnings scripts/local-db-server.mjs",
     "dev": "node scripts/dev.mjs",
+    "gateway:dev": "npm --prefix gateway run dev",
+    "gateway:build": "npm --prefix gateway run build",
+    "gateway:start": "npm --prefix gateway run start",
+    "gateway:test": "npm --prefix gateway run test",
     "vite:dev": "vite",
     "reader": "vite preview",
     "reader:build": "npm run build && npm run reader",
