@@ -80,6 +80,7 @@ const readerSettingsKey = 'novel-reader-gateway-reader-settings'
 const packageCachePrefix = 'novel-reader-gateway-package:'
 const packageCacheDbName = 'novel-reader-gateway'
 const packageCacheStoreName = 'book-packages'
+const audioCacheStoreName = 'chapter-audio'
 
 const defaultSettings: GatewaySettings = {
   baseUrl: 'https://',
@@ -110,6 +111,8 @@ function App() {
   const [loadingBooks, setLoadingBooks] = useState(false)
   const [loadingPackage, setLoadingPackage] = useState(false)
   const [chapterPickerOpen, setChapterPickerOpen] = useState(false)
+  const [cachedAudioIds, setCachedAudioIds] = useState<Set<string>>(() => new Set())
+  const [audioSyncProgress, setAudioSyncProgress] = useState<{ done: number; total: number } | null>(null)
 
   const selectedBook = useMemo(
     () => books.find((book) => book.id === selectedBookId) ?? null,
@@ -175,6 +178,7 @@ function App() {
       const response = await gatewayFetch(settings, '/mobile/books')
       const nextBooks = Array.isArray(response.books) ? (response.books as BookSummary[]) : []
       setBooks(nextBooks)
+      const nextSelectedBookId = nextBooks.some((book) => book.id === selectedBookId) ? selectedBookId : nextBooks[0]?.id
       if (nextBooks.length > 0 && !nextBooks.some((book) => book.id === selectedBookId)) {
         setSelectedBookId(nextBooks[0].id)
       }
@@ -185,6 +189,7 @@ function App() {
         setAudioChapters([])
         clearAudioUrl()
       }
+      await refreshCachedAudioIds(nextSelectedBookId ?? null)
       setConnectionState('connected')
       setMessage(`书库 ${nextBooks.length} 本`)
     } catch (error) {
@@ -209,12 +214,14 @@ function App() {
       const cached = await cacheBookPackage(bookId, nextPackage)
       setMessage(cached ? '数据包已加载' : '数据包已加载，缓存空间不足')
       await refreshAudio(bookId, false)
+      await refreshCachedAudioIds(bookId)
       setTab('reader')
     } catch (error) {
       const cachedPackage = await loadCachedBookPackage(bookId)
       setBookPackage(cachedPackage)
       setCurrentChapterId(packageChapters(cachedPackage)[0]?.id ?? null)
       setMessage(cachedPackage ? `已使用本地缓存：${errorMessage(error)}` : errorMessage(error))
+      await refreshCachedAudioIds(bookId)
       if (cachedPackage) setTab('reader')
     } finally {
       setLoadingPackage(false)
@@ -228,6 +235,7 @@ function App() {
       const response = await gatewayFetch(settings, `/mobile/books/${encodeURIComponent(bookId)}/audio`)
       const nextAudioChapters = Array.isArray(response.chapters) ? response.chapters.filter(isAudioChapter) : []
       setAudioChapters(nextAudioChapters)
+      await refreshCachedAudioIds(bookId)
       if (showMessage) setMessage(`音频 ${nextAudioChapters.length} 章`)
     } catch (error) {
       if (showMessage) setMessage(errorMessage(error))
@@ -244,15 +252,24 @@ function App() {
     }
     setLoadingAudio(true)
     try {
-      const manifest = currentAudio?.manifestFileName
-        ? await gatewayFetch(settings, `/mobile/books/${encodeURIComponent(selectedBookId)}/audio/${encodeURIComponent(currentChapter.id)}/manifest`)
-            .then(normalizeAudioManifest)
-            .catch(() => null)
-        : null
-      const blob = await gatewayFetchBlob(
-        settings,
-        `/mobile/books/${encodeURIComponent(selectedBookId)}/audio/${encodeURIComponent(currentChapter.id)}/download`,
-      )
+      const cachedAudio = await readAudioFromIndexedDb(selectedBookId, currentChapter.id)
+      const manifest =
+        cachedAudio?.manifest ??
+        (currentAudio?.manifestFileName
+          ? await gatewayFetch(settings, `/mobile/books/${encodeURIComponent(selectedBookId)}/audio/${encodeURIComponent(currentChapter.id)}/manifest`)
+              .then(normalizeAudioManifest)
+              .catch(() => null)
+          : null)
+      const blob =
+        cachedAudio?.blob ??
+        (await gatewayFetchBlob(
+          settings,
+          `/mobile/books/${encodeURIComponent(selectedBookId)}/audio/${encodeURIComponent(currentChapter.id)}/download`,
+        ))
+      if (!cachedAudio) {
+        await writeAudioToIndexedDb(selectedBookId, currentAudio, blob, manifest)
+        await refreshCachedAudioIds(selectedBookId)
+      }
       clearAudioUrl()
       setAudioManifest(manifest)
       setAudioTime(0)
@@ -263,6 +280,65 @@ function App() {
     } finally {
       setLoadingAudio(false)
     }
+  }
+
+  async function refreshCachedAudioIds(bookId = selectedBookId) {
+    if (!bookId) {
+      setCachedAudioIds(new Set())
+      return
+    }
+    const ids = await listCachedAudioChapterIds(bookId)
+    setCachedAudioIds(new Set(ids))
+  }
+
+  async function syncCurrentBookAudio() {
+    if (!selectedBookId) return
+    let chaptersToSync = audioChapters
+    if (chaptersToSync.length === 0) {
+      await refreshAudio(selectedBookId, false)
+      chaptersToSync = await fetchAudioCatalog(selectedBookId)
+      setAudioChapters(chaptersToSync)
+    }
+    if (chaptersToSync.length === 0) {
+      setMessage('当前书籍暂无音频')
+      return
+    }
+
+    setLoadingAudio(true)
+    setAudioSyncProgress({ done: 0, total: chaptersToSync.length })
+    try {
+      let done = 0
+      for (const audioChapter of chaptersToSync) {
+        const cached = await readAudioFromIndexedDb(selectedBookId, audioChapter.chapterId)
+        if (!cached) {
+          const manifest = audioChapter.manifestFileName
+            ? await gatewayFetch(settings, `/mobile/books/${encodeURIComponent(selectedBookId)}/audio/${encodeURIComponent(audioChapter.chapterId)}/manifest`)
+                .then(normalizeAudioManifest)
+                .catch(() => null)
+            : null
+          const blob = await gatewayFetchBlob(
+            settings,
+            `/mobile/books/${encodeURIComponent(selectedBookId)}/audio/${encodeURIComponent(audioChapter.chapterId)}/download`,
+          )
+          await writeAudioToIndexedDb(selectedBookId, audioChapter, blob, manifest)
+        }
+        done += 1
+        setAudioSyncProgress({ done, total: chaptersToSync.length })
+        setCachedAudioIds((current) => new Set(current).add(audioChapter.chapterId))
+      }
+      await refreshCachedAudioIds(selectedBookId)
+      setMessage(`音频已缓存 ${chaptersToSync.length}/${chaptersToSync.length} 章`)
+    } catch (error) {
+      setMessage(errorMessage(error))
+    } finally {
+      setLoadingAudio(false)
+      setAudioSyncProgress(null)
+    }
+  }
+
+  async function fetchAudioCatalog(bookId: string) {
+    const response = await gatewayFetch(settings, `/mobile/books/${encodeURIComponent(bookId)}/audio`)
+    return Array.isArray(response.chapters) ? response.chapters.filter(isAudioChapter) : []
   }
 
   function clearAudioUrl() {
@@ -404,8 +480,22 @@ function App() {
                 </div>
                 <div className="package-line">
                   <span>Audio</span>
-                  <strong>{loadingAudio ? '同步中' : `${audioChapters.length} 章`}</strong>
+                  <strong>
+                    {audioSyncProgress
+                      ? `${audioSyncProgress.done}/${audioSyncProgress.total}`
+                      : loadingAudio
+                        ? '同步中'
+                        : `${cachedAudioIds.size}/${audioChapters.length || selectedBook.audioChapterCount || 0} 已缓存`}
+                  </strong>
                 </div>
+                <button
+                  className="secondary-button full-width-button"
+                  type="button"
+                  onClick={() => void syncCurrentBookAudio()}
+                  disabled={!selectedBookId || loadingAudio}
+                >
+                  {audioSyncProgress ? `同步音频 ${audioSyncProgress.done}/${audioSyncProgress.total}` : '同步 Audio'}
+                </button>
                 <button className="primary-button full-width-button" type="button" onClick={() => setTab('reader')} disabled={!bookPackage}>
                   开始阅读
                 </button>
@@ -616,7 +706,7 @@ function App() {
               </div>
               <div>
                 <dt>Audio</dt>
-                <dd>{audioChapters.length} 章</dd>
+                <dd>{cachedAudioIds.size}/{audioChapters.length || selectedBook?.audioChapterCount || 0} 章</dd>
               </div>
             </dl>
           </section>
@@ -901,7 +991,7 @@ async function loadCachedBookPackage(bookId: string): Promise<BookPackage | null
 async function writeBookPackageToIndexedDb(bookId: string, bookPackage: BookPackage) {
   try {
     const db = await openPackageCacheDb()
-    await runPackageStoreRequest(db, 'readwrite', (store) =>
+    await runPackageStoreRequest(db, 'readwrite', packageCacheStoreName, (store) =>
       store.put({
         bookId,
         package: bookPackage,
@@ -918,13 +1008,74 @@ async function writeBookPackageToIndexedDb(bookId: string, bookPackage: BookPack
 async function readBookPackageFromIndexedDb(bookId: string) {
   try {
     const db = await openPackageCacheDb()
-    const record = await runPackageStoreRequest(db, 'readonly', (store) => store.get(bookId))
+    const record = await runPackageStoreRequest(db, 'readonly', packageCacheStoreName, (store) => store.get(bookId))
     db.close()
     if (!isRecord(record)) return null
     return normalizeBookPackage(record.package)
   } catch {
     return null
   }
+}
+
+async function writeAudioToIndexedDb(bookId: string, audioChapter: AudioChapter, blob: Blob, manifest: AudioManifest | null) {
+  const db = await openPackageCacheDb()
+  try {
+    await runPackageStoreRequest(db, 'readwrite', audioCacheStoreName, (store) =>
+      store.put({
+        id: audioCacheKey(bookId, audioChapter.chapterId),
+        bookId,
+        chapterId: audioChapter.chapterId,
+        audioChapter,
+        blob,
+        manifest,
+        sizeBytes: blob.size || audioChapter.sizeBytes,
+        cachedAt: new Date().toISOString(),
+        updatedAt: audioChapter.updatedAt,
+      }),
+    )
+  } finally {
+    db.close()
+  }
+}
+
+async function readAudioFromIndexedDb(bookId: string, chapterId: string): Promise<{ blob: Blob; manifest: AudioManifest | null } | null> {
+  try {
+    const db = await openPackageCacheDb()
+    try {
+      const record = await runPackageStoreRequest(db, 'readonly', audioCacheStoreName, (store) => store.get(audioCacheKey(bookId, chapterId)))
+      if (!isRecord(record) || !(record.blob instanceof Blob)) return null
+      return {
+        blob: record.blob,
+        manifest: isRecord(record.manifest) ? normalizeAudioManifest(record.manifest) : null,
+      }
+    } finally {
+      db.close()
+    }
+  } catch {
+    return null
+  }
+}
+
+async function listCachedAudioChapterIds(bookId: string) {
+  try {
+    const db = await openPackageCacheDb()
+    try {
+      const records = await runPackageStoreRequest(db, 'readonly', audioCacheStoreName, (store) => store.getAll())
+      return Array.isArray(records)
+        ? records
+            .filter((record): record is Record<string, unknown> => isRecord(record) && record.bookId === bookId && typeof record.chapterId === 'string')
+            .map((record) => record.chapterId as string)
+        : []
+    } finally {
+      db.close()
+    }
+  } catch {
+    return []
+  }
+}
+
+function audioCacheKey(bookId: string, chapterId: string) {
+  return `${bookId}:${chapterId}`
 }
 
 function openPackageCacheDb() {
@@ -934,12 +1085,15 @@ function openPackageCacheDb() {
       return
     }
 
-    const request = indexedDB.open(packageCacheDbName, 1)
+    const request = indexedDB.open(packageCacheDbName, 2)
     request.onerror = () => reject(request.error ?? new Error('Failed to open package cache.'))
     request.onupgradeneeded = () => {
       const db = request.result
       if (!db.objectStoreNames.contains(packageCacheStoreName)) {
         db.createObjectStore(packageCacheStoreName, { keyPath: 'bookId' })
+      }
+      if (!db.objectStoreNames.contains(audioCacheStoreName)) {
+        db.createObjectStore(audioCacheStoreName, { keyPath: 'id' })
       }
     }
     request.onsuccess = () => resolve(request.result)
@@ -949,11 +1103,12 @@ function openPackageCacheDb() {
 function runPackageStoreRequest<T>(
   db: IDBDatabase,
   mode: IDBTransactionMode,
+  storeName: string,
   createRequest: (store: IDBObjectStore) => IDBRequest<T>,
 ) {
   return new Promise<T>((resolve, reject) => {
-    const transaction = db.transaction(packageCacheStoreName, mode)
-    const request = createRequest(transaction.objectStore(packageCacheStoreName))
+    const transaction = db.transaction(storeName, mode)
+    const request = createRequest(transaction.objectStore(storeName))
     request.onerror = () => reject(request.error ?? new Error('Package cache request failed.'))
     request.onsuccess = () => resolve(request.result)
     transaction.onerror = () => reject(transaction.error ?? new Error('Package cache transaction failed.'))
