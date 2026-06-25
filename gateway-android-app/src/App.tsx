@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { type MouseEvent, useEffect, useMemo, useRef, useState } from 'react'
 import { Capacitor, CapacitorHttp } from '@capacitor/core'
 
 type GatewaySettings = {
@@ -67,7 +67,7 @@ type AudioTimelineEntry = {
 }
 
 type ConnectionState = 'idle' | 'checking' | 'connected' | 'error'
-type GatewayTab = 'reader' | 'settings'
+type GatewayTab = 'library' | 'reader' | 'settings'
 
 const settingsKey = 'novel-reader-gateway-settings'
 const packageCachePrefix = 'novel-reader-gateway-package:'
@@ -81,7 +81,7 @@ const defaultSettings: GatewaySettings = {
 }
 
 function App() {
-  const [tab, setTab] = useState<GatewayTab>('reader')
+  const [tab, setTab] = useState<GatewayTab>('library')
   const [settings, setSettings] = useState<GatewaySettings>(() => loadSettings())
   const [connectionState, setConnectionState] = useState<ConnectionState>('idle')
   const [message, setMessage] = useState('')
@@ -114,6 +114,14 @@ function App() {
     () => findActiveTimelineEntry(audioManifest, audioTime),
     [audioManifest, audioTime],
   )
+  const currentChapterPosition = useMemo(
+    () => (currentChapter ? chapters.findIndex((chapter) => chapter.id === currentChapter.id) : -1),
+    [chapters, currentChapter],
+  )
+  const previousChapter = currentChapterPosition > 0 ? chapters[currentChapterPosition - 1] : null
+  const nextChapter =
+    currentChapterPosition >= 0 && currentChapterPosition < chapters.length - 1 ? chapters[currentChapterPosition + 1] : null
+  const lastReaderCenterTapAtRef = useRef(0)
 
   useEffect(() => {
     localStorage.setItem(settingsKey, JSON.stringify(settings))
@@ -183,11 +191,13 @@ function App() {
       const cached = await cacheBookPackage(bookId, nextPackage)
       setMessage(cached ? '数据包已加载' : '数据包已加载，缓存空间不足')
       await refreshAudio(bookId, false)
+      setTab('reader')
     } catch (error) {
       const cachedPackage = await loadCachedBookPackage(bookId)
       setBookPackage(cachedPackage)
       setCurrentChapterId(packageChapters(cachedPackage)[0]?.id ?? null)
       setMessage(cachedPackage ? `已使用本地缓存：${errorMessage(error)}` : errorMessage(error))
+      if (cachedPackage) setTab('reader')
     } finally {
       setLoadingPackage(false)
     }
@@ -210,6 +220,10 @@ function App() {
 
   async function playCurrentAudio() {
     if (!selectedBookId || !currentChapter) return
+    if (!currentAudio) {
+      setMessage('当前章节暂无音频')
+      return
+    }
     setLoadingAudio(true)
     try {
       const manifest = currentAudio?.manifestFileName
@@ -245,32 +259,56 @@ function App() {
   function selectChapter(chapterId: string) {
     setCurrentChapterId(chapterId)
     clearAudioUrl()
+    window.scrollTo({ top: 0 })
+  }
+
+  function scrollReaderPage(direction: 'up' | 'down') {
+    const distance = Math.max(320, window.innerHeight * 0.72)
+    window.scrollBy({
+      top: direction === 'down' ? distance : -distance,
+      behavior: 'smooth',
+    })
+  }
+
+  function handleReaderTap(event: MouseEvent<HTMLElement>) {
+    const target = event.target as HTMLElement
+    if (target.closest('button, input, select, textarea, a, label, audio')) return
+    const bounds = event.currentTarget.getBoundingClientRect()
+    const xRatio = (event.clientX - bounds.left) / bounds.width
+
+    if (xRatio >= 0.25 && xRatio <= 0.75) {
+      const now = event.timeStamp
+      if (now - lastReaderCenterTapAtRef.current < 360) {
+        lastReaderCenterTapAtRef.current = 0
+        void playCurrentAudio()
+        return
+      }
+      lastReaderCenterTapAtRef.current = now
+      return
+    }
+
+    lastReaderCenterTapAtRef.current = 0
+    scrollReaderPage(xRatio < 0.25 ? 'up' : 'down')
   }
 
   return (
     <main className="app-shell">
-      <header className="top-bar">
-        <div>
-          <h1>{tab === 'reader' ? selectedBook?.title ?? 'Novel Gateway' : '设置'}</h1>
-          <p>
-            {tab === 'reader'
-              ? selectedBook
-                ? `${selectedBook.chapterCount} 章 · ${audioChapters.length || selectedBook.audioChapterCount || 0} 音频`
-                : connectionLabel(connectionState)
-              : connectionLabel(connectionState)}
-          </p>
-        </div>
-        {tab === 'reader' ? (
+      {tab !== 'reader' ? (
+        <header className="top-bar">
+          <div>
+            <h1>{tab === 'library' ? '书库' : '设置'}</h1>
+            <p>{tab === 'library' ? `${books.length} 本 · ${connectionLabel(connectionState)}` : connectionLabel(connectionState)}</p>
+          </div>
           <button className="icon-button" type="button" onClick={() => void refreshBooks()} disabled={loadingBooks}>
             刷新
           </button>
-        ) : null}
-      </header>
+        </header>
+      ) : null}
 
-      {message ? <div className={`status-line status-${connectionState}`}>{message}</div> : null}
+      {message && tab !== 'reader' ? <div className={`status-line status-${connectionState}`}>{message}</div> : null}
 
-      {tab === 'reader' ? (
-        <section className="content-grid">
+      {tab === 'library' ? (
+        <section className="library-page">
           <div className="book-list">
             <div className="section-title">
               <h2>书库</h2>
@@ -336,66 +374,9 @@ function App() {
                   <span>Audio</span>
                   <strong>{loadingAudio ? '同步中' : `${audioChapters.length} 章`}</strong>
                 </div>
-                {bookPackage ? (
-                  <div className="reader-panel">
-                    <div className="chapter-strip">
-                      {chapters.length === 0 ? (
-                        <span className="chapter-placeholder">暂无章节</span>
-                      ) : (
-                        chapters.map((chapter, index) => (
-                          <button
-                            key={chapter.id}
-                            className={chapter.id === currentChapter?.id ? 'chapter-chip active' : 'chapter-chip'}
-                            type="button"
-                            onClick={() => selectChapter(chapter.id)}
-                          >
-                            {chapter.title || `第 ${index + 1} 章`}
-                          </button>
-                        ))
-                      )}
-                    </div>
-                    <article className="reader-text">
-                      <div className="reader-heading">
-                        <h3>{currentChapter?.title ?? '正文'}</h3>
-                        <button
-                          type="button"
-                          className="audio-button"
-                          onClick={() => void playCurrentAudio()}
-                          disabled={!currentAudio || loadingAudio}
-                        >
-                          {audioButtonLabel(currentAudio, loadingAudio)}
-                        </button>
-                      </div>
-                      {currentAudio ? (
-                        <div className="audio-meta">
-                          <span>{formatDuration(currentAudio.durationMs)}</span>
-                          <span>{formatBytes(currentAudio.sizeBytes)}</span>
-                          <span>{currentAudio.manifestFileName ? '有时间轴' : '无时间轴'}</span>
-                        </div>
-                      ) : null}
-                      {audioUrl ? (
-                        <audio
-                          className="audio-player"
-                          src={audioUrl}
-                          controls
-                          autoPlay
-                          onTimeUpdate={(event) => setAudioTime(event.currentTarget.currentTime)}
-                        />
-                      ) : null}
-                      {activeTimelineEntry?.text ? (
-                        <div className="now-playing">
-                          <span>正在播放</span>
-                          <strong>{activeTimelineEntry.text}</strong>
-                        </div>
-                      ) : null}
-                      {currentChapter ? (
-                        <TextContent text={chapterContent(currentChapter)} activeEntry={activeTimelineEntry} />
-                      ) : (
-                        <p className="muted-text">数据包中没有可显示的章节正文。</p>
-                      )}
-                    </article>
-                  </div>
-                ) : null}
+                <button className="primary-button full-width-button" type="button" onClick={() => setTab('reader')} disabled={!bookPackage}>
+                  开始阅读
+                </button>
               </div>
             ) : (
               <div className="empty-state">
@@ -404,6 +385,55 @@ function App() {
               </div>
             )}
           </div>
+        </section>
+      ) : tab === 'reader' ? (
+        <section className="reader-page">
+          {!bookPackage || !currentChapter ? (
+            <div className="empty-state reader-empty">
+              <p>请选择一本书。</p>
+              <button type="button" onClick={() => setTab('library')}>回到书库</button>
+            </div>
+          ) : (
+            <>
+              <div className="reader-toolbar">
+                <select value={currentChapter.id} onChange={(event) => selectChapter(event.target.value)}>
+                  {chapters.map((chapter, index) => (
+                    <option key={chapter.id} value={chapter.id}>
+                      {index + 1}. {chapter.title}
+                    </option>
+                  ))}
+                </select>
+                <button type="button" onClick={() => selectChapter(previousChapter?.id ?? currentChapter.id)} disabled={!previousChapter}>
+                  上一章
+                </button>
+                <button type="button" onClick={() => selectChapter(nextChapter?.id ?? currentChapter.id)} disabled={!nextChapter}>
+                  下一章
+                </button>
+              </div>
+              {message ? <div className={`status-line reader-status status-${connectionState}`}>{message}</div> : null}
+              <article className="reading-surface" onClick={handleReaderTap}>
+                <h1>{currentChapter.title}</h1>
+                {activeTimelineEntry?.text ? (
+                  <div className="now-playing">
+                    <span>正在播放</span>
+                    <strong>{activeTimelineEntry.text}</strong>
+                  </div>
+                ) : null}
+                <TextContent text={chapterContent(currentChapter)} activeEntry={activeTimelineEntry} />
+              </article>
+              {audioUrl ? (
+                <div className="audio-dock">
+                  <audio
+                    className="audio-player"
+                    src={audioUrl}
+                    controls
+                    autoPlay
+                    onTimeUpdate={(event) => setAudioTime(event.currentTarget.currentTime)}
+                  />
+                </div>
+              ) : null}
+            </>
+          )}
         </section>
       ) : (
         <section className="settings-page">
@@ -469,6 +499,9 @@ function App() {
       )}
 
       <nav className="bottom-nav" aria-label="主导航">
+        <button className={tab === 'library' ? 'active' : ''} type="button" onClick={() => setTab('library')}>
+          书库
+        </button>
         <button className={tab === 'reader' ? 'active' : ''} type="button" onClick={() => setTab('reader')}>
           阅读
         </button>
