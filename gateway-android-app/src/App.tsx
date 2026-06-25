@@ -81,10 +81,12 @@ const packageCachePrefix = 'novel-reader-gateway-package:'
 const packageCacheDbName = 'novel-reader-gateway'
 const packageCacheStoreName = 'book-packages'
 const audioCacheStoreName = 'chapter-audio'
+const defaultGatewayBaseUrl = import.meta.env.VITE_GATEWAY_DEFAULT_BASE_URL ?? 'https://'
+const defaultGatewayToken = import.meta.env.VITE_GATEWAY_DEFAULT_TOKEN ?? '123456'
 
 const defaultSettings: GatewaySettings = {
-  baseUrl: 'https://',
-  token: '',
+  baseUrl: defaultGatewayBaseUrl,
+  token: defaultGatewayToken,
   deviceName: 'Android Phone',
 }
 
@@ -139,6 +141,7 @@ function App() {
   const nextChapter =
     currentChapterPosition >= 0 && currentChapterPosition < chapters.length - 1 ? chapters[currentChapterPosition + 1] : null
   const lastReaderCenterTapAtRef = useRef(0)
+  const autoConnectAttemptedRef = useRef(false)
 
   useEffect(() => {
     localStorage.setItem(settingsKey, JSON.stringify(settings))
@@ -147,6 +150,12 @@ function App() {
   useEffect(() => {
     localStorage.setItem(readerSettingsKey, JSON.stringify(readerSettings))
   }, [readerSettings])
+
+  useEffect(() => {
+    if (autoConnectAttemptedRef.current || !isGatewayConfigured(settings)) return
+    autoConnectAttemptedRef.current = true
+    void checkSession()
+  }, [settings.baseUrl, settings.token])
 
   useEffect(() => {
     return () => {
@@ -678,10 +687,10 @@ function App() {
             </label>
             <div className="settings-actions">
               <button className="primary-button" type="button" onClick={() => void checkSession()} disabled={connectionState === 'checking'}>
-                {connectionState === 'checking' ? '连接中' : '连接'}
+                {connectionState === 'checking' ? '连接中' : '重新连接'}
               </button>
               <button className="secondary-button" type="button" onClick={() => void refreshBooks()} disabled={loadingBooks}>
-                {loadingBooks ? '同步中' : '同步书库'}
+                {loadingBooks ? '同步中' : '刷新书库'}
               </button>
             </div>
           </section>
@@ -875,6 +884,11 @@ function loadSettings(): GatewaySettings {
   } catch {
     return defaultSettings
   }
+}
+
+function isGatewayConfigured(settings: GatewaySettings) {
+  const baseUrl = settings.baseUrl.trim()
+  return Boolean(baseUrl && baseUrl !== 'https://' && baseUrl !== 'https:' && settings.token.trim())
 }
 
 function loadReaderSettings(): ReaderSettings {
