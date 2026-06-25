@@ -1,4 +1,4 @@
-import { type MouseEvent, useEffect, useMemo, useRef, useState } from 'react'
+import { type CSSProperties, type MouseEvent, useEffect, useMemo, useRef, useState } from 'react'
 import { Capacitor, CapacitorHttp } from '@capacitor/core'
 
 type GatewaySettings = {
@@ -68,8 +68,15 @@ type AudioTimelineEntry = {
 
 type ConnectionState = 'idle' | 'checking' | 'connected' | 'error'
 type GatewayTab = 'library' | 'reader' | 'settings'
+type ReaderBackground = 'paper' | 'warm' | 'green' | 'dark'
+
+type ReaderSettings = {
+  fontSize: number
+  background: ReaderBackground
+}
 
 const settingsKey = 'novel-reader-gateway-settings'
+const readerSettingsKey = 'novel-reader-gateway-reader-settings'
 const packageCachePrefix = 'novel-reader-gateway-package:'
 const packageCacheDbName = 'novel-reader-gateway'
 const packageCacheStoreName = 'book-packages'
@@ -80,9 +87,15 @@ const defaultSettings: GatewaySettings = {
   deviceName: 'Android Phone',
 }
 
+const defaultReaderSettings: ReaderSettings = {
+  fontSize: 18,
+  background: 'paper',
+}
+
 function App() {
   const [tab, setTab] = useState<GatewayTab>('library')
   const [settings, setSettings] = useState<GatewaySettings>(() => loadSettings())
+  const [readerSettings, setReaderSettings] = useState<ReaderSettings>(() => loadReaderSettings())
   const [connectionState, setConnectionState] = useState<ConnectionState>('idle')
   const [message, setMessage] = useState('')
   const [books, setBooks] = useState<BookSummary[]>([])
@@ -127,6 +140,10 @@ function App() {
   useEffect(() => {
     localStorage.setItem(settingsKey, JSON.stringify(settings))
   }, [settings])
+
+  useEffect(() => {
+    localStorage.setItem(readerSettingsKey, JSON.stringify(readerSettings))
+  }, [readerSettings])
 
   useEffect(() => {
     return () => {
@@ -259,9 +276,22 @@ function App() {
 
   function selectChapter(chapterId: string) {
     setCurrentChapterId(chapterId)
-    setChapterPickerOpen(false)
     clearAudioUrl()
     window.scrollTo({ top: 0 })
+  }
+
+  function updateReaderFontSize(nextFontSize: number) {
+    setReaderSettings((current) => ({
+      ...current,
+      fontSize: Math.min(28, Math.max(15, nextFontSize)),
+    }))
+  }
+
+  function updateReaderBackground(background: ReaderBackground) {
+    setReaderSettings((current) => ({
+      ...current,
+      background,
+    }))
   }
 
   function scrollReaderPage(direction: 'up' | 'down') {
@@ -413,7 +443,11 @@ function App() {
                 </button>
               </div>
               {message ? <div className={`status-line reader-status status-${connectionState}`}>{message}</div> : null}
-              <article className="reading-surface" onClick={handleReaderTap}>
+              <article
+                className={`reading-surface ${readerSettings.background}`}
+                onClick={handleReaderTap}
+                style={{ '--reader-font-size': `${readerSettings.fontSize}px` } as CSSProperties}
+              >
                 <h1>{currentChapter.title}</h1>
                 {activeTimelineEntry?.text ? (
                   <div className="now-playing">
@@ -447,14 +481,24 @@ function App() {
               ) : null}
               {chapterPickerOpen ? (
                 <div className="chapter-picker-overlay" role="presentation" onClick={() => setChapterPickerOpen(false)}>
-                  <section className="chapter-picker-sheet" role="dialog" aria-modal="true" aria-label="选择章节" onClick={(event) => event.stopPropagation()}>
+                  <section className="chapter-picker-sheet" role="dialog" aria-modal="true" aria-label="阅读控制" onClick={(event) => event.stopPropagation()}>
                     <div className="chapter-picker-header">
                       <div>
-                        <strong>选择章节</strong>
+                        <strong>阅读控制</strong>
                         <span>{currentChapterPosition + 1}/{chapters.length}</span>
                       </div>
                       <button type="button" onClick={() => setChapterPickerOpen(false)}>关闭</button>
                     </div>
+                    <label className="chapter-select-field">
+                      <span>章节</span>
+                      <select value={currentChapter.id} onChange={(event) => selectChapter(event.target.value)}>
+                        {chapters.map((chapter, index) => (
+                          <option key={chapter.id} value={chapter.id}>
+                            {index + 1}. {chapter.title}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
                     <div className="chapter-picker-actions">
                       <button type="button" onClick={() => selectChapter(previousChapter?.id ?? currentChapter.id)} disabled={!previousChapter}>
                         上一章
@@ -463,17 +507,52 @@ function App() {
                         下一章
                       </button>
                     </div>
-                    <div className="chapter-picker-list">
-                      {chapters.map((chapter, index) => (
-                        <button
-                          className={chapter.id === currentChapter.id ? 'active' : ''}
-                          key={chapter.id}
-                          type="button"
-                          onClick={() => selectChapter(chapter.id)}
-                        >
-                          {index + 1}. {chapter.title}
+                    <div className="reader-menu-group">
+                      <strong>音频</strong>
+                      <div className="audio-action-row">
+                        <button type="button" onClick={() => void playCurrentAudio()} disabled={!currentAudio || loadingAudio}>
+                          {audioButtonLabel(currentAudio, loadingAudio)}
                         </button>
-                      ))}
+                        <span>{currentAudio ? `${formatDuration(currentAudio.durationMs)} · ${formatBytes(currentAudio.sizeBytes)}` : '当前章节暂无音频'}</span>
+                      </div>
+                      {audioUrl ? (
+                        <audio
+                          className="audio-player"
+                          src={audioUrl}
+                          controls
+                          onTimeUpdate={(event) => setAudioTime(event.currentTarget.currentTime)}
+                        />
+                      ) : null}
+                    </div>
+                    <div className="reader-menu-group">
+                      <strong>字号</strong>
+                      <div className="reader-size-control">
+                        <button type="button" onClick={() => updateReaderFontSize(readerSettings.fontSize - 1)}>A-</button>
+                        <input
+                          aria-label="字体大小"
+                          max={28}
+                          min={15}
+                          type="range"
+                          value={readerSettings.fontSize}
+                          onChange={(event) => updateReaderFontSize(Number(event.target.value))}
+                        />
+                        <button type="button" onClick={() => updateReaderFontSize(readerSettings.fontSize + 1)}>A+</button>
+                        <span>{readerSettings.fontSize}px</span>
+                      </div>
+                    </div>
+                    <div className="reader-menu-group">
+                      <strong>背景</strong>
+                      <div className="reader-background-control">
+                        {(['paper', 'warm', 'green', 'dark'] as ReaderBackground[]).map((background) => (
+                          <button
+                            aria-label={backgroundLabel(background)}
+                            className={`reader-swatch ${background} ${readerSettings.background === background ? 'active' : ''}`}
+                            key={background}
+                            type="button"
+                            onClick={() => updateReaderBackground(background)}
+                          />
+                        ))}
+                      </div>
                     </div>
                   </section>
                 </div>
@@ -706,6 +785,28 @@ function loadSettings(): GatewaySettings {
   } catch {
     return defaultSettings
   }
+}
+
+function loadReaderSettings(): ReaderSettings {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(readerSettingsKey) || 'null') as Partial<ReaderSettings> | null
+    const background = isReaderBackground(parsed?.background) ? parsed.background : defaultReaderSettings.background
+    const fontSize = typeof parsed?.fontSize === 'number' ? Math.min(28, Math.max(15, parsed.fontSize)) : defaultReaderSettings.fontSize
+    return { fontSize, background }
+  } catch {
+    return defaultReaderSettings
+  }
+}
+
+function isReaderBackground(value: unknown): value is ReaderBackground {
+  return value === 'paper' || value === 'warm' || value === 'green' || value === 'dark'
+}
+
+function backgroundLabel(background: ReaderBackground) {
+  if (background === 'warm') return '暖色'
+  if (background === 'green') return '护眼'
+  if (background === 'dark') return '夜间'
+  return '纸张'
 }
 
 function connectionLabel(state: ConnectionState) {
