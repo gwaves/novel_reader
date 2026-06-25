@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
+import { Capacitor, CapacitorHttp } from '@capacitor/core'
 
 type GatewaySettings = {
   baseUrl: string
@@ -468,11 +469,26 @@ async function gatewayFetch(settings: GatewaySettings, path: string) {
     throw new Error('请填写 Token')
   }
 
+  const headers = {
+    authorization: `Bearer ${settings.token.trim()}`,
+    'x-device-name': settings.deviceName.trim() || 'Android Phone',
+  }
+  if (Capacitor.isNativePlatform()) {
+    const response = await CapacitorHttp.get({
+      headers,
+      readTimeout: 120000,
+      connectTimeout: 15000,
+      url: `${baseUrl}${path}`,
+    })
+    const body = typeof response.data === 'string' ? parseJsonBody(response.data) : response.data
+    if (response.status < 200 || response.status >= 300) {
+      throw new Error(body?.error?.message || `Gateway HTTP ${response.status}`)
+    }
+    return body as Record<string, unknown>
+  }
+
   const response = await fetch(`${baseUrl}${path}`, {
-    headers: {
-      authorization: `Bearer ${settings.token.trim()}`,
-      'x-device-name': settings.deviceName.trim() || 'Android Phone',
-    },
+    headers,
   })
   const body = (await response.json().catch(() => ({}))) as { error?: { message?: string } }
   if (!response.ok) {
@@ -490,17 +506,54 @@ async function gatewayFetchBlob(settings: GatewaySettings, path: string) {
     throw new Error('请填写 Token')
   }
 
+  const headers = {
+    authorization: `Bearer ${settings.token.trim()}`,
+    'x-device-name': settings.deviceName.trim() || 'Android Phone',
+  }
+  if (Capacitor.isNativePlatform()) {
+    const response = await CapacitorHttp.get({
+      headers,
+      readTimeout: 120000,
+      connectTimeout: 15000,
+      responseType: 'blob',
+      url: `${baseUrl}${path}`,
+    })
+    if (response.status < 200 || response.status >= 300) {
+      const body = typeof response.data === 'string' ? parseJsonBody(response.data) : response.data
+      throw new Error(body?.error?.message || `Gateway HTTP ${response.status}`)
+    }
+    return capacitorDataToBlob(response.data)
+  }
+
   const response = await fetch(`${baseUrl}${path}`, {
-    headers: {
-      authorization: `Bearer ${settings.token.trim()}`,
-      'x-device-name': settings.deviceName.trim() || 'Android Phone',
-    },
+    headers,
   })
   if (!response.ok) {
     const body = (await response.json().catch(() => ({}))) as { error?: { message?: string } }
     throw new Error(body.error?.message || `Gateway HTTP ${response.status}`)
   }
   return response.blob()
+}
+
+function parseJsonBody(value: string) {
+  try {
+    return JSON.parse(value) as { error?: { message?: string } } & Record<string, unknown>
+  } catch {
+    return {}
+  }
+}
+
+function capacitorDataToBlob(value: unknown) {
+  if (value instanceof Blob) return value
+  if (typeof value === 'string') {
+    const binary = atob(value)
+    const bytes = new Uint8Array(binary.length)
+    for (let index = 0; index < binary.length; index += 1) {
+      bytes[index] = binary.charCodeAt(index)
+    }
+    return new Blob([bytes], { type: 'audio/mpeg' })
+  }
+  return new Blob([], { type: 'audio/mpeg' })
 }
 
 function loadSettings(): GatewaySettings {

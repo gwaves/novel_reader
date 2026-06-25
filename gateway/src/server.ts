@@ -18,7 +18,7 @@ try {
 function waitForever() {
   return new Promise<void>(() => {
     setInterval(() => {
-      // Keep the standalone process alive after the listener is ready.
-    }, 2 ** 31 - 1)
+      app.log.trace('gateway keepalive')
+    }, 60_000)
   })
 }

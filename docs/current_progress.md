@@ -288,3 +288,9 @@ SQLite 图谱表
 - 新增根脚本 `npm run gateway-android:android:build`，用于构建 Gateway Android debug APK。
 - Android Manifest 已显式允许 HTTP cleartext，便于连接自建 Gateway、公网映射或开发期内网地址。
 - APK 输出名定制为 `novel_gateway.apk`，产物路径为 `gateway-android-app/android/app/build/outputs/apk/debug/novel_gateway.apk`。
+
+2026-06-26 更新：Gateway Android 真机连接问题已修复。
+- 新 `gateway-android-app/` 在 Android 真机上访问 `http://127.0.0.1:6180` 时已改用 Capacitor 原生 `CapacitorHttp`，避免 WebView `fetch` 对 HTTP/localhost 的限制导致 `fail to fetch`。
+- Gateway 本机测试 token 已改为 `123456`，便于手机端验证。
+- 本机 Gateway 已通过 macOS LaunchAgent `com.gwaves.novel-reader-gateway` 保活，配置监听 `0.0.0.0:6180`，数据目录为 `~/.novel_reader_gateway`。
+- 真机通过 `adb reverse tcp:6180 tcp:6180` 访问 Gateway，日志已确认 `/auth/session` 和 `/mobile/books` 返回 200，手机端可看到《妖刀记》和《三国演义》。
