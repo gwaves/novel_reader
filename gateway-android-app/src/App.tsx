@@ -33,6 +33,7 @@ type Chapter = {
   title: string
   content?: string
   text?: string
+  index?: number
   chapterIndex?: number
 }
 
@@ -40,9 +41,28 @@ type AudioChapter = {
   chapterId: string
   title?: string
   fileName: string
+  manifestFileName?: string
+  timelineVersion?: number
   durationMs?: number
   sizeBytes?: number
   updatedAt?: string
+}
+
+type AudioManifest = {
+  version?: number
+  timelineVersion?: number
+  duration?: number
+  timeline?: AudioTimelineEntry[]
+}
+
+type AudioTimelineEntry = {
+  id?: string
+  text?: string
+  sourceStart?: number
+  sourceEnd?: number
+  startTime?: number
+  endTime?: number
+  nextStartTime?: number
 }
 
 type ConnectionState = 'idle' | 'checking' | 'connected' | 'error'
@@ -66,6 +86,8 @@ function App() {
   const [currentChapterId, setCurrentChapterId] = useState<string | null>(null)
   const [audioChapters, setAudioChapters] = useState<AudioChapter[]>([])
   const [audioUrl, setAudioUrl] = useState<string | null>(null)
+  const [audioManifest, setAudioManifest] = useState<AudioManifest | null>(null)
+  const [audioTime, setAudioTime] = useState(0)
   const [loadingAudio, setLoadingAudio] = useState(false)
   const [loadingBooks, setLoadingBooks] = useState(false)
   const [loadingPackage, setLoadingPackage] = useState(false)
@@ -82,6 +104,10 @@ function App() {
   const currentAudio = useMemo(
     () => audioChapters.find((chapter) => chapter.chapterId === currentChapter?.id) ?? null,
     [audioChapters, currentChapter],
+  )
+  const activeTimelineEntry = useMemo(
+    () => findActiveTimelineEntry(audioManifest, audioTime),
+    [audioManifest, audioTime],
   )
 
   useEffect(() => {
@@ -181,11 +207,18 @@ function App() {
     if (!selectedBookId || !currentChapter) return
     setLoadingAudio(true)
     try {
+      const manifest = currentAudio?.manifestFileName
+        ? await gatewayFetch(settings, `/mobile/books/${encodeURIComponent(selectedBookId)}/audio/${encodeURIComponent(currentChapter.id)}/manifest`)
+            .then(normalizeAudioManifest)
+            .catch(() => null)
+        : null
       const blob = await gatewayFetchBlob(
         settings,
         `/mobile/books/${encodeURIComponent(selectedBookId)}/audio/${encodeURIComponent(currentChapter.id)}/download`,
       )
       clearAudioUrl()
+      setAudioManifest(manifest)
+      setAudioTime(0)
       setAudioUrl(URL.createObjectURL(blob))
       setMessage('音频已加载')
     } catch (error) {
@@ -200,6 +233,13 @@ function App() {
       if (currentUrl) URL.revokeObjectURL(currentUrl)
       return null
     })
+    setAudioManifest(null)
+    setAudioTime(0)
+  }
+
+  function selectChapter(chapterId: string) {
+    setCurrentChapterId(chapterId)
+    clearAudioUrl()
   }
 
   return (
@@ -319,7 +359,7 @@ function App() {
                           key={chapter.id}
                           className={chapter.id === currentChapter?.id ? 'chapter-chip active' : 'chapter-chip'}
                           type="button"
-                          onClick={() => setCurrentChapterId(chapter.id)}
+                          onClick={() => selectChapter(chapter.id)}
                         >
                           {chapter.title || `第 ${index + 1} 章`}
                         </button>
@@ -335,12 +375,33 @@ function App() {
                         onClick={() => void playCurrentAudio()}
                         disabled={!currentAudio || loadingAudio}
                       >
-                        {currentAudio ? '播放' : '无音频'}
+                        {audioButtonLabel(currentAudio, loadingAudio)}
                       </button>
                     </div>
-                    {audioUrl ? <audio className="audio-player" src={audioUrl} controls autoPlay /> : null}
+                    {currentAudio ? (
+                      <div className="audio-meta">
+                        <span>{formatDuration(currentAudio.durationMs)}</span>
+                        <span>{formatBytes(currentAudio.sizeBytes)}</span>
+                        <span>{currentAudio.manifestFileName ? '有时间轴' : '无时间轴'}</span>
+                      </div>
+                    ) : null}
+                    {audioUrl ? (
+                      <audio
+                        className="audio-player"
+                        src={audioUrl}
+                        controls
+                        autoPlay
+                        onTimeUpdate={(event) => setAudioTime(event.currentTarget.currentTime)}
+                      />
+                    ) : null}
+                    {activeTimelineEntry?.text ? (
+                      <div className="now-playing">
+                        <span>正在播放</span>
+                        <strong>{activeTimelineEntry.text}</strong>
+                      </div>
+                    ) : null}
                     {currentChapter ? (
-                      <TextContent text={chapterContent(currentChapter)} />
+                      <TextContent text={chapterContent(currentChapter)} activeEntry={activeTimelineEntry} />
                     ) : (
                       <p className="muted-text">数据包中没有可显示的章节正文。</p>
                     )}
@@ -357,7 +418,18 @@ function App() {
   )
 }
 
-function TextContent({ text }: { text: string }) {
+function TextContent({ text, activeEntry }: { text: string; activeEntry?: AudioTimelineEntry | null }) {
+  const highlighted = splitHighlightedText(text, activeEntry)
+  if (highlighted) {
+    return (
+      <p className="highlighted-text">
+        <span>{highlighted.before}</span>
+        <mark>{highlighted.active}</mark>
+        <span>{highlighted.after}</span>
+      </p>
+    )
+  }
+
   const paragraphs = text
     .split(/\n{2,}|\r?\n/)
     .map((paragraph) => paragraph.trim())
@@ -475,8 +547,8 @@ function packageSummary(bookPackage: BookPackage) {
 function packageChapters(bookPackage: BookPackage | null): Chapter[] {
   if (!bookPackage || !Array.isArray(bookPackage.chapters)) return []
   return bookPackage.chapters.filter(isChapter).sort((left, right) => {
-    const leftIndex = left.chapterIndex ?? 0
-    const rightIndex = right.chapterIndex ?? 0
+    const leftIndex = left.index ?? left.chapterIndex ?? 0
+    const rightIndex = right.index ?? right.chapterIndex ?? 0
     return leftIndex - rightIndex || left.title.localeCompare(right.title)
   })
 }
@@ -490,7 +562,9 @@ function normalizeBookPackage(value: unknown): BookPackage {
     throw new Error('Gateway 返回的数据包格式无效')
   }
 
-  const rawChapters = Array.isArray(value.chapters) ? value.chapters.filter(isChapter) : []
+  const rawChapters = Array.isArray(value.chapters)
+    ? value.chapters.map(normalizeChapter).filter((chapter): chapter is Chapter => Boolean(chapter))
+    : []
   return {
     ...value,
     schemaVersion: 1,
@@ -513,13 +587,95 @@ function loadCachedBookPackage(bookId: string): BookPackage | null {
 }
 
 function isChapter(value: unknown): value is Chapter {
-  if (!isRecord(value)) return false
-  return typeof value.id === 'string' && typeof value.title === 'string'
+  return normalizeChapter(value) !== null
+}
+
+function normalizeChapter(value: unknown): Chapter | null {
+  if (!isRecord(value)) return null
+  const id = typeof value.id === 'string' || typeof value.id === 'number' ? String(value.id).trim() : ''
+  const title = typeof value.title === 'string' ? value.title.trim() : ''
+  if (!id || !title) return null
+  const index = readOptionalInteger(value.index)
+  const chapterIndex = readOptionalInteger(value.chapterIndex)
+  return {
+    ...value,
+    id,
+    title,
+    index,
+    chapterIndex,
+  } as Chapter
 }
 
 function isAudioChapter(value: unknown): value is AudioChapter {
   if (!isRecord(value)) return false
   return typeof value.chapterId === 'string' && typeof value.fileName === 'string'
+}
+
+function normalizeAudioManifest(value: Record<string, unknown>): AudioManifest | null {
+  const timeline = Array.isArray(value.timeline) ? value.timeline.filter(isAudioTimelineEntry) : []
+  return {
+    version: readOptionalInteger(value.version),
+    timelineVersion: readOptionalInteger(value.timelineVersion),
+    duration: typeof value.duration === 'number' ? value.duration : undefined,
+    timeline,
+  }
+}
+
+function isAudioTimelineEntry(value: unknown): value is AudioTimelineEntry {
+  if (!isRecord(value)) return false
+  return typeof value.startTime === 'number' && typeof value.endTime === 'number'
+}
+
+function findActiveTimelineEntry(manifest: AudioManifest | null, currentTime: number) {
+  const timeline = manifest?.timeline
+  if (!timeline?.length) return null
+  return (
+    timeline.find((entry) => {
+      const start = entry.startTime ?? 0
+      const end = entry.nextStartTime ?? entry.endTime ?? start
+      return currentTime >= start && currentTime < end
+    }) ?? null
+  )
+}
+
+function splitHighlightedText(text: string, activeEntry?: AudioTimelineEntry | null) {
+  if (!activeEntry) return null
+  const start = readBoundedIndex(activeEntry.sourceStart, text.length)
+  const end = readBoundedIndex(activeEntry.sourceEnd, text.length)
+  if (start == null || end == null || end <= start) return null
+  return {
+    before: text.slice(0, start),
+    active: text.slice(start, end),
+    after: text.slice(end),
+  }
+}
+
+function readBoundedIndex(value: unknown, length: number) {
+  if (typeof value !== 'number' || !Number.isInteger(value)) return null
+  return Math.max(0, Math.min(length, value))
+}
+
+function readOptionalInteger(value: unknown) {
+  return typeof value === 'number' && Number.isInteger(value) ? value : undefined
+}
+
+function audioButtonLabel(currentAudio: AudioChapter | null, loadingAudio: boolean) {
+  if (loadingAudio) return '加载中'
+  return currentAudio ? '播放' : '无音频'
+}
+
+function formatDuration(durationMs?: number) {
+  if (!durationMs) return '时长未知'
+  const totalSeconds = Math.round(durationMs / 1000)
+  const minutes = Math.floor(totalSeconds / 60)
+  const seconds = totalSeconds % 60
+  return `${minutes}:${String(seconds).padStart(2, '0')}`
+}
+
+function formatBytes(sizeBytes?: number) {
+  if (!sizeBytes) return '大小未知'
+  const mb = sizeBytes / 1024 / 1024
+  return `${mb.toFixed(mb >= 10 ? 0 : 1)} MB`
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

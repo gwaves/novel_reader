@@ -5,7 +5,7 @@ import Fastify, { type FastifyError } from 'fastify'
 import { randomUUID } from 'node:crypto'
 import { basename } from 'node:path'
 import { requireGatewayAuth } from './auth.js'
-import { openAudioFile, readAudioCatalog } from './audio-store.js'
+import { openAudioFile, readAudioCatalog, readAudioManifest } from './audio-store.js'
 import { buildCapabilities } from './capabilities.js'
 import { type GatewayConfig, loadConfig } from './config.js'
 import { readBookCatalog, readBookPackage, readBookSummary, upsertBookPackage } from './data-store.js'
@@ -175,6 +175,14 @@ export function buildGatewayApp(config: GatewayConfig = loadConfig()) {
         .header('content-length', audio.sizeBytes)
         .header('content-disposition', `inline; filename="${basename(audio.chapter.fileName)}"`)
         .send(audio.stream)
+    },
+  )
+
+  app.get<{ Params: { bookId: string; chapterId: string } }>(
+    '/mobile/books/:bookId/audio/:chapterId/manifest',
+    async (request) => {
+      requireGatewayAuth(config, request)
+      return readAudioManifest(config, request.params.bookId, request.params.chapterId)
     },
   )
 

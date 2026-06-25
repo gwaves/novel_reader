@@ -8,6 +8,8 @@ export type GatewayAudioChapter = {
   chapterId: string
   title?: string
   fileName: string
+  manifestFileName?: string
+  timelineVersion?: number
   durationMs?: number
   sizeBytes?: number
   updatedAt?: string
@@ -52,6 +54,31 @@ export async function openAudioFile(config: GatewayConfig, bookId: string, chapt
   }
 }
 
+export async function readAudioManifest(config: GatewayConfig, bookId: string, chapterId: string): Promise<unknown> {
+  const catalog = await readAudioCatalog(config, bookId)
+  const chapter = catalog.chapters.find((candidate) => candidate.chapterId === chapterId)
+  if (!chapter?.manifestFileName) {
+    throw new GatewayHttpError(404, 'audio_manifest_not_found', `Audio manifest for chapter ${chapterId} was not found.`)
+  }
+
+  const manifestPath = resolveSafeAudioPath(config, bookId, chapter.manifestFileName)
+  let rawManifest: string
+  try {
+    rawManifest = await readFile(manifestPath, 'utf8')
+  } catch (error) {
+    if (isNodeError(error) && error.code === 'ENOENT') {
+      throw new GatewayHttpError(404, 'audio_manifest_not_found', 'Gateway audio manifest was not found.')
+    }
+    throw error
+  }
+
+  try {
+    return JSON.parse(rawManifest) as unknown
+  } catch {
+    throw new GatewayHttpError(500, 'audio_manifest_invalid', 'Gateway audio manifest is not valid JSON.')
+  }
+}
+
 function parseAudioCatalog(rawCatalog: string) {
   try {
     return JSON.parse(rawCatalog) as unknown
@@ -78,7 +105,13 @@ function normalizeAudioChapter(chapter: unknown, index: number): GatewayAudioCha
 
   const chapterId = readRequiredString(chapter, 'chapterId')
   const fileName = readRequiredString(chapter, 'fileName')
-  if (!chapterId || !fileName || fileName.includes('..') || fileName.startsWith('/')) {
+  const manifestFileName = readOptionalString(chapter, 'manifestFileName')
+  if (
+    !chapterId ||
+    !fileName ||
+    !isSafeRelativePath(fileName) ||
+    (manifestFileName && !isSafeRelativePath(manifestFileName))
+  ) {
     throw invalidChapter(index)
   }
 
@@ -86,10 +119,16 @@ function normalizeAudioChapter(chapter: unknown, index: number): GatewayAudioCha
     chapterId,
     title: readOptionalString(chapter, 'title'),
     fileName,
+    manifestFileName,
+    timelineVersion: readOptionalNonNegativeInteger(chapter, 'timelineVersion'),
     durationMs: readOptionalNonNegativeInteger(chapter, 'durationMs'),
     sizeBytes: readOptionalNonNegativeInteger(chapter, 'sizeBytes'),
     updatedAt: readOptionalString(chapter, 'updatedAt'),
   }
+}
+
+function isSafeRelativePath(fileName: string) {
+  return !fileName.includes('..') && !fileName.startsWith('/')
 }
 
 function resolveSafeAudioPath(config: GatewayConfig, bookId: string, fileName: string) {

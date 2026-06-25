@@ -872,6 +872,17 @@ describe('gateway app', () => {
     await mkdir(bookAudioDir, { recursive: true })
     await writeFile(join(bookAudioDir, 'chapter-1.mp3'), 'fake mp3 data')
     await writeFile(
+      join(bookAudioDir, 'chapter-1.manifest.json'),
+      JSON.stringify({
+        kind: 'novel-reader-tts-audio-manifest',
+        version: 2,
+        timelineVersion: 1,
+        duration: 1.2,
+        timeline: [{ id: 'seg-1', text: '正文', startTime: 0, endTime: 1, nextStartTime: 1.2 }],
+      }),
+      'utf8',
+    )
+    await writeFile(
       join(bookAudioDir, 'audio.json'),
       JSON.stringify({
         schemaVersion: 1,
@@ -880,6 +891,8 @@ describe('gateway app', () => {
             chapterId: 'chapter-1',
             title: '第一章',
             fileName: 'chapter-1.mp3',
+            manifestFileName: 'chapter-1.manifest.json',
+            timelineVersion: 1,
             durationMs: 1200,
           },
         ],
@@ -904,6 +917,13 @@ describe('gateway app', () => {
         authorization: 'Bearer dev-token',
       },
     })
+    const manifestResponse = await app.inject({
+      method: 'GET',
+      url: '/mobile/books/book-a/audio/chapter-1/manifest',
+      headers: {
+        authorization: 'Bearer dev-token',
+      },
+    })
 
     expect(catalogResponse.statusCode).toBe(200)
     expect(catalogResponse.json()).toMatchObject({
@@ -912,12 +932,20 @@ describe('gateway app', () => {
           chapterId: 'chapter-1',
           title: '第一章',
           fileName: 'chapter-1.mp3',
+          manifestFileName: 'chapter-1.manifest.json',
+          timelineVersion: 1,
         },
       ],
     })
     expect(downloadResponse.statusCode).toBe(200)
     expect(downloadResponse.headers['content-type']).toContain('audio/mpeg')
     expect(downloadResponse.body).toBe('fake mp3 data')
+    expect(manifestResponse.statusCode).toBe(200)
+    expect(manifestResponse.json()).toMatchObject({
+      version: 2,
+      timelineVersion: 1,
+      timeline: [{ text: '正文' }],
+    })
   })
 
   it('rejects unsafe protected audio catalog paths', async () => {

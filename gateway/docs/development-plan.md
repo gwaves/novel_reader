@@ -174,6 +174,12 @@ POST /ai/embeddings
 - 返回短期签名 URL 或受控下载 URL。
 - 移动端通过 Gateway 下载、缓存并播放章节 MP3。
 
+当前进展：
+
+- Gateway 已支持受保护的章节音频清单、MP3 下载和 manifest/timeline 元数据读取。
+- `gateway/scripts/publish-audio.mjs` 可把 offline-tts 输出目录发布到 `GATEWAY_AUDIO_DIR/books/<bookId>/`，并生成 Gateway 使用的 `audio.json`。
+- 新的 `gateway-android-app/` 已展示音频时长、大小和时间轴状态；播放时会拉取 manifest，并按当前播放时间在正文中高亮对应片段。
+
 ### Phase 6：部署与运维
 
 - 补充 Dockerfile、环境变量模板和部署文档。

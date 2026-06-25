@@ -117,6 +117,8 @@ AI 转发第一版只支持 OpenAI-compatible 接口。`POST /ai/chat` 转发到
       "chapterId": "chapter-1",
       "title": "第一章",
       "fileName": "chapter-1.mp3",
+      "manifestFileName": "chapter-1.manifest.json",
+      "timelineVersion": 1,
       "durationMs": 120000,
       "sizeBytes": 1048576,
       "updatedAt": "2026-06-25T00:00:00.000Z"
@@ -126,5 +128,17 @@ AI 转发第一版只支持 OpenAI-compatible 接口。`POST /ai/chat` 转发到
 ```
 
 `fileName` 必须是相对路径，不能包含 `..` 或绝对路径。实际下载通过 Gateway 鉴权后的 `/mobile/books/:bookId/audio/:chapterId/download` 完成。
+如果提供了 `manifestFileName`，移动端可通过 `/mobile/books/:bookId/audio/:chapterId/manifest` 获取 offline-tts 生成的 timeline 元数据，用于播放时正文高亮。
+
+offline-tts 产物可以用脚本发布到 Gateway 音频目录，不需要提交到 Git：
+
+```bash
+npm run gateway:publish-audio -- \
+  --book-id <bookId> \
+  --source-root tmp/tts/yaodao \
+  --gateway-audio-dir /srv/novel-reader-gateway/audio
+```
+
+脚本会扫描 `<source-root>/chNNN-full/audio/chapter.mp3` 和 `manifest.json`，根据本地移动数据包章节序号匹配真实 `chapterId`，复制到 `GATEWAY_AUDIO_DIR/books/<bookId>/`，并生成 `audio.json`。可以用 `--package-file path/to/package.json` 跳过本地 API，或用 `--dry-run` 只检查映射结果。
 
 未配置 AI、embedding 或对象存储时，`/capabilities` 会明确返回对应能力不可用，而不是在运行时崩溃。

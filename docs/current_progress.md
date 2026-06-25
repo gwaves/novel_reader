@@ -276,3 +276,9 @@ SQLite 图谱表
 - 根脚本新增 `npm run gateway:publish-package`，支持 `GATEWAY_BASE_URL`、`GATEWAY_DEV_ACCESS_TOKEN`、`NOVEL_READER_API_BASE_URL`、`NOVEL_READER_SYNC_TOKEN` 等环境变量，也支持 `--source-file` 和 `--dry-run`。
 - Gateway 导入移动端数据包时兼容本地 API 的数字 book id，并在 package 缺少 `book.updatedAt` 时用 `generatedAt` 或 `book.importedAt` 回填书库索引更新时间。
 - README 与 Gateway 开发计划已补充脚本发布路径，PC 端暂不新增发布 UI，后续 MP3 产物也优先按脚本化发布路线推进。
+
+2026-06-26 更新：Gateway MP3 发布链路与新安卓端音频体验已推进。
+- 新增 `gateway/scripts/publish-audio.mjs`，可扫描 offline-tts 输出目录下的 `chNNN-full/audio/chapter.mp3` 与 `manifest.json`，按移动数据包章节序号匹配真实 `chapterId`，复制到 `GATEWAY_AUDIO_DIR/books/<bookId>/` 并生成 `audio.json`。
+- 根脚本新增 `npm run gateway:publish-audio`；该路径是发布到 Gateway 音频目录，不是发布到 Git 目录。
+- Gateway 音频清单新增 `manifestFileName` 与 `timelineVersion`，并提供受保护的 `/mobile/books/:bookId/audio/:chapterId/manifest` 接口供移动端读取 timeline。
+- 新 `gateway-android-app/` 已显示当前章节音频时长、大小和时间轴状态；播放时会拉取 manifest，并根据当前播放时间在正文中高亮对应片段。
