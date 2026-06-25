@@ -63,6 +63,16 @@ type CachedAudio = {
   sizeBytes?: number
 }
 
+type CachedAudioRecord = {
+  bookId: string
+  chapterId: string
+  audioChapter: AudioChapter
+  filePath: string
+  sizeBytes?: number
+  cachedAt: string
+  updatedAt?: string
+}
+
 type AudioCachePayload =
   | {
       kind: 'blob'
@@ -113,10 +123,11 @@ type ReadingProgress = {
 const settingsKey = 'novel-reader-gateway-settings'
 const readerSettingsKey = 'novel-reader-gateway-reader-settings'
 const readingProgressKey = 'novel-reader-gateway-reading-progress'
+const audioCacheIndexKey = 'novel-reader-gateway-audio-cache-index'
 const packageCachePrefix = 'novel-reader-gateway-package:'
 const packageCacheDbName = 'novel-reader-gateway'
 const packageCacheStoreName = 'book-packages'
-const audioCacheStoreName = 'chapter-audio'
+const legacyAudioCacheStoreName = 'chapter-audio'
 const defaultGatewayBaseUrl = import.meta.env.VITE_GATEWAY_DEFAULT_BASE_URL ?? 'https://'
 const defaultGatewayToken = import.meta.env.VITE_GATEWAY_DEFAULT_TOKEN ?? '123456'
 const NativeAudio = registerPlugin<NativeAudioPlugin>('GatewayAudio')
@@ -190,6 +201,10 @@ function App() {
   useEffect(() => {
     localStorage.setItem(readerSettingsKey, JSON.stringify(readerSettings))
   }, [readerSettings])
+
+  useEffect(() => {
+    void clearLegacyAudioIndexedDbCache()
+  }, [])
 
   useEffect(() => {
     if (autoConnectAttemptedRef.current || !isGatewayConfigured(settings)) return
@@ -341,7 +356,7 @@ function App() {
     }
     setLoadingAudio(true)
     try {
-      const cachedAudio = await readAudioFromIndexedDb(selectedBookId, currentChapter.id)
+      const cachedAudio = readCachedAudio(selectedBookId, currentChapter.id)
       const manifest =
         cachedAudio?.manifest ??
         (currentAudio?.manifestFileName
@@ -402,7 +417,7 @@ function App() {
     try {
       let done = 0
       for (const audioChapter of chaptersToSync) {
-        const cached = await readAudioFromIndexedDb(selectedBookId, audioChapter.chapterId)
+        const cached = readCachedAudio(selectedBookId, audioChapter.chapterId)
         if (!cached) {
           await cacheAudioChapter(selectedBookId, audioChapter, null)
         }
@@ -433,7 +448,7 @@ function App() {
         filePath: downloaded.filePath,
         sizeBytes: downloaded.sizeBytes,
       }
-      await writeAudioToIndexedDb(bookId, audioChapter, payload, manifest)
+      writeCachedAudio(bookId, audioChapter, payload)
       return payload
     }
 
@@ -442,7 +457,6 @@ function App() {
       `/mobile/books/${encodeURIComponent(bookId)}/audio/${encodeURIComponent(audioChapter.chapterId)}/download`,
     )
     const payload: AudioCachePayload = { kind: 'blob', blob }
-    await writeAudioToIndexedDb(bookId, audioChapter, payload, manifest)
     return payload
   }
 
@@ -1230,66 +1244,63 @@ async function readBookPackageFromIndexedDb(bookId: string) {
   }
 }
 
-async function writeAudioToIndexedDb(bookId: string, audioChapter: AudioChapter, payload: AudioCachePayload, manifest: AudioManifest | null) {
-  const db = await openPackageCacheDb()
-  try {
-    await runPackageStoreRequest(db, 'readwrite', audioCacheStoreName, (store) =>
-      store.put({
-        id: audioCacheKey(bookId, audioChapter.chapterId),
-        bookId,
-        chapterId: audioChapter.chapterId,
-        audioChapter,
-        blob: payload.kind === 'blob' ? payload.blob : undefined,
-        filePath: payload.kind === 'file' ? payload.filePath : undefined,
-        manifest,
-        sizeBytes: payload.kind === 'blob' ? payload.blob.size || audioChapter.sizeBytes : payload.sizeBytes || audioChapter.sizeBytes,
-        cachedAt: new Date().toISOString(),
-        updatedAt: audioChapter.updatedAt,
-      }),
-    )
-  } finally {
-    db.close()
+function writeCachedAudio(bookId: string, audioChapter: AudioChapter, payload: AudioCachePayload) {
+  if (payload.kind !== 'file') return
+  const index = loadAudioCacheIndex()
+  index[audioCacheKey(bookId, audioChapter.chapterId)] = {
+    bookId,
+    chapterId: audioChapter.chapterId,
+    audioChapter,
+    filePath: payload.filePath,
+    sizeBytes: payload.sizeBytes || audioChapter.sizeBytes,
+    cachedAt: new Date().toISOString(),
+    updatedAt: audioChapter.updatedAt,
   }
+  saveAudioCacheIndex(index)
 }
 
-async function readAudioFromIndexedDb(bookId: string, chapterId: string): Promise<CachedAudio | null> {
-  try {
-    const db = await openPackageCacheDb()
-    try {
-      const record = await runPackageStoreRequest(db, 'readonly', audioCacheStoreName, (store) => store.get(audioCacheKey(bookId, chapterId)))
-      if (!isRecord(record)) return null
-      const blob = record.blob instanceof Blob ? record.blob : undefined
-      const filePath = typeof record.filePath === 'string' ? record.filePath : undefined
-      if (!blob && !filePath) return null
-      return {
-        blob,
-        filePath,
-        manifest: isRecord(record.manifest) ? normalizeAudioManifest(record.manifest) : null,
-        sizeBytes: typeof record.sizeBytes === 'number' ? record.sizeBytes : undefined,
-      }
-    } finally {
-      db.close()
-    }
-  } catch {
-    return null
+function readCachedAudio(bookId: string, chapterId: string): CachedAudio | null {
+  const record = loadAudioCacheIndex()[audioCacheKey(bookId, chapterId)]
+  if (!record?.filePath) return null
+  return {
+    filePath: record.filePath,
+    manifest: null,
+    sizeBytes: record.sizeBytes,
   }
 }
 
 async function listCachedAudioChapterIds(bookId: string) {
+  return Object.values(loadAudioCacheIndex())
+    .filter((record) => record.bookId === bookId)
+    .map((record) => record.chapterId)
+}
+
+function loadAudioCacheIndex(): Record<string, CachedAudioRecord> {
   try {
-    const db = await openPackageCacheDb()
-    try {
-      const records = await runPackageStoreRequest(db, 'readonly', audioCacheStoreName, (store) => store.getAll())
-      return Array.isArray(records)
-        ? records
-            .filter((record): record is Record<string, unknown> => isRecord(record) && record.bookId === bookId && typeof record.chapterId === 'string')
-            .map((record) => record.chapterId as string)
-        : []
-    } finally {
-      db.close()
-    }
+    const parsed = JSON.parse(localStorage.getItem(audioCacheIndexKey) || '{}') as unknown
+    if (!isRecord(parsed)) return {}
+    return Object.fromEntries(
+      Object.entries(parsed).filter((entry): entry is [string, CachedAudioRecord] => {
+        const record = entry[1]
+        return (
+          isRecord(record) &&
+          typeof record.bookId === 'string' &&
+          typeof record.chapterId === 'string' &&
+          typeof record.filePath === 'string' &&
+          isAudioChapter(record.audioChapter)
+        )
+      }),
+    )
   } catch {
-    return []
+    return {}
+  }
+}
+
+function saveAudioCacheIndex(index: Record<string, CachedAudioRecord>) {
+  try {
+    localStorage.setItem(audioCacheIndexKey, JSON.stringify(index))
+  } catch {
+    // Audio files remain on disk; this only affects the cached-count display.
   }
 }
 
@@ -1304,19 +1315,28 @@ function openPackageCacheDb() {
       return
     }
 
-    const request = indexedDB.open(packageCacheDbName, 2)
+    const request = indexedDB.open(packageCacheDbName, 3)
     request.onerror = () => reject(request.error ?? new Error('Failed to open package cache.'))
     request.onupgradeneeded = () => {
       const db = request.result
       if (!db.objectStoreNames.contains(packageCacheStoreName)) {
         db.createObjectStore(packageCacheStoreName, { keyPath: 'bookId' })
       }
-      if (!db.objectStoreNames.contains(audioCacheStoreName)) {
-        db.createObjectStore(audioCacheStoreName, { keyPath: 'id' })
+      if (db.objectStoreNames.contains(legacyAudioCacheStoreName)) {
+        db.deleteObjectStore(legacyAudioCacheStoreName)
       }
     }
     request.onsuccess = () => resolve(request.result)
   })
+}
+
+async function clearLegacyAudioIndexedDbCache() {
+  try {
+    const db = await openPackageCacheDb()
+    db.close()
+  } catch {
+    // Best effort cleanup for old audio Blob records.
+  }
 }
 
 function runPackageStoreRequest<T>(
