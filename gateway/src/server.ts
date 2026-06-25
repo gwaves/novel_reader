@@ -17,6 +17,8 @@ try {
 
 function waitForever() {
   return new Promise<void>(() => {
-    // Keep the standalone process alive after the listener is ready.
+    setInterval(() => {
+      // Keep the standalone process alive after the listener is ready.
+    }, 2 ** 31 - 1)
   })
 }
