@@ -151,6 +151,7 @@ function App() {
   const lastReaderCenterTapAtRef = useRef(0)
   const autoConnectAttemptedRef = useRef(false)
   const autoRestoreAttemptedRef = useRef(false)
+  const lastReaderScrollYRef = useRef(0)
   const pendingRestoreScrollRef = useRef<number | null>(null)
 
   useEffect(() => {
@@ -172,14 +173,10 @@ function App() {
 
     let saveTimer: number | undefined
     const save = () => {
+      lastReaderScrollYRef.current = Math.max(0, window.scrollY)
       window.clearTimeout(saveTimer)
       saveTimer = window.setTimeout(() => {
-        saveReadingProgress({
-          bookId: selectedBookId,
-          chapterId: currentChapterId,
-          scrollY: Math.max(0, window.scrollY),
-          updatedAt: new Date().toISOString(),
-        })
+        persistReadingProgress(selectedBookId, currentChapterId, lastReaderScrollYRef.current)
       }, 250)
     }
 
@@ -187,12 +184,7 @@ function App() {
     return () => {
       window.removeEventListener('scroll', save)
       window.clearTimeout(saveTimer)
-      saveReadingProgress({
-        bookId: selectedBookId,
-        chapterId: currentChapterId,
-        scrollY: Math.max(0, window.scrollY),
-        updatedAt: new Date().toISOString(),
-      })
+      persistReadingProgress(selectedBookId, currentChapterId, lastReaderScrollYRef.current)
     }
   }, [currentChapterId, selectedBookId, tab])
 
@@ -421,14 +413,42 @@ function App() {
   function selectChapter(chapterId: string) {
     setCurrentChapterId(chapterId)
     clearAudioUrl()
+    lastReaderScrollYRef.current = 0
     window.scrollTo({ top: 0 })
     if (selectedBookId) {
-      saveReadingProgress({
-        bookId: selectedBookId,
-        chapterId,
-        scrollY: 0,
-        updatedAt: new Date().toISOString(),
-      })
+      persistReadingProgress(selectedBookId, chapterId, 0)
+    }
+  }
+
+  function switchTab(nextTab: GatewayTab) {
+    if (tab === 'reader' && selectedBookId && currentChapterId) {
+      const scrollY = Math.max(0, window.scrollY)
+      lastReaderScrollYRef.current = scrollY
+      persistReadingProgress(selectedBookId, currentChapterId, scrollY)
+    }
+
+    if (nextTab === 'reader') {
+      prepareReaderScrollRestore()
+    }
+
+    setTab(nextTab)
+    if (nextTab === 'reader') {
+      restorePendingScroll()
+    }
+  }
+
+  function prepareReaderScrollRestore() {
+    if (!selectedBookId) return
+    const progress = loadReadingProgress()
+    if (!progress || progress.bookId !== selectedBookId) return
+
+    const canRestoreChapter = chapters.some((chapter) => chapter.id === progress.chapterId)
+    if (canRestoreChapter) {
+      if (progress.chapterId !== currentChapterId) {
+        setCurrentChapterId(progress.chapterId)
+      }
+      pendingRestoreScrollRef.current = progress.scrollY
+      lastReaderScrollYRef.current = progress.scrollY
     }
   }
 
@@ -444,6 +464,7 @@ function App() {
     pendingRestoreScrollRef.current = null
     window.setTimeout(() => {
       window.scrollTo({ top: scrollY, behavior: 'auto' })
+      lastReaderScrollYRef.current = Math.max(0, scrollY)
     }, 120)
   }
 
@@ -516,7 +537,7 @@ function App() {
             {books.length === 0 ? (
               <div className="empty-state">
                 <p>暂无书籍</p>
-                <button type="button" onClick={() => setTab('settings')}>去设置连接</button>
+                <button type="button" onClick={() => switchTab('settings')}>去设置连接</button>
               </div>
             ) : (
               <div className="book-items">
@@ -587,14 +608,14 @@ function App() {
                 >
                   {audioSyncProgress ? `同步音频 ${audioSyncProgress.done}/${audioSyncProgress.total}` : '同步 Audio'}
                 </button>
-                <button className="primary-button full-width-button" type="button" onClick={() => setTab('reader')} disabled={!bookPackage}>
+                <button className="primary-button full-width-button" type="button" onClick={() => switchTab('reader')} disabled={!bookPackage}>
                   开始阅读
                 </button>
               </div>
             ) : (
               <div className="empty-state">
                 <p>选择书籍</p>
-                <button type="button" onClick={() => setTab('settings')}>同步书库</button>
+                <button type="button" onClick={() => switchTab('settings')}>同步书库</button>
               </div>
             )}
           </div>
@@ -604,7 +625,7 @@ function App() {
           {!bookPackage || !currentChapter ? (
             <div className="empty-state reader-empty">
               <p>请选择一本书。</p>
-              <button type="button" onClick={() => setTab('library')}>回到书库</button>
+              <button type="button" onClick={() => switchTab('library')}>回到书库</button>
             </div>
           ) : (
             <>
@@ -805,13 +826,13 @@ function App() {
       )}
 
       <nav className="bottom-nav" aria-label="主导航">
-        <button className={tab === 'library' ? 'active' : ''} type="button" onClick={() => setTab('library')}>
+        <button className={tab === 'library' ? 'active' : ''} type="button" onClick={() => switchTab('library')}>
           书库
         </button>
-        <button className={tab === 'reader' ? 'active' : ''} type="button" onClick={() => setTab('reader')}>
+        <button className={tab === 'reader' ? 'active' : ''} type="button" onClick={() => switchTab('reader')}>
           阅读
         </button>
-        <button className={tab === 'settings' ? 'active' : ''} type="button" onClick={() => setTab('settings')}>
+        <button className={tab === 'settings' ? 'active' : ''} type="button" onClick={() => switchTab('settings')}>
           设置
         </button>
       </nav>
@@ -1005,6 +1026,16 @@ function saveReadingProgress(progress: ReadingProgress) {
   } catch {
     // Best effort; reading should continue even if the WebView storage is full.
   }
+}
+
+function persistReadingProgress(bookId: string | null, chapterId: string | null, scrollY: number) {
+  if (!bookId || !chapterId) return
+  saveReadingProgress({
+    bookId,
+    chapterId,
+    scrollY: Math.max(0, scrollY),
+    updatedAt: new Date().toISOString(),
+  })
 }
 
 function isReaderBackground(value: unknown): value is ReaderBackground {
