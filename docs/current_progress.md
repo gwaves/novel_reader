@@ -282,3 +282,9 @@ SQLite 图谱表
 - 根脚本新增 `npm run gateway:publish-audio`；该路径是发布到 Gateway 音频目录，不是发布到 Git 目录。
 - Gateway 音频清单新增 `manifestFileName` 与 `timelineVersion`，并提供受保护的 `/mobile/books/:bookId/audio/:chapterId/manifest` 接口供移动端读取 timeline。
 - 新 `gateway-android-app/` 已显示当前章节音频时长、大小和时间轴状态；播放时会拉取 manifest，并根据当前播放时间在正文中高亮对应片段。
+
+2026-06-26 更新：Gateway 独立 Android 工程已生成。
+- `gateway-android-app/android/` 已通过 Capacitor 生成独立 Android 原生工程，包名为 `com.gwaves.novelreader.gateway`，不会覆盖旧 `mobile-app/`。
+- 新增根脚本 `npm run gateway-android:android:build`，用于构建 Gateway Android debug APK。
+- Android Manifest 已显式允许 HTTP cleartext，便于连接自建 Gateway、公网映射或开发期内网地址。
+- APK 输出名定制为 `novel_gateway.apk`，产物路径为 `gateway-android-app/android/app/build/outputs/apk/debug/novel_gateway.apk`。

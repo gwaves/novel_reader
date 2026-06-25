@@ -33,6 +33,7 @@
     "gateway-android:build": "npm --prefix gateway-android-app run build",
     "gateway-android:android:add": "npm --prefix gateway-android-app run android:add",
     "gateway-android:android:sync": "npm --prefix gateway-android-app run android:sync",
+    "gateway-android:android:build": "npm --prefix gateway-android-app run android:build-fast",
     "vite:dev": "vite",
     "reader": "vite preview",
     "reader:build": "npm run build && npm run reader",
