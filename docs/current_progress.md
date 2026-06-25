@@ -1,6 +1,8 @@
 2026-06-25 更新：Gateway 移动书库索引 API 已进入最小可用形态。
 - 产品边界补充：后续面向 Gateway 的 Android 移动端应单独新建应用目录/工程，保持现有 `mobile-app/` 不变，避免影响当前已可用的局域网/离线移动端。
 - 新增独立 `gateway-android-app/` 客户端工程骨架，使用 Capacitor-ready React/Vite，不修改旧 `mobile-app/`；第一版支持配置 Gateway 地址、token、设备名，验证会话，拉取书库并读取单书 package。
+- `gateway-android-app/` 已支持将单书 package 缓存到本地，离线/请求失败时优先回退到缓存；可从 package 中识别章节列表，选择章节并阅读正文。
+- `gateway-android-app/` 已接入 Gateway 音频接口：打开书籍时同步 `/mobile/books/:bookId/audio`，当前章节有音频时可通过受保护下载接口加载并播放 MP3。
 - 新增 Gateway Docker 部署材料：`gateway/Dockerfile`、`gateway/docker-compose.yml` 和 `gateway/docs/deployment.md`，优先支持云服务器/VPS 或家里机器公网映射部署。
 - 新增第一版设备名记录：受保护请求可携带 `X-Device-Name`，`GET /auth/session` 会登记设备到 `GATEWAY_DATA_DIR/devices.json`，`GET /auth/devices` 可查看已登记设备。
 - 新增 `GATEWAY_DATA_DIR` 配置，默认使用用户目录下的 `.novel_reader_gateway`，第一版从 `books.json` 读取书库索引。
