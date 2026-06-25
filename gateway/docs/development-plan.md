@@ -153,6 +153,13 @@ POST /ai/embeddings
 - 支持从 PC 端或离线包导入书籍数据到 Gateway。
 - 移动端通过 Gateway 拉取并缓存书籍。
 
+当前进展：
+
+- Gateway 已支持 `GET /mobile/books`、`GET /mobile/books/:bookId/package` 和 `PUT /admin/books/:bookId/package`。
+- 新的 `gateway-android-app/` 已能通过 Gateway 登录、拉取书库、缓存 package、阅读章节并播放 Gateway MP3。
+- `gateway/scripts/publish-package.mjs` 可从 PC 本地 `/api/mobile/books/:bookId/package` 读取数据包并上传到 Gateway，避免在 PC 端新增发布 UI。
+- Gateway 导入时兼容本地 API 导出的数字 book id，并可用 package `generatedAt` 或 `book.importedAt` 回填书库索引的 `updatedAt`。
+
 ### Phase 4：AI 与 Embedding Gateway
 
 - 实现 `/ai/search`、`/ai/chat`、`/ai/embeddings` 的受控转发。

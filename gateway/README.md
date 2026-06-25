@@ -93,6 +93,18 @@ X-Device-Name: Android Phone
 
 PC 端或其他工具可以通过 `PUT /admin/books/:bookId/package` 上传同样格式的数据包。Gateway 会保存到 `books/<bookId>/package.json`，并根据包内 `book` 字段自动更新 `books.json` 书库索引。
 
+也可以直接用脚本从本机 API 发布，不需要在 PC 端界面增加上传入口：
+
+```bash
+npm run gateway:publish-package -- \
+  --book-id <bookId> \
+  --source-api http://127.0.0.1:5174 \
+  --gateway-url https://reader.example.com \
+  --gateway-token <GATEWAY_DEV_ACCESS_TOKEN>
+```
+
+脚本默认读取 `NOVEL_READER_API_BASE_URL`、`GATEWAY_BASE_URL`、`GATEWAY_DEV_ACCESS_TOKEN` 和 `NOVEL_READER_SYNC_TOKEN`。如果已经有导出的 JSON 文件，也可以用 `--source-file path/to/package.json` 跳过本地 API；`--dry-run` 可只校验不上传。
+
 AI 转发第一版只支持 OpenAI-compatible 接口。`POST /ai/chat` 转发到 `<GATEWAY_AI_BASE_URL>/chat/completions`，`POST /ai/embeddings` 转发到 `<GATEWAY_EMBEDDING_BASE_URL>/embeddings`。如果请求体未指定 `model`，Gateway 会分别注入 `GATEWAY_AI_MODEL` 或 `GATEWAY_EMBEDDING_MODEL`。
 
 本地 MP3 第一版从 `GATEWAY_AUDIO_DIR/books/<bookId>/audio.json` 读取清单，音频文件与 `audio.json` 放在同一目录或其子目录。清单格式：

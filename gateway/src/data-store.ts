@@ -24,6 +24,7 @@ export type GatewayBookCatalog = {
 export type GatewayBookPackage = {
   schemaVersion: 1
   book: GatewayBookSummary
+  generatedAt?: string
   [key: string]: unknown
 }
 
@@ -83,10 +84,15 @@ export async function upsertBookPackage(
     code: 'invalid_book_package',
     statusCode: 400,
   })
-  const book = normalizeBook(bookPackage.book, 0, {
-    code: 'invalid_book_package',
-    statusCode: 400,
-  })
+  const book = normalizeBook(
+    bookPackage.book,
+    0,
+    {
+      code: 'invalid_book_package',
+      statusCode: 400,
+    },
+    readOptionalIsoDate(bookPackage, 'generatedAt') ?? readOptionalIsoDate(bookPackage.book, 'importedAt'),
+  )
   const bookDir = join(config.dataDir, 'books', bookId)
 
   await mkdir(bookDir, { recursive: true })
@@ -142,12 +148,18 @@ function normalizeBookPackage(
     throw new GatewayHttpError(error.statusCode, error.code, 'Gateway book package schema is invalid.')
   }
 
-  const packageBookId = readRequiredString(bookPackage.book, 'id')
+  const packageBookId = readRequiredId(bookPackage.book, 'id')
   if (packageBookId !== bookId) {
     throw new GatewayHttpError(error.statusCode, error.code, 'Gateway book package does not match the requested book.')
   }
 
-  return bookPackage as GatewayBookPackage
+  return {
+    ...bookPackage,
+    book: {
+      ...bookPackage.book,
+      id: packageBookId,
+    },
+  } as GatewayBookPackage
 }
 
 function normalizeCatalog(catalog: unknown): GatewayBookCatalog {
@@ -176,14 +188,15 @@ function normalizeBook(
   book: unknown,
   index: number,
   error: { code: string; statusCode: number } = { code: 'book_catalog_invalid', statusCode: 500 },
+  fallbackUpdatedAt?: string,
 ): GatewayBookSummary {
   if (!isRecord(book)) {
     throw invalidBook(index, error)
   }
 
-  const id = readRequiredString(book, 'id')
+  const id = readRequiredId(book, 'id')
   const title = readRequiredString(book, 'title')
-  const updatedAt = readRequiredString(book, 'updatedAt')
+  const updatedAt = readOptionalIsoDate(book, 'updatedAt') ?? fallbackUpdatedAt
   const chapterCount = readNonNegativeInteger(book, 'chapterCount')
 
   if (!id || !title || !updatedAt || chapterCount === undefined || Number.isNaN(Date.parse(updatedAt))) {
@@ -209,9 +222,21 @@ function readRequiredString(record: Record<string, unknown>, key: string) {
   return typeof value === 'string' && value.trim() ? value.trim() : undefined
 }
 
+function readRequiredId(record: Record<string, unknown>, key: string) {
+  const value = record[key]
+  if (typeof value === 'string' && value.trim()) return value.trim()
+  if (typeof value === 'number' && Number.isInteger(value) && value >= 0) return String(value)
+  return undefined
+}
+
 function readOptionalString(record: Record<string, unknown>, key: string) {
   const value = record[key]
   return typeof value === 'string' && value.trim() ? value.trim() : undefined
+}
+
+function readOptionalIsoDate(record: Record<string, unknown>, key: string) {
+  const value = readOptionalString(record, key)
+  return value && !Number.isNaN(Date.parse(value)) ? value : undefined
 }
 
 function readNonNegativeInteger(record: Record<string, unknown>, key: string): number | undefined {

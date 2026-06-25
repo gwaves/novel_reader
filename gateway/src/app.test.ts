@@ -636,6 +636,64 @@ describe('gateway app', () => {
     })
   })
 
+  it('imports local mobile packages with numeric ids and generated timestamps', async () => {
+    const dataDir = await makeDataDir()
+    const app = buildTestApp({
+      GATEWAY_DEV_ACCESS_TOKEN: 'dev-token',
+      GATEWAY_DATA_DIR: dataDir,
+    })
+    const packageBody = {
+      schemaVersion: 1,
+      generatedAt: '2026-06-25T03:00:00.000Z',
+      book: {
+        id: 42,
+        title: '本地导出书',
+        importedAt: '2026-06-20T00:00:00.000Z',
+        chapterCount: 3,
+        wordCount: 67890,
+      },
+      chapters: [
+        {
+          id: 1,
+          title: '第一章',
+          content: '正文',
+        },
+      ],
+    }
+    const importResponse = await app.inject({
+      method: 'PUT',
+      url: '/admin/books/42/package',
+      headers: {
+        authorization: 'Bearer dev-token',
+      },
+      payload: packageBody,
+    })
+    const packageResponse = await app.inject({
+      method: 'GET',
+      url: '/mobile/books/42/package',
+      headers: {
+        authorization: 'Bearer dev-token',
+      },
+    })
+
+    expect(importResponse.statusCode).toBe(200)
+    expect(importResponse.json()).toMatchObject({
+      book: {
+        id: '42',
+        title: '本地导出书',
+        updatedAt: '2026-06-25T03:00:00.000Z',
+      },
+    })
+    expect(packageResponse.json()).toMatchObject({
+      package: {
+        book: {
+          id: '42',
+          title: '本地导出书',
+        },
+      },
+    })
+  })
+
   it('rejects imported mobile book packages with mismatched ids', async () => {
     const dataDir = await makeDataDir()
     const app = buildTestApp({

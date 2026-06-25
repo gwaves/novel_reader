@@ -270,3 +270,9 @@ SQLite 图谱表
 - 渲染：节点宽度和关系线宽会按出现次数调整，匹配节点高亮，图例展示当前可见节点/关系数量。
 - 视觉：图谱节点支持自动换行、阴影和更稳定的尺寸，减少长名称挤压和大图混乱感。
 - 页面：移除底部重复实体列表，将当前章节手动 JSON 保存入口收进章节扫描的折叠高级操作，减少主页面干扰。
+
+2026-06-26 更新：Gateway 数据发布脚本已完成。
+- 新增 `gateway/scripts/publish-package.mjs`，可从 PC 本地 `/api/mobile/books/:bookId/package` 读取移动端完整数据包，并上传到 Gateway 的 `PUT /admin/books/:bookId/package`。
+- 根脚本新增 `npm run gateway:publish-package`，支持 `GATEWAY_BASE_URL`、`GATEWAY_DEV_ACCESS_TOKEN`、`NOVEL_READER_API_BASE_URL`、`NOVEL_READER_SYNC_TOKEN` 等环境变量，也支持 `--source-file` 和 `--dry-run`。
+- Gateway 导入移动端数据包时兼容本地 API 的数字 book id，并在 package 缺少 `book.updatedAt` 时用 `generatedAt` 或 `book.importedAt` 回填书库索引更新时间。
+- README 与 Gateway 开发计划已补充脚本发布路径，PC 端暂不新增发布 UI，后续 MP3 产物也优先按脚本化发布路线推进。
