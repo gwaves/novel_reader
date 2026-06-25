@@ -158,11 +158,14 @@ function App() {
   const [audioManifest, setAudioManifest] = useState<AudioManifest | null>(null)
   const [audioTime, setAudioTime] = useState(0)
   const [loadingAudio, setLoadingAudio] = useState(false)
+  const [audioCatalogBookId, setAudioCatalogBookId] = useState<string | null>(null)
   const [loadingBooks, setLoadingBooks] = useState(false)
   const [loadingPackage, setLoadingPackage] = useState(false)
   const [chapterPickerOpen, setChapterPickerOpen] = useState(false)
   const [cachedAudioIds, setCachedAudioIds] = useState<Set<string>>(() => new Set())
+  const [cachedAudioBookId, setCachedAudioBookId] = useState<string | null>(null)
   const [audioSyncProgress, setAudioSyncProgress] = useState<{ done: number; total: number } | null>(null)
+  const [audioSyncBookId, setAudioSyncBookId] = useState<string | null>(null)
 
   const selectedBook = useMemo(
     () => books.find((book) => book.id === selectedBookId) ?? null,
@@ -173,9 +176,12 @@ function App() {
     () => chapters.find((chapter) => chapter.id === currentChapterId) ?? chapters[0] ?? null,
     [chapters, currentChapterId],
   )
+  const visibleAudioChapters = audioCatalogBookId === selectedBookId ? audioChapters : []
+  const visibleCachedAudioIds = cachedAudioBookId === selectedBookId ? cachedAudioIds : new Set<string>()
+  const visibleAudioSyncProgress = audioSyncBookId === selectedBookId ? audioSyncProgress : null
   const currentAudio = useMemo(
-    () => audioChapters.find((chapter) => chapter.chapterId === currentChapter?.id) ?? null,
-    [audioChapters, currentChapter],
+    () => visibleAudioChapters.find((chapter) => chapter.chapterId === currentChapter?.id) ?? null,
+    [currentChapter, visibleAudioChapters],
   )
   const activeTimelineEntry = useMemo(
     () => findActiveTimelineEntry(audioManifest, audioTime),
@@ -271,6 +277,8 @@ function App() {
         setBookPackage(null)
         setCurrentChapterId(null)
         setAudioChapters([])
+        setAudioCatalogBookId(null)
+        setCachedAudioBookId(null)
         clearAudioUrl()
       }
       await refreshCachedAudioIds(nextSelectedBookId ?? null)
@@ -293,6 +301,11 @@ function App() {
     setLoadingPackage(true)
     setMessage('')
     setAudioChapters([])
+    setAudioCatalogBookId(null)
+    setCachedAudioBookId(null)
+    setCachedAudioIds(new Set())
+    setAudioSyncProgress(null)
+    setAudioSyncBookId(null)
     clearAudioUrl()
     try {
       const response = await gatewayFetch(settings, `/mobile/books/${encodeURIComponent(bookId)}/package`)
@@ -339,6 +352,7 @@ function App() {
       const response = await gatewayFetch(settings, `/mobile/books/${encodeURIComponent(bookId)}/audio`)
       const nextAudioChapters = Array.isArray(response.chapters) ? response.chapters.filter(isAudioChapter) : []
       setAudioChapters(nextAudioChapters)
+      setAudioCatalogBookId(bookId)
       await refreshCachedAudioIds(bookId)
       if (showMessage) setMessage(`音频 ${nextAudioChapters.length} 章`)
     } catch (error) {
@@ -393,19 +407,23 @@ function App() {
   async function refreshCachedAudioIds(bookId = selectedBookId) {
     if (!bookId) {
       setCachedAudioIds(new Set())
+      setCachedAudioBookId(null)
       return
     }
     const ids = await listCachedAudioChapterIds(bookId)
     setCachedAudioIds(new Set(ids))
+    setCachedAudioBookId(bookId)
   }
 
   async function syncCurrentBookAudio() {
     if (!selectedBookId) return
-    let chaptersToSync = audioChapters
+    const bookId = selectedBookId
+    let chaptersToSync = audioCatalogBookId === bookId ? audioChapters : []
     if (chaptersToSync.length === 0) {
-      await refreshAudio(selectedBookId, false)
-      chaptersToSync = await fetchAudioCatalog(selectedBookId)
+      chaptersToSync = await fetchAudioCatalog(bookId)
       setAudioChapters(chaptersToSync)
+      setAudioCatalogBookId(bookId)
+      await refreshCachedAudioIds(bookId)
     }
     if (chaptersToSync.length === 0) {
       setMessage('当前书籍暂无音频')
@@ -413,25 +431,27 @@ function App() {
     }
 
     setLoadingAudio(true)
+    setAudioSyncBookId(bookId)
     setAudioSyncProgress({ done: 0, total: chaptersToSync.length })
     try {
       let done = 0
       for (const audioChapter of chaptersToSync) {
-        const cached = readCachedAudio(selectedBookId, audioChapter.chapterId)
+        const cached = readCachedAudio(bookId, audioChapter.chapterId)
         if (!cached) {
-          await cacheAudioChapter(selectedBookId, audioChapter, null)
+          await cacheAudioChapter(bookId, audioChapter, null)
         }
         done += 1
         setAudioSyncProgress({ done, total: chaptersToSync.length })
         setCachedAudioIds((current) => new Set(current).add(audioChapter.chapterId))
       }
-      await refreshCachedAudioIds(selectedBookId)
+      await refreshCachedAudioIds(bookId)
       setMessage(`音频已缓存 ${chaptersToSync.length}/${chaptersToSync.length} 章`)
     } catch (error) {
       setMessage(errorMessage(error))
     } finally {
       setLoadingAudio(false)
       setAudioSyncProgress(null)
+      setAudioSyncBookId(null)
     }
   }
 
@@ -652,11 +672,11 @@ function App() {
                 <div className="package-line">
                   <span>Audio</span>
                   <strong>
-                    {audioSyncProgress
-                      ? `${audioSyncProgress.done}/${audioSyncProgress.total}`
+                    {visibleAudioSyncProgress
+                      ? `${visibleAudioSyncProgress.done}/${visibleAudioSyncProgress.total}`
                       : loadingAudio
                         ? '同步中'
-                        : `${cachedAudioIds.size}/${audioChapters.length || selectedBook.audioChapterCount || 0} 已缓存`}
+                        : `${visibleCachedAudioIds.size}/${visibleAudioChapters.length || selectedBook.audioChapterCount || 0} 已缓存`}
                   </strong>
                 </div>
                 <button
@@ -665,7 +685,7 @@ function App() {
                   onClick={() => void syncCurrentBookAudio()}
                   disabled={!selectedBookId || loadingAudio}
                 >
-                  {audioSyncProgress ? `同步音频 ${audioSyncProgress.done}/${audioSyncProgress.total}` : '同步 Audio'}
+                  {visibleAudioSyncProgress ? `同步音频 ${visibleAudioSyncProgress.done}/${visibleAudioSyncProgress.total}` : '同步 Audio'}
                 </button>
                 <button className="primary-button full-width-button" type="button" onClick={() => switchTab('reader')} disabled={!bookPackage}>
                   开始阅读
@@ -877,7 +897,7 @@ function App() {
               </div>
               <div>
                 <dt>Audio</dt>
-                <dd>{cachedAudioIds.size}/{audioChapters.length || selectedBook?.audioChapterCount || 0} 章</dd>
+                <dd>{visibleCachedAudioIds.size}/{visibleAudioChapters.length || selectedBook?.audioChapterCount || 0} 章</dd>
               </div>
             </dl>
           </section>

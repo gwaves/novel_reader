@@ -12,6 +12,7 @@
 - Gateway Android 修正阅读页切换 Tab 时的进度覆盖问题：离开阅读页前会主动保存真实滚动位置，回到阅读页会恢复该位置，避免进入设置页后再返回时跳到章节顶部。
 - Gateway Android 优化 Audio 批量同步：真机上新增原生下载插件，MP3 会通过 Android 原生 HTTP 流式写入 APP 私有文件目录，IndexedDB 只保存本地路径和元数据，避免几十 MB 章节经过 JS/base64/Blob 后导致同步越下越慢；浏览器环境仍保留 Blob 缓存兜底。
 - Gateway Android 移除 Audio 对 IndexedDB 的依赖：音频缓存状态改用轻量 localStorage 索引，MP3 继续存放在 Android 私有文件目录；旧版本 `chapter-audio` IndexedDB store 会在启动时清理，真机调试时也可直接清空 WebView IndexedDB 后重新拉取 package。
+- Gateway Android 修正切换书籍后的 Audio 状态串书问题：音频目录、缓存数量和同步进度都会记录所属书籍，详情页与同步按钮只显示当前选中书籍的数据，避免《三国演义》误显示《妖刀记》的 27 章音频。
 
 2026-06-25 更新：Gateway 移动书库索引 API 已进入最小可用形态。
 - 产品边界补充：后续面向 Gateway 的 Android 移动端应单独新建应用目录/工程，保持现有 `mobile-app/` 不变，避免影响当前已可用的局域网/离线移动端。
