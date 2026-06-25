@@ -70,6 +70,8 @@ type ConnectionState = 'idle' | 'checking' | 'connected' | 'error'
 
 const settingsKey = 'novel-reader-gateway-settings'
 const packageCachePrefix = 'novel-reader-gateway-package:'
+const packageCacheDbName = 'novel-reader-gateway'
+const packageCacheStoreName = 'book-packages'
 
 const defaultSettings: GatewaySettings = {
   baseUrl: 'https://',
@@ -176,11 +178,11 @@ function App() {
       const nextPackage = normalizeBookPackage(response.package)
       setBookPackage(nextPackage)
       setCurrentChapterId(packageChapters(nextPackage)[0]?.id ?? null)
-      cacheBookPackage(bookId, nextPackage)
-      setMessage('数据包已加载')
+      const cached = await cacheBookPackage(bookId, nextPackage)
+      setMessage(cached ? '数据包已加载' : '数据包已加载，缓存空间不足')
       await refreshAudio(bookId, false)
     } catch (error) {
-      const cachedPackage = loadCachedBookPackage(bookId)
+      const cachedPackage = await loadCachedBookPackage(bookId)
       setBookPackage(cachedPackage)
       setCurrentChapterId(packageChapters(cachedPackage)[0]?.id ?? null)
       setMessage(cachedPackage ? `已使用本地缓存：${errorMessage(error)}` : errorMessage(error))
@@ -626,17 +628,97 @@ function normalizeBookPackage(value: unknown): BookPackage {
   }
 }
 
-function cacheBookPackage(bookId: string, bookPackage: BookPackage) {
-  localStorage.setItem(`${packageCachePrefix}${bookId}`, JSON.stringify(bookPackage))
+async function cacheBookPackage(bookId: string, bookPackage: BookPackage) {
+  const indexedDbCached = await writeBookPackageToIndexedDb(bookId, bookPackage)
+  if (indexedDbCached) {
+    try {
+      localStorage.removeItem(`${packageCachePrefix}${bookId}`)
+    } catch {
+      // Ignore cleanup failures; IndexedDB already has the current package.
+    }
+    return true
+  }
+
+  try {
+    localStorage.setItem(`${packageCachePrefix}${bookId}`, JSON.stringify(bookPackage))
+    return true
+  } catch {
+    return false
+  }
 }
 
-function loadCachedBookPackage(bookId: string): BookPackage | null {
+async function loadCachedBookPackage(bookId: string): Promise<BookPackage | null> {
+  const indexedDbPackage = await readBookPackageFromIndexedDb(bookId)
+  if (indexedDbPackage) return indexedDbPackage
+
   try {
     const cached = localStorage.getItem(`${packageCachePrefix}${bookId}`)
     return cached ? normalizeBookPackage(JSON.parse(cached) as unknown) : null
   } catch {
     return null
   }
+}
+
+async function writeBookPackageToIndexedDb(bookId: string, bookPackage: BookPackage) {
+  try {
+    const db = await openPackageCacheDb()
+    await runPackageStoreRequest(db, 'readwrite', (store) =>
+      store.put({
+        bookId,
+        package: bookPackage,
+        cachedAt: new Date().toISOString(),
+      }),
+    )
+    db.close()
+    return true
+  } catch {
+    return false
+  }
+}
+
+async function readBookPackageFromIndexedDb(bookId: string) {
+  try {
+    const db = await openPackageCacheDb()
+    const record = await runPackageStoreRequest(db, 'readonly', (store) => store.get(bookId))
+    db.close()
+    if (!isRecord(record)) return null
+    return normalizeBookPackage(record.package)
+  } catch {
+    return null
+  }
+}
+
+function openPackageCacheDb() {
+  return new Promise<IDBDatabase>((resolve, reject) => {
+    if (!('indexedDB' in window)) {
+      reject(new Error('IndexedDB is not available.'))
+      return
+    }
+
+    const request = indexedDB.open(packageCacheDbName, 1)
+    request.onerror = () => reject(request.error ?? new Error('Failed to open package cache.'))
+    request.onupgradeneeded = () => {
+      const db = request.result
+      if (!db.objectStoreNames.contains(packageCacheStoreName)) {
+        db.createObjectStore(packageCacheStoreName, { keyPath: 'bookId' })
+      }
+    }
+    request.onsuccess = () => resolve(request.result)
+  })
+}
+
+function runPackageStoreRequest<T>(
+  db: IDBDatabase,
+  mode: IDBTransactionMode,
+  createRequest: (store: IDBObjectStore) => IDBRequest<T>,
+) {
+  return new Promise<T>((resolve, reject) => {
+    const transaction = db.transaction(packageCacheStoreName, mode)
+    const request = createRequest(transaction.objectStore(packageCacheStoreName))
+    request.onerror = () => reject(request.error ?? new Error('Package cache request failed.'))
+    request.onsuccess = () => resolve(request.result)
+    transaction.onerror = () => reject(transaction.error ?? new Error('Package cache transaction failed.'))
+  })
 }
 
 function isChapter(value: unknown): value is Chapter {

@@ -1,3 +1,8 @@
+2026-06-26 更新：Gateway Android 真机连接与大数据包缓存继续修复。
+- Gateway Android 客户端的单书 package 缓存从 `localStorage` 改为优先写入 IndexedDB，避免 Android WebView 在《妖刀记》这类大包上触发 `Storage exceeded the quota` 后中断打开书籍。
+- package 写入 IndexedDB 成功后会清理同书旧版 localStorage 缓存；若 IndexedDB 不可用，仍保留 localStorage 降级，但失败不会回滚已经拉到内存里的书籍数据。
+- 本机 Gateway 继续通过 LaunchAgent `com.gwaves.novel-reader-gateway` 监听 `0.0.0.0:6180`，测试 token 为 `123456`；手机调试通过 `adb reverse tcp:6180 tcp:6180` 访问 `http://127.0.0.1:6180`。
+
 2026-06-25 更新：Gateway 移动书库索引 API 已进入最小可用形态。
 - 产品边界补充：后续面向 Gateway 的 Android 移动端应单独新建应用目录/工程，保持现有 `mobile-app/` 不变，避免影响当前已可用的局域网/离线移动端。
 - 新增独立 `gateway-android-app/` 客户端工程骨架，使用 Capacitor-ready React/Vite，不修改旧 `mobile-app/`；第一版支持配置 Gateway 地址、token、设备名，验证会话，拉取书库并读取单书 package。
