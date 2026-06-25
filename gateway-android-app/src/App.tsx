@@ -96,6 +96,7 @@ function App() {
   const [loadingAudio, setLoadingAudio] = useState(false)
   const [loadingBooks, setLoadingBooks] = useState(false)
   const [loadingPackage, setLoadingPackage] = useState(false)
+  const [chapterPickerOpen, setChapterPickerOpen] = useState(false)
 
   const selectedBook = useMemo(
     () => books.find((book) => book.id === selectedBookId) ?? null,
@@ -258,6 +259,7 @@ function App() {
 
   function selectChapter(chapterId: string) {
     setCurrentChapterId(chapterId)
+    setChapterPickerOpen(false)
     clearAudioUrl()
     window.scrollTo({ top: 0 })
   }
@@ -280,7 +282,7 @@ function App() {
       const now = event.timeStamp
       if (now - lastReaderCenterTapAtRef.current < 360) {
         lastReaderCenterTapAtRef.current = 0
-        void playCurrentAudio()
+        setChapterPickerOpen(true)
         return
       }
       lastReaderCenterTapAtRef.current = now
@@ -420,6 +422,17 @@ function App() {
                   </div>
                 ) : null}
                 <TextContent text={chapterContent(currentChapter)} activeEntry={activeTimelineEntry} />
+                <div className="reader-bottom-nav">
+                  <button type="button" onClick={() => selectChapter(previousChapter?.id ?? currentChapter.id)} disabled={!previousChapter}>
+                    上一章
+                  </button>
+                  <button type="button" onClick={() => setChapterPickerOpen(true)}>
+                    章节
+                  </button>
+                  <button type="button" onClick={() => selectChapter(nextChapter?.id ?? currentChapter.id)} disabled={!nextChapter}>
+                    下一章
+                  </button>
+                </div>
               </article>
               {audioUrl ? (
                 <div className="audio-dock">
@@ -430,6 +443,39 @@ function App() {
                     autoPlay
                     onTimeUpdate={(event) => setAudioTime(event.currentTarget.currentTime)}
                   />
+                </div>
+              ) : null}
+              {chapterPickerOpen ? (
+                <div className="chapter-picker-overlay" role="presentation" onClick={() => setChapterPickerOpen(false)}>
+                  <section className="chapter-picker-sheet" role="dialog" aria-modal="true" aria-label="选择章节" onClick={(event) => event.stopPropagation()}>
+                    <div className="chapter-picker-header">
+                      <div>
+                        <strong>选择章节</strong>
+                        <span>{currentChapterPosition + 1}/{chapters.length}</span>
+                      </div>
+                      <button type="button" onClick={() => setChapterPickerOpen(false)}>关闭</button>
+                    </div>
+                    <div className="chapter-picker-actions">
+                      <button type="button" onClick={() => selectChapter(previousChapter?.id ?? currentChapter.id)} disabled={!previousChapter}>
+                        上一章
+                      </button>
+                      <button type="button" onClick={() => selectChapter(nextChapter?.id ?? currentChapter.id)} disabled={!nextChapter}>
+                        下一章
+                      </button>
+                    </div>
+                    <div className="chapter-picker-list">
+                      {chapters.map((chapter, index) => (
+                        <button
+                          className={chapter.id === currentChapter.id ? 'active' : ''}
+                          key={chapter.id}
+                          type="button"
+                          onClick={() => selectChapter(chapter.id)}
+                        >
+                          {index + 1}. {chapter.title}
+                        </button>
+                      ))}
+                    </div>
+                  </section>
                 </div>
               ) : null}
             </>

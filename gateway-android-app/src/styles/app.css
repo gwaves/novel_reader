@@ -330,9 +330,6 @@ button:disabled {
 }
 
 .reader-toolbar {
-  position: sticky;
-  top: calc(env(safe-area-inset-top) + 8px);
-  z-index: 10;
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto auto;
   gap: 12px;
@@ -352,6 +349,24 @@ button:disabled {
   color: #26313d;
   padding: 0 10px;
   font-weight: 700;
+}
+
+.reader-bottom-nav {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 10px;
+  margin-top: 28px;
+  padding-top: 18px;
+  border-top: 1px solid #eadfce;
+}
+
+.reader-bottom-nav button {
+  min-height: 42px;
+  border: 1px solid #d8ccb9;
+  border-radius: 8px;
+  background: #fffaf0;
+  color: #3d3325;
+  font-weight: 800;
 }
 
 .reader-status {
@@ -454,6 +469,85 @@ button:disabled {
   background: #ffe0a3;
   color: #17202a;
   padding: 1px 2px;
+}
+
+.chapter-picker-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 30;
+  display: flex;
+  align-items: flex-end;
+  background: rgba(14, 22, 31, 0.28);
+}
+
+.chapter-picker-sheet {
+  width: 100%;
+  max-height: min(72vh, 720px);
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  border-radius: 8px 8px 0 0;
+  background: #ffffff;
+  padding: 14px 14px calc(env(safe-area-inset-bottom) + 14px);
+}
+
+.chapter-picker-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.chapter-picker-header div {
+  display: grid;
+  gap: 4px;
+}
+
+.chapter-picker-header strong {
+  color: #17202a;
+  font-size: 17px;
+}
+
+.chapter-picker-header span {
+  color: #667584;
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.chapter-picker-header button,
+.chapter-picker-actions button,
+.chapter-picker-list button {
+  min-height: 40px;
+  border: 1px solid #cfd9e3;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #26313d;
+  padding: 0 12px;
+  font-weight: 700;
+}
+
+.chapter-picker-actions {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.chapter-picker-list {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+  overflow: auto;
+}
+
+.chapter-picker-list button {
+  justify-content: start;
+  text-align: left;
+}
+
+.chapter-picker-list button.active {
+  border-color: #2f6f73;
+  background: #edf7f5;
+  color: #174d51;
 }
 
 .sync-summary {
