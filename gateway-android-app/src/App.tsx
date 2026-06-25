@@ -1,5 +1,5 @@
 import { type CSSProperties, type MouseEvent, useEffect, useMemo, useRef, useState } from 'react'
-import { Capacitor, CapacitorHttp } from '@capacitor/core'
+import { Capacitor, CapacitorHttp, registerPlugin } from '@capacitor/core'
 
 type GatewaySettings = {
   baseUrl: string
@@ -56,6 +56,34 @@ type AudioManifest = {
   timeline?: AudioTimelineEntry[]
 }
 
+type CachedAudio = {
+  blob?: Blob
+  filePath?: string
+  manifest: AudioManifest | null
+  sizeBytes?: number
+}
+
+type AudioCachePayload =
+  | {
+      kind: 'blob'
+      blob: Blob
+    }
+  | {
+      kind: 'file'
+      filePath: string
+      sizeBytes?: number
+    }
+
+type NativeAudioPlugin = {
+  downloadAudio(options: {
+    url: string
+    token: string
+    deviceName: string
+    bookId: string
+    chapterId: string
+  }): Promise<{ filePath: string; sizeBytes: number }>
+}
+
 type AudioTimelineEntry = {
   id?: string
   text?: string
@@ -91,6 +119,7 @@ const packageCacheStoreName = 'book-packages'
 const audioCacheStoreName = 'chapter-audio'
 const defaultGatewayBaseUrl = import.meta.env.VITE_GATEWAY_DEFAULT_BASE_URL ?? 'https://'
 const defaultGatewayToken = import.meta.env.VITE_GATEWAY_DEFAULT_TOKEN ?? '123456'
+const NativeAudio = registerPlugin<NativeAudioPlugin>('GatewayAudio')
 
 const defaultSettings: GatewaySettings = {
   baseUrl: defaultGatewayBaseUrl,
@@ -320,20 +349,24 @@ function App() {
               .then(normalizeAudioManifest)
               .catch(() => null)
           : null)
-      const blob =
-        cachedAudio?.blob ??
-        (await gatewayFetchBlob(
-          settings,
-          `/mobile/books/${encodeURIComponent(selectedBookId)}/audio/${encodeURIComponent(currentChapter.id)}/download`,
-        ))
+      let playbackUrl = cachedAudio?.filePath ? Capacitor.convertFileSrc(cachedAudio.filePath) : ''
+      let blob: Blob | undefined = cachedAudio?.blob
       if (!cachedAudio) {
-        await writeAudioToIndexedDb(selectedBookId, currentAudio, blob, manifest)
+        const cached = await cacheAudioChapter(selectedBookId, currentAudio, manifest)
+        if (cached.kind === 'file') {
+          playbackUrl = Capacitor.convertFileSrc(cached.filePath)
+        } else {
+          blob = cached.blob
+        }
         await refreshCachedAudioIds(selectedBookId)
+      }
+      if (!playbackUrl && blob) {
+        playbackUrl = URL.createObjectURL(blob)
       }
       clearAudioUrl()
       setAudioManifest(manifest)
       setAudioTime(0)
-      setAudioUrl(URL.createObjectURL(blob))
+      setAudioUrl(playbackUrl)
       setMessage('音频已加载')
     } catch (error) {
       setMessage(errorMessage(error))
@@ -371,16 +404,7 @@ function App() {
       for (const audioChapter of chaptersToSync) {
         const cached = await readAudioFromIndexedDb(selectedBookId, audioChapter.chapterId)
         if (!cached) {
-          const manifest = audioChapter.manifestFileName
-            ? await gatewayFetch(settings, `/mobile/books/${encodeURIComponent(selectedBookId)}/audio/${encodeURIComponent(audioChapter.chapterId)}/manifest`)
-                .then(normalizeAudioManifest)
-                .catch(() => null)
-            : null
-          const blob = await gatewayFetchBlob(
-            settings,
-            `/mobile/books/${encodeURIComponent(selectedBookId)}/audio/${encodeURIComponent(audioChapter.chapterId)}/download`,
-          )
-          await writeAudioToIndexedDb(selectedBookId, audioChapter, blob, manifest)
+          await cacheAudioChapter(selectedBookId, audioChapter, null)
         }
         done += 1
         setAudioSyncProgress({ done, total: chaptersToSync.length })
@@ -401,9 +425,30 @@ function App() {
     return Array.isArray(response.chapters) ? response.chapters.filter(isAudioChapter) : []
   }
 
+  async function cacheAudioChapter(bookId: string, audioChapter: AudioChapter, manifest: AudioManifest | null): Promise<AudioCachePayload> {
+    if (Capacitor.isNativePlatform()) {
+      const downloaded = await downloadAudioToNativeFile(settings, bookId, audioChapter.chapterId)
+      const payload: AudioCachePayload = {
+        kind: 'file',
+        filePath: downloaded.filePath,
+        sizeBytes: downloaded.sizeBytes,
+      }
+      await writeAudioToIndexedDb(bookId, audioChapter, payload, manifest)
+      return payload
+    }
+
+    const blob = await gatewayFetchBlob(
+      settings,
+      `/mobile/books/${encodeURIComponent(bookId)}/audio/${encodeURIComponent(audioChapter.chapterId)}/download`,
+    )
+    const payload: AudioCachePayload = { kind: 'blob', blob }
+    await writeAudioToIndexedDb(bookId, audioChapter, payload, manifest)
+    return payload
+  }
+
   function clearAudioUrl() {
     setAudioUrl((currentUrl) => {
-      if (currentUrl) URL.revokeObjectURL(currentUrl)
+      if (currentUrl?.startsWith('blob:')) URL.revokeObjectURL(currentUrl)
       return null
     })
     setAudioManifest(null)
@@ -956,6 +1001,24 @@ async function gatewayFetchBlob(settings: GatewaySettings, path: string) {
   return response.blob()
 }
 
+async function downloadAudioToNativeFile(settings: GatewaySettings, bookId: string, chapterId: string) {
+  const baseUrl = settings.baseUrl.trim().replace(/\/+$/, '')
+  if (!baseUrl || baseUrl === 'https:') {
+    throw new Error('请填写 Gateway 地址')
+  }
+  if (!settings.token.trim()) {
+    throw new Error('请填写 Token')
+  }
+
+  return NativeAudio.downloadAudio({
+    bookId,
+    chapterId,
+    deviceName: settings.deviceName.trim() || 'Android Phone',
+    token: settings.token.trim(),
+    url: `${baseUrl}/mobile/books/${encodeURIComponent(bookId)}/audio/${encodeURIComponent(chapterId)}/download`,
+  })
+}
+
 function parseJsonBody(value: string) {
   try {
     return JSON.parse(value) as { error?: { message?: string } } & Record<string, unknown>
@@ -1167,7 +1230,7 @@ async function readBookPackageFromIndexedDb(bookId: string) {
   }
 }
 
-async function writeAudioToIndexedDb(bookId: string, audioChapter: AudioChapter, blob: Blob, manifest: AudioManifest | null) {
+async function writeAudioToIndexedDb(bookId: string, audioChapter: AudioChapter, payload: AudioCachePayload, manifest: AudioManifest | null) {
   const db = await openPackageCacheDb()
   try {
     await runPackageStoreRequest(db, 'readwrite', audioCacheStoreName, (store) =>
@@ -1176,9 +1239,10 @@ async function writeAudioToIndexedDb(bookId: string, audioChapter: AudioChapter,
         bookId,
         chapterId: audioChapter.chapterId,
         audioChapter,
-        blob,
+        blob: payload.kind === 'blob' ? payload.blob : undefined,
+        filePath: payload.kind === 'file' ? payload.filePath : undefined,
         manifest,
-        sizeBytes: blob.size || audioChapter.sizeBytes,
+        sizeBytes: payload.kind === 'blob' ? payload.blob.size || audioChapter.sizeBytes : payload.sizeBytes || audioChapter.sizeBytes,
         cachedAt: new Date().toISOString(),
         updatedAt: audioChapter.updatedAt,
       }),
@@ -1188,15 +1252,20 @@ async function writeAudioToIndexedDb(bookId: string, audioChapter: AudioChapter,
   }
 }
 
-async function readAudioFromIndexedDb(bookId: string, chapterId: string): Promise<{ blob: Blob; manifest: AudioManifest | null } | null> {
+async function readAudioFromIndexedDb(bookId: string, chapterId: string): Promise<CachedAudio | null> {
   try {
     const db = await openPackageCacheDb()
     try {
       const record = await runPackageStoreRequest(db, 'readonly', audioCacheStoreName, (store) => store.get(audioCacheKey(bookId, chapterId)))
-      if (!isRecord(record) || !(record.blob instanceof Blob)) return null
+      if (!isRecord(record)) return null
+      const blob = record.blob instanceof Blob ? record.blob : undefined
+      const filePath = typeof record.filePath === 'string' ? record.filePath : undefined
+      if (!blob && !filePath) return null
       return {
-        blob: record.blob,
+        blob,
+        filePath,
         manifest: isRecord(record.manifest) ? normalizeAudioManifest(record.manifest) : null,
+        sizeBytes: typeof record.sizeBytes === 'number' ? record.sizeBytes : undefined,
       }
     } finally {
       db.close()

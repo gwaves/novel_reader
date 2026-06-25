@@ -10,6 +10,7 @@
 - Gateway Android 启动后会在 Gateway 地址和 Token 已配置时自动连接后端并同步书库；设置页的连接/刷新按钮改为兜底操作。默认 token 保持测试用 `123456`，默认 Gateway 地址可通过 `VITE_GATEWAY_DEFAULT_BASE_URL` 在构建时注入公有域名。
 - Gateway Android 新增阅读进度恢复：阅读页滚动时会保存当前书、章节和滚动位置；下次启动自动连接并同步书库后，会优先打开上次阅读的书和章节并恢复到对应滚动位置。
 - Gateway Android 修正阅读页切换 Tab 时的进度覆盖问题：离开阅读页前会主动保存真实滚动位置，回到阅读页会恢复该位置，避免进入设置页后再返回时跳到章节顶部。
+- Gateway Android 优化 Audio 批量同步：真机上新增原生下载插件，MP3 会通过 Android 原生 HTTP 流式写入 APP 私有文件目录，IndexedDB 只保存本地路径和元数据，避免几十 MB 章节经过 JS/base64/Blob 后导致同步越下越慢；浏览器环境仍保留 Blob 缓存兜底。
 
 2026-06-25 更新：Gateway 移动书库索引 API 已进入最小可用形态。
 - 产品边界补充：后续面向 Gateway 的 Android 移动端应单独新建应用目录/工程，保持现有 `mobile-app/` 不变，避免影响当前已可用的局域网/离线移动端。
