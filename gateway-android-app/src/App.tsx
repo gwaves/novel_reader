@@ -75,8 +75,16 @@ type ReaderSettings = {
   background: ReaderBackground
 }
 
+type ReadingProgress = {
+  bookId: string
+  chapterId: string
+  scrollY: number
+  updatedAt: string
+}
+
 const settingsKey = 'novel-reader-gateway-settings'
 const readerSettingsKey = 'novel-reader-gateway-reader-settings'
+const readingProgressKey = 'novel-reader-gateway-reading-progress'
 const packageCachePrefix = 'novel-reader-gateway-package:'
 const packageCacheDbName = 'novel-reader-gateway'
 const packageCacheStoreName = 'book-packages'
@@ -142,6 +150,8 @@ function App() {
     currentChapterPosition >= 0 && currentChapterPosition < chapters.length - 1 ? chapters[currentChapterPosition + 1] : null
   const lastReaderCenterTapAtRef = useRef(0)
   const autoConnectAttemptedRef = useRef(false)
+  const autoRestoreAttemptedRef = useRef(false)
+  const pendingRestoreScrollRef = useRef<number | null>(null)
 
   useEffect(() => {
     localStorage.setItem(settingsKey, JSON.stringify(settings))
@@ -156,6 +166,35 @@ function App() {
     autoConnectAttemptedRef.current = true
     void checkSession()
   }, [settings.baseUrl, settings.token])
+
+  useEffect(() => {
+    if (tab !== 'reader' || !selectedBookId || !currentChapterId) return
+
+    let saveTimer: number | undefined
+    const save = () => {
+      window.clearTimeout(saveTimer)
+      saveTimer = window.setTimeout(() => {
+        saveReadingProgress({
+          bookId: selectedBookId,
+          chapterId: currentChapterId,
+          scrollY: Math.max(0, window.scrollY),
+          updatedAt: new Date().toISOString(),
+        })
+      }, 250)
+    }
+
+    window.addEventListener('scroll', save, { passive: true })
+    return () => {
+      window.removeEventListener('scroll', save)
+      window.clearTimeout(saveTimer)
+      saveReadingProgress({
+        bookId: selectedBookId,
+        chapterId: currentChapterId,
+        scrollY: Math.max(0, window.scrollY),
+        updatedAt: new Date().toISOString(),
+      })
+    }
+  }, [currentChapterId, selectedBookId, tab])
 
   useEffect(() => {
     return () => {
@@ -201,6 +240,10 @@ function App() {
       await refreshCachedAudioIds(nextSelectedBookId ?? null)
       setConnectionState('connected')
       setMessage(`书库 ${nextBooks.length} 本`)
+      if (!autoRestoreAttemptedRef.current) {
+        autoRestoreAttemptedRef.current = true
+        await restoreLastReading(nextBooks)
+      }
     } catch (error) {
       setConnectionState('error')
       setMessage(errorMessage(error))
@@ -209,7 +252,7 @@ function App() {
     }
   }
 
-  async function openBook(bookId: string) {
+  async function openBook(bookId: string, options: { restoreProgress?: ReadingProgress | null } = {}) {
     setSelectedBookId(bookId)
     setLoadingPackage(true)
     setMessage('')
@@ -218,20 +261,36 @@ function App() {
     try {
       const response = await gatewayFetch(settings, `/mobile/books/${encodeURIComponent(bookId)}/package`)
       const nextPackage = normalizeBookPackage(response.package)
+      const nextChapters = packageChapters(nextPackage)
+      const restoredChapterId =
+        options.restoreProgress?.bookId === bookId && nextChapters.some((chapter) => chapter.id === options.restoreProgress?.chapterId)
+          ? options.restoreProgress.chapterId
+          : null
       setBookPackage(nextPackage)
-      setCurrentChapterId(packageChapters(nextPackage)[0]?.id ?? null)
+      setCurrentChapterId(restoredChapterId ?? nextChapters[0]?.id ?? null)
       const cached = await cacheBookPackage(bookId, nextPackage)
       setMessage(cached ? '数据包已加载' : '数据包已加载，缓存空间不足')
       await refreshAudio(bookId, false)
       await refreshCachedAudioIds(bookId)
+      pendingRestoreScrollRef.current = restoredChapterId ? options.restoreProgress?.scrollY ?? 0 : 0
       setTab('reader')
+      restorePendingScroll()
     } catch (error) {
       const cachedPackage = await loadCachedBookPackage(bookId)
+      const cachedChapters = packageChapters(cachedPackage)
+      const restoredChapterId =
+        options.restoreProgress?.bookId === bookId && cachedChapters.some((chapter) => chapter.id === options.restoreProgress?.chapterId)
+          ? options.restoreProgress.chapterId
+          : null
       setBookPackage(cachedPackage)
-      setCurrentChapterId(packageChapters(cachedPackage)[0]?.id ?? null)
+      setCurrentChapterId(restoredChapterId ?? cachedChapters[0]?.id ?? null)
       setMessage(cachedPackage ? `已使用本地缓存：${errorMessage(error)}` : errorMessage(error))
       await refreshCachedAudioIds(bookId)
-      if (cachedPackage) setTab('reader')
+      if (cachedPackage) {
+        pendingRestoreScrollRef.current = restoredChapterId ? options.restoreProgress?.scrollY ?? 0 : 0
+        setTab('reader')
+        restorePendingScroll()
+      }
     } finally {
       setLoadingPackage(false)
     }
@@ -363,6 +422,29 @@ function App() {
     setCurrentChapterId(chapterId)
     clearAudioUrl()
     window.scrollTo({ top: 0 })
+    if (selectedBookId) {
+      saveReadingProgress({
+        bookId: selectedBookId,
+        chapterId,
+        scrollY: 0,
+        updatedAt: new Date().toISOString(),
+      })
+    }
+  }
+
+  async function restoreLastReading(nextBooks: BookSummary[]) {
+    const progress = loadReadingProgress()
+    if (!progress || !nextBooks.some((book) => book.id === progress.bookId)) return
+    await openBook(progress.bookId, { restoreProgress: progress })
+  }
+
+  function restorePendingScroll() {
+    const scrollY = pendingRestoreScrollRef.current
+    if (scrollY === null) return
+    pendingRestoreScrollRef.current = null
+    window.setTimeout(() => {
+      window.scrollTo({ top: scrollY, behavior: 'auto' })
+    }, 120)
   }
 
   function updateReaderFontSize(nextFontSize: number) {
@@ -899,6 +981,29 @@ function loadReaderSettings(): ReaderSettings {
     return { fontSize, background }
   } catch {
     return defaultReaderSettings
+  }
+}
+
+function loadReadingProgress(): ReadingProgress | null {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(readingProgressKey) || 'null') as Partial<ReadingProgress> | null
+    if (!parsed || typeof parsed.bookId !== 'string' || typeof parsed.chapterId !== 'string') return null
+    return {
+      bookId: parsed.bookId,
+      chapterId: parsed.chapterId,
+      scrollY: typeof parsed.scrollY === 'number' && Number.isFinite(parsed.scrollY) ? Math.max(0, parsed.scrollY) : 0,
+      updatedAt: typeof parsed.updatedAt === 'string' ? parsed.updatedAt : new Date().toISOString(),
+    }
+  } catch {
+    return null
+  }
+}
+
+function saveReadingProgress(progress: ReadingProgress) {
+  try {
+    localStorage.setItem(readingProgressKey, JSON.stringify(progress))
+  } catch {
+    // Best effort; reading should continue even if the WebView storage is full.
   }
 }
 
