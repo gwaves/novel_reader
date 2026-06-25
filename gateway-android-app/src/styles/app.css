@@ -35,7 +35,7 @@ button:disabled {
 
 .app-shell {
   min-height: 100vh;
-  padding: calc(env(safe-area-inset-top) + 16px) 16px calc(env(safe-area-inset-bottom) + 20px);
+  padding: calc(env(safe-area-inset-top) + 16px) 16px calc(env(safe-area-inset-bottom) + 88px);
 }
 
 .top-bar {
@@ -60,7 +60,8 @@ button:disabled {
 }
 
 .icon-button,
-.primary-button {
+.primary-button,
+.secondary-button {
   border: 1px solid #2f6f73;
   background: #2f6f73;
   color: #ffffff;
@@ -68,6 +69,17 @@ button:disabled {
   border-radius: 8px;
   padding: 0 16px;
   font-weight: 700;
+}
+
+.secondary-button {
+  border-color: #cfd9e3;
+  background: #ffffff;
+  color: #26313d;
+}
+
+.settings-page {
+  display: grid;
+  gap: 14px;
 }
 
 .settings-panel {
@@ -99,6 +111,12 @@ button:disabled {
   background: #fbfdff;
   color: #17202a;
   padding: 0 12px;
+}
+
+.settings-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
 }
 
 .status-line {
@@ -199,8 +217,25 @@ button:disabled {
   min-height: 132px;
   display: grid;
   place-items: center;
+  gap: 10px;
   color: #768493;
   font-size: 14px;
+  padding: 18px;
+  text-align: center;
+}
+
+.empty-state p {
+  margin: 0;
+}
+
+.empty-state button {
+  min-height: 38px;
+  border: 1px solid #cfd9e3;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #26313d;
+  padding: 0 12px;
+  font-weight: 700;
 }
 
 .detail-body {
@@ -422,6 +457,62 @@ button:disabled {
   padding: 1px 2px;
 }
 
+.sync-summary {
+  border: 1px solid #d9e1e8;
+  border-radius: 8px;
+  background: #ffffff;
+  overflow: hidden;
+}
+
+.sync-summary dl {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin: 0;
+  padding: 14px;
+}
+
+.sync-summary dt {
+  color: #667584;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.sync-summary dd {
+  margin: 4px 0 0;
+  color: #17202a;
+  font-size: 14px;
+  font-weight: 800;
+  word-break: break-word;
+}
+
+.bottom-nav {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 20;
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  min-height: calc(64px + env(safe-area-inset-bottom));
+  padding-bottom: env(safe-area-inset-bottom);
+  border-top: 1px solid #d9e1e8;
+  background: rgba(255, 255, 255, 0.96);
+  backdrop-filter: blur(16px);
+}
+
+.bottom-nav button {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  color: #667584;
+  font-weight: 700;
+}
+
+.bottom-nav button.active {
+  color: #2f6f73;
+}
+
 @media (min-width: 760px) {
   .app-shell {
     max-width: 1080px;
@@ -429,9 +520,9 @@ button:disabled {
     padding-top: 24px;
   }
 
-  .settings-panel {
-    grid-template-columns: 1.2fr 1fr 0.8fr auto;
-    align-items: end;
+  .settings-page {
+    grid-template-columns: minmax(360px, 1fr) minmax(300px, 0.8fr);
+    align-items: start;
   }
 
   .content-grid {

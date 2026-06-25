@@ -67,6 +67,7 @@ type AudioTimelineEntry = {
 }
 
 type ConnectionState = 'idle' | 'checking' | 'connected' | 'error'
+type GatewayTab = 'reader' | 'settings'
 
 const settingsKey = 'novel-reader-gateway-settings'
 const packageCachePrefix = 'novel-reader-gateway-package:'
@@ -80,6 +81,7 @@ const defaultSettings: GatewaySettings = {
 }
 
 function App() {
+  const [tab, setTab] = useState<GatewayTab>('reader')
   const [settings, setSettings] = useState<GatewaySettings>(() => loadSettings())
   const [connectionState, setConnectionState] = useState<ConnectionState>('idle')
   const [message, setMessage] = useState('')
@@ -249,174 +251,231 @@ function App() {
     <main className="app-shell">
       <header className="top-bar">
         <div>
-          <h1>Novel Gateway</h1>
-          <p>{connectionLabel(connectionState)}</p>
+          <h1>{tab === 'reader' ? selectedBook?.title ?? 'Novel Gateway' : '设置'}</h1>
+          <p>
+            {tab === 'reader'
+              ? selectedBook
+                ? `${selectedBook.chapterCount} 章 · ${audioChapters.length || selectedBook.audioChapterCount || 0} 音频`
+                : connectionLabel(connectionState)
+              : connectionLabel(connectionState)}
+          </p>
         </div>
-        <button className="icon-button" type="button" onClick={() => void refreshBooks()} disabled={loadingBooks}>
-          刷新
-        </button>
+        {tab === 'reader' ? (
+          <button className="icon-button" type="button" onClick={() => void refreshBooks()} disabled={loadingBooks}>
+            刷新
+          </button>
+        ) : null}
       </header>
-
-      <section className="settings-panel">
-        <label>
-          <span>Gateway</span>
-          <input
-            value={settings.baseUrl}
-            inputMode="url"
-            onChange={(event) => setSettings({ ...settings, baseUrl: event.target.value })}
-          />
-        </label>
-        <label>
-          <span>Token</span>
-          <input
-            value={settings.token}
-            type="password"
-            onChange={(event) => setSettings({ ...settings, token: event.target.value })}
-          />
-        </label>
-        <label>
-          <span>设备</span>
-          <input
-            value={settings.deviceName}
-            onChange={(event) => setSettings({ ...settings, deviceName: event.target.value })}
-          />
-        </label>
-        <button className="primary-button" type="button" onClick={() => void checkSession()} disabled={connectionState === 'checking'}>
-          {connectionState === 'checking' ? '连接中' : '连接'}
-        </button>
-      </section>
 
       {message ? <div className={`status-line status-${connectionState}`}>{message}</div> : null}
 
-      <section className="content-grid">
-        <div className="book-list">
-          <div className="section-title">
-            <h2>书库</h2>
-            <span>{loadingBooks ? '同步中' : `${books.length} 本`}</span>
-          </div>
-          {books.length === 0 ? (
-            <div className="empty-state">暂无书籍</div>
-          ) : (
-            <div className="book-items">
-              {books.map((book) => (
-                <button
-                  className={book.id === selectedBookId ? 'book-row active' : 'book-row'}
-                  type="button"
-                  key={book.id}
-                  onClick={() => void openBook(book.id)}
-                >
-                  <span className="book-title">{book.title}</span>
-                  <span className="book-meta">{formatBookMeta(book)}</span>
-                </button>
-              ))}
+      {tab === 'reader' ? (
+        <section className="content-grid">
+          <div className="book-list">
+            <div className="section-title">
+              <h2>书库</h2>
+              <span>{loadingBooks ? '同步中' : `${books.length} 本`}</span>
             </div>
-          )}
-        </div>
+            {books.length === 0 ? (
+              <div className="empty-state">
+                <p>暂无书籍</p>
+                <button type="button" onClick={() => setTab('settings')}>去设置连接</button>
+              </div>
+            ) : (
+              <div className="book-items">
+                {books.map((book) => (
+                  <button
+                    className={book.id === selectedBookId ? 'book-row active' : 'book-row'}
+                    type="button"
+                    key={book.id}
+                    onClick={() => void openBook(book.id)}
+                  >
+                    <span className="book-title">{book.title}</span>
+                    <span className="book-meta">{formatBookMeta(book)}</span>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
 
-        <div className="book-detail">
-          <div className="section-title">
-            <h2>{selectedBook?.title ?? '详情'}</h2>
-            <span>{loadingPackage ? '加载中' : selectedBook ? `${selectedBook.chapterCount} 章` : ''}</span>
-          </div>
-          {selectedBook ? (
-            <div className="detail-body">
-              <dl>
-                <div>
-                  <dt>作者</dt>
-                  <dd>{selectedBook.author || '未标注'}</dd>
-                </div>
-                <div>
-                  <dt>字数</dt>
-                  <dd>{selectedBook.wordCount ? selectedBook.wordCount.toLocaleString('zh-CN') : '未统计'}</dd>
-                </div>
-                <div>
-                  <dt>音频</dt>
-                  <dd>{selectedBook.audioChapterCount ?? 0} 章</dd>
-                </div>
-                <div>
-                  <dt>更新</dt>
-                  <dd>{formatDate(selectedBook.updatedAt)}</dd>
-                </div>
-              </dl>
-              <div className="coverage-row">
-                <Coverage label="概要" value={selectedBook.summaryCoverage} />
-                <Coverage label="图谱" value={selectedBook.kgCoverage} />
-                <Coverage label="向量" value={selectedBook.embeddingCoverage} />
-              </div>
-              <div className="package-line">
-                <span>Package</span>
-                <strong>{bookPackage ? packageSummary(bookPackage) : '未加载'}</strong>
-              </div>
-              <div className="package-line">
-                <span>Audio</span>
-                <strong>{loadingAudio ? '同步中' : `${audioChapters.length} 章`}</strong>
-              </div>
-              {bookPackage ? (
-                <div className="reader-panel">
-                  <div className="chapter-strip">
-                    {chapters.length === 0 ? (
-                      <span className="chapter-placeholder">暂无章节</span>
-                    ) : (
-                      chapters.map((chapter, index) => (
-                        <button
-                          key={chapter.id}
-                          className={chapter.id === currentChapter?.id ? 'chapter-chip active' : 'chapter-chip'}
-                          type="button"
-                          onClick={() => selectChapter(chapter.id)}
-                        >
-                          {chapter.title || `第 ${index + 1} 章`}
-                        </button>
-                      ))
-                    )}
-                  </div>
-                  <article className="reader-text">
-                    <div className="reader-heading">
-                      <h3>{currentChapter?.title ?? '正文'}</h3>
-                      <button
-                        type="button"
-                        className="audio-button"
-                        onClick={() => void playCurrentAudio()}
-                        disabled={!currentAudio || loadingAudio}
-                      >
-                        {audioButtonLabel(currentAudio, loadingAudio)}
-                      </button>
-                    </div>
-                    {currentAudio ? (
-                      <div className="audio-meta">
-                        <span>{formatDuration(currentAudio.durationMs)}</span>
-                        <span>{formatBytes(currentAudio.sizeBytes)}</span>
-                        <span>{currentAudio.manifestFileName ? '有时间轴' : '无时间轴'}</span>
-                      </div>
-                    ) : null}
-                    {audioUrl ? (
-                      <audio
-                        className="audio-player"
-                        src={audioUrl}
-                        controls
-                        autoPlay
-                        onTimeUpdate={(event) => setAudioTime(event.currentTarget.currentTime)}
-                      />
-                    ) : null}
-                    {activeTimelineEntry?.text ? (
-                      <div className="now-playing">
-                        <span>正在播放</span>
-                        <strong>{activeTimelineEntry.text}</strong>
-                      </div>
-                    ) : null}
-                    {currentChapter ? (
-                      <TextContent text={chapterContent(currentChapter)} activeEntry={activeTimelineEntry} />
-                    ) : (
-                      <p className="muted-text">数据包中没有可显示的章节正文。</p>
-                    )}
-                  </article>
-                </div>
-              ) : null}
+          <div className="book-detail">
+            <div className="section-title">
+              <h2>{selectedBook?.title ?? '阅读'}</h2>
+              <span>{loadingPackage ? '加载中' : selectedBook ? `${selectedBook.chapterCount} 章` : ''}</span>
             </div>
-          ) : (
-            <div className="empty-state">选择书籍</div>
-          )}
-        </div>
-      </section>
+            {selectedBook ? (
+              <div className="detail-body">
+                <dl>
+                  <div>
+                    <dt>作者</dt>
+                    <dd>{selectedBook.author || '未标注'}</dd>
+                  </div>
+                  <div>
+                    <dt>字数</dt>
+                    <dd>{selectedBook.wordCount ? selectedBook.wordCount.toLocaleString('zh-CN') : '未统计'}</dd>
+                  </div>
+                  <div>
+                    <dt>音频</dt>
+                    <dd>{selectedBook.audioChapterCount ?? 0} 章</dd>
+                  </div>
+                  <div>
+                    <dt>更新</dt>
+                    <dd>{formatDate(selectedBook.updatedAt)}</dd>
+                  </div>
+                </dl>
+                <div className="coverage-row">
+                  <Coverage label="概要" value={selectedBook.summaryCoverage} />
+                  <Coverage label="图谱" value={selectedBook.kgCoverage} />
+                  <Coverage label="向量" value={selectedBook.embeddingCoverage} />
+                </div>
+                <div className="package-line">
+                  <span>Package</span>
+                  <strong>{bookPackage ? packageSummary(bookPackage) : '未加载'}</strong>
+                </div>
+                <div className="package-line">
+                  <span>Audio</span>
+                  <strong>{loadingAudio ? '同步中' : `${audioChapters.length} 章`}</strong>
+                </div>
+                {bookPackage ? (
+                  <div className="reader-panel">
+                    <div className="chapter-strip">
+                      {chapters.length === 0 ? (
+                        <span className="chapter-placeholder">暂无章节</span>
+                      ) : (
+                        chapters.map((chapter, index) => (
+                          <button
+                            key={chapter.id}
+                            className={chapter.id === currentChapter?.id ? 'chapter-chip active' : 'chapter-chip'}
+                            type="button"
+                            onClick={() => selectChapter(chapter.id)}
+                          >
+                            {chapter.title || `第 ${index + 1} 章`}
+                          </button>
+                        ))
+                      )}
+                    </div>
+                    <article className="reader-text">
+                      <div className="reader-heading">
+                        <h3>{currentChapter?.title ?? '正文'}</h3>
+                        <button
+                          type="button"
+                          className="audio-button"
+                          onClick={() => void playCurrentAudio()}
+                          disabled={!currentAudio || loadingAudio}
+                        >
+                          {audioButtonLabel(currentAudio, loadingAudio)}
+                        </button>
+                      </div>
+                      {currentAudio ? (
+                        <div className="audio-meta">
+                          <span>{formatDuration(currentAudio.durationMs)}</span>
+                          <span>{formatBytes(currentAudio.sizeBytes)}</span>
+                          <span>{currentAudio.manifestFileName ? '有时间轴' : '无时间轴'}</span>
+                        </div>
+                      ) : null}
+                      {audioUrl ? (
+                        <audio
+                          className="audio-player"
+                          src={audioUrl}
+                          controls
+                          autoPlay
+                          onTimeUpdate={(event) => setAudioTime(event.currentTarget.currentTime)}
+                        />
+                      ) : null}
+                      {activeTimelineEntry?.text ? (
+                        <div className="now-playing">
+                          <span>正在播放</span>
+                          <strong>{activeTimelineEntry.text}</strong>
+                        </div>
+                      ) : null}
+                      {currentChapter ? (
+                        <TextContent text={chapterContent(currentChapter)} activeEntry={activeTimelineEntry} />
+                      ) : (
+                        <p className="muted-text">数据包中没有可显示的章节正文。</p>
+                      )}
+                    </article>
+                  </div>
+                ) : null}
+              </div>
+            ) : (
+              <div className="empty-state">
+                <p>选择书籍</p>
+                <button type="button" onClick={() => setTab('settings')}>同步书库</button>
+              </div>
+            )}
+          </div>
+        </section>
+      ) : (
+        <section className="settings-page">
+          <section className="settings-panel">
+            <label>
+              <span>Gateway</span>
+              <input
+                value={settings.baseUrl}
+                inputMode="url"
+                onChange={(event) => setSettings({ ...settings, baseUrl: event.target.value })}
+              />
+            </label>
+            <label>
+              <span>Token</span>
+              <input
+                value={settings.token}
+                type="password"
+                onChange={(event) => setSettings({ ...settings, token: event.target.value })}
+              />
+            </label>
+            <label>
+              <span>设备</span>
+              <input
+                value={settings.deviceName}
+                onChange={(event) => setSettings({ ...settings, deviceName: event.target.value })}
+              />
+            </label>
+            <div className="settings-actions">
+              <button className="primary-button" type="button" onClick={() => void checkSession()} disabled={connectionState === 'checking'}>
+                {connectionState === 'checking' ? '连接中' : '连接'}
+              </button>
+              <button className="secondary-button" type="button" onClick={() => void refreshBooks()} disabled={loadingBooks}>
+                {loadingBooks ? '同步中' : '同步书库'}
+              </button>
+            </div>
+          </section>
+
+          <section className="sync-summary">
+            <div className="section-title">
+              <h2>同步状态</h2>
+              <span>{books.length} 本</span>
+            </div>
+            <dl>
+              <div>
+                <dt>连接</dt>
+                <dd>{connectionLabel(connectionState)}</dd>
+              </div>
+              <div>
+                <dt>当前书籍</dt>
+                <dd>{selectedBook?.title ?? '未选择'}</dd>
+              </div>
+              <div>
+                <dt>Package</dt>
+                <dd>{bookPackage ? packageSummary(bookPackage) : '未加载'}</dd>
+              </div>
+              <div>
+                <dt>Audio</dt>
+                <dd>{audioChapters.length} 章</dd>
+              </div>
+            </dl>
+          </section>
+        </section>
+      )}
+
+      <nav className="bottom-nav" aria-label="主导航">
+        <button className={tab === 'reader' ? 'active' : ''} type="button" onClick={() => setTab('reader')}>
+          阅读
+        </button>
+        <button className={tab === 'settings' ? 'active' : ''} type="button" onClick={() => setTab('settings')}>
+          设置
+        </button>
+      </nav>
     </main>
   )
 }
