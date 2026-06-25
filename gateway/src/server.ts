@@ -9,7 +9,14 @@ try {
     host: config.host,
     port: config.port,
   })
+  await waitForever()
 } catch (error) {
   app.log.error(error, 'failed to start gateway')
   process.exitCode = 1
+}
+
+function waitForever() {
+  return new Promise<void>(() => {
+    // Keep the standalone process alive after the listener is ready.
+  })
 }
