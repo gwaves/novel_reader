@@ -1,3 +1,18 @@
+2026-06-26 更新：内容生产流水线方向已在独立 worktree 启动。
+- 新增独立 worktree `/Users/gwaves/Documents/novel_reader-content-pipeline`，分支 `codex/content-production-pipeline`，用于隔离开发内容生产系统。
+- 新增 `content-pipeline/` 规划目录，目标是把 TXT/EPUB/PDF 或主数据库已有书籍生产为移动 APP 和 Gateway 可消费的完整资产：章节、概要、embedding、知识图谱、MP3、timeline、Gateway package/audio 发布记录。
+- 第一版定位为编排层：复用 `scripts/offline-scanner.mjs`、`offline-tts/scripts/tts-director.mjs`、`gateway/scripts/publish-package.mjs` 和 `gateway/scripts/publish-audio.mjs`，用 `production-manifest.json` 记录阶段状态、产物路径、失败原因和运行历史；根 `package.json` 新增 `npm run content:pipeline` 入口。
+- Phase 2 导入层开始落地：新增 Node 侧 `content-pipeline/lib/book-ingest.mjs`，支持 TXT/EPUB 解析、按文件 sha256 稳定生成默认 `bookId`、写入主 SQLite；CLI 新增 `ingest --file`，导入成功后会创建/更新 manifest 的 `ingest` 阶段和 source hash。PDF 仍按计划后续只先接文本型 PDF。
+- Phase 2 基础验收已通过临时样本验证：TXT 和最小 EPUB 均可 `ingest --file` 写入临时主库，并继续跑通 `run --steps import` 进入离线扫描源库；重复导入同一 TXT 会复用同一 `bookId`；当前不支持的 PDF 会把失败原因写入 manifest。
+- Phase 3 embedding 独立生产已接入 pipeline：新增 `run --steps embedding`，从 PC 主数据库 `app_state.embeddingConfig` 读取配置，经本地 API 复用 `/api/rag/embeddings/*` 批量生成 summary/chunk embedding，并把 provider、model、baseUrl、维度和覆盖率写入 manifest；已用外部 `qwen3-embedding-8b` 配置验证成功，返回维度 4096，并对《西游记》低成本重算 1 章、8 个正文片段。
+- 发布前硬化继续推进：`status` 现在会展示 ingest、scan、embedding 等阶段的关键 artifacts；`embedding` 会先检查本地 API 是否可达，未启动时提示先运行 `npm run api` 或指定 `--source-api`；`scan` 新增 `--scan-type summary|kg|all`，便于低成本真实模型验证。
+- 新增 `npm run content:pipeline:smoke`，自动创建临时 TXT/EPUB/PDF 与 SQLite，验证 TXT/EPUB ingest、PDF failed manifest、离线 import、scan/embedding dry-run，不调用模型、不发布 Gateway。
+- 已用临时 2 章 TXT 小书跑通真实闭环：`ingest -> import -> scan --scan-type summary -> export -> embedding --limit 1 -> publish-package`。其中 summary 真实调用内网模型成功生成 2 章概要，embedding 调用外部 `qwen3-embedding-8b` 成功生成 1 章 summary/chunk embedding，package 已发布到临时 Gateway 并可从 `/mobile/books/:bookId/package` 读取。
+- 已补充中文设计文档、开发计划、示例配置和第一版 CLI；`help`、`init`、`status`、`import/scan/export/publish-package dry-run`、`audio/publish-audio dry-run` 已完成基础验证；CLI 继续补齐 `--config` 默认值读取、真实命令失败时的 manifest 落盘、`status` 错误展示，以及 `scan` 前默认同步 PC 端当前大模型配置。
+- 已用《西游记》真实验证已有书籍生产闭环：`import` 从主 SQLite 导入 100 章；`scan` 检测到 Summary 100/100、KG 100/100 后跳过模型扫描；`export` 导回 100 个 Summary、100 个 KG 提取、898 个实体和 1471 个关系；临时启动本地 API 后，`publish-package` 已发布到 `http://127.0.0.1:6180` Gateway。
+- 已用《妖刀记》现有 TTS 产物真实验证 `publish-audio`：从 `/Users/gwaves/Documents/novel_reader/tmp/tts/yaodao` 发布 27 章 MP3 和 timeline manifest 到 Gateway 实际音频目录 `/Users/gwaves/.novel_reader_gateway/audio`；Gateway 受保护音频接口已能读取 27 章音频清单。
+- 后续优先在确认成本和模型服务状态后跑真实 `scan` 或 `audio`，然后补 TXT/EPUB/PDF 上传导入与 Gateway 异步任务化。
+
 2026-06-26 更新：Gateway Android 真机连接与大数据包缓存继续修复。
 - Gateway Android 客户端的单书 package 缓存从 `localStorage` 改为优先写入 IndexedDB，避免 Android WebView 在《妖刀记》这类大包上触发 `Storage exceeded the quota` 后中断打开书籍。
 - package 写入 IndexedDB 成功后会清理同书旧版 localStorage 缓存；若 IndexedDB 不可用，仍保留 localStorage 降级，但失败不会回滚已经拉到内存里的书籍数据。

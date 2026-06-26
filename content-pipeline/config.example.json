@@ -1,0 +1,19 @@
+{
+  "workRoot": "tmp/content-pipeline",
+  "sourceApi": "http://127.0.0.1:5174",
+  "gatewayUrl": "http://127.0.0.1:6180",
+  "gatewayAudioDir": "gateway/data/audio",
+  "deviceName": "Content Pipeline",
+  "offlineScanner": {
+    "script": "scripts/offline-scanner.mjs"
+  },
+  "tts": {
+    "script": "offline-tts/scripts/tts-director.mjs",
+    "config": "offline-tts/config.example.json",
+    "outRoot": "tmp/tts"
+  },
+  "publish": {
+    "packageScript": "gateway/scripts/publish-package.mjs",
+    "audioScript": "gateway/scripts/publish-audio.mjs"
+  }
+}

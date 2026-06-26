@@ -29,6 +29,8 @@
     "gateway:test": "npm --prefix gateway run test",
     "gateway:publish-audio": "node gateway/scripts/publish-audio.mjs",
     "gateway:publish-package": "node gateway/scripts/publish-package.mjs",
+    "content:pipeline": "node content-pipeline/scripts/content-pipeline.mjs",
+    "content:pipeline:smoke": "node content-pipeline/scripts/smoke-test.mjs",
     "gateway-android:dev": "npm --prefix gateway-android-app run dev",
     "gateway-android:build": "npm --prefix gateway-android-app run build",
     "gateway-android:android:add": "npm --prefix gateway-android-app run android:add",
