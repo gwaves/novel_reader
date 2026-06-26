@@ -1,3 +1,47 @@
+2026-06-26 更新：Gateway Android 真机连接与大数据包缓存继续修复。
+- Gateway Android 客户端的单书 package 缓存从 `localStorage` 改为优先写入 IndexedDB，避免 Android WebView 在《妖刀记》这类大包上触发 `Storage exceeded the quota` 后中断打开书籍。
+- package 写入 IndexedDB 成功后会清理同书旧版 localStorage 缓存；若 IndexedDB 不可用，仍保留 localStorage 降级，但失败不会回滚已经拉到内存里的书籍数据。
+- 本机 Gateway 继续通过 LaunchAgent `com.gwaves.novel-reader-gateway` 监听 `0.0.0.0:6180`，测试 token 为 `123456`；手机调试通过 `adb reverse tcp:6180 tcp:6180` 访问 `http://127.0.0.1:6180`。
+- Gateway Android 客户端开始按旧移动端样式拆分主栏目：底部新增“阅读 / 设置”导航，阅读页聚焦书库、详情、章节正文和音频播放；设置页集中 Gateway 地址、Token、设备名、连接与同步书库操作。
+- Gateway Android 客户端继续拆分为“书库 / 阅读 / 设置”三栏：书库页负责选书、加载 package 和查看元数据；阅读页改为纯正文阅读界面，支持左侧点击上翻、右侧点击下翻、中间双击触发当前章节音频播放。
+- Gateway Android 阅读页修正章节导航体验：顶部章节栏不再固定遮挡正文，会随阅读内容自然滚走；正文底部新增上一章/章节/下一章；中间双击改为打开章节切换面板，可直接上一章、下一章或选择任意章节。
+- Gateway Android 阅读控制面板改为紧凑下拉式：双击中间区域打开阅读控制抽屉，章节选择改为 select 下拉，并整合当前章节音频播放、字号调节和纸张/暖色/护眼/夜间背景切换，阅读偏好会持久化。
+- Gateway Android 书库页新增 Audio 同步进度与本地缓存统计：章节 MP3 会写入 IndexedDB，播放时优先使用本地缓存；覆盖安装同包名同签名 APK 应保留缓存，卸载/清除应用数据/更换包名或签名会删除缓存。
+- Gateway Android 启动后会在 Gateway 地址和 Token 已配置时自动连接后端并同步书库；设置页的连接/刷新按钮改为兜底操作。默认 token 保持测试用 `123456`，默认 Gateway 地址可通过 `VITE_GATEWAY_DEFAULT_BASE_URL` 在构建时注入公有域名。
+- Gateway Android 新增阅读进度恢复：阅读页滚动时会保存当前书、章节和滚动位置；下次启动自动连接并同步书库后，会优先打开上次阅读的书和章节并恢复到对应滚动位置。
+- Gateway Android 修正阅读页切换 Tab 时的进度覆盖问题：离开阅读页前会主动保存真实滚动位置，回到阅读页会恢复该位置，避免进入设置页后再返回时跳到章节顶部。
+- Gateway Android 优化 Audio 批量同步：真机上新增原生下载插件，MP3 会通过 Android 原生 HTTP 流式写入 APP 私有文件目录，IndexedDB 只保存本地路径和元数据，避免几十 MB 章节经过 JS/base64/Blob 后导致同步越下越慢；浏览器环境仍保留 Blob 缓存兜底。
+- Gateway Android 移除 Audio 对 IndexedDB 的依赖：音频缓存状态改用轻量 localStorage 索引，MP3 继续存放在 Android 私有文件目录；旧版本 `chapter-audio` IndexedDB store 会在启动时清理，真机调试时也可直接清空 WebView IndexedDB 后重新拉取 package。
+- Gateway Android 修正切换书籍后的 Audio 状态串书问题：音频目录、缓存数量和同步进度都会记录所属书籍，详情页与同步按钮只显示当前选中书籍的数据，避免《三国演义》误显示《妖刀记》的 27 章音频。
+- 今日 Gateway Android 真机开发复盘已记录到 `docs/development-experience.md`，重点沉淀 WebView 存储边界、大文件音频同步、阅读进度恢复、异步状态归属和真机验证经验。
+
+2026-06-25 更新：Gateway 移动书库索引 API 已进入最小可用形态。
+- 产品边界补充：后续面向 Gateway 的 Android 移动端应单独新建应用目录/工程，保持现有 `mobile-app/` 不变，避免影响当前已可用的局域网/离线移动端。
+- 新增独立 `gateway-android-app/` 客户端工程骨架，使用 Capacitor-ready React/Vite，不修改旧 `mobile-app/`；第一版支持配置 Gateway 地址、token、设备名，验证会话，拉取书库并读取单书 package。
+- `gateway-android-app/` 已支持将单书 package 缓存到本地，离线/请求失败时优先回退到缓存；可从 package 中识别章节列表，选择章节并阅读正文。
+- `gateway-android-app/` 已接入 Gateway 音频接口：打开书籍时同步 `/mobile/books/:bookId/audio`，当前章节有音频时可通过受保护下载接口加载并播放 MP3。
+- 新增 Gateway Docker 部署材料：`gateway/Dockerfile`、`gateway/docker-compose.yml` 和 `gateway/docs/deployment.md`，优先支持云服务器/VPS 或家里机器公网映射部署。
+- 新增第一版设备名记录：受保护请求可携带 `X-Device-Name`，`GET /auth/session` 会登记设备到 `GATEWAY_DATA_DIR/devices.json`，`GET /auth/devices` 可查看已登记设备。
+- 新增 `GATEWAY_DATA_DIR` 配置，默认使用用户目录下的 `.novel_reader_gateway`，第一版从 `books.json` 读取书库索引。
+- `GET /mobile/books` 已从占位接口升级为受保护的书库列表接口；缺少 `books.json` 时返回空书库，存在时校验 schema 并按更新时间排序。
+- 新增 `GET /mobile/books/:bookId`，从同一书库索引返回单书摘要，未知书籍返回稳定 `book_not_found` 错误。
+- 新增 `GET /mobile/books/:bookId/package`，从 `GATEWAY_DATA_DIR/books/<bookId>/package.json` 返回完整移动数据包；当前只校验 `schemaVersion` 和 `book.id`，其余内容先透明透传。
+- 新增 `PUT /admin/books/:bookId/package`，支持 PC 端或工具上传移动数据包到 Gateway，并自动维护 `books.json` 书库索引。
+- 新增 OpenAI-compatible 转发入口：`POST /ai/chat` 和 `POST /ai/embeddings`，移动端只访问 Gateway，服务端负责注入上游 API Key 和默认模型。
+- 新增本地 MP3 受保护访问：`GET /mobile/books/:bookId/audio` 读取 `GATEWAY_AUDIO_DIR/books/<bookId>/audio.json`，`GET /mobile/books/:bookId/audio/:chapterId/download` 负责鉴权后下载音频文件。
+- `/capabilities` 现在会标记 books API 可用；README 补充了 `books.json` 第一版格式。
+
+2026-06-25 更新：Gateway 开始补齐开发期鉴权与受保护路由基础。
+- 新增 Gateway 结构化 HTTP 错误与 dev bearer token 鉴权模块，`GATEWAY_DEV_ACCESS_TOKEN` 可用于保护后续移动端数据、AI 和音频接口。
+- 新增 `GET /auth/session` 作为鉴权验证入口，新增受保护占位接口 `GET /mobile/books`，确保移动数据 API 在真实实现前也不会裸露。
+- Gateway 测试覆盖未配置鉴权、缺少 token、错误 token、正确 token，以及受保护移动数据路由的占位行为。
+
+2026-06-24 更新：云端 Gateway 方向已启动，新增 `codex/cloud-gateway` 分支与 `gateway/` 工作目录。
+- 目标：让移动客户端默认连接固定公有域名，通过云端 Gateway 获取书籍数据、阅读进度、AI 检索、embedding 转发和 MP3 播放资源，减少用户手动配置局域网 IP、LLM、embedding 与音频后端的成本。
+- 架构原则：Gateway 作为独立云端服务，不直接把现有本地 SQLite API 暴露到公网；公网接口默认鉴权、限流和审计，移动端不保存上游模型或对象存储密钥。
+- 已新增 `gateway/README.md` 与 `gateway/docs/development-plan.md`，记录产品目标、模块边界、API 草案、安全要求、阶段计划和近期任务。
+- 后续优先级：先搭建最小 Gateway 服务骨架（健康检查、版本、能力接口、配置加载、统一错误格式），再接入鉴权、移动端默认域名、书库同步、AI/embedding 转发和 MP3 资源分发。
+
 2026-06-23 更新：PC 端离线多角色 TTS 方向已启动，先落地本地 Node.js 目录与文档。
 - Android App 高质量 MP3 播放方向已另立 `codex/mobile-mp3-playback` 分支开发：PC Web 端新增当前书“章节 MP3 目录”配置入口，本地服务持久化目录并通过 `/api/mobile/books/:bookId/audio` 暴露移动端音频清单。
 - PC 端章节 MP3 目录规范：推荐根目录直接放 `ch001.mp3`、`ch002.mp3`；兼容 `001-章节标题.mp3`；兼容现有 TTS 批量产物 `ch001/audio/chapter.mp3` 或 `ch001-full/audio/chapter.mp3`。
@@ -243,3 +287,27 @@ SQLite 图谱表
 - 渲染：节点宽度和关系线宽会按出现次数调整，匹配节点高亮，图例展示当前可见节点/关系数量。
 - 视觉：图谱节点支持自动换行、阴影和更稳定的尺寸，减少长名称挤压和大图混乱感。
 - 页面：移除底部重复实体列表，将当前章节手动 JSON 保存入口收进章节扫描的折叠高级操作，减少主页面干扰。
+
+2026-06-26 更新：Gateway 数据发布脚本已完成。
+- 新增 `gateway/scripts/publish-package.mjs`，可从 PC 本地 `/api/mobile/books/:bookId/package` 读取移动端完整数据包，并上传到 Gateway 的 `PUT /admin/books/:bookId/package`。
+- 根脚本新增 `npm run gateway:publish-package`，支持 `GATEWAY_BASE_URL`、`GATEWAY_DEV_ACCESS_TOKEN`、`NOVEL_READER_API_BASE_URL`、`NOVEL_READER_SYNC_TOKEN` 等环境变量，也支持 `--source-file` 和 `--dry-run`。
+- Gateway 导入移动端数据包时兼容本地 API 的数字 book id，并在 package 缺少 `book.updatedAt` 时用 `generatedAt` 或 `book.importedAt` 回填书库索引更新时间。
+- README 与 Gateway 开发计划已补充脚本发布路径，PC 端暂不新增发布 UI，后续 MP3 产物也优先按脚本化发布路线推进。
+
+2026-06-26 更新：Gateway MP3 发布链路与新安卓端音频体验已推进。
+- 新增 `gateway/scripts/publish-audio.mjs`，可扫描 offline-tts 输出目录下的 `chNNN-full/audio/chapter.mp3` 与 `manifest.json`，按移动数据包章节序号匹配真实 `chapterId`，复制到 `GATEWAY_AUDIO_DIR/books/<bookId>/` 并生成 `audio.json`。
+- 根脚本新增 `npm run gateway:publish-audio`；该路径是发布到 Gateway 音频目录，不是发布到 Git 目录。
+- Gateway 音频清单新增 `manifestFileName` 与 `timelineVersion`，并提供受保护的 `/mobile/books/:bookId/audio/:chapterId/manifest` 接口供移动端读取 timeline。
+- 新 `gateway-android-app/` 已显示当前章节音频时长、大小和时间轴状态；播放时会拉取 manifest，并根据当前播放时间在正文中高亮对应片段。
+
+2026-06-26 更新：Gateway 独立 Android 工程已生成。
+- `gateway-android-app/android/` 已通过 Capacitor 生成独立 Android 原生工程，包名为 `com.gwaves.novelreader.gateway`，不会覆盖旧 `mobile-app/`。
+- 新增根脚本 `npm run gateway-android:android:build`，用于构建 Gateway Android debug APK。
+- Android Manifest 已显式允许 HTTP cleartext，便于连接自建 Gateway、公网映射或开发期内网地址。
+- APK 输出名定制为 `novel_gateway.apk`，产物路径为 `gateway-android-app/android/app/build/outputs/apk/debug/novel_gateway.apk`。
+
+2026-06-26 更新：Gateway Android 真机连接问题已修复。
+- 新 `gateway-android-app/` 在 Android 真机上访问 `http://127.0.0.1:6180` 时已改用 Capacitor 原生 `CapacitorHttp`，避免 WebView `fetch` 对 HTTP/localhost 的限制导致 `fail to fetch`。
+- Gateway 本机测试 token 已改为 `123456`，便于手机端验证。
+- 本机 Gateway 已通过 macOS LaunchAgent `com.gwaves.novel-reader-gateway` 保活，配置监听 `0.0.0.0:6180`，数据目录为 `~/.novel_reader_gateway`。
+- 真机通过 `adb reverse tcp:6180 tcp:6180` 访问 Gateway，日志已确认 `/auth/session` 和 `/mobile/books` 返回 200，手机端可看到《妖刀记》和《三国演义》。

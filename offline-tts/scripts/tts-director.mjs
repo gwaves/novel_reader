@@ -294,6 +294,9 @@ function preSegmentText(text, limit) {
 
 function getSafeSourceLimit(text, requestedLimit) {
   const limit = Math.min(text.length, requestedLimit)
+  if (limit >= text.length) {
+    return text.length
+  }
   const preview = text.slice(0, limit)
   const lastOpen = preview.lastIndexOf('「')
   const lastClose = preview.lastIndexOf('」')
@@ -599,7 +602,7 @@ function extractFirstJsonObject(text) {
   return null
 }
 
-function buildDirectorScript({ config, book, chapter, preSegments, decisions, characterCandidates }) {
+function buildDirectorScript({ config, book, chapter, preSegments, decisions, characterCandidates, sourceLimit }) {
   const decisionMap = new Map()
   for (const decision of Array.isArray(decisions?.decisions) ? decisions.decisions : []) {
     if (decision?.preSegmentId) decisionMap.set(decision.preSegmentId, decision)
@@ -654,7 +657,7 @@ function buildDirectorScript({ config, book, chapter, preSegments, decisions, ch
       chapterId: chapter.id,
       chapterIndex: chapter.chapter_index,
       chapterTitle: chapter.title,
-      sourceLimit: preSegments.at(-1)?.sourceEnd ?? 0,
+      sourceLimit: sourceLimit ?? preSegments.at(-1)?.sourceEnd ?? 0,
       chapterCharLength: chapter.content.length,
     },
     segments,
@@ -797,7 +800,7 @@ async function runDraftScript(config, args) {
   })
   const allDecisions = batchResults.flat()
   const decisions = { decisions: allDecisions }
-  const script = buildDirectorScript({ config, book, chapter, preSegments, decisions, characterCandidates })
+  const script = buildDirectorScript({ config, book, chapter, preSegments, decisions, characterCandidates, sourceLimit })
   const validation = validateDirectorScript(script, preSegments)
   script.diagnostics = diagnosticsFor({ config, preSegments, kgCandidates, characterCandidates, validation, batchSize, directorConcurrency, llmBatchStats })
 
