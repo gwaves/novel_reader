@@ -176,8 +176,14 @@ function App() {
     () => chapters.find((chapter) => chapter.id === currentChapterId) ?? chapters[0] ?? null,
     [chapters, currentChapterId],
   )
-  const visibleAudioChapters = audioCatalogBookId === selectedBookId ? audioChapters : []
-  const visibleCachedAudioIds = cachedAudioBookId === selectedBookId ? cachedAudioIds : new Set<string>()
+  const visibleAudioChapters = useMemo(
+    () => (audioCatalogBookId === selectedBookId ? audioChapters : []),
+    [audioCatalogBookId, audioChapters, selectedBookId],
+  )
+  const visibleCachedAudioIds = useMemo(
+    () => (cachedAudioBookId === selectedBookId ? cachedAudioIds : new Set<string>()),
+    [cachedAudioBookId, cachedAudioIds, selectedBookId],
+  )
   const visibleAudioSyncProgress = audioSyncBookId === selectedBookId ? audioSyncProgress : null
   const currentAudio = useMemo(
     () => visibleAudioChapters.find((chapter) => chapter.chapterId === currentChapter?.id) ?? null,
@@ -213,12 +219,6 @@ function App() {
   }, [])
 
   useEffect(() => {
-    if (autoConnectAttemptedRef.current || !isGatewayConfigured(settings)) return
-    autoConnectAttemptedRef.current = true
-    void checkSession()
-  }, [settings.baseUrl, settings.token])
-
-  useEffect(() => {
     if (tab !== 'reader' || !selectedBookId || !currentChapterId) return
 
     let saveTimer: number | undefined
@@ -243,23 +243,6 @@ function App() {
       if (audioUrl) URL.revokeObjectURL(audioUrl)
     }
   }, [audioUrl])
-
-  async function checkSession() {
-    setConnectionState('checking')
-    setMessage('')
-    try {
-      const session = await gatewayFetch(settings, '/auth/session')
-      if (!session.authenticated) {
-        throw new Error('Gateway session is not authenticated.')
-      }
-      setConnectionState('connected')
-      setMessage('已连接')
-      await refreshBooks()
-    } catch (error) {
-      setConnectionState('error')
-      setMessage(errorMessage(error))
-    }
-  }
 
   async function refreshBooks() {
     setLoadingBooks(true)
@@ -295,6 +278,29 @@ function App() {
       setLoadingBooks(false)
     }
   }
+
+  async function checkSession() {
+    setConnectionState('checking')
+    setMessage('')
+    try {
+      const session = await gatewayFetch(settings, '/auth/session')
+      if (!session.authenticated) {
+        throw new Error('Gateway session is not authenticated.')
+      }
+      setConnectionState('connected')
+      setMessage('已连接')
+      await refreshBooks()
+    } catch (error) {
+      setConnectionState('error')
+      setMessage(errorMessage(error))
+    }
+  }
+
+  useEffect(() => {
+    if (autoConnectAttemptedRef.current || !isGatewayConfigured(settings)) return
+    autoConnectAttemptedRef.current = true
+    void checkSession()
+  }, [settings])
 
   async function openBook(bookId: string, options: { restoreProgress?: ReadingProgress | null } = {}) {
     setSelectedBookId(bookId)
@@ -381,7 +387,7 @@ function App() {
       let playbackUrl = cachedAudio?.filePath ? Capacitor.convertFileSrc(cachedAudio.filePath) : ''
       let blob: Blob | undefined = cachedAudio?.blob
       if (!cachedAudio) {
-        const cached = await cacheAudioChapter(selectedBookId, currentAudio, manifest)
+        const cached = await cacheAudioChapter(selectedBookId, currentAudio)
         if (cached.kind === 'file') {
           playbackUrl = Capacitor.convertFileSrc(cached.filePath)
         } else {
@@ -438,7 +444,7 @@ function App() {
       for (const audioChapter of chaptersToSync) {
         const cached = readCachedAudio(bookId, audioChapter.chapterId)
         if (!cached) {
-          await cacheAudioChapter(bookId, audioChapter, null)
+          await cacheAudioChapter(bookId, audioChapter)
         }
         done += 1
         setAudioSyncProgress({ done, total: chaptersToSync.length })
@@ -460,7 +466,7 @@ function App() {
     return Array.isArray(response.chapters) ? response.chapters.filter(isAudioChapter) : []
   }
 
-  async function cacheAudioChapter(bookId: string, audioChapter: AudioChapter, manifest: AudioManifest | null): Promise<AudioCachePayload> {
+  async function cacheAudioChapter(bookId: string, audioChapter: AudioChapter): Promise<AudioCachePayload> {
     if (Capacitor.isNativePlatform()) {
       const downloaded = await downloadAudioToNativeFile(settings, bookId, audioChapter.chapterId)
       const payload: AudioCachePayload = {
