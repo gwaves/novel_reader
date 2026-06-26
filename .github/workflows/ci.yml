@@ -7,7 +7,7 @@ on:
       - main
 
 jobs:
-  web:
+  lint-build-unit:
     name: Lint and build
     runs-on: ubuntu-latest
     steps:
@@ -29,3 +29,27 @@ jobs:
       - name: Build
         run: npm run build
 
+      - name: Unit tests
+        run: npm run test:unit
+
+  smoke-e2e:
+    name: Browser smoke tests
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Playwright smoke tests
+        run: npm run test:e2e
