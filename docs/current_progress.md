@@ -1,3 +1,11 @@
+2026-06-26 更新：移动端主要人物画像方向已启动，分支 `codex/mobile-character-portraits`。
+- 新增中文设计说明 `mobile-app/docs/character-portraits.md`，确定第一版使用移动端已同步知识图谱人物数据，不在手机端直接生成图片。
+- 已加入《妖刀记》demo 画像静态资源：耿照、明栈雪、横疏影、染红霞、黄缨，路径位于 `mobile-app/public/portraits/yaodao/`。
+- 新增画像清单 `mobile-app/public/portraits/catalog.json`，并扩展移动端单书数据包 `portraits.characters`，PC 同步接口会随包体返回 demo 画像元数据。
+- 移动端新增人物画像数据模块 `mobile-app/src/lib/characterPortraits.ts`：按人物实体名称/别名匹配画像，按画像优先、出现次数和关系数量排序；无画像人物显示稳定文字占位。
+- Android 移动端 UI 新增“人物”底部导航和阅读页快捷入口，人物页支持大图详情、别名、简介、相关人物、首次证据跳章和人物搜索。
+- 画像匹配已收紧：只有 `entityId` 或画像规范名命中的实体会显示图片，知识图谱误拆出的别名实体不再复用已有画像。
+
 2026-06-23 更新：PC 端离线多角色 TTS 方向已启动，先落地本地 Node.js 目录与文档。
 - Android App 高质量 MP3 播放方向已另立 `codex/mobile-mp3-playback` 分支开发：PC Web 端新增当前书“章节 MP3 目录”配置入口，本地服务持久化目录并通过 `/api/mobile/books/:bookId/audio` 暴露移动端音频清单。
 - PC 端章节 MP3 目录规范：推荐根目录直接放 `ch001.mp3`、`ch002.mp3`；兼容 `001-章节标题.mp3`；兼容现有 TTS 批量产物 `ch001/audio/chapter.mp3` 或 `ch001-full/audio/chapter.mp3`。

@@ -2913,6 +2913,42 @@ function mapMobileEmbedding(row) {
   }
 }
 
+function getMobileCharacterPortraits(bookRow) {
+  if (!String(bookRow?.title ?? '').includes('妖刀')) return []
+  return [
+    {
+      names: ['耿照', '小耿', '典卫大人', '阿照'],
+      source: 'demo',
+      tone: 'ember',
+      url: '/portraits/yaodao/geng-zhao.png',
+    },
+    {
+      names: ['明栈雪', '明姑娘', '白衣女郎'],
+      source: 'demo',
+      tone: 'jade',
+      url: '/portraits/yaodao/ming-zhanxue.png',
+    },
+    {
+      names: ['横疏影', '横二总管', '暗香浮动'],
+      source: 'demo',
+      tone: 'teal',
+      url: '/portraits/yaodao/heng-shuying.png',
+    },
+    {
+      names: ['染红霞', '红霞', '染二掌院', '万里枫江'],
+      source: 'demo',
+      tone: 'crimson',
+      url: '/portraits/yaodao/ran-hongxia.png',
+    },
+    {
+      names: ['黄缨', '黄樱', '阿缨', '黄衣少女'],
+      source: 'demo',
+      tone: 'ochre',
+      url: '/portraits/yaodao/huang-ying.png',
+    },
+  ]
+}
+
 function createMobileContentHash(payload) {
   return createHash('sha256')
     .update(JSON.stringify({
@@ -2922,6 +2958,7 @@ function createMobileContentHash(payload) {
       chapters: payload.chapters,
       summaries: payload.summaries,
       knowledgeGraph: payload.knowledgeGraph,
+      portraits: payload.portraits,
       embeddings: payload.embeddings,
     }))
     .digest('hex')
@@ -3206,6 +3243,9 @@ function getMobileBookPackage(bookId, options = {}) {
       entityMentions: embeddingsOnly ? [] : listMobileEntityMentionsStatement.all(bookId),
       relations: embeddingsOnly ? [] : listMobileRelationsStatement.all(bookId),
       relationMentions: embeddingsOnly ? [] : listMobileRelationMentionsStatement.all(bookId),
+    },
+    portraits: {
+      characters: embeddingsOnly ? [] : getMobileCharacterPortraits(bookRow),
     },
     embeddings: {
       summaries: includeEmbeddings

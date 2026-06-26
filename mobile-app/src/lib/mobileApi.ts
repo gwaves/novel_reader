@@ -101,6 +101,16 @@ export type MobileKgRelationMention = {
   confidence: number
 }
 
+export type MobileCharacterPortrait = {
+  entityId?: string | null
+  names: string[]
+  url: string
+  tone?: string | null
+  source?: 'demo' | 'generated' | 'manual' | 'synced' | string
+  prompt?: string | null
+  updatedAt?: string | null
+}
+
 export type MobileSummaryEmbedding = {
   chapterId: string
   bookId: string
@@ -143,6 +153,9 @@ export type MobileBookPackage = {
     entityMentions: MobileKgEntityMention[]
     relations: MobileKgRelation[]
     relationMentions: MobileKgRelationMention[]
+  }
+  portraits?: {
+    characters: MobileCharacterPortrait[]
   }
   embeddings: {
     summaries: MobileSummaryEmbedding[]

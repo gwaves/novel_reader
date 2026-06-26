@@ -717,6 +717,219 @@ button:disabled {
   box-shadow: 0 0 0 3px rgba(47, 111, 95, 0.14);
 }
 
+.character-hero {
+  display: grid;
+  grid-template-columns: minmax(118px, 34%) minmax(0, 1fr);
+  gap: 14px;
+  margin-bottom: 14px;
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+}
+
+.character-hero.tone-jade,
+.character-hero.tone-teal,
+.character-hero.tone-crimson,
+.character-hero.tone-ochre,
+.character-hero.tone-ember {
+  background: var(--surface);
+}
+
+.character-hero.tone-jade {
+  border-color: #cfe7dc;
+}
+
+.character-hero.tone-teal {
+  border-color: #cbdfe6;
+}
+
+.character-hero.tone-crimson {
+  border-color: #efd0ce;
+}
+
+.character-hero.tone-ochre {
+  border-color: #ead8ae;
+}
+
+.character-hero.tone-ember {
+  border-color: #d8cec3;
+}
+
+.character-portrait-frame {
+  aspect-ratio: 3 / 4;
+  overflow: hidden;
+  border-radius: 8px;
+  background: var(--surface-soft);
+}
+
+.character-portrait-frame img,
+.character-card-image img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+
+.character-portrait-fallback,
+.character-card-image {
+  display: grid;
+  place-items: center;
+  width: 100%;
+  height: 100%;
+  color: #fff;
+  font-weight: 800;
+}
+
+.character-portrait-fallback {
+  font-size: clamp(22px, 8vw, 42px);
+  letter-spacing: 0;
+}
+
+.tone-jade {
+  background: linear-gradient(145deg, #e6f3ef, #2f6f5f);
+}
+
+.tone-teal {
+  background: linear-gradient(145deg, #e9f4f7, #2b6073);
+}
+
+.tone-crimson {
+  background: linear-gradient(145deg, #fae9e8, #9f2f2f);
+}
+
+.tone-ochre {
+  background: linear-gradient(145deg, #fff2cf, #a86a16);
+}
+
+.tone-ember {
+  background: linear-gradient(145deg, #f4ece2, #5b4636);
+}
+
+.character-hero-body {
+  display: grid;
+  align-content: start;
+  gap: 9px;
+  min-width: 0;
+}
+
+.character-hero-body h3 {
+  margin: 0 0 4px;
+  font-size: 21px;
+}
+
+.character-hero-body p,
+.character-related,
+.character-hero-body blockquote {
+  margin: 0;
+  color: var(--muted);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.character-hero-body blockquote {
+  padding-left: 10px;
+  border-left: 3px solid rgba(47, 111, 95, 0.28);
+}
+
+.character-aliases {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.character-aliases span {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  border-radius: 999px;
+  padding: 4px 8px;
+  background: var(--surface-soft);
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.character-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.character-actions button:first-child {
+  background: var(--primary);
+  border-color: var(--primary);
+  color: #fff;
+}
+
+.character-search-row .search-input {
+  margin-bottom: 12px;
+}
+
+.character-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.character-card {
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1fr);
+  gap: 10px;
+  align-items: center;
+  min-height: 96px;
+  padding: 10px;
+  text-align: left;
+  background: var(--surface);
+}
+
+.character-card.active {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 2px rgba(47, 111, 95, 0.14);
+}
+
+.character-card-image {
+  aspect-ratio: 1;
+  overflow: hidden;
+  border-radius: 8px;
+}
+
+.character-card-image span {
+  padding: 4px;
+  overflow-wrap: anywhere;
+  text-align: center;
+}
+
+.character-card-main {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.character-card-main strong,
+.character-card-main small,
+.character-card-main em {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.character-card-main strong {
+  white-space: nowrap;
+}
+
+.character-card-main small,
+.character-card-main em {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.character-card-main em {
+  display: -webkit-box;
+  font-style: normal;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
 .search-input {
   margin-bottom: 14px;
 }
@@ -853,11 +1066,25 @@ button:disabled {
   bottom: 0;
   z-index: 20;
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(5, 1fr);
   min-height: calc(64px + env(safe-area-inset-bottom, 0px));
   padding-bottom: env(safe-area-inset-bottom, 0px);
   border-top: 1px solid var(--border);
   background: var(--surface);
+}
+
+@media (max-width: 560px) {
+  .character-hero {
+    grid-template-columns: 1fr;
+  }
+
+  .character-portrait-frame {
+    max-height: 56vh;
+  }
+
+  .character-grid {
+    grid-template-columns: 1fr;
+  }
 }
 
 .bottom-nav button {

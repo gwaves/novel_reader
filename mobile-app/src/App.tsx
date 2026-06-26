@@ -28,10 +28,11 @@ import {
   type ReaderBackground,
   type LocalBook,
 } from './lib/localLibrary'
+import { buildCharacterPortraitCards, getCharacterInitial, type CharacterPortraitCard } from './lib/characterPortraits'
 import { createSpeechChapter, type SpeechSegment } from './lib/speechSegments'
 import { NovelReaderTts, type TtsVoice } from './lib/ttsPlugin'
 
-type Tab = 'library' | 'sync' | 'reader' | 'search'
+type Tab = 'library' | 'sync' | 'reader' | 'characters' | 'search'
 type SearchMode = 'rag' | 'graph'
 
 type SpeechPlaybackState =
@@ -437,6 +438,8 @@ function App() {
   const [searchInput, setSearchInput] = useState('')
   const [submittedSearchQuery, setSubmittedSearchQuery] = useState('')
   const [searchMode, setSearchMode] = useState<SearchMode>('rag')
+  const [characterSearchInput, setCharacterSearchInput] = useState('')
+  const [selectedCharacterId, setSelectedCharacterId] = useState<string | null>(null)
   const [ragResults, setRagResults] = useState<RagResult[]>([])
   const [ragAnswer, setRagAnswer] = useState('')
   const [ragError, setRagError] = useState('')
@@ -551,6 +554,36 @@ function App() {
     () => remoteChapterAudio.find((audio) => audio.chapterId === activeChapterId) ?? null,
     [activeChapterId, remoteChapterAudio],
   )
+
+  const characterCards = useMemo(
+    () => (activePackage ? buildCharacterPortraitCards(activePackage) : []),
+    [activePackage],
+  )
+
+  const filteredCharacterCards = useMemo(() => {
+    const query = characterSearchInput.trim()
+    if (!query) return characterCards
+    return characterCards.filter((card) => {
+      const haystack = [
+        card.entity.name,
+        card.entity.normalizedName,
+        card.entity.description ?? '',
+        card.entity.aliases.join(' '),
+        card.firstEvidence?.evidence ?? '',
+      ].join('\n')
+      return scoreSearchText(haystack, query) > 0
+    })
+  }, [characterCards, characterSearchInput])
+
+  const selectedCharacter = useMemo<CharacterPortraitCard | null>(() => {
+    if (!filteredCharacterCards.length) return null
+    if (!selectedCharacterId) return filteredCharacterCards[0]
+    return (
+      filteredCharacterCards.find((card) => card.entity.id === selectedCharacterId) ??
+      characterCards.find((card) => card.entity.id === selectedCharacterId) ??
+      filteredCharacterCards[0]
+    )
+  }, [characterCards, filteredCharacterCards, selectedCharacterId])
 
   const pendingChapterAudio = useMemo(
     () => remoteChapterAudio.filter((audio) => cachedChapterAudioKeys[audio.chapterId] !== `${audio.id}:${audio.updatedAt}`),
@@ -1134,6 +1167,8 @@ function App() {
         : pkg.chapters[0]?.id ?? null
     setActivePackage(pkg)
     setActiveChapterId(progressChapter)
+    setSelectedCharacterId(null)
+    setCharacterSearchInput('')
     setRemoteChapterAudio([])
     await refreshCachedChapterAudioState(bookId)
     pendingRestoreScrollRef.current = progress?.chapterId === progressChapter ? progress.scrollY : 0
@@ -1161,6 +1196,16 @@ function App() {
   function changeChapter(chapterId: string | null) {
     if (!chapterId) return
     openChapter(chapterId)
+  }
+
+  function openCharacterChapter(character: CharacterPortraitCard) {
+    const chapterId =
+      character.firstEvidence?.chapterId ??
+      activePackage?.chapters.find((chapter) => chapter.index === character.entity.firstChapterIndex)?.id ??
+      null
+    if (chapterId) {
+      openChapter(chapterId)
+    }
   }
 
   function scrollReaderPage(direction: 'up' | 'down') {
@@ -2504,7 +2549,7 @@ ${context}
                       </option>
                     ))}
                   </select>
-                  <button type="button" onClick={() => switchTab('search')}>搜索</button>
+                  <button type="button" onClick={() => switchTab('characters')}>人物</button>
                 </div>
                 <div className="chapter-nav-row">
                   <button type="button" onClick={() => changeChapter(previousChapter?.id ?? null)} disabled={!previousChapter}>上一章</button>
@@ -2567,6 +2612,117 @@ ${context}
                   <button type="button" onClick={() => changeChapter(previousChapter?.id ?? null)} disabled={!previousChapter}>上一章</button>
                   <button type="button" onClick={() => changeChapter(nextChapter?.id ?? null)} disabled={!nextChapter}>下一章</button>
                 </div>
+              </>
+            )}
+          </section>
+        )}
+
+        {tab === 'characters' && (
+          <section>
+            <div className="section-heading">
+              <h2>人物画像</h2>
+              {activePackage && (
+                <span>
+                  人物 {characterCards.length} · 已配图 {characterCards.filter((card) => card.portraitUrl).length}
+                </span>
+              )}
+            </div>
+            {!activePackage ? (
+              <div className="empty-state">
+                <p>请选择一本本地书后再查看人物画像。</p>
+                <button type="button" onClick={() => switchTab('library')}>回到书架</button>
+              </div>
+            ) : characterCards.length === 0 ? (
+              <div className="empty-state">
+                <p>当前同步包没有人物图谱数据。</p>
+                <button type="button" onClick={() => switchTab('sync')}>重新同步</button>
+              </div>
+            ) : (
+              <>
+                {selectedCharacter && (
+                  <article className={`character-hero tone-${selectedCharacter.portraitTone}`}>
+                    <div className="character-portrait-frame">
+                      {selectedCharacter.portraitUrl ? (
+                        <img alt={`${selectedCharacter.entity.name}画像`} src={selectedCharacter.portraitUrl} />
+                      ) : (
+                        <div className="character-portrait-fallback">
+                          {getCharacterInitial(selectedCharacter.entity.name)}
+                        </div>
+                      )}
+                    </div>
+                    <div className="character-hero-body">
+                      <div>
+                        <h3>{selectedCharacter.entity.name}</h3>
+                        <p>
+                          出现 {selectedCharacter.mentionCount} 次 · 关系 {selectedCharacter.relationCount} 条
+                          {selectedCharacter.entity.firstChapterIndex != null ? ` · 首见第 ${selectedCharacter.entity.firstChapterIndex} 章` : ''}
+                        </p>
+                      </div>
+                      {selectedCharacter.entity.description && <p>{selectedCharacter.entity.description}</p>}
+                      {selectedCharacter.entity.aliases.length > 0 && (
+                        <div className="character-aliases">
+                          {selectedCharacter.entity.aliases.slice(0, 10).map((alias) => (
+                            <span key={alias}>{alias}</span>
+                          ))}
+                        </div>
+                      )}
+                      {selectedCharacter.relatedNames.length > 0 && (
+                        <p className="character-related">相关：{selectedCharacter.relatedNames.join('、')}</p>
+                      )}
+                      {selectedCharacter.firstEvidence?.evidence && (
+                        <blockquote>{selectedCharacter.firstEvidence.evidence}</blockquote>
+                      )}
+                      <div className="character-actions">
+                        <button type="button" onClick={() => openCharacterChapter(selectedCharacter)}>
+                          跳到首次证据
+                        </button>
+                        <button type="button" onClick={() => switchTab('search')}>
+                          图谱搜索
+                        </button>
+                      </div>
+                    </div>
+                  </article>
+                )}
+
+                <div className="character-search-row">
+                  <input
+                    className="search-input"
+                    value={characterSearchInput}
+                    onChange={(event) => {
+                      setCharacterSearchInput(event.target.value)
+                      setSelectedCharacterId(null)
+                    }}
+                    placeholder="搜索人物名称、别名或描述"
+                  />
+                </div>
+
+                <div className="character-grid">
+                  {filteredCharacterCards.map((card) => (
+                    <button
+                      className={card.entity.id === selectedCharacter?.entity.id ? 'character-card active' : 'character-card'}
+                      key={card.entity.id}
+                      type="button"
+                      onClick={() => setSelectedCharacterId(card.entity.id)}
+                    >
+                      <span className={`character-card-image tone-${card.portraitTone}`}>
+                        {card.portraitUrl ? (
+                          <img alt="" src={card.portraitUrl} />
+                        ) : (
+                          <span>{getCharacterInitial(card.entity.name)}</span>
+                        )}
+                      </span>
+                      <span className="character-card-main">
+                        <strong>{card.entity.name}</strong>
+                        <small>
+                          出现 {card.mentionCount} · 关系 {card.relationCount}
+                          {card.entity.firstChapterIndex != null ? ` · 第 ${card.entity.firstChapterIndex} 章` : ''}
+                        </small>
+                        {card.entity.description && <em>{card.entity.description}</em>}
+                      </span>
+                    </button>
+                  ))}
+                </div>
+                {filteredCharacterCards.length === 0 && <p className="muted">没有匹配的人物。</p>}
               </>
             )}
           </section>
@@ -2765,6 +2921,7 @@ ${context}
       <nav className="bottom-nav">
         <button className={tab === 'library' ? 'active' : ''} type="button" onClick={() => switchTab('library')}>书架</button>
         <button className={tab === 'reader' ? 'active' : ''} type="button" onClick={() => switchTab('reader')}>阅读</button>
+        <button className={tab === 'characters' ? 'active' : ''} type="button" onClick={() => switchTab('characters')}>人物</button>
         <button className={tab === 'search' ? 'active' : ''} type="button" onClick={() => switchTab('search')}>搜索</button>
         <button className={tab === 'sync' ? 'active' : ''} type="button" onClick={() => switchTab('sync')}>设置</button>
       </nav>
