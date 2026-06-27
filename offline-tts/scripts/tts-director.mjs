@@ -271,7 +271,7 @@ function preSegmentText(text, limit) {
   const sourceLimit = getSafeSourceLimit(text, limit)
   const source = text.slice(0, sourceLimit)
   const segments = []
-  const quoteRegex = /「[^」]+」/g
+  const quoteRegex = /[「“][^」”]+[」”]/g
   let cursor = 0
   let match
 
