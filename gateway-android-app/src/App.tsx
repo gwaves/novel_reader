@@ -850,7 +850,7 @@ function App() {
           </div>
         </section>
       ) : tab === 'reader' ? (
-        <section className={audioUrl ? 'reader-page has-audio' : 'reader-page'}>
+        <section className="reader-page">
           {!bookPackage || !currentChapter ? (
             <div className="empty-state reader-empty">
               <p>请选择一本书。</p>
@@ -858,7 +858,7 @@ function App() {
             </div>
           ) : (
             <>
-              <div className="reader-toolbar">
+              <div className="chapter-toolbar">
                 <select value={currentChapter.id} onChange={(event) => selectChapter(event.target.value)}>
                   {chapters.map((chapter, index) => (
                     <option key={chapter.id} value={chapter.id}>
@@ -866,6 +866,9 @@ function App() {
                     </option>
                   ))}
                 </select>
+                <button type="button" onClick={() => setChapterPickerOpen(true)}>菜单</button>
+              </div>
+              <div className="chapter-nav-row">
                 <button type="button" onClick={() => selectChapter(previousChapter?.id ?? currentChapter.id)} disabled={!previousChapter}>
                   上一章
                 </button>
@@ -874,33 +877,20 @@ function App() {
                 </button>
               </div>
               {message ? <div className={`status-line reader-status status-${connectionState}`}>{message}</div> : null}
-              <article
-                className={`reading-surface ${readerSettings.background}`}
-                onClick={handleReaderTap}
-                style={{ '--reader-font-size': `${readerSettings.fontSize}px` } as CSSProperties}
-              >
-                <h1>{currentChapter.title}</h1>
-                {activeTimelineEntry?.text ? (
-                  <div className="now-playing">
-                    <span>正在播放</span>
-                    <strong>{activeTimelineEntry.text}</strong>
-                  </div>
-                ) : null}
-                <TextContent text={chapterContent(currentChapter)} activeEntry={activeTimelineEntry} />
-                <div className="reader-bottom-nav">
-                  <button type="button" onClick={() => selectChapter(previousChapter?.id ?? currentChapter.id)} disabled={!previousChapter}>
-                    上一章
-                  </button>
-                  <button type="button" onClick={() => setChapterPickerOpen(true)}>
-                    章节
-                  </button>
-                  <button type="button" onClick={() => selectChapter(nextChapter?.id ?? currentChapter.id)} disabled={!nextChapter}>
-                    下一章
-                  </button>
+              <div className="speech-control-panel">
+                <div>
+                  <strong>语音阅读</strong>
+                  <span>
+                    {audioUrl
+                      ? activeTimelineEntry?.text
+                        ? `正在播放：${activeTimelineEntry.text}`
+                        : '正在播放'
+                      : currentAudio
+                        ? `当前章节可播放 · ${formatDuration(currentAudio.durationMs)}`
+                        : '当前章节暂无音频'}
+                  </span>
                 </div>
-              </article>
-              {audioUrl ? (
-                <div className="audio-dock">
+                {audioUrl ? (
                   <audio
                     className="audio-player"
                     src={audioUrl}
@@ -908,19 +898,41 @@ function App() {
                     autoPlay
                     onTimeUpdate={(event) => setAudioTime(event.currentTarget.currentTime)}
                   />
+                ) : (
+                  <button type="button" onClick={() => void playCurrentAudio()} disabled={!currentAudio || loadingAudio}>
+                    {audioButtonLabel(currentAudio, loadingAudio)}
+                  </button>
+                )}
+              </div>
+              <article
+                className={`reader-card ${readerSettings.background}`}
+                onClick={handleReaderTap}
+                style={{ '--reader-font-size': `${readerSettings.fontSize}px` } as CSSProperties}
+              >
+                <h2>{currentChapter.title}</h2>
+                <div className="chapter-text">
+                  <TextContent text={chapterContent(currentChapter)} activeEntry={activeTimelineEntry} />
                 </div>
-              ) : null}
+              </article>
+              <div className="chapter-nav-row bottom">
+                <button type="button" onClick={() => selectChapter(previousChapter?.id ?? currentChapter.id)} disabled={!previousChapter}>
+                  上一章
+                </button>
+                <button type="button" onClick={() => selectChapter(nextChapter?.id ?? currentChapter.id)} disabled={!nextChapter}>
+                  下一章
+                </button>
+              </div>
               {chapterPickerOpen ? (
-                <div className="chapter-picker-overlay" role="presentation" onClick={() => setChapterPickerOpen(false)}>
-                  <section className="chapter-picker-sheet" role="dialog" aria-modal="true" aria-label="阅读控制" onClick={(event) => event.stopPropagation()}>
-                    <div className="chapter-picker-header">
+                <div className="reader-menu-overlay" role="presentation" onClick={() => setChapterPickerOpen(false)}>
+                  <section className="reader-menu-sheet" role="dialog" aria-modal="true" aria-label="阅读控制" onClick={(event) => event.stopPropagation()}>
+                    <div className="reader-menu-header">
                       <div>
-                        <strong>阅读控制</strong>
+                        <strong>{currentChapter.title}</strong>
                         <span>{currentChapterPosition + 1}/{chapters.length}</span>
                       </div>
                       <button type="button" onClick={() => setChapterPickerOpen(false)}>关闭</button>
                     </div>
-                    <label className="chapter-select-field">
+                    <label className="chapter-select-field reader-menu-group">
                       <span>章节</span>
                       <select value={currentChapter.id} onChange={(event) => selectChapter(event.target.value)}>
                         {chapters.map((chapter, index) => (
@@ -930,7 +942,7 @@ function App() {
                         ))}
                       </select>
                     </label>
-                    <div className="chapter-picker-actions">
+                    <div className="chapter-nav-row reader-menu-nav">
                       <button type="button" onClick={() => selectChapter(previousChapter?.id ?? currentChapter.id)} disabled={!previousChapter}>
                         上一章
                       </button>
@@ -938,14 +950,16 @@ function App() {
                         下一章
                       </button>
                     </div>
-                    <div className="reader-menu-group">
-                      <strong>音频</strong>
-                      <div className="audio-action-row">
+                    <div className="speech-control-panel reader-menu-group">
+                      <div>
+                        <strong>语音阅读</strong>
+                        <span>{audioUrl ? '正在播放' : currentAudio ? `${formatDuration(currentAudio.durationMs)} · ${formatBytes(currentAudio.sizeBytes)}` : '当前章节暂无音频'}</span>
+                      </div>
+                      {!audioUrl ? (
                         <button type="button" onClick={() => void playCurrentAudio()} disabled={!currentAudio || loadingAudio}>
                           {audioButtonLabel(currentAudio, loadingAudio)}
                         </button>
-                        <span>{currentAudio ? `${formatDuration(currentAudio.durationMs)} · ${formatBytes(currentAudio.sizeBytes)}` : '当前章节暂无音频'}</span>
-                      </div>
+                      ) : null}
                       {audioUrl ? (
                         <audio
                           className="audio-player"
@@ -955,7 +969,7 @@ function App() {
                         />
                       ) : null}
                     </div>
-                    <div className="reader-menu-group">
+                    <div className="reader-settings reader-menu-group">
                       <strong>字号</strong>
                       <div className="reader-size-control">
                         <button type="button" onClick={() => updateReaderFontSize(readerSettings.fontSize - 1)}>A-</button>
@@ -970,8 +984,6 @@ function App() {
                         <button type="button" onClick={() => updateReaderFontSize(readerSettings.fontSize + 1)}>A+</button>
                         <span>{readerSettings.fontSize}px</span>
                       </div>
-                    </div>
-                    <div className="reader-menu-group">
                       <strong>背景</strong>
                       <div className="reader-background-control">
                         {(['paper', 'warm', 'green', 'dark'] as ReaderBackground[]).map((background) => (
