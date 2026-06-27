@@ -336,6 +336,7 @@ function App() {
   const lastReaderCenterTapAtRef = useRef(0)
   const chapterAudioRef = useRef<HTMLAudioElement | null>(null)
   const chapterAudioTimelineRef = useRef<ChapterAudioTimelineItem[]>([])
+  const activeAudioEntryKeyRef = useRef<string | null>(null)
   const autoConnectAttemptedRef = useRef(false)
   const autoRestoreAttemptedRef = useRef(false)
   const lastReaderScrollYRef = useRef(0)
@@ -900,6 +901,7 @@ function App() {
   function clearAudioUrl() {
     chapterAudioRef.current?.pause()
     chapterAudioTimelineRef.current = []
+    activeAudioEntryKeyRef.current = null
     setAudioUrl((currentUrl) => {
       if (currentUrl?.startsWith('blob:')) URL.revokeObjectURL(currentUrl)
       return null
@@ -1096,6 +1098,18 @@ function App() {
     }, 800)
   }
 
+  function scrollToAudioHighlight(force = false) {
+    if (!force && (!speechAutoFollowRef.current || speechFollowSuspendedRef.current)) return
+    const target = document.querySelector('[data-audio-highlight-anchor="true"]')
+    if (!target) return
+
+    isSpeechAutoScrollingRef.current = true
+    target.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    window.setTimeout(() => {
+      isSpeechAutoScrollingRef.current = false
+    }, 800)
+  }
+
   function clampAudioRatio(value: number): number {
     if (!Number.isFinite(value)) return 0
     return Math.min(1, Math.max(0, value))
@@ -1188,9 +1202,28 @@ function App() {
     return nearest?.index ?? null
   }
 
+  function audioEntryKey(entry: AudioTimelineEntry) {
+    return entry.id ?? `${entry.startTime ?? 0}:${entry.endTime ?? 0}:${entry.sourceStart ?? ''}:${entry.sourceEnd ?? ''}`
+  }
+
   function handleChapterAudioTimeUpdate(audio: HTMLAudioElement) {
     const currentTime = audio.currentTime
     setAudioTime(currentTime)
+    const activeEntry = findActiveTimelineEntry(audioManifest, currentTime)
+    if (activeEntry) {
+      const activeEntryKey = audioEntryKey(activeEntry)
+      if (activeAudioEntryKeyRef.current !== activeEntryKey) {
+        activeAudioEntryKeyRef.current = activeEntryKey
+        window.setTimeout(() => scrollToAudioHighlight(), 0)
+      }
+      const currentIndex = findAudioSegmentIndexBySourcePosition(activeEntry, currentTime)
+      if (currentIndex != null) {
+        const segment = speechSegmentsRef.current[currentIndex]
+        if (segment) setSpeechPlayback({ status: 'playing', segmentIndex: currentIndex, segmentId: segment.id })
+      }
+      if (activeSpeechSegmentId) setActiveSpeechSegmentId(null)
+      return
+    }
     const currentIndex = findAudioSegmentIndex(currentTime)
     if (currentIndex == null) return
     const segment = speechSegmentsRef.current[currentIndex]
@@ -1655,7 +1688,9 @@ function App() {
                 <h2>{currentChapter.title}</h2>
                 <ChapterSummary bookPackage={bookPackage} chapter={currentChapter} />
                 <div className="chapter-text">
-                  {speechChapter ? (
+                  {audioUrl && activeTimelineEntry ? (
+                    <TextContent text={chapterContent(currentChapter)} activeEntry={activeTimelineEntry} />
+                  ) : speechChapter ? (
                     <SpeechTextContent speechChapter={speechChapter} activeSegmentId={activeSpeechSegmentId} />
                   ) : (
                     <TextContent text={chapterContent(currentChapter)} activeEntry={activeTimelineEntry} />
@@ -1948,7 +1983,7 @@ function TextContent({ text, activeEntry }: { text: string; activeEntry?: AudioT
     return (
       <p className="highlighted-text">
         <span>{highlighted.before}</span>
-        <mark>{highlighted.active}</mark>
+        <mark data-audio-highlight-anchor="true">{highlighted.active}</mark>
         <span>{highlighted.after}</span>
       </p>
     )
