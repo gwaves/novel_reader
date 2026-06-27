@@ -241,7 +241,7 @@ function App() {
   const visibleAudioSyncProgress = audioSyncBookId === selectedBookId ? audioSyncProgress : null
   const visibleFullPackageCache = fullPackageCache?.bookId === selectedBookId ? fullPackageCache : null
   const visibleFullPackageProgress = fullPackageProgress?.bookId === selectedBookId ? fullPackageProgress : null
-  const displaySummaryCoverage = inferredSummaryCoverage(selectedBook, bookPackage, visibleFullPackageCache)
+  const displaySummaryCoverage = hasImportedPackage(visibleFullPackageCache ?? fullPackageCache) ? 1 : inferredSummaryCoverage(selectedBook, bookPackage, visibleFullPackageCache ?? fullPackageCache)
   const displayKgCoverage = inferredKgCoverage(selectedBook, bookPackage, visibleFullPackageCache)
   const displayEmbeddingCoverage = inferredEmbeddingCoverage(selectedBook, bookPackage, visibleFullPackageCache)
   const displayAudioChapterCount =
@@ -1782,6 +1782,7 @@ function fullPackageProgressLabel(progress: PackageSyncProgress | null) {
 }
 
 function inferredSummaryCoverage(book: BookSummary | null, bookPackage: BookPackage | null, fullPackage: FullPackageCache | null) {
+  if (hasImportedPackage(fullPackage)) return 1
   const importedSummaryCount = fullPackage?.importStats?.summaryCount ?? 0
   const importedChapterCount = fullPackage?.importStats?.chapterCount ?? 0
   if (importedChapterCount > 0) {
@@ -1803,6 +1804,10 @@ function inferredEmbeddingCoverage(book: BookSummary | null, bookPackage: BookPa
   if (typeof book?.embeddingCoverage === 'number' && book.embeddingCoverage > 0) return book.embeddingCoverage
   if (hasEmbeddings(bookPackage) || hasImportedEmbeddings(fullPackage)) return 1
   return book?.embeddingCoverage
+}
+
+function hasImportedPackage(fullPackage: FullPackageCache | null) {
+  return Boolean(fullPackage?.importStats || fullPackage?.importedAt || fullPackage?.metadataPath)
 }
 
 function hasKnowledgeGraph(bookPackage: BookPackage | null) {
