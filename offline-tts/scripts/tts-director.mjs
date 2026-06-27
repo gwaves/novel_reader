@@ -271,20 +271,23 @@ function preSegmentText(text, limit) {
   const sourceLimit = getSafeSourceLimit(text, limit)
   const source = text.slice(0, sourceLimit)
   const segments = []
-  const quoteRegex = /[「“][^」”]+[」”]/g
+  const quoteRegex = /[「『“‘\"']([^」』”’\"']{1,1200})[」』”’\"']/g
   let cursor = 0
   let match
 
   while ((match = quoteRegex.exec(source))) {
-    const quoteText = match[0].slice(1, -1)
+    const fullQuote = match[0]
+    const quoteText = match[1]
     if (!isLikelyDialogueQuote(quoteText)) {
       continue
     }
     if (match.index > cursor) {
       pushNonDialogueSegments(segments, source.slice(cursor, match.index), cursor)
     }
-    pushSegment(segments, 'dialogue', quoteText, match.index + 1, match.index + match[0].length - 1)
-    cursor = match.index + match[0].length
+    const contextBefore = source.slice(Math.max(0, match.index - 24), match.index)
+    const hint = inferQuoteTypeHint(contextBefore, quoteText)
+    pushSegment(segments, hint, quoteText, match.index + fullQuote.indexOf(quoteText), match.index + fullQuote.indexOf(quoteText) + quoteText.length)
+    cursor = match.index + fullQuote.length
   }
   if (cursor < source.length) {
     pushNonDialogueSegments(segments, source.slice(cursor), cursor)
@@ -296,6 +299,16 @@ function preSegmentText(text, limit) {
     contextAfter: source.slice(segment.sourceEnd, Math.min(source.length, segment.sourceEnd + 80)).replace(/\s+/g, ' ').trim(),
     id: `pre-${String(index + 1).padStart(4, '0')}`,
   }))
+}
+
+function inferQuoteTypeHint(contextBefore, quoteText) {
+  if (isNarrativeCitationContext(contextBefore)) return 'narration'
+  if (/[道曰说问答叫喊喝笑骂叹][：:]?\s*$/.test(contextBefore) || isLikelyDialogueQuote(quoteText)) return 'dialogue'
+  return 'narration'
+}
+
+function isNarrativeCitationContext(contextBefore) {
+  return /(诗曰|赋曰|词曰|赞曰|古云|古语云|有诗为证|有词为证|易曰|历曰|邵康节曰|正是|但见|那|这)\s*[：:]?\s*$/.test(contextBefore)
 }
 
 function getSafeSourceLimit(text, requestedLimit) {
