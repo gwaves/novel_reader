@@ -92,6 +92,12 @@ type NativeAudioPlugin = {
     bookId: string
     chapterId: string
   }): Promise<{ filePath: string; sizeBytes: number }>
+  downloadPackage(options: {
+    url: string
+    token: string
+    deviceName: string
+    bookId: string
+  }): Promise<{ filePath: string; sizeBytes: number }>
 }
 
 type AudioTimelineEntry = {
@@ -120,9 +126,17 @@ type ReadingProgress = {
   updatedAt: string
 }
 
+type FullPackageCache = {
+  bookId: string
+  filePath: string
+  sizeBytes: number
+  cachedAt: string
+}
+
 const settingsKey = 'novel-reader-gateway-settings'
 const readerSettingsKey = 'novel-reader-gateway-reader-settings'
 const readingProgressKey = 'novel-reader-gateway-reading-progress'
+const fullPackageCacheKey = 'novel-reader-gateway-full-package-cache'
 const audioCacheIndexKey = 'novel-reader-gateway-audio-cache-index'
 const packageCachePrefix = 'novel-reader-gateway-package:'
 const packageCacheDbName = 'novel-reader-gateway'
@@ -166,6 +180,8 @@ function App() {
   const [cachedAudioBookId, setCachedAudioBookId] = useState<string | null>(null)
   const [audioSyncProgress, setAudioSyncProgress] = useState<{ done: number; total: number } | null>(null)
   const [audioSyncBookId, setAudioSyncBookId] = useState<string | null>(null)
+  const [fullPackageCache, setFullPackageCache] = useState<FullPackageCache | null>(() => loadFullPackageCache())
+  const [fullPackageStatus, setFullPackageStatus] = useState<'idle' | 'downloading' | 'cached' | 'error'>('idle')
 
   const selectedBook = useMemo(
     () => books.find((book) => book.id === selectedBookId) ?? null,
@@ -185,6 +201,7 @@ function App() {
     [cachedAudioBookId, cachedAudioIds, selectedBookId],
   )
   const visibleAudioSyncProgress = audioSyncBookId === selectedBookId ? audioSyncProgress : null
+  const visibleFullPackageCache = fullPackageCache?.bookId === selectedBookId ? fullPackageCache : null
   const currentAudio = useMemo(
     () => visibleAudioChapters.find((chapter) => chapter.chapterId === currentChapter?.id) ?? null,
     [currentChapter, visibleAudioChapters],
@@ -330,6 +347,7 @@ function App() {
       pendingRestoreScrollRef.current = restoredChapterId ? options.restoreProgress?.scrollY ?? 0 : 0
       setTab('reader')
       restorePendingScroll()
+      void syncFullPackage(bookId)
     } catch (error) {
       const cachedPackage = await loadCachedBookPackage(bookId)
       const cachedChapters = packageChapters(cachedPackage)
@@ -348,6 +366,27 @@ function App() {
       }
     } finally {
       setLoadingPackage(false)
+    }
+  }
+
+  async function syncFullPackage(bookId: string) {
+    if (!Capacitor.isNativePlatform()) return
+    if (fullPackageStatus === 'downloading') return
+    setFullPackageStatus('downloading')
+    try {
+      const downloaded = await downloadPackageToNativeFile(settings, bookId)
+      const cache: FullPackageCache = {
+        bookId,
+        filePath: downloaded.filePath,
+        sizeBytes: downloaded.sizeBytes,
+        cachedAt: new Date().toISOString(),
+      }
+      saveFullPackageCache(cache)
+      setFullPackageCache(cache)
+      setFullPackageStatus('cached')
+    } catch (error) {
+      setFullPackageStatus('error')
+      setMessage(`完整包后台下载失败：${errorMessage(error)}`)
     }
   }
 
@@ -674,6 +713,10 @@ function App() {
                 <div className="package-line">
                   <span>Package</span>
                   <strong>{bookPackage ? packageSummary(bookPackage) : '未加载'}</strong>
+                </div>
+                <div className="package-line">
+                  <span>Full Package</span>
+                  <strong>{fullPackageLabel(visibleFullPackageCache, fullPackageStatus)}</strong>
                 </div>
                 <div className="package-line">
                   <span>Audio</span>
@@ -1057,6 +1100,41 @@ async function downloadAudioToNativeFile(settings: GatewaySettings, bookId: stri
     token: settings.token.trim(),
     url: `${baseUrl}/mobile/books/${encodeURIComponent(bookId)}/audio/${encodeURIComponent(chapterId)}/download`,
   })
+}
+
+async function downloadPackageToNativeFile(settings: GatewaySettings, bookId: string) {
+  const baseUrl = settings.baseUrl.trim().replace(/\/+$/, '')
+  if (!baseUrl || baseUrl === 'https:') {
+    throw new Error('请填写 Gateway 地址')
+  }
+  if (!settings.token.trim()) {
+    throw new Error('请填写 Token')
+  }
+
+  return NativeAudio.downloadPackage({
+    bookId,
+    deviceName: settings.deviceName.trim() || 'Android Phone',
+    token: settings.token.trim(),
+    url: `${baseUrl}/mobile/books/${encodeURIComponent(bookId)}/package/download`,
+  })
+}
+
+function loadFullPackageCache(): FullPackageCache | null {
+  try {
+    const cached = localStorage.getItem(fullPackageCacheKey)
+    if (!cached) return null
+    const parsed = JSON.parse(cached) as unknown
+    if (!isRecord(parsed)) return null
+    if (typeof parsed.bookId !== 'string' || typeof parsed.filePath !== 'string') return null
+    if (typeof parsed.sizeBytes !== 'number' || typeof parsed.cachedAt !== 'string') return null
+    return parsed as FullPackageCache
+  } catch {
+    return null
+  }
+}
+
+function saveFullPackageCache(cache: FullPackageCache) {
+  localStorage.setItem(fullPackageCacheKey, JSON.stringify(cache))
 }
 
 function parseJsonBody(value: string) {
@@ -1456,6 +1534,13 @@ function readOptionalInteger(value: unknown) {
 function audioButtonLabel(currentAudio: AudioChapter | null, loadingAudio: boolean) {
   if (loadingAudio) return '加载中'
   return currentAudio ? '播放' : '无音频'
+}
+
+function fullPackageLabel(cache: FullPackageCache | null, status: 'idle' | 'downloading' | 'cached' | 'error') {
+  if (status === 'downloading') return '后台下载中'
+  if (cache) return `已下载 ${formatBytes(cache.sizeBytes)}`
+  if (status === 'error') return '下载失败'
+  return '未下载'
 }
 
 function formatDuration(durationMs?: number) {

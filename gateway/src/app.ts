@@ -8,7 +8,7 @@ import { requireGatewayAuth } from './auth.js'
 import { openAudioFile, readAudioCatalog, readAudioManifest } from './audio-store.js'
 import { buildCapabilities } from './capabilities.js'
 import { type GatewayConfig, loadConfig } from './config.js'
-import { readBookCatalog, readBookPackage, readBookSummary, upsertBookPackage } from './data-store.js'
+import { openBookPackageFile, readBookCatalog, readBookPackage, readBookSummary, upsertBookPackage } from './data-store.js'
 import { readDeviceRegistry, touchGatewayDevice } from './device-store.js'
 import { isGatewayHttpError } from './errors.js'
 import { forwardChatCompletion, forwardEmbeddings } from './openai-client.js'
@@ -128,12 +128,24 @@ export function buildGatewayApp(config: GatewayConfig = loadConfig()) {
     }
   })
 
-  app.get<{ Params: { bookId: string } }>('/mobile/books/:bookId/package', async (request) => {
+  app.get<{ Params: { bookId: string }; Querystring: { include?: string } }>('/mobile/books/:bookId/package', async (request) => {
     requireGatewayAuth(config, request)
+    const bookPackage = await readBookPackage(config, request.params.bookId)
+    const includeFullPackage = request.query.include === 'all' || request.query.include === 'full'
     return {
       generatedAt: new Date().toISOString(),
-      package: await readBookPackage(config, request.params.bookId),
+      package: includeFullPackage ? bookPackage : buildReaderPackage(bookPackage),
     }
+  })
+
+  app.get<{ Params: { bookId: string } }>('/mobile/books/:bookId/package/download', async (request, reply) => {
+    requireGatewayAuth(config, request)
+    const packageFile = await openBookPackageFile(config, request.params.bookId)
+    return reply
+      .header('content-type', 'application/json; charset=utf-8')
+      .header('content-length', packageFile.sizeBytes)
+      .header('content-disposition', `attachment; filename="${basename(packageFile.fileName)}"`)
+      .send(packageFile.stream)
   })
 
   app.put<{ Body: unknown; Params: { bookId: string } }>('/admin/books/:bookId/package', async (request) => {
@@ -187,6 +199,48 @@ export function buildGatewayApp(config: GatewayConfig = loadConfig()) {
   )
 
   return app
+}
+
+function buildReaderPackage(bookPackage: Awaited<ReturnType<typeof readBookPackage>>) {
+  const {
+    embeddings: _embeddings,
+    knowledgeGraph,
+    integrity,
+    ...readerPackage
+  } = bookPackage
+
+  return {
+    ...readerPackage,
+    knowledgeGraph: summarizeKnowledgeGraph(knowledgeGraph),
+    integrity: summarizeIntegrity(integrity),
+  }
+}
+
+function summarizeKnowledgeGraph(value: unknown) {
+  if (!isRecord(value)) return value
+
+  return {
+    ...value,
+    entityMentions: summarizeCount(value.entityMentions),
+    relationMentions: summarizeCount(value.relationMentions),
+  }
+}
+
+function summarizeIntegrity(value: unknown) {
+  if (!isRecord(value)) return value
+
+  return {
+    ...value,
+    embeddings: summarizeCount(value.embeddings),
+  }
+}
+
+function summarizeCount(value: unknown) {
+  return Array.isArray(value) ? { count: value.length } : value
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
 }
 
 function normalizeError(error: FastifyError | Error) {

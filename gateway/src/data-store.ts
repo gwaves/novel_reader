@@ -1,4 +1,5 @@
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
+import { createReadStream } from 'node:fs'
+import { mkdir, readFile, rename, stat, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { GatewayConfig } from './config.js'
 import { GatewayHttpError } from './errors.js'
@@ -26,6 +27,12 @@ export type GatewayBookPackage = {
   book: GatewayBookSummary
   generatedAt?: string
   [key: string]: unknown
+}
+
+export type GatewayBookPackageFile = {
+  stream: ReturnType<typeof createReadStream>
+  sizeBytes: number
+  fileName: string
 }
 
 export async function readBookCatalog(config: GatewayConfig): Promise<GatewayBookCatalog> {
@@ -73,6 +80,25 @@ export async function readBookPackage(config: GatewayConfig, bookId: string): Pr
     code: 'book_package_invalid',
     statusCode: 500,
   })
+}
+
+export async function openBookPackageFile(config: GatewayConfig, bookId: string): Promise<GatewayBookPackageFile> {
+  await readBookSummary(config, bookId)
+
+  const packagePath = join(config.dataDir, 'books', bookId, 'package.json')
+  try {
+    const packageStat = await stat(packagePath)
+    return {
+      stream: createReadStream(packagePath),
+      sizeBytes: packageStat.size,
+      fileName: `${bookId}-package-full.json`,
+    }
+  } catch (error) {
+    if (isNodeError(error) && error.code === 'ENOENT') {
+      throw new GatewayHttpError(404, 'book_package_not_found', `Gateway package for book ${bookId} was not found.`)
+    }
+    throw error
+  }
 }
 
 export async function upsertBookPackage(
