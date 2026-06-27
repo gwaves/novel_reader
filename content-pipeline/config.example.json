@@ -2,7 +2,7 @@
   "workRoot": "tmp/content-pipeline",
   "sourceApi": "http://127.0.0.1:5174",
   "gatewayUrl": "http://127.0.0.1:6180",
-  "gatewayAudioDir": "gateway/data/audio",
+  "gatewayAudioDir": "gateway/audio",
   "deviceName": "Content Pipeline",
   "offlineScanner": {
     "script": "scripts/offline-scanner.mjs"
