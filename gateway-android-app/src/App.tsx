@@ -25,7 +25,7 @@ type BookPackage = {
   book: BookSummary
   chapters?: Chapter[]
   summaries?: unknown
-  kg?: unknown
+  knowledgeGraph?: unknown
   embeddings?: unknown
 }
 
@@ -202,6 +202,11 @@ function App() {
   )
   const visibleAudioSyncProgress = audioSyncBookId === selectedBookId ? audioSyncProgress : null
   const visibleFullPackageCache = fullPackageCache?.bookId === selectedBookId ? fullPackageCache : null
+  const displaySummaryCoverage = inferredSummaryCoverage(selectedBook, bookPackage)
+  const displayKgCoverage = inferredKgCoverage(selectedBook, bookPackage, visibleFullPackageCache)
+  const displayEmbeddingCoverage = inferredEmbeddingCoverage(selectedBook, bookPackage, visibleFullPackageCache)
+  const displayAudioChapterCount =
+    visibleAudioChapters.length || visibleCachedAudioIds.size || selectedBook?.audioChapterCount || 0
   const currentAudio = useMemo(
     () => visibleAudioChapters.find((chapter) => chapter.chapterId === currentChapter?.id) ?? null,
     [currentChapter, visibleAudioChapters],
@@ -704,7 +709,7 @@ function App() {
                   </div>
                   <div>
                     <dt>音频</dt>
-                    <dd>{selectedBook.audioChapterCount ?? 0} 章</dd>
+                    <dd>{displayAudioChapterCount} 章</dd>
                   </div>
                   <div>
                     <dt>更新</dt>
@@ -712,9 +717,9 @@ function App() {
                   </div>
                 </dl>
                 <div className="coverage-row">
-                  <Coverage label="概要" value={selectedBook.summaryCoverage} />
-                  <Coverage label="图谱" value={selectedBook.kgCoverage} />
-                  <Coverage label="向量" value={selectedBook.embeddingCoverage} />
+                  <Coverage label="概要" value={displaySummaryCoverage} />
+                  <Coverage label="图谱" value={displayKgCoverage} />
+                  <Coverage label="向量" value={displayEmbeddingCoverage} />
                 </div>
                 <div className="package-line">
                   <span>Package</span>
@@ -1543,6 +1548,52 @@ function readBoundedIndex(value: unknown, length: number) {
 
 function readOptionalInteger(value: unknown) {
   return typeof value === 'number' && Number.isInteger(value) ? value : undefined
+}
+
+function inferredSummaryCoverage(book: BookSummary | null, bookPackage: BookPackage | null) {
+  if (typeof book?.summaryCoverage === 'number' && book.summaryCoverage > 0) return book.summaryCoverage
+  const summaryCount = Array.isArray(bookPackage?.summaries) ? bookPackage.summaries.length : 0
+  const chapterCount = bookPackage ? packageChapters(bookPackage).length : (book?.chapterCount ?? 0)
+  return chapterCount > 0 ? Math.min(1, summaryCount / chapterCount) : book?.summaryCoverage
+}
+
+function inferredKgCoverage(book: BookSummary | null, bookPackage: BookPackage | null, fullPackage: FullPackageCache | null) {
+  if (typeof book?.kgCoverage === 'number' && book.kgCoverage > 0) return book.kgCoverage
+  return hasKnowledgeGraph(bookPackage) || fullPackage ? 1 : book?.kgCoverage
+}
+
+function inferredEmbeddingCoverage(book: BookSummary | null, bookPackage: BookPackage | null, fullPackage: FullPackageCache | null) {
+  if (typeof book?.embeddingCoverage === 'number' && book.embeddingCoverage > 0) return book.embeddingCoverage
+  if (hasEmbeddings(bookPackage) || fullPackage) return 1
+  return book?.embeddingCoverage
+}
+
+function hasKnowledgeGraph(bookPackage: BookPackage | null) {
+  const graph = bookPackage?.knowledgeGraph
+  return isRecord(graph) && (
+    hasNonEmptyArray(graph.entities) ||
+    hasNonEmptyArray(graph.relations) ||
+    hasPositiveCount(graph.entityMentions) ||
+    hasPositiveCount(graph.relationMentions)
+  )
+}
+
+function hasEmbeddings(bookPackage: BookPackage | null) {
+  const embeddings = bookPackage?.embeddings
+  return isRecord(embeddings) && (
+    hasNonEmptyArray(embeddings.summaries) ||
+    hasNonEmptyArray(embeddings.chunks) ||
+    hasPositiveCount(embeddings.summaries) ||
+    hasPositiveCount(embeddings.chunks)
+  )
+}
+
+function hasNonEmptyArray(value: unknown) {
+  return Array.isArray(value) && value.length > 0
+}
+
+function hasPositiveCount(value: unknown) {
+  return isRecord(value) && typeof value.count === 'number' && value.count > 0
 }
 
 function audioButtonLabel(currentAudio: AudioChapter | null, loadingAudio: boolean) {
