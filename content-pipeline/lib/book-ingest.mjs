@@ -1,10 +1,11 @@
 import { createHash } from 'node:crypto'
+import { spawn } from 'node:child_process'
 import { mkdirSync } from 'node:fs'
-import { readFile } from 'node:fs/promises'
+import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { dirname, extname, basename } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { inflateRawSync } from 'node:zlib'
-import { homedir } from 'node:os'
+import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 const chapterPattern =
@@ -61,6 +62,9 @@ export async function parseBookFile(filePath, fileBuffer = null) {
   if (type === 'epub') {
     return parseEpub(filePath, buffer)
   }
+  if (type === 'mobi') {
+    return parseMobi(filePath)
+  }
   if (type === 'pdf') {
     throw new Error('PDF 导入尚未接入；Phase 2 先支持 TXT/EPUB，文本型 PDF 后续补充。')
   }
@@ -76,8 +80,49 @@ export function inferSourceType(filePath) {
   const extension = extname(filePath).toLowerCase()
   if (extension === '.txt') return 'txt'
   if (extension === '.epub') return 'epub'
+  if (['.mobi', '.azw', '.azw3'].includes(extension)) return 'mobi'
   if (extension === '.pdf') return 'pdf'
   return 'file'
+}
+
+async function parseMobi(filePath) {
+  const tempDir = await mkdtemp(join(tmpdir(), 'novel-reader-mobi-'))
+  const epubPath = join(tempDir, `${basename(filePath).replace(/\.[^.]+$/, '') || 'book'}.epub`)
+  try {
+    await runEbookConvert(filePath, epubPath)
+    return parseEpub(epubPath, await readFile(epubPath))
+  } catch (error) {
+    if (error.code === 'ENOENT') {
+      throw new Error('MOBI/AZW 导入需要安装 Calibre，并确保 ebook-convert 在 PATH 中。macOS 可安装 Calibre 后重启终端或服务。')
+    }
+    const stderr = String(error.stderr || '').trim()
+    throw new Error(`MOBI/AZW 转 EPUB 失败：${stderr || error.message}`)
+  } finally {
+    await rm(tempDir, { recursive: true, force: true })
+  }
+}
+
+function runEbookConvert(sourcePath, epubPath) {
+  return new Promise((resolvePromise, rejectPromise) => {
+    const child = spawn('ebook-convert', [sourcePath, epubPath], {
+      stdio: ['ignore', 'inherit', 'inherit'],
+      env: process.env,
+    })
+    child.on('error', (error) => {
+      if (error.code === 'ENOENT') {
+        rejectPromise(new Error('MOBI/AZW 导入需要安装 Calibre，并确保 ebook-convert 在 PATH 中。macOS 可安装 Calibre 后重启终端或服务。'))
+        return
+      }
+      rejectPromise(error)
+    })
+    child.on('close', (code) => {
+      if (code === 0) {
+        resolvePromise()
+        return
+      }
+      rejectPromise(new Error(`ebook-convert 退出码 ${code}`))
+    })
+  })
 }
 
 function writeBookToMainDb(dbPath, book) {
@@ -259,9 +304,11 @@ function splitChapters(rawText) {
     const end = index < matches.length - 1 ? (matches[index + 1].index ?? rawText.length) : rawText.length
     const block = rawText.slice(start, end).trim()
     const lines = block.split(/\r?\n/)
+    const heading = splitHeadingLine(lines[0].trim())
+    const contentLines = heading.contentPrefix ? [heading.contentPrefix, ...lines.slice(1)] : lines.slice(1)
     return {
-      title: normalizeChapterTitle(lines[0].trim()),
-      content: lines.slice(1).join('\n').trim(),
+      title: heading.title,
+      content: contentLines.join('\n').trim(),
     }
   }).filter((chapter) => chapter.content)
 }
@@ -296,6 +343,34 @@ function chunkFallback(text) {
 
 function normalizeChapterTitle(title) {
   return title.replace(/^正文\s+/, '').trim()
+}
+
+function splitHeadingLine(line) {
+  const normalizedLine = normalizeChapterTitle(line)
+  const headingMatch = normalizedLine.match(
+    /^((?:第\s*[0-9零一二三四五六七八九十百千万亿〇○]+\s*[集卷部]\s+)?第\s*[0-9零一二三四五六七八九十百千万亿〇○]+\s*[章卷节回])([\s\S]*)$/,
+  )
+
+  if (!headingMatch) {
+    return { title: normalizedLine, contentPrefix: '' }
+  }
+
+  const headingPrefix = headingMatch[1]
+  const headingText = headingMatch[2] ?? ''
+  const proseMarkers = ['却说', '话说', '且说', '诗曰', '原来', '当下', '却表', '却才']
+  const markerIndex = proseMarkers
+    .map((marker) => headingText.indexOf(marker))
+    .filter((index) => index >= 4)
+    .sort((a, b) => a - b)[0]
+
+  if (markerIndex == null) {
+    return { title: normalizedLine, contentPrefix: '' }
+  }
+
+  return {
+    title: `${headingPrefix}${headingText.slice(0, markerIndex)}`.trim(),
+    contentPrefix: headingText.slice(markerIndex).trim(),
+  }
 }
 
 function countWords(text) {

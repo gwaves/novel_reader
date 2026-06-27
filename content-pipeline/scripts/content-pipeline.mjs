@@ -1001,6 +1001,7 @@ function inferSourceType(filePath) {
   const lower = filePath.toLowerCase()
   if (lower.endsWith('.txt')) return 'txt'
   if (lower.endsWith('.epub')) return 'epub'
+  if (lower.endsWith('.mobi') || lower.endsWith('.azw') || lower.endsWith('.azw3')) return 'mobi'
   if (lower.endsWith('.pdf')) return 'pdf'
   return 'file'
 }
