@@ -20,7 +20,8 @@ body {
 }
 
 button,
-input {
+input,
+select {
   font: inherit;
 }
 
@@ -415,6 +416,156 @@ button:disabled {
   font-weight: 800;
 }
 
+.secondary-audio-action:not(:disabled) {
+  border-color: #cfd9e3;
+  background: #ffffff !important;
+  color: #26313d !important;
+}
+
+.speech-actions,
+.tts-secondary-actions {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(88px, 1fr));
+  gap: 8px;
+}
+
+.speech-actions button,
+.tts-secondary-actions button,
+.rate-preset-grid button {
+  min-height: 40px;
+  border: 1px solid #cfd9e3;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #26313d;
+  font-weight: 800;
+}
+
+.speech-actions button:not(:disabled),
+.rate-preset-grid button.active {
+  border-color: #2f6f73;
+  background: #2f6f73;
+  color: #ffffff;
+}
+
+.speech-status {
+  margin: 0;
+  color: #667584;
+  font-size: 13px;
+  line-height: 1.45;
+}
+
+.segmented-control {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.speech-control-panel .segmented-control button {
+  min-height: 40px;
+  border: 1px solid #cfd9e3;
+  background: #ffffff !important;
+  color: #26313d !important;
+  font-weight: 800;
+}
+
+.speech-control-panel .segmented-control button.active {
+  border-color: #2f6f73;
+  background: #2f6f73 !important;
+  color: #ffffff !important;
+}
+
+.tts-rate-field,
+.tts-select-field,
+.tts-toggle-row {
+  display: grid;
+  gap: 8px;
+}
+
+.tts-rate-field > span,
+.tts-select-field > span,
+.tts-toggle-row span {
+  color: #667584;
+  font-size: 13px;
+  font-weight: 800;
+}
+
+.rate-preset-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.rate-slider-field {
+  display: grid;
+  gap: 6px;
+}
+
+.rate-slider-field input[type="range"] {
+  width: 100%;
+  margin: 0;
+  accent-color: #2f6f73;
+}
+
+.rate-slider-dots,
+.rate-slider-labels {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  align-items: center;
+}
+
+.rate-slider-dots {
+  padding: 0 8px;
+}
+
+.rate-slider-dots span {
+  justify-self: center;
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: #cfd9e3;
+}
+
+.rate-slider-dots span.active {
+  width: 10px;
+  height: 10px;
+  background: #2f6f73;
+}
+
+.speech-control-panel .rate-slider-labels button {
+  min-height: 24px;
+  border: 0;
+  background: transparent !important;
+  color: #667584 !important;
+  padding: 0;
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.speech-control-panel .rate-slider-labels button.active {
+  color: #2f6f73 !important;
+}
+
+.tts-select-field input,
+.tts-select-field select {
+  width: 100%;
+  min-height: 40px;
+  border: 1px solid #cfd9e3;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #26313d;
+  padding: 0 10px;
+}
+
+.tts-toggle-row {
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+}
+
+.tts-toggle-row input {
+  width: 18px;
+  height: 18px;
+}
+
 .reader-card {
   min-height: calc(100vh - 180px - env(safe-area-inset-top) - env(safe-area-inset-bottom));
   border: 1px solid #e1e8ef;
@@ -540,6 +691,22 @@ button:disabled {
   padding: 1px 2px;
 }
 
+.speech-segment {
+  border-radius: 4px;
+  transition: background 0.16s ease, color 0.16s ease;
+}
+
+.speech-segment.active {
+  background: #ffe0a3;
+  color: #17202a;
+  box-shadow: 0 0 0 2px rgba(255, 224, 163, 0.45);
+}
+
+.reader-card.dark .speech-segment.active {
+  background: #d6a85f;
+  color: #17202a;
+}
+
 .audio-meta {
   display: flex;
   flex-wrap: wrap;
@@ -563,6 +730,16 @@ button:disabled {
 .audio-player {
   width: 100%;
   margin: 0 0 12px;
+}
+
+.persistent-audio-player {
+  position: fixed;
+  left: -9999px;
+  bottom: 0;
+  width: 1px;
+  height: 1px;
+  opacity: 0;
+  pointer-events: none;
 }
 
 .audio-dock {
@@ -684,6 +861,16 @@ button:disabled {
   color: #26313d;
   padding: 0 12px;
   font-weight: 700;
+}
+
+.reader-menu-header .reader-menu-close {
+  width: 36px;
+  min-width: 36px;
+  min-height: 36px;
+  border-radius: 999px;
+  padding: 0;
+  font-size: 24px;
+  line-height: 1;
 }
 
 .chapter-select-field {

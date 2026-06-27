@@ -50,7 +50,7 @@
     "finalFormat": "mp3",
     "mp3Bitrate": "96k",
     "silenceSeconds": 0.35,
-    "concurrency": 3,
+    "concurrency": 8,
     "keepIntermediateWav": false,
     "apiKeyEnv": "MIMO_API_KEY"
   }
