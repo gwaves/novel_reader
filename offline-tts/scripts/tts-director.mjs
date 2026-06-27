@@ -10,6 +10,7 @@ const DEFAULT_CONFIG_PATH = join(homedir(), '.novel_reader', 'tts-director.confi
 const DEFAULT_MAIN_DB_PATH = join(homedir(), '.novel_reader', 'novel_reader.sqlite')
 const SCRIPT_KIND = 'novel-reader-tts-director-script'
 const ALLOWED_SEGMENT_TYPES = new Set(['narration', 'dialogue', 'thought', 'stage'])
+const DEFAULT_TTS_MAX_CHARACTERS_PER_REQUEST = 900
 
 function printHelp() {
   console.log(`
@@ -160,6 +161,10 @@ function loadConfig(configPath) {
       silenceSeconds: finiteNumber(config.tts?.silenceSeconds, 0.35),
       concurrency: Math.max(1, Math.floor(finiteNumber(config.tts?.concurrency, 1))),
       keepIntermediateWav: Boolean(config.tts?.keepIntermediateWav),
+      maxCharactersPerRequest: Math.max(
+        200,
+        Math.floor(finiteNumber(config.tts?.maxCharactersPerRequest, DEFAULT_TTS_MAX_CHARACTERS_PER_REQUEST)),
+      ),
     },
   }
 }
@@ -366,15 +371,49 @@ function pushNonDialogueSegments(segments, rawText, baseStart) {
 }
 
 function pushSegment(segments, type, rawText, start, end) {
-  const text = rawText.replace(/\s+/g, ' ').trim()
-  if (!text) return
-  segments.push({
-    id: '',
-    typeHint: type,
-    text,
-    sourceStart: start,
-    sourceEnd: end,
-  })
+  for (const chunk of splitRawTextForTts(rawText, DEFAULT_TTS_MAX_CHARACTERS_PER_REQUEST)) {
+    const text = chunk.text.replace(/\s+/g, ' ').trim()
+    if (!text) continue
+    segments.push({
+      id: '',
+      typeHint: type,
+      text,
+      sourceStart: start + chunk.start,
+      sourceEnd: start + chunk.end,
+    })
+  }
+}
+
+function splitRawTextForTts(rawText, maxChars) {
+  if (rawText.length <= maxChars) {
+    return [{ text: rawText, start: 0, end: rawText.length }]
+  }
+
+  const chunks = []
+  let cursor = 0
+  while (cursor < rawText.length) {
+    const hardEnd = Math.min(rawText.length, cursor + maxChars)
+    let end = hardEnd
+    if (hardEnd < rawText.length) {
+      const window = rawText.slice(cursor, hardEnd)
+      const punctuationIndex = Math.max(
+        window.lastIndexOf('。'),
+        window.lastIndexOf('！'),
+        window.lastIndexOf('？'),
+        window.lastIndexOf('；'),
+        window.lastIndexOf(';'),
+        window.lastIndexOf('，'),
+        window.lastIndexOf(','),
+      )
+      if (punctuationIndex >= Math.floor(maxChars * 0.45)) {
+        end = cursor + punctuationIndex + 1
+      }
+    }
+    const text = rawText.slice(cursor, end)
+    chunks.push({ text, start: cursor, end })
+    cursor = end
+  }
+  return chunks
 }
 
 function buildVoiceCandidates(config, kgCandidates) {
@@ -1127,7 +1166,8 @@ async function runSynth(config, args) {
     segments: [],
   }
 
-  manifest.segments = script.segments.map((segment) => {
+  const ttsSegments = expandLongSegmentsForTts(script.segments, config.tts.maxCharactersPerRequest)
+  manifest.segments = ttsSegments.map((segment) => {
     const key = segmentCacheKey({ ...segment, performanceStyle: config.director.performanceStyle })
     const wavPath = join(segmentDir, `${segment.id}-${key}.wav`)
     return {
@@ -1218,6 +1258,25 @@ async function runSynth(config, args) {
   if (!config.tts.keepIntermediateWav) {
     console.log('   中间 WAV 保留在 work/，后续会增加清理策略。')
   }
+}
+
+function expandLongSegmentsForTts(segments, maxChars) {
+  return segments.flatMap((segment) => {
+    if (!segment.text || segment.text.length <= maxChars) return [segment]
+    const chunks = splitRawTextForTts(segment.text, maxChars)
+    return chunks.map((chunk, index) => {
+      const ratioStart = segment.text.length > 0 ? chunk.start / segment.text.length : 0
+      const ratioEnd = segment.text.length > 0 ? chunk.end / segment.text.length : 1
+      const sourceLength = Math.max(0, Number(segment.sourceEnd ?? 0) - Number(segment.sourceStart ?? 0))
+      return {
+        ...segment,
+        id: `${segment.id}-p${String(index + 1).padStart(2, '0')}`,
+        text: chunk.text.replace(/\s+/g, ' ').trim(),
+        sourceStart: Math.round(Number(segment.sourceStart ?? 0) + sourceLength * ratioStart),
+        sourceEnd: Math.round(Number(segment.sourceStart ?? 0) + sourceLength * ratioEnd),
+      }
+    })
+  })
 }
 
 function getChapterOutputPaths(outRoot, chapterIndex, finalFormat = 'mp3') {
