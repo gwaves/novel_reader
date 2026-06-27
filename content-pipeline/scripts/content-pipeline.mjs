@@ -512,6 +512,7 @@ async function runStep({ manifestPath, manifest, step, options, config, dryRun }
 async function runEmbeddingStage({ manifest, manifestPath, step, options, config, sourceApi, dryRun }) {
   const bookId = required(manifest.book?.id, 'manifest 缺少 book.id')
   const startedAt = new Date().toISOString()
+  const startedMs = Date.now()
   const stage = {
     ...createStage('embedding'),
     ...(manifest.stages?.embedding || {}),
@@ -535,8 +536,11 @@ async function runEmbeddingStage({ manifest, manifestPath, step, options, config
 
   if (dryRun) {
     const finishedAt = new Date().toISOString()
+    const durationMs = Date.now() - startedMs
     stage.finishedAt = finishedAt
+    stage.durationMs = durationMs
     run.finishedAt = finishedAt
+    run.durationMs = durationMs
     run.exitCode = 0
     await writeManifest(manifestPath, manifest)
     return
@@ -588,8 +592,10 @@ async function runEmbeddingStage({ manifest, manifestPath, step, options, config
       `${sourceApiBase}/api/rag/embeddings/status?bookId=${encodeURIComponent(bookId)}&model=${encodeURIComponent(embeddingConfig.model)}`,
     )
     const finishedAt = new Date().toISOString()
+    const durationMs = Date.now() - startedMs
     stage.status = 'completed'
     stage.finishedAt = finishedAt
+    stage.durationMs = durationMs
     stage.message = `embedding 完成：处理 ${completed}/${chapterIds.length} 章，正文片段 ${chunkCompleted} 个。`
     stage.artifacts = {
       provider: embeddingConfig.provider,
@@ -605,15 +611,19 @@ async function runEmbeddingStage({ manifest, manifestPath, step, options, config
     }
     run.status = 'completed'
     run.finishedAt = finishedAt
+    run.durationMs = durationMs
     run.exitCode = 0
     await writeManifest(manifestPath, manifest)
   } catch (error) {
     const finishedAt = new Date().toISOString()
+    const durationMs = Date.now() - startedMs
     stage.status = 'failed'
     stage.finishedAt = finishedAt
+    stage.durationMs = durationMs
     stage.error = error.message
     run.status = 'failed'
     run.finishedAt = finishedAt
+    run.durationMs = durationMs
     run.exitCode = null
     await writeManifest(manifestPath, manifest)
     throw error
@@ -683,6 +693,7 @@ async function completeWithoutCommand({ manifest, manifestPath, stageName, step,
     status: 'completed',
     startedAt: now,
     finishedAt: now,
+    durationMs: 0,
     message,
     error: '',
     artifacts,
@@ -693,6 +704,7 @@ async function completeWithoutCommand({ manifest, manifestPath, stageName, step,
     status: 'completed',
     startedAt: now,
     finishedAt: now,
+    durationMs: 0,
     command: 'skip-complete',
     exitCode: 0,
   })
@@ -707,6 +719,7 @@ async function failBeforeCommand({ manifest, manifestPath, stageName, step, erro
     status: 'failed',
     startedAt: now,
     finishedAt: now,
+    durationMs: 0,
     error,
     message: '',
   }
@@ -716,6 +729,7 @@ async function failBeforeCommand({ manifest, manifestPath, stageName, step, erro
     status: 'failed',
     startedAt: now,
     finishedAt: now,
+    durationMs: 0,
     command: 'preflight',
     exitCode: null,
   })
@@ -725,6 +739,7 @@ async function failBeforeCommand({ manifest, manifestPath, stageName, step, erro
 
 async function runCommandStage({ manifest, manifestPath, stageName, step, command, args, cwd, dryRun, redactArgs = [] }) {
   const startedAt = new Date().toISOString()
+  const startedMs = Date.now()
   const stage = {
     ...createStage(stageName),
     ...(manifest.stages?.[stageName] || {}),
@@ -751,8 +766,11 @@ async function runCommandStage({ manifest, manifestPath, stageName, step, comman
   console.log(run.command)
   if (dryRun) {
     const finishedAt = new Date().toISOString()
+    const durationMs = Date.now() - startedMs
     stage.finishedAt = finishedAt
+    stage.durationMs = durationMs
     run.finishedAt = finishedAt
+    run.durationMs = durationMs
     run.exitCode = 0
     await writeManifest(manifestPath, manifest)
     return
@@ -763,19 +781,25 @@ async function runCommandStage({ manifest, manifestPath, stageName, step, comman
     result = await spawnCommand(command, args, cwd)
   } catch (error) {
     const finishedAt = new Date().toISOString()
+    const durationMs = Date.now() - startedMs
     stage.status = 'failed'
     stage.finishedAt = finishedAt
+    stage.durationMs = durationMs
     stage.error = error.message
     run.status = 'failed'
     run.finishedAt = finishedAt
+    run.durationMs = durationMs
     run.exitCode = null
     await writeManifest(manifestPath, manifest)
     throw error
   }
   const finishedAt = new Date().toISOString()
+  const durationMs = Date.now() - startedMs
   run.finishedAt = finishedAt
+  run.durationMs = durationMs
   run.exitCode = result.code
   stage.finishedAt = finishedAt
+  stage.durationMs = durationMs
 
   if (result.code === 0) {
     stage.status = 'completed'
@@ -865,6 +889,7 @@ function createStage(name) {
     status: 'pending',
     startedAt: '',
     finishedAt: '',
+    durationMs: null,
     message: '',
     error: '',
     artifacts: {},

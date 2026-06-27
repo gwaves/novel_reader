@@ -50,6 +50,7 @@ Novel Reader 离线多角色 TTS 导演脚本工具
   --min-batch-size <number>    batch-pipeline LLM 失败降级后的最小批大小，默认 6
   --tts-concurrency <number>   batch-pipeline 单章 TTS 片段并发，默认取 tts.concurrency
   --tts-chapters <number>      batch-pipeline 同时进行 TTS 的章节数，默认 2
+  --no-adaptive-tts            batch-pipeline 禁用基于重试率的 TTS 自适应并发
 
 示例:
   node offline-tts/scripts/tts-director.mjs --config offline-tts/config.example.json test-model
@@ -1074,6 +1075,7 @@ async function synthSegmentWithMimo(config, segment, outputPath) {
   if (!apiKey) {
     throw new Error(`缺少 MIMO API key。请在配置文件 tts.apiKey 中填写，或设置环境变量 ${config.tts.apiKeyEnv}。`)
   }
+  const startedAt = Date.now()
   const response = await fetch('https://api.xiaomimimo.com/v1/chat/completions', {
     method: 'POST',
     headers: {
@@ -1092,6 +1094,7 @@ async function synthSegmentWithMimo(config, segment, outputPath) {
       },
     }),
   })
+  const requestMs = Date.now() - startedAt
 
   const raw = await response.text()
   if (!response.ok) {
@@ -1103,6 +1106,7 @@ async function synthSegmentWithMimo(config, segment, outputPath) {
     throw new Error(`MIMO TTS 响应缺少 audio.data：${raw.slice(0, 1000)}`)
   }
   writeFileSync(outputPath, Buffer.from(data, 'base64'))
+  return { requestMs, responseBytes: raw.length }
 }
 
 function runFfmpeg(args, label) {
@@ -1162,32 +1166,121 @@ function validateSynthesizedAudio(config, item) {
   const textLength = Array.from(String(item.text || '')).length
   const maxDuration = Math.max(12, textLength * config.tts.maxSecondsPerCharacter)
   if (duration > maxDuration) {
-    throw new Error(`${item.id} 音频时长异常：${duration.toFixed(2)}s / ${textLength} 字，超过 ${maxDuration.toFixed(2)}s。`)
+    const error = new Error(`${item.id} 音频时长异常：${duration.toFixed(2)}s / ${textLength} 字，超过 ${maxDuration.toFixed(2)}s。`)
+    error.audioDurationSeconds = duration
+    error.textLength = textLength
+    error.maxDurationSeconds = maxDuration
+    throw error
   }
   const longSilences = detectLongSilences(item.wav, config.tts.maxSilenceSeconds)
   if (longSilences.length) {
     const longest = longSilences.reduce((best, item) => item.duration > best.duration ? item : best, longSilences[0])
-    throw new Error(`${item.id} 含异常长静音：${longest.duration.toFixed(2)}s。`)
+    const error = new Error(`${item.id} 含异常长静音：${longest.duration.toFixed(2)}s。`)
+    error.audioDurationSeconds = duration
+    error.longSilenceSeconds = longest.duration
+    throw error
   }
   return duration
 }
 
+function classifyTtsError(error) {
+  const message = String(error?.message || '')
+  if (message.includes('MIMO TTS 返回')) return 'http_error'
+  if (message.includes('响应缺少 audio.data')) return 'missing_audio'
+  if (message.includes('音频时长异常')) return 'duration_outlier'
+  if (message.includes('含异常长静音')) return 'long_silence'
+  if (message.includes('fetch failed') || message.includes('network') || message.includes('ECONN')) return 'network_error'
+  return 'unknown'
+}
+
+function createSegmentMetric(item, concurrency) {
+  return {
+    id: item.id,
+    speaker: item.speaker,
+    voice: item.voice,
+    textLength: Array.from(String(item.text || '')).length,
+    textHash: item.textHash,
+    concurrency,
+    status: 'pending',
+    attempts: [],
+    requestMs: null,
+    audioDurationSeconds: null,
+    durationPerChar: null,
+    errorType: '',
+    error: '',
+  }
+}
+
 async function synthSegmentWithValidation(config, item, attempts = 3) {
   let lastError = null
+  const metric = item.metric || createSegmentMetric(item, config.tts.concurrency)
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    const attemptStartedAt = Date.now()
+    let responseMetric = null
+    const attemptMetric = {
+      attempt,
+      startedAt: new Date(attemptStartedAt).toISOString(),
+      requestMs: null,
+      audioDurationSeconds: null,
+      durationPerChar: null,
+      responseBytes: null,
+      status: 'running',
+      errorType: '',
+      error: '',
+    }
+    metric.attempts.push(attemptMetric)
     try {
       if (existsSync(item.wav)) rmSync(item.wav, { force: true })
-      await synthSegmentWithMimo(config, item.segment, item.wav)
-      validateSynthesizedAudio(config, item)
-      return
+      responseMetric = await synthSegmentWithMimo(config, item.segment, item.wav)
+      attemptMetric.requestMs = responseMetric.requestMs
+      attemptMetric.responseBytes = responseMetric.responseBytes
+      const audioDurationSeconds = validateSynthesizedAudio(config, item)
+      const textLength = Math.max(1, metric.textLength)
+      attemptMetric.audioDurationSeconds = audioDurationSeconds
+      attemptMetric.durationPerChar = audioDurationSeconds / textLength
+      attemptMetric.status = 'completed'
+      attemptMetric.finishedAt = new Date().toISOString()
+      metric.status = 'completed'
+      metric.requestMs = responseMetric.requestMs
+      metric.audioDurationSeconds = audioDurationSeconds
+      metric.durationPerChar = audioDurationSeconds / textLength
+      metric.finishedAt = attemptMetric.finishedAt
+      metric.retryCount = attempt - 1
+      return metric
     } catch (error) {
       lastError = error
+      const errorType = classifyTtsError(error)
+      attemptMetric.status = 'failed'
+      if (responseMetric) {
+        attemptMetric.requestMs = responseMetric.requestMs
+        attemptMetric.responseBytes = responseMetric.responseBytes
+      }
+      if (Number.isFinite(error.audioDurationSeconds)) {
+        const textLength = Math.max(1, metric.textLength)
+        attemptMetric.audioDurationSeconds = error.audioDurationSeconds
+        attemptMetric.durationPerChar = error.audioDurationSeconds / textLength
+      }
+      if (Number.isFinite(error.longSilenceSeconds)) {
+        attemptMetric.longSilenceSeconds = error.longSilenceSeconds
+      }
+      if (Number.isFinite(error.maxDurationSeconds)) {
+        attemptMetric.maxDurationSeconds = error.maxDurationSeconds
+      }
+      attemptMetric.errorType = errorType
+      attemptMetric.error = error.message
+      attemptMetric.finishedAt = new Date().toISOString()
+      attemptMetric.elapsedMs = Date.now() - attemptStartedAt
+      metric.errorType = errorType
+      metric.error = error.message
       if (existsSync(item.wav)) rmSync(item.wav, { force: true })
       if (attempt < attempts) {
         console.warn(`⚠️  ${item.id} TTS 片段异常，重试 ${attempt + 1}/${attempts}：${error.message}`)
       }
     }
   }
+  metric.status = 'failed'
+  metric.finishedAt = new Date().toISOString()
+  metric.retryCount = attempts - 1
   throw lastError
 }
 
@@ -1201,6 +1294,103 @@ async function runConcurrent(items, workerCount, worker) {
     }
   })
   await Promise.all(workers)
+}
+
+function percentile(values, p) {
+  const sorted = values.filter(value => Number.isFinite(value)).slice().sort((a, b) => a - b)
+  if (!sorted.length) return null
+  const index = Math.min(sorted.length - 1, Math.max(0, Math.ceil((p / 100) * sorted.length) - 1))
+  return sorted[index]
+}
+
+function roundNumber(value, digits = 3) {
+  if (!Number.isFinite(value)) return null
+  const factor = 10 ** digits
+  return Math.round(value * factor) / factor
+}
+
+function summarizeTtsMetrics(metrics) {
+  const completed = metrics.filter(item => item.status === 'completed' || item.status === 'cached')
+  const failed = metrics.filter(item => item.status === 'failed')
+  const retried = metrics.filter(item => Number(item.retryCount || 0) > 0)
+  const requestMsValues = completed.map(item => item.requestMs)
+  const durationValues = completed.map(item => item.audioDurationSeconds)
+  const durationPerCharValues = completed.map(item => item.durationPerChar)
+  const errorCounts = {}
+  for (const metric of metrics) {
+    for (const attempt of metric.attempts || []) {
+      if (attempt.status === 'failed') {
+        const key = attempt.errorType || 'unknown'
+        errorCounts[key] = (errorCounts[key] || 0) + 1
+      }
+    }
+  }
+  return {
+    totalSegments: metrics.length,
+    completedSegments: completed.length,
+    failedSegments: failed.length,
+    retriedSegments: retried.length,
+    retryAttempts: metrics.reduce((sum, item) => sum + Math.max(0, Number(item.attempts?.length || 0) - 1), 0),
+    errorCounts,
+    requestMs: {
+      min: percentile(requestMsValues, 0),
+      p50: percentile(requestMsValues, 50),
+      p90: percentile(requestMsValues, 90),
+      p95: percentile(requestMsValues, 95),
+      p99: percentile(requestMsValues, 99),
+      max: percentile(requestMsValues, 100),
+    },
+    audioDurationSeconds: {
+      p50: roundNumber(percentile(durationValues, 50)),
+      p90: roundNumber(percentile(durationValues, 90)),
+      p95: roundNumber(percentile(durationValues, 95)),
+      p99: roundNumber(percentile(durationValues, 99)),
+      max: roundNumber(percentile(durationValues, 100)),
+    },
+    durationPerChar: {
+      p50: roundNumber(percentile(durationPerCharValues, 50), 4),
+      p90: roundNumber(percentile(durationPerCharValues, 90), 4),
+      p95: roundNumber(percentile(durationPerCharValues, 95), 4),
+      p99: roundNumber(percentile(durationPerCharValues, 99), 4),
+      max: roundNumber(percentile(durationPerCharValues, 100), 4),
+    },
+  }
+}
+
+function nextAdaptiveTtsConcurrency(current, summary, { minConcurrency, maxConcurrency }) {
+  if (!summary || !summary.totalSegments) return current
+  const retryRate = summary.retriedSegments / summary.totalSegments
+  const failed = Number(summary.failedSegments || 0)
+  if (failed > 0 || retryRate >= 0.04) {
+    return Math.max(minConcurrency, Math.floor(current / 2))
+  }
+  if (retryRate === 0 && current < maxConcurrency) {
+    return Math.min(maxConcurrency, current * 2)
+  }
+  return current
+}
+
+function summarizeBatchTtsMetrics(results) {
+  const summaries = results.map(item => item.metricsSummary).filter(Boolean)
+  if (!summaries.length) return null
+  return {
+    totalSegments: summaries.reduce((sum, item) => sum + Number(item.totalSegments || 0), 0),
+    completedSegments: summaries.reduce((sum, item) => sum + Number(item.completedSegments || 0), 0),
+    failedSegments: summaries.reduce((sum, item) => sum + Number(item.failedSegments || 0), 0),
+    retriedSegments: summaries.reduce((sum, item) => sum + Number(item.retriedSegments || 0), 0),
+    retryAttempts: summaries.reduce((sum, item) => sum + Number(item.retryAttempts || 0), 0),
+    requestMs: {
+      maxP95: Math.max(...summaries.map(item => item.requestMs?.p95 ?? 0)),
+      maxP99: Math.max(...summaries.map(item => item.requestMs?.p99 ?? 0)),
+      max: Math.max(...summaries.map(item => item.requestMs?.max ?? 0)),
+    },
+    errorCounts: summaries.reduce((counts, item) => {
+      for (const [key, value] of Object.entries(item.errorCounts || {})) {
+        counts[key] = (counts[key] || 0) + Number(value || 0)
+      }
+      return counts
+    }, {}),
+  }
 }
 
 async function runSynth(config, args) {
@@ -1243,6 +1433,15 @@ async function runSynth(config, args) {
     },
     segments: [],
   }
+  const metrics = {
+    kind: 'novel-reader-tts-metrics',
+    version: 1,
+    sourceScript: scriptPath,
+    generatedAt: manifest.generatedAt,
+    tts: manifest.tts,
+    summary: {},
+    segments: [],
+  }
 
   const ttsSegments = expandLongSegmentsForTts(script.segments, config.tts.maxCharactersPerRequest)
   manifest.segments = ttsSegments.map((segment) => {
@@ -1260,6 +1459,11 @@ async function runSynth(config, args) {
       segment,
     }
   })
+  const metricsById = new Map(manifest.segments.map(item => {
+    const metric = createSegmentMetric(item, concurrency)
+    item.metric = metric
+    return [item.id, metric]
+  }))
 
   const segmentsToSynthesize = []
   for (const item of manifest.segments) {
@@ -1268,7 +1472,12 @@ async function runSynth(config, args) {
       continue
     }
     try {
-      validateSynthesizedAudio(config, item)
+      const audioDurationSeconds = validateSynthesizedAudio(config, item)
+      const cachedMetric = item.metric || createSegmentMetric(item, concurrency)
+      cachedMetric.status = 'cached'
+      cachedMetric.audioDurationSeconds = audioDurationSeconds
+      cachedMetric.durationPerChar = audioDurationSeconds / Math.max(1, cachedMetric.textLength)
+      cachedMetric.retryCount = 0
     } catch (error) {
       console.warn(`⚠️  缓存音频异常，将重新合成 ${item.id}：${error.message}`)
       rmSync(item.wav, { force: true })
@@ -1289,7 +1498,9 @@ async function runSynth(config, args) {
     }
     console.log(`✅ 片段就绪 ${item.id}`)
   }
-  manifest.segments = manifest.segments.map(({ segment, ...item }) => item)
+  metrics.segments = manifest.segments.map(item => metricsById.get(item.id)).filter(Boolean)
+  metrics.summary = summarizeTtsMetrics(metrics.segments)
+  manifest.segments = manifest.segments.map(({ segment, metric, ...item }) => item)
 
   const concatEntries = []
   const timeline = []
@@ -1342,12 +1553,20 @@ async function runSynth(config, args) {
   manifest.duration = probeAudioDurationSeconds(finalPath)
   manifest.timeline = timeline
   const manifestPath = join(outDir, 'manifest.json')
+  const metricsPath = join(outDir, 'tts-metrics.json')
   writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8')
+  writeFileSync(metricsPath, `${JSON.stringify(metrics, null, 2)}\n`, 'utf8')
 
   console.log(`✅ 音频已生成：${finalPath}`)
   console.log(`   Manifest：${manifestPath}`)
+  console.log(`   Metrics：${metricsPath}`)
   if (!config.tts.keepIntermediateWav) {
     console.log('   中间 WAV 保留在 work/，后续会增加清理策略。')
+  }
+  return {
+    manifestPath,
+    metricsPath,
+    summary: metrics.summary,
   }
 }
 
@@ -1418,6 +1637,10 @@ async function runBatchPipeline(config, args) {
   const llmChapterConcurrency = args['llm-chapters']
     ? Math.max(1, Math.floor(Number(args['llm-chapters'])))
     : 1
+  const adaptiveTts = args['no-adaptive-tts'] !== true
+  const minAdaptiveTtsConcurrency = Math.min(ttsConcurrency, Math.max(1, Math.min(4, ttsConcurrency)))
+  const maxAdaptiveTtsConcurrency = ttsConcurrency
+  let currentTtsConcurrency = ttsConcurrency
 
   const resume = args.resume === true
   if (!Number.isFinite(initialBatchSize) || initialBatchSize < 1) throw new Error('--batch-size 必须是大于等于 1 的整数。')
@@ -1442,7 +1665,7 @@ async function runBatchPipeline(config, args) {
 
   console.log(`🚂 批量流水线启动：章节 ${chapters.join(', ')}`)
   console.log(`   LLM 阶段：章节并发 ${llmChapterConcurrency}，单章批次并发 ${initialDirectorConcurrency}，batchSize ${initialBatchSize}`)
-  console.log(`   TTS 阶段：章节并发 ${ttsChapterConcurrency}，单章片段并发 ${ttsConcurrency}`)
+  console.log(`   TTS 阶段：章节并发 ${ttsChapterConcurrency}，单章片段并发 ${ttsConcurrency}${adaptiveTts ? `，自适应起始 ${currentTtsConcurrency}` : ''}`)
   if (resume) console.log('   断点续跑：已完成 MP3 会跳过，已通过校验脚本会复用。')
 
   const acquireSynthSlot = async () => {
@@ -1464,15 +1687,35 @@ async function runBatchPipeline(config, args) {
     const started = Date.now()
     const synthPromise = (async () => {
       await acquireSynthSlot()
+      const chapterTtsConcurrency = currentTtsConcurrency
       console.log(`🎧 第 ${chapterIndex} 章进入 TTS 阶段`)
-      await runSynth(config, {
+      const synthResult = await runSynth(config, {
         script: scriptPath,
         'out-dir': audioDir,
-        concurrency: String(ttsConcurrency),
+        concurrency: String(chapterTtsConcurrency),
         ...(args['allow-partial'] === true ? { 'allow-partial': true } : {}),
       })
       const elapsedSeconds = Math.round((Date.now() - started) / 1000)
-      results.push({ chapterIndex, scriptPath, audioDir, elapsedSeconds, status: 'synthesized' })
+      results.push({
+        chapterIndex,
+        scriptPath,
+        audioDir,
+        elapsedSeconds,
+        status: 'synthesized',
+        ttsConcurrency: chapterTtsConcurrency,
+        metricsPath: synthResult.metricsPath,
+        metricsSummary: synthResult.summary,
+      })
+      if (adaptiveTts) {
+        const next = nextAdaptiveTtsConcurrency(currentTtsConcurrency, synthResult.summary, {
+          minConcurrency: minAdaptiveTtsConcurrency,
+          maxConcurrency: maxAdaptiveTtsConcurrency,
+        })
+        if (next !== currentTtsConcurrency) {
+          console.log(`🔧 TTS 自适应并发：${currentTtsConcurrency} -> ${next}`)
+          currentTtsConcurrency = next
+        }
+      }
       console.log(`✅ 第 ${chapterIndex} 章 TTS 完成，用时 ${elapsedSeconds}s`)
       return { ok: true }
     })()
@@ -1542,6 +1785,7 @@ async function runBatchPipeline(config, args) {
   const failed = outcomes.find(outcome => !outcome.ok)
   if (failed) throw failed.error
   results.sort((a, b) => a.chapterIndex - b.chapterIndex)
+  const batchMetricsSummary = summarizeBatchTtsMetrics(results)
   const elapsedSeconds = Math.round((Date.now() - startedAt) / 1000)
   const summary = {
     kind: 'novel-reader-tts-batch-pipeline-summary',
@@ -1551,9 +1795,17 @@ async function runBatchPipeline(config, args) {
     chapters,
     outRoot,
     director: { limit: requestedLimit, allowPartial: args['allow-partial'] === true, initialBatchSize, initialConcurrency: initialDirectorConcurrency, finalBatchSize: adaptiveBatchSize, finalConcurrency: adaptiveDirectorConcurrency, minBatchSize, chapterConcurrency: llmChapterConcurrency },
-    tts: { segmentConcurrency: ttsConcurrency, chapterConcurrency: ttsChapterConcurrency },
+    tts: {
+      segmentConcurrency: ttsConcurrency,
+      chapterConcurrency: ttsChapterConcurrency,
+      adaptive: adaptiveTts,
+      minAdaptiveConcurrency: minAdaptiveTtsConcurrency,
+      maxAdaptiveConcurrency: maxAdaptiveTtsConcurrency,
+      finalAdaptiveConcurrency: currentTtsConcurrency,
+    },
     results,
     audits,
+    metricsSummary: batchMetricsSummary,
   }
   const summaryPath = join(outRoot, `batch-pipeline-${chapters[0]}-${chapters.at(-1)}.summary.json`)
   writeFileSync(summaryPath, `${JSON.stringify(summary, null, 2)}\n`, 'utf8')
