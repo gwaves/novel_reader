@@ -377,6 +377,9 @@ function App() {
   const chapterAudioRef = useRef<HTMLAudioElement | null>(null)
   const chapterAudioTimelineRef = useRef<ChapterAudioTimelineItem[]>([])
   const activeAudioEntryKeyRef = useRef<string | null>(null)
+  const audioManifestRef = useRef<AudioManifest | null>(null)
+  const pendingAudioStartTimeRef = useRef<number | null>(null)
+  const pendingAudioShouldPlayRef = useRef(false)
   const autoConnectAttemptedRef = useRef(false)
   const autoRestoreAttemptedRef = useRef(false)
   const lastReaderScrollYRef = useRef(0)
@@ -764,7 +767,7 @@ function App() {
     }
   }
 
-  async function playCurrentAudio() {
+  async function playCurrentAudio(options: { autoplay?: boolean; sourcePosition?: number | null; startTime?: number } = {}) {
     if (!selectedBookId || !currentChapter) return
     await stopSpeechReading()
     if (!currentAudio) {
@@ -795,13 +798,24 @@ function App() {
       if (!playbackUrl && blob) {
         playbackUrl = URL.createObjectURL(blob)
       }
+      const startTime =
+        typeof options.startTime === 'number'
+          ? options.startTime
+          : options.sourcePosition == null
+            ? 0
+            : getAudioTimeForSourcePositionInManifest(manifest, options.sourcePosition) ?? 0
       clearAudioUrl()
       buildChapterAudioTimeline(manifest?.timeline ?? [])
+      audioManifestRef.current = manifest
+      pendingAudioStartTimeRef.current = startTime
+      pendingAudioShouldPlayRef.current = options.autoplay ?? true
       setAudioManifest(manifest)
-      setAudioTime(0)
+      setAudioTime(startTime)
       setAudioUrl(playbackUrl)
       setMessage('音频已加载')
     } catch (error) {
+      pendingAudioStartTimeRef.current = null
+      pendingAudioShouldPlayRef.current = false
       setMessage(errorMessage(error))
     } finally {
       setLoadingAudio(false)
@@ -942,6 +956,9 @@ function App() {
     chapterAudioRef.current?.pause()
     chapterAudioTimelineRef.current = []
     activeAudioEntryKeyRef.current = null
+    audioManifestRef.current = null
+    pendingAudioStartTimeRef.current = null
+    pendingAudioShouldPlayRef.current = false
     setAudioUrl((currentUrl) => {
       if (currentUrl?.startsWith('blob:')) URL.revokeObjectURL(currentUrl)
       return null
@@ -975,7 +992,12 @@ function App() {
   }
 
   function getAudioTimeForSourcePosition(sourcePosition: number): number | null {
-    const timeline = audioManifest?.timeline ?? []
+    return getAudioTimeForSourcePositionInManifest(audioManifestRef.current ?? audioManifest, sourcePosition)
+  }
+
+  function getAudioTimeForSourcePositionInManifest(manifest: AudioManifest | null, sourcePosition: number): number | null {
+    const timeline = manifest?.timeline ?? []
+    if (!timeline.length) return null
     const entry = timeline.find(
       (item) =>
         typeof item.sourceStart === 'number' &&
@@ -983,28 +1005,70 @@ function App() {
         sourcePosition >= item.sourceStart &&
         sourcePosition < item.sourceEnd,
     )
-    if (!entry || typeof entry.sourceStart !== 'number' || typeof entry.sourceEnd !== 'number') return null
+    if (!entry || typeof entry.sourceStart !== 'number' || typeof entry.sourceEnd !== 'number') {
+      return getNearestAudioTimeForSourcePosition(manifest, sourcePosition)
+    }
     const startTime = entry.startTime ?? 0
     const endTime = entry.endTime ?? entry.nextStartTime ?? startTime
     const ratio = clampAudioRatio((sourcePosition - entry.sourceStart) / Math.max(1, entry.sourceEnd - entry.sourceStart))
     return startTime + ratio * Math.max(0, endTime - startTime)
   }
 
-  async function playCurrentAudioFromVisiblePosition() {
-    if (!audioUrl) {
-      await playCurrentAudio()
+  function getNearestAudioTimeForSourcePosition(manifest: AudioManifest | null, sourcePosition: number): number | null {
+    const timeline = manifest?.timeline ?? []
+    let nearest: { time: number; distance: number } | null = null
+    for (const entry of timeline) {
+      if (typeof entry.sourceStart !== 'number' || typeof entry.sourceEnd !== 'number') continue
+      const startTime = entry.startTime ?? 0
+      const endTime = entry.endTime ?? entry.nextStartTime ?? startTime
+      if (sourcePosition < entry.sourceStart) {
+        const distance = entry.sourceStart - sourcePosition
+        if (!nearest || distance < nearest.distance) nearest = { time: startTime, distance }
+      } else if (sourcePosition >= entry.sourceEnd) {
+        const distance = sourcePosition - entry.sourceEnd
+        if (!nearest || distance < nearest.distance) nearest = { time: endTime, distance }
+      }
     }
-    window.setTimeout(() => {
-      const audio = chapterAudioRef.current
-      if (!audio) return
-      const sourcePosition = findCurrentVisibleSourcePosition()
-      const audioTime =
-        sourcePosition == null
-          ? getAudioTimeForSegment(findCurrentVisibleSpeechSegmentIndex() ?? 0)
-          : getAudioTimeForSourcePosition(sourcePosition) ?? getAudioTimeForSegment(findCurrentVisibleSpeechSegmentIndex() ?? 0)
-      audio.currentTime = Math.min(audioTime, Number.isFinite(audio.duration) ? Math.max(0, audio.duration - 0.05) : Number.MAX_SAFE_INTEGER)
+    return nearest?.time ?? null
+  }
+
+  function clampAudioTime(audio: HTMLAudioElement, time: number) {
+    if (!Number.isFinite(time)) return 0
+    const upperBound = Number.isFinite(audio.duration) ? Math.max(0, audio.duration - 0.05) : Number.MAX_SAFE_INTEGER
+    return Math.min(Math.max(0, time), upperBound)
+  }
+
+  function seekChapterAudio(audio: HTMLAudioElement, time: number, shouldPlay: boolean) {
+    const nextTime = clampAudioTime(audio, time)
+    activeAudioEntryKeyRef.current = null
+    audio.currentTime = nextTime
+    setAudioTime(nextTime)
+    window.setTimeout(() => scrollToAudioHighlight(true), 0)
+    if (shouldPlay) {
       void audio.play().catch((error) => setMessage(errorMessage(error)))
-    }, 80)
+    }
+  }
+
+  function resumeAudioAutoFollow() {
+    if (speechFollowTimerRef.current != null) window.clearTimeout(speechFollowTimerRef.current)
+    speechFollowSuspendedRef.current = false
+    setSpeechAutoFollowSuspended(false)
+  }
+
+  async function playCurrentAudioFromVisiblePosition() {
+    const sourcePosition = findCurrentVisibleSourcePosition()
+    resumeAudioAutoFollow()
+    if (!audioUrl) {
+      await playCurrentAudio({ autoplay: true, sourcePosition })
+      return
+    }
+    const audio = chapterAudioRef.current
+    if (!audio) return
+    const audioTime =
+      sourcePosition == null
+        ? getAudioTimeForSegment(findCurrentVisibleSpeechSegmentIndex() ?? 0)
+        : getAudioTimeForSourcePosition(sourcePosition) ?? getAudioTimeForSegment(findCurrentVisibleSpeechSegmentIndex() ?? 0)
+    seekChapterAudio(audio, audioTime, true)
   }
 
   function selectChapter(chapterId: string) {
@@ -1539,10 +1603,14 @@ function App() {
   }
 
   function followSpeechSegment() {
+    if (audioUrl && activeTimelineEntry) {
+      resumeAudioAutoFollow()
+      scrollToAudioHighlight(true)
+      return
+    }
     const current = speechPlaybackRef.current
     if (current.status !== 'playing' && current.status !== 'paused') return
-    speechFollowSuspendedRef.current = false
-    setSpeechAutoFollowSuspended(false)
+    resumeAudioAutoFollow()
     scrollToSpeechSegment(current.segmentId, true)
   }
 
@@ -1869,10 +1937,12 @@ function App() {
                 <h2>{currentChapter.title}</h2>
                 <ChapterSummary bookPackage={bookPackage} chapter={currentChapter} />
                 <div className="chapter-text">
-                  {audioUrl && activeTimelineEntry ? (
-                    <TextContent text={chapterContent(currentChapter)} activeEntry={activeTimelineEntry} />
-                  ) : speechChapter ? (
-                    <SpeechTextContent speechChapter={speechChapter} activeSegmentId={activeSpeechSegmentId} />
+                  {speechChapter ? (
+                    <SpeechTextContent
+                      speechChapter={speechChapter}
+                      activeSegmentId={activeSpeechSegmentId}
+                      activeEntry={activeTimelineEntry}
+                    />
                   ) : (
                     <TextContent text={chapterContent(currentChapter)} activeEntry={activeTimelineEntry} />
                   )}
@@ -2237,11 +2307,16 @@ function App() {
           className="persistent-audio-player"
           ref={chapterAudioRef}
           src={audioUrl}
-          autoPlay
           onTimeUpdate={(event) => handleChapterAudioTimeUpdate(event.currentTarget)}
           onLoadedMetadata={(event) => {
             event.currentTarget.defaultPlaybackRate = ttsSettings.rate
             event.currentTarget.playbackRate = ttsSettings.rate
+            const pendingStartTime = pendingAudioStartTimeRef.current
+            if (pendingStartTime != null) {
+              pendingAudioStartTimeRef.current = null
+              seekChapterAudio(event.currentTarget, pendingStartTime, pendingAudioShouldPlayRef.current)
+              pendingAudioShouldPlayRef.current = false
+            }
           }}
           onPlay={(event) => {
             event.currentTarget.playbackRate = ttsSettings.rate
@@ -2652,9 +2727,11 @@ function TextContent({ text, activeEntry }: { text: string; activeEntry?: AudioT
 function SpeechTextContent({
   speechChapter,
   activeSegmentId,
+  activeEntry,
 }: {
   speechChapter: ReturnType<typeof createSpeechChapter>
   activeSegmentId: string | null
+  activeEntry?: AudioTimelineEntry | null
 }) {
   if (speechChapter.paragraphs.length === 0) {
     return <p className="muted-text">这一章没有正文。</p>
@@ -2672,12 +2749,37 @@ function SpeechTextContent({
               data-source-end={segment.endChar}
               key={segment.id}
             >
-              {segment.text}
+              {renderSpeechSegmentText(segment, activeEntry)}
               {index < paragraph.segments.length - 1 ? ' ' : ''}
             </span>
           ))}
         </p>
       ))}
+    </>
+  )
+}
+
+function renderSpeechSegmentText(segment: SpeechSegment, activeEntry?: AudioTimelineEntry | null) {
+  if (
+    !activeEntry ||
+    typeof activeEntry.sourceStart !== 'number' ||
+    typeof activeEntry.sourceEnd !== 'number' ||
+    activeEntry.sourceEnd <= segment.startChar ||
+    activeEntry.sourceStart >= segment.endChar
+  ) {
+    return segment.text
+  }
+
+  const overlapStart = Math.max(segment.startChar, activeEntry.sourceStart)
+  const overlapEnd = Math.min(segment.endChar, activeEntry.sourceEnd)
+  const relativeStart = Math.max(0, Math.min(segment.text.length, overlapStart - segment.startChar))
+  const relativeEnd = Math.max(relativeStart, Math.min(segment.text.length, overlapEnd - segment.startChar))
+
+  return (
+    <>
+      {segment.text.slice(0, relativeStart)}
+      <mark data-audio-highlight-anchor="true">{segment.text.slice(relativeStart, relativeEnd)}</mark>
+      {segment.text.slice(relativeEnd)}
     </>
   )
 }
