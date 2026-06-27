@@ -336,6 +336,6 @@ ffprobe -v error \
 - `director-script.audit.json`
 - `audio/chapter.mp3`
 - `audio/manifest.json`
-- `audio/segments/`
+- `audio/tts-metrics.json`
 
-`audio/work/` 是标准化、静音和整章 WAV 等中间文件，占用较大。确认 `chapter.mp3` 和 `manifest.json` 正常后，可以按需清理；如果还要排查拼接问题，先保留。
+默认配置 `tts.keepIntermediateWav: false` 会在 `chapter.mp3`、`manifest.json` 和 `tts-metrics.json` 成功写出后，自动删除 `audio/segments/` 与 `audio/work/` 里的中间 WAV。需要排查分片合成或拼接问题时，把该配置改为 `true` 再运行。

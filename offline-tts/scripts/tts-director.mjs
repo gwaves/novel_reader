@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { homedir } from 'node:os'
 import { createHash } from 'node:crypto'
@@ -79,6 +79,39 @@ function parseArgs(argv) {
     index += 1
   }
   return args
+}
+
+function formatByteSize(bytes) {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '0 B'
+  const units = ['B', 'KB', 'MB', 'GB', 'TB']
+  let value = bytes
+  let unitIndex = 0
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024
+    unitIndex += 1
+  }
+  return `${value.toFixed(value >= 10 || unitIndex === 0 ? 0 : 1)} ${units[unitIndex]}`
+}
+
+function cleanupIntermediateWavs(dirs) {
+  const result = { deleted: 0, bytes: 0 }
+  const walk = (dir) => {
+    if (!existsSync(dir)) return
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      const path = join(dir, entry.name)
+      if (entry.isDirectory()) {
+        walk(path)
+        continue
+      }
+      if (!entry.isFile() || !entry.name.toLowerCase().endsWith('.wav')) continue
+      const size = statSync(path).size
+      rmSync(path, { force: true })
+      result.deleted += 1
+      result.bytes += size
+    }
+  }
+  for (const dir of dirs) walk(dir)
+  return result
 }
 
 function expandHome(value) {
@@ -1561,7 +1594,10 @@ async function runSynth(config, args) {
   console.log(`   Manifest：${manifestPath}`)
   console.log(`   Metrics：${metricsPath}`)
   if (!config.tts.keepIntermediateWav) {
-    console.log('   中间 WAV 保留在 work/，后续会增加清理策略。')
+    const cleanup = cleanupIntermediateWavs([segmentDir, workDir])
+    console.log(`   已清理中间 WAV：${cleanup.deleted} 个，${formatByteSize(cleanup.bytes)}`)
+  } else {
+    console.log('   已按配置保留中间 WAV。')
   }
   return {
     manifestPath,
