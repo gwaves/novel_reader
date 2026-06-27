@@ -258,11 +258,11 @@ export function buildGatewayApp(config: GatewayConfig = loadConfig()) {
 
 function buildReaderPackage(bookPackage: Awaited<ReturnType<typeof readBookPackage>>) {
   const {
-    embeddings: _embeddings,
     knowledgeGraph,
     integrity,
     ...readerPackage
   } = bookPackage
+  delete (readerPackage as { embeddings?: unknown }).embeddings
 
   return {
     ...readerPackage,
