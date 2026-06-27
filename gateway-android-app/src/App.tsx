@@ -1,5 +1,5 @@
 import { type CSSProperties, type MouseEvent, useEffect, useMemo, useRef, useState } from 'react'
-import { Capacitor, CapacitorHttp, registerPlugin } from '@capacitor/core'
+import { Capacitor, CapacitorHttp, registerPlugin, type PluginListenerHandle } from '@capacitor/core'
 
 type GatewaySettings = {
   baseUrl: string
@@ -98,6 +98,11 @@ type NativeAudioPlugin = {
     deviceName: string
     bookId: string
   }): Promise<{ filePath: string; sizeBytes: number }>
+  importPackage(options: {
+    bookId: string
+    filePath: string
+  }): Promise<FullPackageImportStats & { metadataPath?: string }>
+  addListener(eventName: 'packageSyncProgress', listenerFunc: (event: PackageSyncProgress) => void): Promise<PluginListenerHandle>
 }
 
 type AudioTimelineEntry = {
@@ -131,7 +136,35 @@ type FullPackageCache = {
   filePath: string
   sizeBytes: number
   cachedAt: string
+  importedAt?: string
+  importStats?: FullPackageImportStats
+  metadataPath?: string
 }
+
+type FullPackageImportStats = {
+  chapterCount?: number
+  summaryCount?: number
+  knowledgeGraph?: {
+    entityCount?: number
+    entityMentionCount?: number
+    relationCount?: number
+    relationMentionCount?: number
+  }
+  embeddings?: {
+    summaryCount?: number
+    chunkCount?: number
+  }
+}
+
+type PackageSyncProgress = {
+  bookId?: string
+  phase?: 'download' | 'import'
+  status?: string
+  done?: number
+  total?: number
+}
+
+type FullPackageStatus = 'idle' | 'downloading' | 'downloaded' | 'importing' | 'imported' | 'error'
 
 const settingsKey = 'novel-reader-gateway-settings'
 const readerSettingsKey = 'novel-reader-gateway-reader-settings'
@@ -181,7 +214,11 @@ function App() {
   const [audioSyncProgress, setAudioSyncProgress] = useState<{ done: number; total: number } | null>(null)
   const [audioSyncBookId, setAudioSyncBookId] = useState<string | null>(null)
   const [fullPackageCache, setFullPackageCache] = useState<FullPackageCache | null>(() => loadFullPackageCache())
-  const [fullPackageStatus, setFullPackageStatus] = useState<'idle' | 'downloading' | 'cached' | 'error'>('idle')
+  const [fullPackageStatus, setFullPackageStatus] = useState<FullPackageStatus>(() => {
+    const cache = loadFullPackageCache()
+    return cache?.importStats ? 'imported' : cache ? 'downloaded' : 'idle'
+  })
+  const [fullPackageProgress, setFullPackageProgress] = useState<PackageSyncProgress | null>(null)
 
   const selectedBook = useMemo(
     () => books.find((book) => book.id === selectedBookId) ?? null,
@@ -202,6 +239,7 @@ function App() {
   )
   const visibleAudioSyncProgress = audioSyncBookId === selectedBookId ? audioSyncProgress : null
   const visibleFullPackageCache = fullPackageCache?.bookId === selectedBookId ? fullPackageCache : null
+  const visibleFullPackageProgress = fullPackageProgress?.bookId === selectedBookId ? fullPackageProgress : null
   const displaySummaryCoverage = inferredSummaryCoverage(selectedBook, bookPackage)
   const displayKgCoverage = inferredKgCoverage(selectedBook, bookPackage, visibleFullPackageCache)
   const displayEmbeddingCoverage = inferredEmbeddingCoverage(selectedBook, bookPackage, visibleFullPackageCache)
@@ -238,6 +276,24 @@ function App() {
 
   useEffect(() => {
     void clearLegacyAudioIndexedDbCache()
+  }, [])
+
+  useEffect(() => {
+    if (!Capacitor.isNativePlatform()) return
+
+    let listener: PluginListenerHandle | null = null
+    void NativeAudio.addListener('packageSyncProgress', (event) => {
+      setFullPackageProgress(event)
+      if (event.phase === 'download' && event.status === 'downloading') setFullPackageStatus('downloading')
+      if (event.phase === 'download' && event.status === 'downloaded') setFullPackageStatus('downloaded')
+      if (event.phase === 'import') setFullPackageStatus(event.status === 'imported' ? 'imported' : 'importing')
+    }).then((nextListener) => {
+      listener = nextListener
+    })
+
+    return () => {
+      void listener?.remove()
+    }
   }, [])
 
   useEffect(() => {
@@ -376,23 +432,36 @@ function App() {
 
   async function syncFullPackage(bookId: string) {
     if (!Capacitor.isNativePlatform()) return
-    if (fullPackageStatus === 'downloading') return
+    if (fullPackageStatus === 'downloading' || fullPackageStatus === 'importing') return
     setFullPackageStatus('downloading')
+    setFullPackageProgress({ bookId, phase: 'download', status: 'downloading', done: 0, total: 0 })
     try {
       const downloaded = await downloadPackageToNativeFile(settings, bookId)
-      const cache: FullPackageCache = {
+      const downloadedCache: FullPackageCache = {
         bookId,
         filePath: downloaded.filePath,
         sizeBytes: downloaded.sizeBytes,
         cachedAt: new Date().toISOString(),
       }
-      saveFullPackageCache(cache)
-      setFullPackageCache(cache)
-      setFullPackageStatus('cached')
-      setMessage('完整数据包已下载')
+      saveFullPackageCache(downloadedCache)
+      setFullPackageCache(downloadedCache)
+      setFullPackageStatus('importing')
+      setFullPackageProgress({ bookId, phase: 'import', status: 'parsing', done: 0, total: 4 })
+      const importStats = await importPackageToNativeStore(bookId, downloaded.filePath)
+      const importedCache: FullPackageCache = {
+        ...downloadedCache,
+        importedAt: new Date().toISOString(),
+        importStats,
+        metadataPath: importStats.metadataPath,
+      }
+      saveFullPackageCache(importedCache)
+      setFullPackageCache(importedCache)
+      setFullPackageStatus('imported')
+      setFullPackageProgress({ bookId, phase: 'import', status: 'imported', done: 4, total: 4 })
+      setMessage('完整数据包已导入')
     } catch (error) {
       setFullPackageStatus('error')
-      setMessage(`完整包后台下载失败：${errorMessage(error)}`)
+      setMessage(`完整包同步失败：${errorMessage(error)}`)
     }
   }
 
@@ -729,13 +798,25 @@ function App() {
                   <span>完整数据包</span>
                   <strong>{fullPackageLabel(visibleFullPackageCache, fullPackageStatus)}</strong>
                 </div>
+                {visibleFullPackageProgress ? (
+                  <div className="package-line">
+                    <span>{visibleFullPackageProgress.phase === 'download' ? '下载进度' : '导入进度'}</span>
+                    <strong>{fullPackageProgressLabel(visibleFullPackageProgress)}</strong>
+                  </div>
+                ) : null}
                 <button
                   className="secondary-button full-width-button"
                   type="button"
                   onClick={() => void syncCurrentFullPackage()}
-                  disabled={!selectedBookId || fullPackageStatus === 'downloading'}
+                  disabled={!selectedBookId || fullPackageStatus === 'downloading' || fullPackageStatus === 'importing'}
                 >
-                  {fullPackageStatus === 'downloading' ? '下载数据包中' : visibleFullPackageCache ? '重新下载数据包' : '下载完整数据包'}
+                  {fullPackageStatus === 'downloading'
+                    ? '下载数据包中'
+                    : fullPackageStatus === 'importing'
+                      ? '导入数据包中'
+                      : visibleFullPackageCache
+                        ? '重新同步数据包'
+                        : '下载完整数据包'}
                 </button>
                 <div className="package-line">
                   <span>Audio</span>
@@ -1138,6 +1219,13 @@ async function downloadPackageToNativeFile(settings: GatewaySettings, bookId: st
   })
 }
 
+async function importPackageToNativeStore(bookId: string, filePath: string) {
+  return NativeAudio.importPackage({
+    bookId,
+    filePath,
+  })
+}
+
 function loadFullPackageCache(): FullPackageCache | null {
   try {
     const cached = localStorage.getItem(fullPackageCacheKey)
@@ -1146,7 +1234,15 @@ function loadFullPackageCache(): FullPackageCache | null {
     if (!isRecord(parsed)) return null
     if (typeof parsed.bookId !== 'string' || typeof parsed.filePath !== 'string') return null
     if (typeof parsed.sizeBytes !== 'number' || typeof parsed.cachedAt !== 'string') return null
-    return parsed as FullPackageCache
+    return {
+      bookId: parsed.bookId,
+      filePath: parsed.filePath,
+      sizeBytes: parsed.sizeBytes,
+      cachedAt: parsed.cachedAt,
+      importedAt: typeof parsed.importedAt === 'string' ? parsed.importedAt : undefined,
+      importStats: normalizeFullPackageImportStats(parsed.importStats),
+      metadataPath: typeof parsed.metadataPath === 'string' ? parsed.metadataPath : undefined,
+    }
   } catch {
     return null
   }
@@ -1550,6 +1646,49 @@ function readOptionalInteger(value: unknown) {
   return typeof value === 'number' && Number.isInteger(value) ? value : undefined
 }
 
+function normalizeFullPackageImportStats(value: unknown): FullPackageImportStats | undefined {
+  if (!isRecord(value)) return undefined
+  const graph = isRecord(value.knowledgeGraph) ? value.knowledgeGraph : undefined
+  const embeddings = isRecord(value.embeddings) ? value.embeddings : undefined
+  return {
+    chapterCount: readOptionalInteger(value.chapterCount),
+    summaryCount: readOptionalInteger(value.summaryCount),
+    knowledgeGraph: graph
+      ? {
+          entityCount: readOptionalInteger(graph.entityCount),
+          entityMentionCount: readOptionalInteger(graph.entityMentionCount),
+          relationCount: readOptionalInteger(graph.relationCount),
+          relationMentionCount: readOptionalInteger(graph.relationMentionCount),
+        }
+      : undefined,
+    embeddings: embeddings
+      ? {
+          summaryCount: readOptionalInteger(embeddings.summaryCount),
+          chunkCount: readOptionalInteger(embeddings.chunkCount),
+        }
+      : undefined,
+  }
+}
+
+function fullPackageProgressLabel(progress: PackageSyncProgress | null) {
+  if (!progress) return ''
+  if (progress.phase === 'download') {
+    const total = typeof progress.total === 'number' && progress.total > 0 ? progress.total : 0
+    const done = typeof progress.done === 'number' ? progress.done : 0
+    if (total > 0) return `下载 ${Math.min(100, Math.round((done / total) * 100))}%`
+    return done > 0 ? `已下载 ${formatBytes(done)}` : '准备下载'
+  }
+  if (progress.phase === 'import') {
+    if (progress.status === 'parsing') return '解析完整包'
+    if (progress.status === 'summaries') return '导入摘要'
+    if (progress.status === 'knowledgeGraph') return '导入图谱'
+    if (progress.status === 'embeddings') return '导入向量'
+    if (progress.status === 'imported') return '导入完成'
+    return '导入中'
+  }
+  return ''
+}
+
 function inferredSummaryCoverage(book: BookSummary | null, bookPackage: BookPackage | null) {
   if (typeof book?.summaryCoverage === 'number' && book.summaryCoverage > 0) return book.summaryCoverage
   const summaryCount = Array.isArray(bookPackage?.summaries) ? bookPackage.summaries.length : 0
@@ -1559,12 +1698,12 @@ function inferredSummaryCoverage(book: BookSummary | null, bookPackage: BookPack
 
 function inferredKgCoverage(book: BookSummary | null, bookPackage: BookPackage | null, fullPackage: FullPackageCache | null) {
   if (typeof book?.kgCoverage === 'number' && book.kgCoverage > 0) return book.kgCoverage
-  return hasKnowledgeGraph(bookPackage) || fullPackage ? 1 : book?.kgCoverage
+  return hasKnowledgeGraph(bookPackage) || hasImportedKnowledgeGraph(fullPackage) ? 1 : book?.kgCoverage
 }
 
 function inferredEmbeddingCoverage(book: BookSummary | null, bookPackage: BookPackage | null, fullPackage: FullPackageCache | null) {
   if (typeof book?.embeddingCoverage === 'number' && book.embeddingCoverage > 0) return book.embeddingCoverage
-  if (hasEmbeddings(bookPackage) || fullPackage) return 1
+  if (hasEmbeddings(bookPackage) || hasImportedEmbeddings(fullPackage)) return 1
   return book?.embeddingCoverage
 }
 
@@ -1588,6 +1727,22 @@ function hasEmbeddings(bookPackage: BookPackage | null) {
   )
 }
 
+function hasImportedKnowledgeGraph(fullPackage: FullPackageCache | null) {
+  const graph = fullPackage?.importStats?.knowledgeGraph
+  return Boolean(
+    graph &&
+      ((graph.entityCount ?? 0) > 0 ||
+        (graph.relationCount ?? 0) > 0 ||
+        (graph.entityMentionCount ?? 0) > 0 ||
+        (graph.relationMentionCount ?? 0) > 0),
+  )
+}
+
+function hasImportedEmbeddings(fullPackage: FullPackageCache | null) {
+  const embeddings = fullPackage?.importStats?.embeddings
+  return Boolean(embeddings && ((embeddings.summaryCount ?? 0) > 0 || (embeddings.chunkCount ?? 0) > 0))
+}
+
 function hasNonEmptyArray(value: unknown) {
   return Array.isArray(value) && value.length > 0
 }
@@ -1601,8 +1756,10 @@ function audioButtonLabel(currentAudio: AudioChapter | null, loadingAudio: boole
   return currentAudio ? '播放' : '无音频'
 }
 
-function fullPackageLabel(cache: FullPackageCache | null, status: 'idle' | 'downloading' | 'cached' | 'error') {
+function fullPackageLabel(cache: FullPackageCache | null, status: FullPackageStatus) {
   if (status === 'downloading') return '后台下载中'
+  if (status === 'importing') return '导入中'
+  if (cache?.importStats) return `已导入 ${formatBytes(cache.sizeBytes)}`
   if (cache) return `已下载 ${formatBytes(cache.sizeBytes)}`
   if (status === 'error') return '下载失败'
   return '未下载'

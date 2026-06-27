@@ -6,10 +6,15 @@ import com.getcapacitor.PluginCall;
 import com.getcapacitor.PluginMethod;
 import com.getcapacitor.annotation.CapacitorPlugin;
 import java.io.File;
+import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.InputStream;
+import java.io.ByteArrayOutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
+import java.nio.charset.StandardCharsets;
+import org.json.JSONArray;
+import org.json.JSONObject;
 
 @CapacitorPlugin(name = "GatewayAudio")
 public class GatewayAudioPlugin extends Plugin {
@@ -121,13 +126,19 @@ public class GatewayAudioPlugin extends Plugin {
             throw new IllegalStateException("Gateway HTTP " + status);
           }
 
+          long totalBytes = connection.getContentLengthLong();
           long sizeBytes = 0;
+          long lastProgressAt = 0;
           byte[] buffer = new byte[1024 * 256];
           try (InputStream input = connection.getInputStream(); FileOutputStream output = new FileOutputStream(tempFile, false)) {
             int read;
             while ((read = input.read(buffer)) != -1) {
               output.write(buffer, 0, read);
               sizeBytes += read;
+              if (sizeBytes - lastProgressAt >= 1024 * 1024 || (totalBytes > 0 && sizeBytes == totalBytes)) {
+                lastProgressAt = sizeBytes;
+                notifyPackageProgress(bookId, "download", "downloading", sizeBytes, totalBytes);
+              }
             }
           }
 
@@ -141,6 +152,7 @@ public class GatewayAudioPlugin extends Plugin {
           JSObject result = new JSObject();
           result.put("filePath", targetFile.getAbsolutePath());
           result.put("sizeBytes", sizeBytes);
+          notifyPackageProgress(bookId, "download", "downloaded", sizeBytes, totalBytes);
           call.resolve(result);
         } catch (Exception error) {
           if (tempFile != null && tempFile.exists()) {
@@ -154,6 +166,91 @@ public class GatewayAudioPlugin extends Plugin {
         }
       }
     );
+  }
+
+  @PluginMethod
+  public void importPackage(PluginCall call) {
+    String bookId = call.getString("bookId");
+    String filePath = call.getString("filePath");
+
+    if (bookId == null || filePath == null) {
+      call.reject("Missing importPackage parameters.");
+      return;
+    }
+
+    getBridge().execute(
+      () -> {
+        try {
+          notifyPackageProgress(bookId, "import", "parsing", 0, 4);
+          File packageFile = new File(filePath);
+          JSONObject root;
+          root = new JSONObject(readUtf8File(packageFile));
+
+          JSONObject stats = new JSONObject();
+          stats.put("chapterCount", arrayLength(root.optJSONArray("chapters")));
+          stats.put("summaryCount", arrayLength(root.optJSONArray("summaries")));
+          notifyPackageProgress(bookId, "import", "summaries", 1, 4);
+
+          JSONObject graph = root.optJSONObject("knowledgeGraph");
+          JSONObject graphStats = new JSONObject();
+          graphStats.put("entityCount", arrayLength(graph == null ? null : graph.optJSONArray("entities")));
+          graphStats.put("entityMentionCount", arrayLength(graph == null ? null : graph.optJSONArray("entityMentions")));
+          graphStats.put("relationCount", arrayLength(graph == null ? null : graph.optJSONArray("relations")));
+          graphStats.put("relationMentionCount", arrayLength(graph == null ? null : graph.optJSONArray("relationMentions")));
+          stats.put("knowledgeGraph", graphStats);
+          notifyPackageProgress(bookId, "import", "knowledgeGraph", 2, 4);
+
+          JSONObject embeddings = root.optJSONObject("embeddings");
+          JSONObject embeddingStats = new JSONObject();
+          embeddingStats.put("summaryCount", arrayLength(embeddings == null ? null : embeddings.optJSONArray("summaries")));
+          embeddingStats.put("chunkCount", arrayLength(embeddings == null ? null : embeddings.optJSONArray("chunks")));
+          stats.put("embeddings", embeddingStats);
+          notifyPackageProgress(bookId, "import", "embeddings", 3, 4);
+
+          stats.put("bookId", bookId);
+          stats.put("filePath", packageFile.getAbsolutePath());
+          stats.put("sizeBytes", packageFile.length());
+          stats.put("importedAt", String.valueOf(System.currentTimeMillis()));
+
+          File importFile = new File(packageFile.getParentFile(), "package-import.json");
+          try (FileOutputStream output = new FileOutputStream(importFile, false)) {
+            output.write(stats.toString().getBytes(StandardCharsets.UTF_8));
+          }
+
+          notifyPackageProgress(bookId, "import", "imported", 4, 4);
+          JSObject result = new JSObject(stats.toString());
+          result.put("metadataPath", importFile.getAbsolutePath());
+          call.resolve(result);
+        } catch (Exception error) {
+          call.reject(error.getMessage() == null ? "Package import failed." : error.getMessage(), error);
+        }
+      }
+    );
+  }
+
+  private void notifyPackageProgress(String bookId, String phase, String status, long done, long total) {
+    JSObject payload = new JSObject();
+    payload.put("bookId", bookId);
+    payload.put("phase", phase);
+    payload.put("status", status);
+    payload.put("done", done);
+    payload.put("total", total);
+    notifyListeners("packageSyncProgress", payload);
+  }
+    private String readUtf8File(File file) throws Exception {
+        try (FileInputStream input = new FileInputStream(file); ByteArrayOutputStream output = new ByteArrayOutputStream()) {
+            byte[] buffer = new byte[1024 * 256];
+            int read;
+            while ((read = input.read(buffer)) != -1) {
+                output.write(buffer, 0, read);
+            }
+            return output.toString(StandardCharsets.UTF_8.name());
+        }
+    }
+
+
+  private int arrayLength(JSONArray array) {
+    return array == null ? 0 : array.length();
   }
 
   private String safeSegment(String value) {
