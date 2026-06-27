@@ -198,7 +198,7 @@ function App() {
   const [connectionState, setConnectionState] = useState<ConnectionState>('idle')
   const [message, setMessage] = useState('')
   const [books, setBooks] = useState<BookSummary[]>([])
-  const [selectedBookId, setSelectedBookId] = useState<string | null>(null)
+  const [selectedBookId, setSelectedBookId] = useState<string | null>(() => loadReadingProgress()?.bookId ?? loadFullPackageCache()?.bookId ?? null)
   const [bookPackage, setBookPackage] = useState<BookPackage | null>(null)
   const [currentChapterId, setCurrentChapterId] = useState<string | null>(null)
   const [audioChapters, setAudioChapters] = useState<AudioChapter[]>([])
@@ -329,6 +329,11 @@ function App() {
     try {
       const response = await gatewayFetch(settings, '/mobile/books')
       const nextBooks = Array.isArray(response.books) ? (response.books as BookSummary[]) : []
+      const cachedFullPackage = loadFullPackageCache()
+      if (cachedFullPackage && nextBooks.some((book) => book.id === cachedFullPackage.bookId)) {
+        setFullPackageCache(cachedFullPackage)
+        setFullPackageStatus(cachedFullPackage.importStats ? 'imported' : 'downloaded')
+      }
       setBooks(nextBooks)
       const nextSelectedBookId = nextBooks.some((book) => book.id === selectedBookId) ? selectedBookId : nextBooks[0]?.id
       if (nextBooks.length > 0 && !nextBooks.some((book) => book.id === selectedBookId)) {
