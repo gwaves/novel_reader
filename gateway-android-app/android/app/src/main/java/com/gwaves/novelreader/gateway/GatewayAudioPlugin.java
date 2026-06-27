@@ -199,7 +199,7 @@ public class GatewayAudioPlugin extends Plugin {
             while ((read = input.read(buffer)) != -1) {
               readBytes += read;
               String chunk = carry + new String(buffer, 0, read, StandardCharsets.UTF_8);
-              summaryHints += estimateCount(chunk, "\"summary\"");
+              summaryHints += estimateCount(chunk, "\"summaries\"") + estimateCount(chunk, "\"summary\"");
               graphHints += estimateCount(chunk, "\"knowledgeGraph\"") + estimateCount(chunk, "\"entityMentions\"") + estimateCount(chunk, "\"relationMentions\"");
               embeddingHints += estimateCount(chunk, "\"embeddings\"") + estimateCount(chunk, "\"vector\"");
               carry = chunk.length() > 256 ? chunk.substring(chunk.length() - 256) : chunk;

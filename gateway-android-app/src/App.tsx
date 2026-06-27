@@ -1784,8 +1784,8 @@ function fullPackageProgressLabel(progress: PackageSyncProgress | null) {
 function inferredSummaryCoverage(book: BookSummary | null, bookPackage: BookPackage | null, fullPackage: FullPackageCache | null) {
   const importedSummaryCount = fullPackage?.importStats?.summaryCount ?? 0
   const importedChapterCount = fullPackage?.importStats?.chapterCount ?? 0
-  if (importedSummaryCount > 0 && importedChapterCount > 0) {
-    return Math.min(1, importedSummaryCount / importedChapterCount)
+  if (importedChapterCount > 0) {
+    return importedSummaryCount > 0 ? Math.min(1, importedSummaryCount / importedChapterCount) : 1
   }
   if (typeof book?.summaryCoverage === 'number' && book.summaryCoverage > 0) return book.summaryCoverage
   const summaries = bookPackage?.summaries
