@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { homedir } from 'node:os'
 import { createHash } from 'node:crypto'
@@ -159,6 +159,8 @@ function loadConfig(configPath) {
       finalFormat: config.tts?.finalFormat || 'mp3',
       mp3Bitrate: config.tts?.mp3Bitrate || '96k',
       silenceSeconds: finiteNumber(config.tts?.silenceSeconds, 0.35),
+      maxSilenceSeconds: finiteNumber(config.tts?.maxSilenceSeconds, 8),
+      maxSecondsPerCharacter: finiteNumber(config.tts?.maxSecondsPerCharacter, 0.8),
       concurrency: Math.max(1, Math.floor(finiteNumber(config.tts?.concurrency, 1))),
       keepIntermediateWav: Boolean(config.tts?.keepIntermediateWav),
       maxCharactersPerRequest: Math.max(
@@ -1126,6 +1128,69 @@ function probeAudioDurationSeconds(filePath) {
   return duration
 }
 
+function detectLongSilences(filePath, maxSilenceSeconds) {
+  if (!Number.isFinite(maxSilenceSeconds) || maxSilenceSeconds <= 0) return []
+  const result = spawnSync(
+    'ffmpeg',
+    [
+      '-hide_banner',
+      '-nostats',
+      '-i',
+      filePath,
+      '-af',
+      `silencedetect=noise=-45dB:d=${Math.max(0.5, maxSilenceSeconds)}`,
+      '-f',
+      'null',
+      '-',
+    ],
+    { encoding: 'utf8' },
+  )
+  const output = `${result.stderr || ''}\n${result.stdout || ''}`
+  const silences = []
+  for (const match of output.matchAll(/silence_start:\s*([0-9.]+)[\s\S]*?silence_end:\s*([0-9.]+)\s*\|\s*silence_duration:\s*([0-9.]+)/g)) {
+    silences.push({
+      start: Number(match[1]),
+      end: Number(match[2]),
+      duration: Number(match[3]),
+    })
+  }
+  return silences.filter(item => Number.isFinite(item.duration) && item.duration >= maxSilenceSeconds)
+}
+
+function validateSynthesizedAudio(config, item) {
+  const duration = probeAudioDurationSeconds(item.wav)
+  const textLength = Array.from(String(item.text || '')).length
+  const maxDuration = Math.max(12, textLength * config.tts.maxSecondsPerCharacter)
+  if (duration > maxDuration) {
+    throw new Error(`${item.id} 音频时长异常：${duration.toFixed(2)}s / ${textLength} 字，超过 ${maxDuration.toFixed(2)}s。`)
+  }
+  const longSilences = detectLongSilences(item.wav, config.tts.maxSilenceSeconds)
+  if (longSilences.length) {
+    const longest = longSilences.reduce((best, item) => item.duration > best.duration ? item : best, longSilences[0])
+    throw new Error(`${item.id} 含异常长静音：${longest.duration.toFixed(2)}s。`)
+  }
+  return duration
+}
+
+async function synthSegmentWithValidation(config, item, attempts = 3) {
+  let lastError = null
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      if (existsSync(item.wav)) rmSync(item.wav, { force: true })
+      await synthSegmentWithMimo(config, item.segment, item.wav)
+      validateSynthesizedAudio(config, item)
+      return
+    } catch (error) {
+      lastError = error
+      if (existsSync(item.wav)) rmSync(item.wav, { force: true })
+      if (attempt < attempts) {
+        console.warn(`⚠️  ${item.id} TTS 片段异常，重试 ${attempt + 1}/${attempts}：${error.message}`)
+      }
+    }
+  }
+  throw lastError
+}
+
 async function runConcurrent(items, workerCount, worker) {
   let nextIndex = 0
   const workers = Array.from({ length: Math.min(workerCount, items.length) }, async () => {
@@ -1196,13 +1261,26 @@ async function runSynth(config, args) {
     }
   })
 
-  const missingSegments = manifest.segments.filter(item => !existsSync(item.wav))
-  if (missingSegments.length) {
-    console.log(`🚀 TTS 并发：${concurrency}，待合成片段：${missingSegments.length}`)
+  const segmentsToSynthesize = []
+  for (const item of manifest.segments) {
+    if (!existsSync(item.wav)) {
+      segmentsToSynthesize.push(item)
+      continue
+    }
+    try {
+      validateSynthesizedAudio(config, item)
+    } catch (error) {
+      console.warn(`⚠️  缓存音频异常，将重新合成 ${item.id}：${error.message}`)
+      rmSync(item.wav, { force: true })
+      segmentsToSynthesize.push(item)
+    }
   }
-  await runConcurrent(missingSegments, concurrency, async (item) => {
+  if (segmentsToSynthesize.length) {
+    console.log(`🚀 TTS 并发：${concurrency}，待合成片段：${segmentsToSynthesize.length}`)
+  }
+  await runConcurrent(segmentsToSynthesize, concurrency, async (item) => {
     console.log(`🎙️  合成 ${item.id} ${item.speaker} ${item.voice || '默认音色'}`)
-    await synthSegmentWithMimo(config, item.segment, item.wav)
+    await synthSegmentWithValidation(config, item)
   })
 
   for (const item of manifest.segments) {

@@ -242,6 +242,52 @@ public class GatewayAudioPlugin extends Plugin {
     );
   }
 
+  @PluginMethod
+  public void clearAudioCache(PluginCall call) {
+    String bookId = call.getString("bookId");
+    if (bookId == null) {
+      call.reject("Missing clearAudioCache parameters.");
+      return;
+    }
+
+    getBridge().execute(
+      () -> {
+        try {
+          File bookDir = new File(getContext().getFilesDir(), "audio/" + safeSegment(bookId));
+          long deletedBytes = deleteRecursively(bookDir);
+          JSObject result = new JSObject();
+          result.put("deletedBytes", deletedBytes);
+          call.resolve(result);
+        } catch (Exception error) {
+          call.reject(error.getMessage() == null ? "Audio cache cleanup failed." : error.getMessage(), error);
+        }
+      }
+    );
+  }
+
+  @PluginMethod
+  public void clearPackageCache(PluginCall call) {
+    String bookId = call.getString("bookId");
+    if (bookId == null) {
+      call.reject("Missing clearPackageCache parameters.");
+      return;
+    }
+
+    getBridge().execute(
+      () -> {
+        try {
+          File bookDir = new File(getContext().getFilesDir(), "packages/" + safeSegment(bookId));
+          long deletedBytes = deleteRecursively(bookDir);
+          JSObject result = new JSObject();
+          result.put("deletedBytes", deletedBytes);
+          call.resolve(result);
+        } catch (Exception error) {
+          call.reject(error.getMessage() == null ? "Package cache cleanup failed." : error.getMessage(), error);
+        }
+      }
+    );
+  }
+
   private void notifyPackageProgress(String bookId, String phase, String status, long done, long total) {
     JSObject payload = new JSObject();
     payload.put("bookId", bookId);
@@ -267,5 +313,22 @@ public class GatewayAudioPlugin extends Plugin {
 
   private String safeSegment(String value) {
     return value.replaceAll("[^A-Za-z0-9._-]", "_");
+  }
+
+  private long deleteRecursively(File file) {
+    if (file == null || !file.exists()) return 0;
+    long deletedBytes = file.isFile() ? file.length() : 0;
+    if (file.isDirectory()) {
+      File[] children = file.listFiles();
+      if (children != null) {
+        for (File child : children) {
+          deletedBytes += deleteRecursively(child);
+        }
+      }
+    }
+    if (!file.delete() && file.exists()) {
+      throw new IllegalStateException("Unable to delete cache file: " + file.getAbsolutePath());
+    }
+    return deletedBytes;
   }
 }

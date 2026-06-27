@@ -105,6 +105,8 @@ type NativeAudioPlugin = {
     filePath: string
     expectedChapterCount?: number
   }): Promise<FullPackageImportStats & { metadataPath?: string }>
+  clearAudioCache(options: { bookId: string }): Promise<{ deletedBytes?: number }>
+  clearPackageCache(options: { bookId: string }): Promise<{ deletedBytes?: number }>
   addListener(eventName: 'packageSyncProgress', listenerFunc: (event: PackageSyncProgress) => void): Promise<PluginListenerHandle>
 }
 
@@ -192,6 +194,15 @@ type PackageSyncProgress = {
 
 type FullPackageStatus = 'idle' | 'downloading' | 'downloaded' | 'importing' | 'imported' | 'error'
 
+type BookCacheSummary = {
+  bookId: string
+  title: string
+  packageCache: FullPackageCache | null
+  audioCount: number
+  audioSizeBytes: number
+  totalSizeBytes: number
+}
+
 const settingsKey = 'novel-reader-gateway-settings'
 const readerSettingsKey = 'novel-reader-gateway-reader-settings'
 const ttsSettingsKey = 'novel-reader-gateway-tts-settings'
@@ -269,6 +280,8 @@ function App() {
   const [speechPlayback, setSpeechPlayback] = useState<SpeechPlaybackState>({ status: 'idle' })
   const [activeSpeechSegmentId, setActiveSpeechSegmentId] = useState<string | null>(null)
   const [speechAutoFollowSuspended, setSpeechAutoFollowSuspended] = useState(false)
+  const [cacheVersion, setCacheVersion] = useState(0)
+  const [clearingCacheKey, setClearingCacheKey] = useState<string | null>(null)
 
   const selectedBook = useMemo(
     () => books.find((book) => book.id === selectedBookId) ?? null,
@@ -295,6 +308,7 @@ function App() {
   const displayEmbeddingCoverage = inferredEmbeddingCoverage(selectedBook, bookPackage, visibleFullPackageCache)
   const displayAudioChapterCount =
     visibleAudioChapters.length || visibleCachedAudioIds.size || selectedBook?.audioChapterCount || 0
+  const cacheSummaries = useMemo(() => buildBookCacheSummaries(books, cacheVersion), [books, cacheVersion])
   const currentAudio = useMemo(
     () => visibleAudioChapters.find((chapter) => chapter.chapterId === currentChapter?.id) ?? null,
     [currentChapter, visibleAudioChapters],
@@ -784,6 +798,60 @@ function App() {
     }
   }
 
+  function refreshCacheSummaries() {
+    setCacheVersion((version) => version + 1)
+  }
+
+  async function clearBookAudioCache(bookId: string) {
+    const key = `${bookId}:audio`
+    setClearingCacheKey(key)
+    try {
+      if (bookId === selectedBookId) clearAudioUrl()
+      if (Capacitor.isNativePlatform()) {
+        await NativeAudio.clearAudioCache({ bookId })
+      }
+      const index = loadAudioCacheIndex()
+      for (const cacheKey of Object.keys(index)) {
+        if (index[cacheKey]?.bookId === bookId) delete index[cacheKey]
+      }
+      saveAudioCacheIndex(index)
+      if (bookId === selectedBookId) {
+        setCachedAudioIds(new Set())
+        setCachedAudioBookId(bookId)
+      }
+      refreshCacheSummaries()
+      setMessage('音频缓存已清除')
+    } catch (error) {
+      setMessage(`清除音频缓存失败：${errorMessage(error)}`)
+    } finally {
+      setClearingCacheKey(null)
+    }
+  }
+
+  async function clearBookPackageCache(bookId: string) {
+    const key = `${bookId}:package`
+    setClearingCacheKey(key)
+    try {
+      if (Capacitor.isNativePlatform()) {
+        await NativeAudio.clearPackageCache({ bookId })
+      }
+      removeFullPackageCache(bookId)
+      await deleteBookPackageFromIndexedDb(bookId)
+      localStorage.removeItem(`${packageCachePrefix}${bookId}`)
+      if (bookId === selectedBookId) {
+        setFullPackageCache(null)
+        setFullPackageStatus('idle')
+        setFullPackageProgress(null)
+      }
+      refreshCacheSummaries()
+      setMessage('完整数据包缓存已清除')
+    } catch (error) {
+      setMessage(`清除完整包缓存失败：${errorMessage(error)}`)
+    } finally {
+      setClearingCacheKey(null)
+    }
+  }
+
   async function fetchAudioCatalog(bookId: string) {
     const response = await gatewayFetch(settings, `/mobile/books/${encodeURIComponent(bookId)}/audio`)
     return Array.isArray(response.chapters) ? response.chapters.filter(isAudioChapter) : []
@@ -1048,10 +1116,17 @@ function App() {
 
   function buildChapterAudioTimeline(audioTimeline: AudioTimelineEntry[]) {
     const segments = speechSegmentsRef.current
-    chapterAudioTimelineRef.current = segments
+    const mappedTimeline = segments
       .map((segment, index) => mapSpeechSegmentToAudioTimeline(segment, index, audioTimeline))
       .filter((item): item is ChapterAudioTimelineItem => Boolean(item))
       .sort((left, right) => left.startTime - right.startTime)
+    chapterAudioTimelineRef.current = mappedTimeline.map((item, index) => {
+      const nextItem = mappedTimeline[index + 1]
+      return {
+        ...item,
+        nextStartTime: nextItem ? Math.max(item.endTime, nextItem.startTime) : item.nextStartTime,
+      }
+    })
   }
 
   function findAudioSegmentIndex(currentTime: number): number | null {
@@ -1070,6 +1145,7 @@ function App() {
     const segment = speechSegmentsRef.current[currentIndex]
     if (!segment || activeSpeechSegmentId === segment.id) return
     setActiveSpeechSegmentId(segment.id)
+    setSpeechPlayback({ status: 'playing', segmentIndex: currentIndex, segmentId: segment.id })
     scrollToSpeechSegment(segment.id)
   }
 
@@ -1715,6 +1791,57 @@ function App() {
             </div>
           </section>
 
+          <section className="cache-manager">
+            <div className="section-title">
+              <h2>缓存管理</h2>
+              <button className="secondary-button compact-button" type="button" onClick={refreshCacheSummaries}>
+                刷新
+              </button>
+            </div>
+            {cacheSummaries.length ? (
+              <div className="cache-book-list">
+                {cacheSummaries.map((cache) => (
+                  <article className="cache-book-card" key={cache.bookId}>
+                    <div className="cache-book-heading">
+                      <strong>{cache.title}</strong>
+                      <span>{formatBytes(cache.totalSizeBytes)}</span>
+                    </div>
+                    <dl>
+                      <div>
+                        <dt>完整数据包</dt>
+                        <dd>{cache.packageCache ? formatBytes(cache.packageCache.sizeBytes) : '无缓存'}</dd>
+                      </div>
+                      <div>
+                        <dt>MP3 音频</dt>
+                        <dd>{cache.audioCount} 章 · {formatBytes(cache.audioSizeBytes)}</dd>
+                      </div>
+                    </dl>
+                    <div className="cache-actions">
+                      <button
+                        className="secondary-button"
+                        type="button"
+                        disabled={!cache.packageCache || clearingCacheKey === `${cache.bookId}:package`}
+                        onClick={() => void clearBookPackageCache(cache.bookId)}
+                      >
+                        {clearingCacheKey === `${cache.bookId}:package` ? '清除中' : '清除数据包'}
+                      </button>
+                      <button
+                        className="secondary-button danger-button"
+                        type="button"
+                        disabled={cache.audioCount === 0 || clearingCacheKey === `${cache.bookId}:audio`}
+                        onClick={() => void clearBookAudioCache(cache.bookId)}
+                      >
+                        {clearingCacheKey === `${cache.bookId}:audio` ? '清除中' : '清除 MP3'}
+                      </button>
+                    </div>
+                  </article>
+                ))}
+              </div>
+            ) : (
+              <p className="cache-empty">还没有本地缓存。打开书籍或同步音频后会显示在这里。</p>
+            )}
+          </section>
+
           <section className="sync-summary">
             <div className="section-title">
               <h2>同步状态</h2>
@@ -2104,6 +2231,16 @@ function saveFullPackageCache(cache: FullPackageCache) {
   localStorage.setItem(fullPackageCacheKey, JSON.stringify(cache))
 }
 
+function removeFullPackageCache(bookId: string) {
+  const index = loadFullPackageCacheIndex()
+  delete index[bookId]
+  localStorage.setItem(fullPackageCacheIndexKey, JSON.stringify(index))
+  const legacy = loadLegacyFullPackageCache()
+  if (legacy?.bookId === bookId) {
+    localStorage.removeItem(fullPackageCacheKey)
+  }
+}
+
 function parseJsonBody(value: string) {
   try {
     return JSON.parse(value) as { error?: { message?: string } } & Record<string, unknown>
@@ -2355,6 +2492,16 @@ async function readBookPackageFromIndexedDb(bookId: string) {
   }
 }
 
+async function deleteBookPackageFromIndexedDb(bookId: string) {
+  try {
+    const db = await openPackageCacheDb()
+    await runPackageStoreRequest(db, 'readwrite', packageCacheStoreName, (store) => store.delete(bookId))
+    db.close()
+  } catch {
+    // Best effort; package file/index cleanup should still continue.
+  }
+}
+
 function writeCachedAudio(bookId: string, audioChapter: AudioChapter, payload: AudioCachePayload) {
   if (payload.kind !== 'file') return
   const index = loadAudioCacheIndex()
@@ -2417,6 +2564,30 @@ function saveAudioCacheIndex(index: Record<string, CachedAudioRecord>) {
 
 function audioCacheKey(bookId: string, chapterId: string) {
   return `${bookId}:${chapterId}`
+}
+
+function buildBookCacheSummaries(books: BookSummary[], version: number): BookCacheSummary[] {
+  void version
+  const bookTitles = new Map(books.map((book) => [book.id, book.title]))
+  const packageIndex = loadFullPackageCacheIndex()
+  const audioIndex = loadAudioCacheIndex()
+  const bookIds = new Set<string>([...bookTitles.keys(), ...Object.keys(packageIndex), ...Object.values(audioIndex).map((record) => record.bookId)])
+  return Array.from(bookIds)
+    .map((bookId) => {
+      const audioRecords = Object.values(audioIndex).filter((record) => record.bookId === bookId)
+      const audioSizeBytes = audioRecords.reduce((total, record) => total + (record.sizeBytes ?? record.audioChapter.sizeBytes ?? 0), 0)
+      const packageCache = packageIndex[bookId] ?? null
+      return {
+        bookId,
+        title: bookTitles.get(bookId) ?? packageCache?.bookId ?? bookId,
+        packageCache,
+        audioCount: audioRecords.length,
+        audioSizeBytes,
+        totalSizeBytes: audioSizeBytes + (packageCache?.sizeBytes ?? 0),
+      }
+    })
+    .filter((summary) => summary.packageCache || summary.audioCount > 0)
+    .sort((left, right) => right.totalSizeBytes - left.totalSizeBytes || left.title.localeCompare(right.title))
 }
 
 function openPackageCacheDb() {

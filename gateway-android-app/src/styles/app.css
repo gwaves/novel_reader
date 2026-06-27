@@ -120,6 +120,96 @@ button:disabled {
   gap: 10px;
 }
 
+.compact-button {
+  min-height: 34px;
+  padding: 0 12px;
+  font-size: 13px;
+}
+
+.danger-button {
+  border-color: #f0b8ae;
+  color: #9a3324;
+}
+
+.cache-manager {
+  border: 1px solid #d9e1e8;
+  border-radius: 8px;
+  background: #ffffff;
+  overflow: hidden;
+}
+
+.cache-manager .section-title button {
+  flex: 0 0 auto;
+}
+
+.cache-book-list {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+}
+
+.cache-book-card {
+  display: grid;
+  gap: 10px;
+  border: 1px solid #e3e9ef;
+  border-radius: 8px;
+  background: #fbfdff;
+  padding: 12px;
+}
+
+.cache-book-heading {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.cache-book-heading strong {
+  color: #17202a;
+  font-size: 15px;
+  line-height: 1.35;
+}
+
+.cache-book-heading span {
+  color: #2f6f73;
+  font-size: 13px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.cache-book-card dl {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin: 0;
+}
+
+.cache-book-card dt {
+  color: #667584;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.cache-book-card dd {
+  margin: 3px 0 0;
+  color: #17202a;
+  font-size: 14px;
+  font-weight: 800;
+}
+
+.cache-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.cache-empty {
+  margin: 0;
+  padding: 18px 14px;
+  color: #667584;
+  font-size: 14px;
+}
+
 .status-line {
   margin: 12px 0;
   min-height: 34px;
