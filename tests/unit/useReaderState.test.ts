@@ -1,6 +1,8 @@
 import { describe, expect, it } from 'vitest'
 import {
+  applyChapterTitleRepairSuggestions,
   countBookWords,
+  detectChapterTitleAnomalies,
   formatWordCount,
   getActiveOpenAIConfig,
   inferTitle,
@@ -38,6 +40,67 @@ describe('chapter splitting', () => {
       title: '正文开始',
       content: '没有章节标题的短篇正文。\n第二段继续正文。',
     })
+  })
+
+  it('keeps prose out of a long classic chapter heading line', () => {
+    const chapters = splitChapters(`
+第二十五回　镇元仙赶捉取经僧　孙行者大闹五庄观却说他兄弟三众，到了殿上，对师父道："饭将熟了，叫我们怎的？"
+三藏道："徒弟，不是问饭。"
+
+第二十六回　孙悟空三岛求方　观世音甘泉活树
+诗曰：处世须存心上刃。
+`)
+
+    expect(chapters).toHaveLength(2)
+    expect(chapters[0].title).toBe('第二十五回　镇元仙赶捉取经僧　孙行者大闹五庄观')
+    expect(chapters[0].content).toContain('却说他兄弟三众，到了殿上')
+    expect(chapters[0].content).not.toContain('第二十五回')
+  })
+
+  it('detects title lines that should be reviewed by the language model', () => {
+    const anomalies = detectChapterTitleAnomalies(`
+第二十五回　镇元仙赶捉取经僧　孙行者大闹五庄观却说他兄弟三众，到了殿上，对师父道："饭将熟了，叫我们怎的？"
+三藏道："徒弟，不是问饭。"
+
+第二十六回　孙悟空三岛求方　观世音甘泉活树
+诗曰：处世须存心上刃。
+`)
+
+    expect(anomalies).toHaveLength(1)
+    expect(anomalies[0]).toMatchObject({
+      chapterIndex: 1,
+      suspectedTitle: '第二十五回　镇元仙赶捉取经僧　孙行者大闹五庄观',
+      suspectedContentPrefix: expect.stringContaining('却说他兄弟三众'),
+    })
+  })
+
+  it('applies validated language-model title repair suggestions', () => {
+    const chapters = [
+      {
+        id: '1-bad',
+        index: 1,
+        title:
+          '第二十五回　镇元仙赶捉取经僧　孙行者大闹五庄观却说他兄弟三众，到了殿上，对师父道："饭将熟了，叫我们怎的？"',
+        content: '三藏道："徒弟，不是问饭。"',
+        wordCount: 0,
+      },
+    ]
+
+    const repaired = applyChapterTitleRepairSuggestions(chapters, [
+      {
+        chapterIndex: 1,
+        isAnomaly: true,
+        fixedTitle: '第二十五回　镇元仙赶捉取经僧　孙行者大闹五庄观',
+        contentPrefix: '却说他兄弟三众，到了殿上',
+        confidence: 0.95,
+        reason: '从“却说”开始进入正文。',
+      },
+    ])
+
+    expect(repaired[0].title).toBe('第二十五回　镇元仙赶捉取经僧　孙行者大闹五庄观')
+    expect(repaired[0].content).toContain('却说他兄弟三众，到了殿上')
+    expect(repaired[0].content).toContain('三藏道')
+    expect(repaired[0].wordCount).toBeGreaterThan(0)
   })
 })
 
