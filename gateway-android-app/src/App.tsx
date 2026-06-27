@@ -128,7 +128,8 @@ type ChapterAudioTimelineItem = {
 }
 
 type ConnectionState = 'idle' | 'checking' | 'connected' | 'error'
-type GatewayTab = 'library' | 'reader' | 'settings'
+type GatewayTab = 'library' | 'reader' | 'search' | 'settings'
+type SearchMode = 'rag' | 'graph'
 type ReaderBackground = 'paper' | 'warm' | 'green' | 'dark'
 
 type ReaderSettings = {
@@ -203,6 +204,29 @@ type BookCacheSummary = {
   totalSizeBytes: number
 }
 
+type SearchResult = {
+  chapterId: string
+  chapterIndex: number
+  chapterTitle: string
+  snippet: string
+}
+
+type RagResult = SearchResult & {
+  source: 'chunk' | 'summary' | 'chapter'
+  score: number
+}
+
+type GraphResult = {
+  kind: 'entity' | 'relation' | 'evidence'
+  id: string
+  title: string
+  subtitle: string
+  snippet: string
+  details?: string[]
+  chapterId?: string
+  chapterIndex?: number
+}
+
 const settingsKey = 'novel-reader-gateway-settings'
 const readerSettingsKey = 'novel-reader-gateway-reader-settings'
 const ttsSettingsKey = 'novel-reader-gateway-tts-settings'
@@ -214,7 +238,7 @@ const packageCachePrefix = 'novel-reader-gateway-package:'
 const packageCacheDbName = 'novel-reader-gateway'
 const packageCacheStoreName = 'book-packages'
 const legacyAudioCacheStoreName = 'chapter-audio'
-const defaultGatewayBaseUrl = import.meta.env.VITE_GATEWAY_DEFAULT_BASE_URL ?? 'https://'
+const defaultGatewayBaseUrl = import.meta.env.VITE_GATEWAY_DEFAULT_BASE_URL ?? 'https://novel.gwaves.net:8888'
 const defaultGatewayToken = import.meta.env.VITE_GATEWAY_DEFAULT_TOKEN ?? '123456'
 const NativeAudio = registerPlugin<NativeAudioPlugin>('GatewayAudio')
 const TTS_RATE_PRESETS = [0.75, 1, 1.25, 1.5, 2, 3] as const
@@ -265,6 +289,17 @@ function App() {
   const [loadingBooks, setLoadingBooks] = useState(false)
   const [loadingPackage, setLoadingPackage] = useState(false)
   const [chapterPickerOpen, setChapterPickerOpen] = useState(false)
+  const [searchMode, setSearchMode] = useState<SearchMode>('rag')
+  const [ragUseSemantic, setRagUseSemantic] = useState(true)
+  const [searchInput, setSearchInput] = useState('')
+  const [submittedSearchQuery, setSubmittedSearchQuery] = useState('')
+  const [ragResults, setRagResults] = useState<RagResult[]>([])
+  const [ragAnswer, setRagAnswer] = useState('')
+  const [ragIsSearching, setRagIsSearching] = useState(false)
+  const [ragIsGeneratingAnswer, setRagIsGeneratingAnswer] = useState(false)
+  const [ragStatus, setRagStatus] = useState('')
+  const [ragError, setRagError] = useState('')
+  const [expandedGraphResultId, setExpandedGraphResultId] = useState('')
   const [cachedAudioIds, setCachedAudioIds] = useState<Set<string>>(() => new Set())
   const [cachedAudioBookId, setCachedAudioBookId] = useState<string | null>(null)
   const [audioSyncProgress, setAudioSyncProgress] = useState<{ done: number; total: number } | null>(null)
@@ -330,6 +365,11 @@ function App() {
       content: chapterContent(currentChapter),
     })
   }, [currentChapter, currentChapterPosition, selectedBookId])
+  const graphResults = useMemo(
+    () => (searchMode === 'graph' && submittedSearchQuery ? searchGraphPackage(bookPackage, submittedSearchQuery) : []),
+    [bookPackage, searchMode, submittedSearchQuery],
+  )
+  const visibleStatusMessage = shouldShowGlobalStatusMessage(message) ? message : ''
   const previousChapter = currentChapterPosition > 0 ? chapters[currentChapterPosition - 1] : null
   const nextChapter =
     currentChapterPosition >= 0 && currentChapterPosition < chapters.length - 1 ? chapters[currentChapterPosition + 1] : null
@@ -934,6 +974,22 @@ function App() {
     return timeline.find((item) => item.index > segmentIndex)?.startTime ?? timeline.at(-1)?.startTime ?? 0
   }
 
+  function getAudioTimeForSourcePosition(sourcePosition: number): number | null {
+    const timeline = audioManifest?.timeline ?? []
+    const entry = timeline.find(
+      (item) =>
+        typeof item.sourceStart === 'number' &&
+        typeof item.sourceEnd === 'number' &&
+        sourcePosition >= item.sourceStart &&
+        sourcePosition < item.sourceEnd,
+    )
+    if (!entry || typeof entry.sourceStart !== 'number' || typeof entry.sourceEnd !== 'number') return null
+    const startTime = entry.startTime ?? 0
+    const endTime = entry.endTime ?? entry.nextStartTime ?? startTime
+    const ratio = clampAudioRatio((sourcePosition - entry.sourceStart) / Math.max(1, entry.sourceEnd - entry.sourceStart))
+    return startTime + ratio * Math.max(0, endTime - startTime)
+  }
+
   async function playCurrentAudioFromVisiblePosition() {
     if (!audioUrl) {
       await playCurrentAudio()
@@ -941,8 +997,12 @@ function App() {
     window.setTimeout(() => {
       const audio = chapterAudioRef.current
       if (!audio) return
-      const segmentIndex = findCurrentVisibleSpeechSegmentIndex() ?? 0
-      audio.currentTime = Math.min(getAudioTimeForSegment(segmentIndex), Number.isFinite(audio.duration) ? Math.max(0, audio.duration - 0.05) : Number.MAX_SAFE_INTEGER)
+      const sourcePosition = findCurrentVisibleSourcePosition()
+      const audioTime =
+        sourcePosition == null
+          ? getAudioTimeForSegment(findCurrentVisibleSpeechSegmentIndex() ?? 0)
+          : getAudioTimeForSourcePosition(sourcePosition) ?? getAudioTimeForSegment(findCurrentVisibleSpeechSegmentIndex() ?? 0)
+      audio.currentTime = Math.min(audioTime, Number.isFinite(audio.duration) ? Math.max(0, audio.duration - 0.05) : Number.MAX_SAFE_INTEGER)
       void audio.play().catch((error) => setMessage(errorMessage(error)))
     }, 80)
   }
@@ -955,6 +1015,103 @@ function App() {
     window.scrollTo({ top: 0 })
     if (selectedBookId) {
       persistReadingProgress(selectedBookId, chapterId, 0)
+    }
+  }
+
+  function openSearchResult(chapterId: string) {
+    selectChapter(chapterId)
+    setTab('reader')
+    window.scrollTo({ top: 0 })
+  }
+
+  function updateSearchInput(value: string) {
+    setSearchInput(value)
+    setSubmittedSearchQuery('')
+    setRagResults([])
+    setRagAnswer('')
+    setExpandedGraphResultId('')
+    setRagStatus('')
+    setRagError('')
+  }
+
+  function switchSearchMode(nextMode: SearchMode) {
+    if (nextMode === searchMode) return
+    setSearchMode(nextMode)
+    setSubmittedSearchQuery('')
+    setRagResults([])
+    setRagAnswer('')
+    setExpandedGraphResultId('')
+    setRagStatus('')
+    setRagError('')
+  }
+
+  function submitSearch() {
+    const query = searchInput.trim()
+    if (!bookPackage || !query) return
+    setSubmittedSearchQuery(query)
+    if (searchMode === 'rag') {
+      setRagAnswer('')
+      void runRagSearch(query)
+    } else {
+      setRagResults([])
+      setRagAnswer('')
+      setRagStatus('')
+      setRagError('')
+    }
+  }
+
+  function openGraphResult(result: GraphResult) {
+    if (result.chapterId) {
+      openSearchResult(result.chapterId)
+      return
+    }
+    setExpandedGraphResultId((current) => (current === `${result.kind}-${result.id}` ? '' : `${result.kind}-${result.id}`))
+  }
+
+  async function runRagSearch(query: string) {
+    if (!bookPackage) return
+    setRagIsSearching(true)
+    setRagError('')
+    setRagStatus(ragUseSemantic ? '正在请求 Gateway embedding 语义搜索...' : '正在检索本地正文、概要和 chunk...')
+    try {
+      await new Promise((resolve) => window.setTimeout(resolve, 0))
+      if (ragUseSemantic) {
+        const semanticResults = await searchGatewayRag(settings, selectedBookId ?? bookPackage.book.id, query)
+        setRagResults(semanticResults)
+        setRagStatus(`Gateway embedding 检索完成，召回 ${semanticResults.length} 个相关章节。`)
+        return
+      }
+      const results = searchRagPackage(bookPackage, query)
+      setRagResults(results)
+      setRagStatus(`检索完成，召回 ${results.length} 个相关章节。`)
+    } catch (error) {
+      setRagError(errorMessage(error) || '搜索失败。')
+      const fallbackResults = searchRagPackage(bookPackage, query)
+      setRagResults(fallbackResults)
+      setRagStatus(`Gateway embedding 检索失败，已用关键词检索兜底，召回 ${fallbackResults.length} 个相关章节。`)
+    } finally {
+      setRagIsSearching(false)
+    }
+  }
+
+  async function generateRagAnswer() {
+    const query = submittedSearchQuery || searchInput.trim()
+    if (!bookPackage || !query) return
+    setRagIsGeneratingAnswer(true)
+    setRagError('')
+    setRagStatus('正在调用 Gateway RAG + LLM 生成答案...')
+    try {
+      const response = await gatewayGenerateRagAnswer(settings, selectedBookId ?? bookPackage.book.id, query)
+      if (response.results.length > 0) {
+        setRagResults(response.results)
+      }
+      setRagAnswer(response.answer)
+      setRagStatus('答案已生成。')
+    } catch (error) {
+      setRagError(errorMessage(error) || '生成答案失败。')
+      setRagStatus('')
+    } finally {
+      setRagIsGeneratingAnswer(false)
     }
   }
 
@@ -1258,6 +1415,30 @@ function App() {
     return nearestVisible?.index ?? null
   }
 
+  function findCurrentVisibleSourcePosition(): number | null {
+    const viewportBottom = window.innerHeight || document.documentElement.clientHeight
+    const viewportCenter = viewportBottom * 0.45
+    const targets = Array.from(document.querySelectorAll('[data-source-start][data-source-end]'))
+    let nearest: { position: number; distance: number } | null = null
+
+    for (const target of targets) {
+      if (!(target instanceof HTMLElement)) continue
+      const sourceStart = Number(target.dataset.sourceStart)
+      const sourceEnd = Number(target.dataset.sourceEnd)
+      if (!Number.isFinite(sourceStart) || !Number.isFinite(sourceEnd)) continue
+
+      const bounds = target.getBoundingClientRect()
+      if (bounds.bottom < 0 || bounds.top > viewportBottom) continue
+      if (bounds.top <= viewportCenter && bounds.bottom >= viewportCenter) return Math.floor((sourceStart + sourceEnd) / 2)
+
+      const segmentCenter = (bounds.top + bounds.bottom) / 2
+      const distance = Math.abs(segmentCenter - viewportCenter)
+      if (!nearest || distance < nearest.distance) nearest = { position: Math.floor((sourceStart + sourceEnd) / 2), distance }
+    }
+
+    return nearest?.position ?? null
+  }
+
   async function playSpeechSegment(segmentIndex: number) {
     const segment = speechSegmentsRef.current[segmentIndex]
     if (!segment) {
@@ -1524,8 +1705,8 @@ function App() {
       {tab !== 'reader' ? (
         <header className="top-bar">
           <div>
-            <h1>{tab === 'library' ? '书库' : '设置'}</h1>
-            <p>{tab === 'library' ? `${books.length} 本 · ${connectionLabel(connectionState)}` : connectionLabel(connectionState)}</p>
+            <h1>{tab === 'library' ? '书库' : tab === 'search' ? '搜索' : '设置'}</h1>
+            <p>{tab === 'library' ? `${books.length} 本 · ${connectionLabel(connectionState)}` : tab === 'search' ? (selectedBook?.title ?? '未选择书籍') : connectionLabel(connectionState)}</p>
           </div>
           <button className="icon-button" type="button" onClick={() => void refreshBooks()} disabled={loadingBooks}>
             刷新
@@ -1533,7 +1714,7 @@ function App() {
         </header>
       ) : null}
 
-      {message && tab !== 'reader' ? <div className={`status-line status-${connectionState}`}>{message}</div> : null}
+      {visibleStatusMessage && tab !== 'reader' ? <div className={`status-line status-${connectionState}`}>{visibleStatusMessage}</div> : null}
 
       {tab === 'library' ? (
         <section className="library-page">
@@ -1829,7 +2010,7 @@ function App() {
           )}
         </section>
       ) : (
-        <section className="settings-page">
+        <section className="settings-page" hidden={tab !== 'settings'}>
           <section className="settings-panel">
             <label>
               <span>Gateway</span>
@@ -1942,6 +2123,115 @@ function App() {
         </section>
       )}
 
+      {tab === 'search' ? (
+        <section className="search-page">
+          <section className="search-panel">
+            <div className="section-title">
+              <h2>搜索</h2>
+              {bookPackage ? (
+                <span>
+                  {packageChapters(bookPackage).length} 章 · chunk {getEmbeddingChunks(bookPackage).length} · 图谱 {getKnowledgeGraphEntities(bookPackage).length}/{getKnowledgeGraphRelations(bookPackage).length}
+                </span>
+              ) : (
+                <span>未加载</span>
+              )}
+            </div>
+            {!bookPackage ? (
+              <div className="empty-state">
+                <p>请先在书库选择一本书并加载完整数据包。</p>
+                <button type="button" onClick={() => switchTab('library')}>回到书库</button>
+              </div>
+            ) : (
+              <>
+                <div className="segmented-control search-mode-tabs" aria-label="搜索类型">
+                  <button className={searchMode === 'rag' ? 'active' : ''} type="button" onClick={() => switchSearchMode('rag')}>RAG</button>
+                  <button className={searchMode === 'graph' ? 'active' : ''} type="button" onClick={() => switchSearchMode('graph')}>知识图谱</button>
+                </div>
+                <div className="search-input-row">
+                  <input
+                    className="search-input"
+                    value={searchInput}
+                    onChange={(event) => updateSearchInput(event.target.value)}
+                    onKeyDown={(event) => {
+                      if (event.key === 'Enter') submitSearch()
+                    }}
+                    placeholder={searchMode === 'rag' ? '问一个剧情问题，或输入关键词' : '搜索人物、地点、关系、证据'}
+                  />
+                  <button type="button" onClick={submitSearch} disabled={ragIsSearching || !searchInput.trim()}>
+                    {ragIsSearching ? '检索中' : '检索'}
+                  </button>
+                </div>
+                {searchMode === 'rag' ? (
+                  <>
+                    <label className="search-toggle">
+                      <input
+                        type="checkbox"
+                        checked={ragUseSemantic}
+                        onChange={(event) => setRagUseSemantic(event.target.checked)}
+                      />
+                      <span>调用 embedding 语义召回</span>
+                    </label>
+                    {ragStatus ? <p className="muted-text search-status">{ragStatus}</p> : null}
+                    <p className="muted-text search-status">
+                      {ragUseSemantic
+                        ? '默认通过 Gateway 调用 embedding 语义搜索，移动端不下载向量。'
+                        : '当前仅使用本地关键词检索，未调用 embedding 服务生成查询向量。'}
+                    </p>
+                    {ragError ? <p className="search-error">{ragError}</p> : null}
+                    {ragAnswer ? (
+                      <article className="search-answer-card">
+                        <strong>生成答案</strong>
+                        <p>{ragAnswer}</p>
+                      </article>
+                    ) : null}
+                    <div className="search-results">
+                      {ragResults.length > 0 ? (
+                        <button
+                          className="secondary-button search-answer-button"
+                          type="button"
+                          onClick={() => void generateRagAnswer()}
+                          disabled={ragIsGeneratingAnswer}
+                        >
+                          {ragIsGeneratingAnswer ? '生成中' : '结合 RAG 生成答案'}
+                        </button>
+                      ) : null}
+                      {ragResults.map((result) => (
+                        <button className="search-result" key={`${result.source}-${result.chapterId}`} type="button" onClick={() => openSearchResult(result.chapterId)}>
+                          <strong>{result.chapterIndex}. {result.chapterTitle}</strong>
+                          <small>{sourceLabel(result.source)} · score {result.score.toFixed(1)}</small>
+                          <span>{result.snippet}</span>
+                        </button>
+                      ))}
+                      {searchInput && !submittedSearchQuery && !ragIsSearching && ragResults.length === 0 ? <p className="muted-text">点击检索开始搜索。</p> : null}
+                      {submittedSearchQuery && !ragIsSearching && ragResults.length === 0 ? <p className="muted-text">没有召回相关章节，可以换一个更接近原文或概要的关键词。</p> : null}
+                    </div>
+                  </>
+                ) : (
+                  <div className="search-results">
+                    {graphResults.map((result) => (
+                      <button className="search-result graph-result" key={`${result.kind}-${result.id}`} type="button" onClick={() => openGraphResult(result)}>
+                        <strong>{result.title}</strong>
+                        <small>{result.subtitle}</small>
+                        <span>{result.snippet}</span>
+                        {expandedGraphResultId === `${result.kind}-${result.id}` && result.details?.length ? (
+                          <div className="graph-detail-list">
+                            {result.details.map((detail, index) => (
+                              <p key={`${result.id}-detail-${index}`}>{detail}</p>
+                            ))}
+                          </div>
+                        ) : null}
+                      </button>
+                    ))}
+                    {searchInput && !submittedSearchQuery ? <p className="muted-text">点击检索开始搜索。</p> : null}
+                    {submittedSearchQuery && graphResults.length === 0 ? <p className="muted-text">没有匹配的实体、关系或证据。</p> : null}
+                  </div>
+                )}
+              </>
+            )}
+          </section>
+        </section>
+      ) : null}
+
       {audioUrl ? (
         <audio
           className="persistent-audio-player"
@@ -1969,12 +2259,366 @@ function App() {
         <button className={tab === 'reader' ? 'active' : ''} type="button" onClick={() => switchTab('reader')}>
           阅读
         </button>
+        <button className={tab === 'search' ? 'active' : ''} type="button" onClick={() => switchTab('search')}>
+          搜索
+        </button>
         <button className={tab === 'settings' ? 'active' : ''} type="button" onClick={() => switchTab('settings')}>
           设置
         </button>
       </nav>
     </main>
   )
+}
+
+function sourceLabel(source: RagResult['source']) {
+  if (source === 'chunk') return '正文片段'
+  if (source === 'summary') return '章节概要'
+  return '章节全文'
+}
+
+async function searchGatewayRag(settings: GatewaySettings, bookId: string, query: string): Promise<RagResult[]> {
+  const response = await gatewayPost(settings, '/ai/search', {
+    bookId,
+    query,
+    limit: 20,
+  })
+  const results = Array.isArray(response.results) ? response.results.filter(isRecord) : []
+  return results
+    .map((result) => ({
+      chapterId: readString(result.chapterId),
+      chapterIndex: readNumber(result.chapterIndex) ?? 0,
+      chapterTitle: readString(result.chapterTitle) || '未命名章节',
+      snippet: readString(result.snippet),
+      source: 'chunk' as const,
+      score: readNumber(result.score) ?? 0,
+    }))
+    .filter((result) => Boolean(result.chapterId))
+}
+
+async function gatewayGenerateRagAnswer(settings: GatewaySettings, bookId: string, query: string): Promise<{ answer: string; results: RagResult[] }> {
+  const response = await gatewayPost(settings, '/ai/rag-answer', {
+    bookId,
+    query,
+    limit: 10,
+  })
+  const results = Array.isArray(response.results) ? response.results.filter(isRecord) : []
+  return {
+    answer: readString(response.answer),
+    results: results
+      .map((result) => ({
+        chapterId: readString(result.chapterId),
+        chapterIndex: readNumber(result.chapterIndex) ?? 0,
+        chapterTitle: readString(result.chapterTitle) || '未命名章节',
+        snippet: readString(result.snippet),
+        source: 'chunk' as const,
+        score: readNumber(result.score) ?? 0,
+      }))
+      .filter((result) => Boolean(result.chapterId)),
+  }
+}
+
+function normalizeSearchText(value: string) {
+  return value.trim().toLowerCase()
+}
+
+function getSearchTerms(query: string) {
+  const normalized = normalizeSearchText(query)
+  if (!normalized) return []
+  const terms = new Set<string>([normalized])
+  for (const term of normalized.split(/[\s,，.。!！?？:：;；、"'“”‘’《》()[\]（）]+/).filter(Boolean)) {
+    terms.add(term)
+    for (const part of term.split(/[的是了和与及或在把被都谁什么哪些哪位为何为什么怎么如何吗呢啊]+/).filter(Boolean)) {
+      terms.add(part)
+      if (/[\u3400-\u9fff]/.test(part) && part.length >= 4) {
+        for (let size = 4; size >= 2; size -= 1) {
+          for (let index = 0; index <= part.length - size; index += 1) {
+            terms.add(part.slice(index, index + size))
+          }
+        }
+      }
+    }
+  }
+  return Array.from(terms).filter((term) => term.length >= 2)
+}
+
+function scoreSearchText(text: string, query: string) {
+  const normalizedText = normalizeSearchText(text)
+  const normalizedQuery = normalizeSearchText(query)
+  if (!normalizedText || !normalizedQuery) return 0
+
+  let score = normalizedText.includes(normalizedQuery) ? 6 : 0
+  for (const term of getSearchTerms(query)) {
+    let index = normalizedText.indexOf(term)
+    while (index >= 0) {
+      score += Math.min(4, term.length)
+      index = normalizedText.indexOf(term, index + term.length)
+    }
+  }
+  return score
+}
+
+function findSnippet(text: string, query: string) {
+  const normalizedText = text.replace(/\s+/g, ' ')
+  const lowerText = normalizedText.toLowerCase()
+  let matchedQuery = query
+  let index = lowerText.indexOf(query.toLowerCase())
+  if (index < 0) {
+    for (const term of getSearchTerms(query)) {
+      index = lowerText.indexOf(term)
+      if (index >= 0) {
+        matchedQuery = term
+        break
+      }
+    }
+  }
+  if (index < 0) return normalizedText.slice(0, 120)
+  const start = Math.max(0, index - 48)
+  const end = Math.min(normalizedText.length, index + matchedQuery.length + 96)
+  return `${start > 0 ? '...' : ''}${normalizedText.slice(start, end)}${end < normalizedText.length ? '...' : ''}`
+}
+
+function searchRagPackage(bookPackage: BookPackage, query: string, queryEmbedding: number[] | null = null): RagResult[] {
+  const chapters = packageChapters(bookPackage)
+  const chapterById = new Map(chapters.map((chapter, index) => [chapter.id, { chapter, index }]))
+  const candidates = new Map<string, RagResult>()
+
+  function addCandidate(result: RagResult) {
+    const current = candidates.get(result.chapterId)
+    if (!current || result.score > current.score) candidates.set(result.chapterId, result)
+  }
+
+  for (const chunk of getEmbeddingChunks(bookPackage)) {
+    const chapterId = readString(chunk.chapterId)
+    const text = readString(chunk.text)
+    if (!chapterId || !text) continue
+    if (queryEmbedding?.length) {
+      const chunkEmbedding = readEmbeddingVector(chunk)
+      if (chunkEmbedding.length === queryEmbedding.length) {
+        const semanticScore = cosineSimilarity(queryEmbedding, chunkEmbedding)
+        if (semanticScore > 0) {
+          const match = chapterById.get(chapterId)
+          if (match) {
+            addCandidate({
+              chapterId,
+              chapterIndex: readNumber(chunk.chapterIndex) ?? match.chapter.index ?? match.chapter.chapterIndex ?? match.index + 1,
+              chapterTitle: match.chapter.title,
+              snippet: findSnippet(text, query),
+              source: 'chunk',
+              score: semanticScore * 100 + 40,
+            })
+          }
+        }
+      }
+    }
+    const score = scoreSearchText(text, query)
+    if (!score) continue
+    const match = chapterById.get(chapterId)
+    if (!match) continue
+    addCandidate({
+      chapterId,
+      chapterIndex: readNumber(chunk.chapterIndex) ?? match.chapter.index ?? match.chapter.chapterIndex ?? match.index + 1,
+      chapterTitle: match.chapter.title,
+      snippet: findSnippet(text, query),
+      source: 'chunk',
+      score: score + 20,
+    })
+  }
+
+  for (const summary of getSummaries(bookPackage)) {
+    const chapterId = readString(summary.chapterId) || readString(summary.id)
+    if (!chapterId) continue
+    const match = chapterById.get(chapterId)
+    if (!match) continue
+    const haystack = [match.chapter.title, readString(summary.short), readString(summary.detail), readString(summary.summary), readString(summary.description), readStringArray(summary.keyPoints).join(' ')].join('\n')
+    const score = scoreSearchText(haystack, query)
+    if (!score) continue
+    addCandidate({
+      chapterId,
+      chapterIndex: match.chapter.index ?? match.chapter.chapterIndex ?? match.index + 1,
+      chapterTitle: match.chapter.title,
+      snippet: findSnippet(haystack, query),
+      source: 'summary',
+      score: score + 12,
+    })
+  }
+
+  chapters.forEach((chapter, index) => {
+    const content = chapterContent(chapter)
+    const score = scoreSearchText(`${chapter.title}\n${content}`, query)
+    if (!score) return
+    addCandidate({
+      chapterId: chapter.id,
+      chapterIndex: chapter.index ?? chapter.chapterIndex ?? index + 1,
+      chapterTitle: chapter.title,
+      snippet: findSnippet(content, query),
+      source: 'chapter',
+      score,
+    })
+  })
+
+  return Array.from(candidates.values())
+    .sort((left, right) => right.score - left.score || left.chapterIndex - right.chapterIndex)
+    .slice(0, 20)
+}
+
+function searchGraphPackage(bookPackage: BookPackage | null, query: string): GraphResult[] {
+  if (!bookPackage) return []
+  const entities = getKnowledgeGraphEntities(bookPackage)
+  const relations = getKnowledgeGraphRelations(bookPackage)
+  const entityMentions = getKnowledgeGraphMentions(bookPackage, 'entityMentions')
+  const relationMentions = getKnowledgeGraphMentions(bookPackage, 'relationMentions')
+  const entityById = new Map(entities.map((entity) => [readString(entity.id), entity]))
+  const chapterById = new Map(packageChapters(bookPackage).map((chapter, index) => [chapter.id, { chapter, index }]))
+
+  const entityResults = entities
+    .map((entity) => {
+      const id = readString(entity.id)
+      const name = readString(entity.name) || readString(entity.normalizedName) || '未知实体'
+      const aliases = readStringArray(entity.aliases)
+      const names = [name, readString(entity.normalizedName), ...aliases].filter(Boolean)
+      const exactNameBonus = names.some((entry) => normalizeSearchText(entry) === normalizeSearchText(query)) ? 1000 : 0
+      const nameScore = scoreSearchText(names.join('\n'), query)
+      const descriptionScore = scoreSearchText([readString(entity.type), readString(entity.description)].join('\n'), query)
+      const score = exactNameBonus + nameScore * 20 + descriptionScore
+      if (!score) return null
+      const mentions = entityMentions.filter((mention) => readString(mention.entityId) === id)
+      const relatedRelations = relations.filter((relation) => readString(relation.sourceEntityId) === id || readString(relation.targetEntityId) === id)
+      const relationCount = relatedRelations.length
+      const mentionCount = mentions.length || readNumber(entity.mentionCount) || readNumber(entity.mentions)
+      const detailLines = [
+        aliases.length ? `别名：${aliases.slice(0, 24).join('、')}${aliases.length > 24 ? '...' : ''}` : '',
+        readString(entity.description) ? `说明：${readString(entity.description)}` : '',
+        relatedRelations.length
+          ? `相关关系：${relatedRelations.slice(0, 8).map((relation) => {
+              const sourceName = readString(entityById.get(readString(relation.sourceEntityId))?.name) || '未知实体'
+              const targetName = readString(entityById.get(readString(relation.targetEntityId))?.name) || '未知实体'
+              return `${sourceName} - ${readString(relation.type) || '关系'} - ${targetName}`
+            }).join('；')}${relatedRelations.length > 8 ? '...' : ''}`
+          : '',
+        ...mentions.slice(0, 3).map((mention) => `证据：第 ${readNumber(mention.chapterIndex) ?? '?'} 章，${readString(mention.evidence)}`),
+      ].filter(Boolean)
+      return {
+        kind: 'entity' as const,
+        id: id || name,
+        title: name,
+        subtitle: `${readString(entity.type) || '实体'} · 出现 ${mentionCount ?? 0} 次 · 关系 ${relationCount} 条`,
+        snippet: readString(entity.description) || readString(mentions.find((mention) => readString(mention.evidence))?.evidence) || '命中实体名称或别名。',
+        details: detailLines,
+        score,
+      }
+    })
+    .filter((result): result is GraphResult & { score: number } => Boolean(result))
+
+  const relationResults = relations
+    .map((relation) => {
+      const id = readString(relation.id)
+      const source = entityById.get(readString(relation.sourceEntityId))
+      const target = entityById.get(readString(relation.targetEntityId))
+      const sourceName = readString(source?.name) || '未知实体'
+      const targetName = readString(target?.name) || '未知实体'
+      const haystack = [sourceName, targetName, readString(relation.type), readString(relation.description)].join('\n')
+      const score = scoreSearchText(haystack, query)
+      if (!score) return null
+      const mentions = relationMentions.filter((mention) => readString(mention.relationId) === id)
+      const detailLines = [
+        readString(relation.description) ? `说明：${readString(relation.description)}` : '',
+        ...mentions.slice(0, 3).map((mention) => `证据：第 ${readNumber(mention.chapterIndex) ?? '?'} 章，${readString(mention.evidence)}`),
+      ].filter(Boolean)
+      return {
+        kind: 'relation' as const,
+        id: id || `${sourceName}-${targetName}`,
+        title: `${sourceName} → ${targetName}`,
+        subtitle: `${readString(relation.type) || '关系'} · 证据 ${mentions.length} 条`,
+        snippet: readString(relation.description) || readString(mentions.find((mention) => readString(mention.evidence))?.evidence) || '命中关系名称或端点。',
+        details: detailLines,
+        score,
+      }
+    })
+    .filter((result): result is GraphResult & { score: number } => Boolean(result))
+
+  const evidenceResults = [...entityMentions, ...relationMentions]
+    .map((mention) => {
+      const evidence = readString(mention.evidence)
+      const score = scoreSearchText(evidence, query)
+      if (!score) return null
+      const chapterId = readString(mention.chapterId)
+      const match = chapterById.get(chapterId)
+      return {
+        kind: 'evidence' as const,
+        id: readString(mention.id) || `${chapterId}-${evidence.slice(0, 16)}`,
+        title: `${readNumber(mention.chapterIndex) ?? match?.chapter.index ?? match?.index ?? ''}. ${match?.chapter.title ?? '图谱证据'}`,
+        subtitle: '图谱证据',
+        snippet: findSnippet(evidence, query),
+        chapterId,
+        chapterIndex: readNumber(mention.chapterIndex) ?? match?.chapter.index ?? match?.index,
+        score,
+      }
+    })
+    .filter((result): result is GraphResult & { score: number } => Boolean(result))
+
+  return [...entityResults, ...relationResults, ...evidenceResults]
+    .sort((left, right) => right.score - left.score)
+    .slice(0, 30)
+}
+
+function getSummaries(bookPackage: BookPackage) {
+  const summaries = bookPackage.summaries
+  if (Array.isArray(summaries)) return summaries.filter(isRecord)
+  if (isRecord(summaries)) return Object.values(summaries).filter(isRecord)
+  return []
+}
+
+function getEmbeddingChunks(bookPackage: BookPackage) {
+  const embeddings = bookPackage.embeddings
+  if (!isRecord(embeddings)) return []
+  return Array.isArray(embeddings.chunks) ? embeddings.chunks.filter(isRecord) : []
+}
+
+function readEmbeddingVector(chunk: Record<string, unknown>) {
+  const value = chunk.embedding ?? chunk.vector ?? chunk.values
+  return Array.isArray(value) ? value.filter((entry): entry is number => typeof entry === 'number' && Number.isFinite(entry)) : []
+}
+
+function cosineSimilarity(left: number[], right: number[]) {
+  let dot = 0
+  let leftNorm = 0
+  let rightNorm = 0
+  for (let index = 0; index < left.length; index += 1) {
+    const leftValue = left[index] ?? 0
+    const rightValue = right[index] ?? 0
+    dot += leftValue * rightValue
+    leftNorm += leftValue * leftValue
+    rightNorm += rightValue * rightValue
+  }
+  if (!leftNorm || !rightNorm) return 0
+  return dot / (Math.sqrt(leftNorm) * Math.sqrt(rightNorm))
+}
+
+function getKnowledgeGraphEntities(bookPackage: BookPackage) {
+  const graph = bookPackage.knowledgeGraph
+  return isRecord(graph) && Array.isArray(graph.entities) ? graph.entities.filter(isRecord) : []
+}
+
+function getKnowledgeGraphRelations(bookPackage: BookPackage) {
+  const graph = bookPackage.knowledgeGraph
+  return isRecord(graph) && Array.isArray(graph.relations) ? graph.relations.filter(isRecord) : []
+}
+
+function getKnowledgeGraphMentions(bookPackage: BookPackage, key: 'entityMentions' | 'relationMentions') {
+  const graph = bookPackage.knowledgeGraph
+  return isRecord(graph) && Array.isArray(graph[key]) ? graph[key].filter(isRecord) : []
+}
+
+function readString(value: unknown) {
+  return typeof value === 'string' ? value : ''
+}
+
+function readStringArray(value: unknown) {
+  return Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === 'string') : []
+}
+
+function readNumber(value: unknown) {
+  return typeof value === 'number' && Number.isFinite(value) ? value : undefined
 }
 
 function TextContent({ text, activeEntry }: { text: string; activeEntry?: AudioTimelineEntry | null }) {
@@ -2024,6 +2668,8 @@ function SpeechTextContent({
             <span
               className={segment.id === activeSegmentId ? 'speech-segment active' : 'speech-segment'}
               data-speech-segment-id={segment.id}
+              data-source-start={segment.startChar}
+              data-source-end={segment.endChar}
               key={segment.id}
             >
               {segment.text}
@@ -2154,6 +2800,47 @@ async function gatewayFetch(settings: GatewaySettings, path: string) {
 
   const response = await fetch(`${baseUrl}${path}`, {
     headers,
+  })
+  const body = (await response.json().catch(() => ({}))) as { error?: { message?: string } }
+  if (!response.ok) {
+    throw new Error(body.error?.message || `Gateway HTTP ${response.status}`)
+  }
+  return body as Record<string, unknown>
+}
+
+async function gatewayPost(settings: GatewaySettings, path: string, data: Record<string, unknown>) {
+  const baseUrl = settings.baseUrl.trim().replace(/\/+$/, '')
+  if (!baseUrl || baseUrl === 'https:') {
+    throw new Error('请填写 Gateway 地址')
+  }
+  if (!settings.token.trim()) {
+    throw new Error('请填写 Token')
+  }
+
+  const headers = {
+    authorization: `Bearer ${settings.token.trim()}`,
+    'content-type': 'application/json',
+    'x-device-name': settings.deviceName.trim() || 'Android Phone',
+  }
+  if (Capacitor.isNativePlatform()) {
+    const response = await CapacitorHttp.post({
+      headers,
+      readTimeout: 120000,
+      connectTimeout: 15000,
+      url: `${baseUrl}${path}`,
+      data,
+    })
+    const body = typeof response.data === 'string' ? parseJsonBody(response.data) : response.data
+    if (response.status < 200 || response.status >= 300) {
+      throw new Error(body?.error?.message || `Gateway HTTP ${response.status}`)
+    }
+    return body as Record<string, unknown>
+  }
+
+  const response = await fetch(`${baseUrl}${path}`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(data),
   })
   const body = (await response.json().catch(() => ({}))) as { error?: { message?: string } }
   if (!response.ok) {
@@ -2927,6 +3614,11 @@ function formatBytes(sizeBytes?: number) {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
+}
+
+function shouldShowGlobalStatusMessage(message: string) {
+  if (!message) return false
+  return !['数据包已加载', '完整数据包已导入'].includes(message)
 }
 
 function errorMessage(error: unknown) {

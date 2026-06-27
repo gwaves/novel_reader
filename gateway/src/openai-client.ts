@@ -3,7 +3,7 @@ import { GatewayHttpError } from './errors.js'
 
 export async function forwardChatCompletion(config: GatewayConfig, body: unknown) {
   const upstream = config.upstreams.ai
-  if (!upstream.baseUrl || !upstream.apiKey) {
+  if (!upstream.baseUrl) {
     throw new GatewayHttpError(503, 'ai_not_configured', 'OpenAI chat upstream is not configured.')
   }
   if (!isRecord(body) || !Array.isArray(body.messages)) {
@@ -39,6 +39,18 @@ export async function forwardEmbeddings(config: GatewayConfig, body: unknown) {
   })
 }
 
+export async function createEmbedding(config: GatewayConfig, input: string) {
+  const response = await forwardEmbeddings(config, { input })
+  if (!isRecord(response) || !Array.isArray(response.data)) {
+    throw new GatewayHttpError(502, 'embedding_upstream_invalid_response', 'OpenAI-compatible embedding upstream returned invalid response.')
+  }
+  const first = response.data[0]
+  if (!isRecord(first) || !Array.isArray(first.embedding)) {
+    throw new GatewayHttpError(502, 'embedding_upstream_invalid_response', 'OpenAI-compatible embedding upstream returned no embedding.')
+  }
+  return first.embedding.filter((value): value is number => typeof value === 'number' && Number.isFinite(value))
+}
+
 async function postOpenAiJson({
   baseUrl,
   apiKey,
@@ -48,7 +60,7 @@ async function postOpenAiJson({
   errorCode,
 }: {
   baseUrl: string
-  apiKey: string
+  apiKey?: string
   path: string
   body: Record<string, unknown>
   timeoutMs: number
@@ -57,7 +69,7 @@ async function postOpenAiJson({
   const response = await fetch(joinUrl(baseUrl, path), {
     method: 'POST',
     headers: {
-      authorization: `Bearer ${apiKey}`,
+      ...(apiKey ? { authorization: `Bearer ${apiKey}` } : {}),
       'content-type': 'application/json',
     },
     body: JSON.stringify(body),
