@@ -35,7 +35,7 @@ button:disabled {
 
 .app-shell {
   min-height: 100vh;
-  padding: calc(env(safe-area-inset-top) + 16px) 16px calc(env(safe-area-inset-bottom) + 88px);
+  padding: calc(max(env(safe-area-inset-top), 32px) + 16px) 16px calc(env(safe-area-inset-bottom) + 88px);
 }
 
 .top-bar {
@@ -329,6 +329,10 @@ button:disabled {
   gap: 12px;
 }
 
+.reader-page.has-audio {
+  padding-bottom: 112px;
+}
+
 .reader-toolbar {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto auto;
@@ -469,6 +473,11 @@ button:disabled {
   color: #3a2a12;
   font-size: 14px;
   line-height: 1.5;
+  display: -webkit-box;
+  max-height: 6em;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 4;
 }
 
 .reading-surface p {

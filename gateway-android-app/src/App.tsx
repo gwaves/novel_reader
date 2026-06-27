@@ -850,7 +850,7 @@ function App() {
           </div>
         </section>
       ) : tab === 'reader' ? (
-        <section className="reader-page">
+        <section className={audioUrl ? 'reader-page has-audio' : 'reader-page'}>
           {!bookPackage || !currentChapter ? (
             <div className="empty-state reader-empty">
               <p>请选择一本书。</p>
@@ -1224,6 +1224,7 @@ async function importPackageToNativeStore(bookId: string, filePath: string, expe
   return NativeAudio.importPackage({
     bookId,
     filePath,
+    expectedChapterCount,
   })
 }
 
