@@ -402,6 +402,7 @@ async function runStep({ manifestPath, manifest, step, options, config, dryRun }
         '--resume',
         ...optionalNumberArgs(options, [
           ['directorConcurrency', '--director-concurrency'],
+          ['llmChapters', '--llm-chapters'],
           ['minBatchSize', '--min-batch-size'],
           ['ttsConcurrency', '--tts-concurrency'],
           ['ttsChapters', '--tts-chapters'],
