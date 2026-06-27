@@ -28,7 +28,7 @@ Novel Reader 离线多角色 TTS 导演脚本工具
   audit-script                 生成导演脚本质量报告
   validate-script              校验已有导演脚本 JSON
   synth                        按导演脚本调用 MIMO TTS，输出 MP3
-  batch-pipeline               按流水线批量生成多章音频：LLM 串行，TTS 并行
+  batch-pipeline               按流水线批量生成多章音频：LLM 可配并发，TTS 并行
 
 参数:
   --config <path>              配置文件路径，默认 ~/.novel_reader/tts-director.config.json
@@ -45,6 +45,7 @@ Novel Reader 离线多角色 TTS 导演脚本工具
   --concurrency <number>       draft-script 的 LLM 并发数，或 synth 的 TTS 并发数，覆盖配置文件
   --batch-size <number>        draft-script 每批提交给模型的预切分片段数
   --director-concurrency <n>   batch-pipeline 单章 LLM 批次并发，默认取 director.concurrency
+  --llm-chapters <number>      batch-pipeline 同时进行 LLM 导演脚本生成的章节数，默认 1
   --min-batch-size <number>    batch-pipeline LLM 失败降级后的最小批大小，默认 6
   --tts-concurrency <number>   batch-pipeline 单章 TTS 片段并发，默认取 tts.concurrency
   --tts-chapters <number>      batch-pipeline 同时进行 TTS 的章节数，默认 2
@@ -1264,6 +1265,9 @@ async function runBatchPipeline(config, args) {
   const ttsChapterConcurrency = args['tts-chapters']
     ? Math.max(1, Math.floor(Number(args['tts-chapters'])))
     : config.batchPipeline.ttsChapterConcurrency
+  const llmChapterConcurrency = args['llm-chapters']
+    ? Math.max(1, Math.floor(Number(args['llm-chapters'])))
+    : 1
 
   const resume = args.resume === true
   if (!Number.isFinite(initialBatchSize) || initialBatchSize < 1) throw new Error('--batch-size 必须是大于等于 1 的整数。')
@@ -1271,6 +1275,7 @@ async function runBatchPipeline(config, args) {
   if (!Number.isFinite(minBatchSize) || minBatchSize < 1) throw new Error('--min-batch-size 必须是大于等于 1 的整数。')
   if (!Number.isFinite(ttsConcurrency) || ttsConcurrency < 1) throw new Error('--tts-concurrency 必须是大于等于 1 的整数。')
   if (!Number.isFinite(ttsChapterConcurrency) || ttsChapterConcurrency < 1) throw new Error('--tts-chapters 必须是大于等于 1 的整数。')
+  if (!Number.isFinite(llmChapterConcurrency) || llmChapterConcurrency < 1) throw new Error('--llm-chapters 必须是大于等于 1 的整数。')
 
   const firstChapter = getChapter(config, bookId, chapters[0])
   const outRoot = args['out-root']
@@ -1286,7 +1291,7 @@ async function runBatchPipeline(config, args) {
   let adaptiveDirectorConcurrency = initialDirectorConcurrency
 
   console.log(`🚂 批量流水线启动：章节 ${chapters.join(', ')}`)
-  console.log(`   LLM 阶段：章节串行，单章批次并发 ${initialDirectorConcurrency}，batchSize ${initialBatchSize}`)
+  console.log(`   LLM 阶段：章节并发 ${llmChapterConcurrency}，单章批次并发 ${initialDirectorConcurrency}，batchSize ${initialBatchSize}`)
   console.log(`   TTS 阶段：章节并发 ${ttsChapterConcurrency}，单章片段并发 ${ttsConcurrency}`)
   if (resume) console.log('   断点续跑：已完成 MP3 会跳过，已通过校验脚本会复用。')
 
@@ -1356,12 +1361,12 @@ async function runBatchPipeline(config, args) {
     throw lastError
   }
 
-  for (const chapterIndex of chapters) {
+  await runConcurrent(chapters, llmChapterConcurrency, async (chapterIndex) => {
     const { scriptPath, audioDir, finalAudioPath } = getChapterOutputPaths(outRoot, chapterIndex, config.tts.finalFormat)
     if (resume && existsSync(finalAudioPath)) {
       console.log(`⏭️  第 ${chapterIndex} 章已存在 MP3，跳过：${finalAudioPath}`)
       results.push({ chapterIndex, scriptPath, audioDir, status: 'skipped-audio-exists', elapsedSeconds: 0 })
-      continue
+      return
     }
 
     let script = null
@@ -1380,7 +1385,7 @@ async function runBatchPipeline(config, args) {
     const auditResult = writeAuditReport(config, scriptPath, script)
     audits.push({ chapterIndex, auditPath: auditResult.auditPath, warnings: auditResult.audit.warnings })
     launchSynth(chapterIndex, scriptPath, audioDir)
-  }
+  })
 
   console.log('\n⏳ 所有章节已完成 LLM 阶段，等待剩余 TTS 收尾。')
   const outcomes = await Promise.all(synthPromises)
@@ -1395,7 +1400,7 @@ async function runBatchPipeline(config, args) {
     bookId,
     chapters,
     outRoot,
-    director: { limit: requestedLimit, allowPartial: args['allow-partial'] === true, initialBatchSize, initialConcurrency: initialDirectorConcurrency, finalBatchSize: adaptiveBatchSize, finalConcurrency: adaptiveDirectorConcurrency, minBatchSize },
+    director: { limit: requestedLimit, allowPartial: args['allow-partial'] === true, initialBatchSize, initialConcurrency: initialDirectorConcurrency, finalBatchSize: adaptiveBatchSize, finalConcurrency: adaptiveDirectorConcurrency, minBatchSize, chapterConcurrency: llmChapterConcurrency },
     tts: { segmentConcurrency: ttsConcurrency, chapterConcurrency: ttsChapterConcurrency },
     results,
     audits,
