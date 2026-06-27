@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { homedir } from 'node:os'
 import { createHash } from 'node:crypto'
@@ -10,6 +10,7 @@ const DEFAULT_CONFIG_PATH = join(homedir(), '.novel_reader', 'tts-director.confi
 const DEFAULT_MAIN_DB_PATH = join(homedir(), '.novel_reader', 'novel_reader.sqlite')
 const SCRIPT_KIND = 'novel-reader-tts-director-script'
 const ALLOWED_SEGMENT_TYPES = new Set(['narration', 'dialogue', 'thought', 'stage'])
+const DEFAULT_TTS_MAX_CHARACTERS_PER_REQUEST = 120
 
 function printHelp() {
   console.log(`
@@ -158,8 +159,14 @@ function loadConfig(configPath) {
       finalFormat: config.tts?.finalFormat || 'mp3',
       mp3Bitrate: config.tts?.mp3Bitrate || '96k',
       silenceSeconds: finiteNumber(config.tts?.silenceSeconds, 0.35),
+      maxSilenceSeconds: finiteNumber(config.tts?.maxSilenceSeconds, 8),
+      maxSecondsPerCharacter: finiteNumber(config.tts?.maxSecondsPerCharacter, 0.8),
       concurrency: Math.max(1, Math.floor(finiteNumber(config.tts?.concurrency, 1))),
       keepIntermediateWav: Boolean(config.tts?.keepIntermediateWav),
+      maxCharactersPerRequest: Math.max(
+        40,
+        Math.floor(finiteNumber(config.tts?.maxCharactersPerRequest, DEFAULT_TTS_MAX_CHARACTERS_PER_REQUEST)),
+      ),
     },
   }
 }
@@ -262,27 +269,30 @@ function parseJsonArray(value) {
   }
 }
 
-function preSegmentText(text, limit) {
+function preSegmentText(text, limit, maxChars = DEFAULT_TTS_MAX_CHARACTERS_PER_REQUEST) {
   const sourceLimit = getSafeSourceLimit(text, limit)
   const source = text.slice(0, sourceLimit)
   const segments = []
-  const quoteRegex = /「[^」]+」/g
+  const quoteRegex = /[「『“‘\"']([^」』”’\"']{1,1200})[」』”’\"']/g
   let cursor = 0
   let match
 
   while ((match = quoteRegex.exec(source))) {
-    const quoteText = match[0].slice(1, -1)
+    const fullQuote = match[0]
+    const quoteText = match[1]
     if (!isLikelyDialogueQuote(quoteText)) {
       continue
     }
     if (match.index > cursor) {
-      pushNonDialogueSegments(segments, source.slice(cursor, match.index), cursor)
+      pushNonDialogueSegments(segments, source.slice(cursor, match.index), cursor, maxChars)
     }
-    pushSegment(segments, 'dialogue', quoteText, match.index + 1, match.index + match[0].length - 1)
-    cursor = match.index + match[0].length
+    const contextBefore = source.slice(Math.max(0, match.index - 24), match.index)
+    const hint = inferQuoteTypeHint(contextBefore, quoteText)
+    pushSegment(segments, hint, quoteText, match.index + fullQuote.indexOf(quoteText), match.index + fullQuote.indexOf(quoteText) + quoteText.length, maxChars)
+    cursor = match.index + fullQuote.length
   }
   if (cursor < source.length) {
-    pushNonDialogueSegments(segments, source.slice(cursor), cursor)
+    pushNonDialogueSegments(segments, source.slice(cursor), cursor, maxChars)
   }
 
   return segments.map((segment, index) => ({
@@ -291,6 +301,16 @@ function preSegmentText(text, limit) {
     contextAfter: source.slice(segment.sourceEnd, Math.min(source.length, segment.sourceEnd + 80)).replace(/\s+/g, ' ').trim(),
     id: `pre-${String(index + 1).padStart(4, '0')}`,
   }))
+}
+
+function inferQuoteTypeHint(contextBefore, quoteText) {
+  if (isNarrativeCitationContext(contextBefore)) return 'narration'
+  if (/[道曰说问答叫喊喝笑骂叹][：:]?\s*$/.test(contextBefore) || isLikelyDialogueQuote(quoteText)) return 'dialogue'
+  return 'narration'
+}
+
+function isNarrativeCitationContext(contextBefore) {
+  return /(诗曰|赋曰|词曰|赞曰|古云|古语云|有诗为证|有词为证|易曰|历曰|邵康节曰|正是|但见|那|这)\s*[：:]?\s*$/.test(contextBefore)
 }
 
 function getSafeSourceLimit(text, requestedLimit) {
@@ -347,34 +367,68 @@ function isLikelyDialogueQuote(text) {
   return /[。！？!?……]/.test(value) || /[我你他她咱俺本姑娘本门]/.test(value)
 }
 
-function pushNonDialogueSegments(segments, rawText, baseStart) {
+function pushNonDialogueSegments(segments, rawText, baseStart, maxChars = DEFAULT_TTS_MAX_CHARACTERS_PER_REQUEST) {
   const thoughtRegex = /(——[^。！？!?]*?心里想。|（[^）]+）|\([^）)]+\))/g
   let cursor = 0
   let match
 
   while ((match = thoughtRegex.exec(rawText))) {
     if (match.index > cursor) {
-      pushSegment(segments, 'narration', rawText.slice(cursor, match.index), baseStart + cursor, baseStart + match.index)
+      pushSegment(segments, 'narration', rawText.slice(cursor, match.index), baseStart + cursor, baseStart + match.index, maxChars)
     }
-    pushSegment(segments, 'thought', match[0], baseStart + match.index, baseStart + match.index + match[0].length)
+    pushSegment(segments, 'thought', match[0], baseStart + match.index, baseStart + match.index + match[0].length, maxChars)
     cursor = match.index + match[0].length
   }
 
   if (cursor < rawText.length) {
-    pushSegment(segments, 'narration', rawText.slice(cursor), baseStart + cursor, baseStart + rawText.length)
+    pushSegment(segments, 'narration', rawText.slice(cursor), baseStart + cursor, baseStart + rawText.length, maxChars)
   }
 }
 
-function pushSegment(segments, type, rawText, start, end) {
-  const text = rawText.replace(/\s+/g, ' ').trim()
-  if (!text) return
-  segments.push({
-    id: '',
-    typeHint: type,
-    text,
-    sourceStart: start,
-    sourceEnd: end,
-  })
+function pushSegment(segments, type, rawText, start, end, maxChars = DEFAULT_TTS_MAX_CHARACTERS_PER_REQUEST) {
+  for (const chunk of splitRawTextForTts(rawText, maxChars)) {
+    const text = chunk.text.replace(/\s+/g, ' ').trim()
+    if (!text) continue
+    segments.push({
+      id: '',
+      typeHint: type,
+      text,
+      sourceStart: start + chunk.start,
+      sourceEnd: start + chunk.end,
+    })
+  }
+}
+
+function splitRawTextForTts(rawText, maxChars) {
+  if (rawText.length <= maxChars) {
+    return [{ text: rawText, start: 0, end: rawText.length }]
+  }
+
+  const chunks = []
+  let cursor = 0
+  while (cursor < rawText.length) {
+    const hardEnd = Math.min(rawText.length, cursor + maxChars)
+    let end = hardEnd
+    if (hardEnd < rawText.length) {
+      const window = rawText.slice(cursor, hardEnd)
+      const punctuationIndex = Math.max(
+        window.lastIndexOf('。'),
+        window.lastIndexOf('！'),
+        window.lastIndexOf('？'),
+        window.lastIndexOf('；'),
+        window.lastIndexOf(';'),
+        window.lastIndexOf('，'),
+        window.lastIndexOf(','),
+      )
+      if (punctuationIndex >= Math.floor(maxChars * 0.45)) {
+        end = cursor + punctuationIndex + 1
+      }
+    }
+    const text = rawText.slice(cursor, end)
+    chunks.push({ text, start: cursor, end })
+    cursor = end
+  }
+  return chunks
 }
 
 function buildVoiceCandidates(config, kgCandidates) {
@@ -770,7 +824,7 @@ async function runDraftScript(config, args) {
   const { book, chapter } = getChapter(config, bookId, chapterIndex)
   const kgCandidates = getKgCharacterCandidates(config, bookId, chapterIndex)
   const sourceLimit = getDraftSourceLimit(chapter, requestedLimit, args['allow-partial'] === true)
-  const preSegments = preSegmentText(chapter.content, sourceLimit)
+  const preSegments = preSegmentText(chapter.content, sourceLimit, config.tts.maxCharactersPerRequest)
   const sourceText = chapter.content.slice(0, sourceLimit)
   const characterCandidates = filterVoiceCandidates(buildVoiceCandidates(config, kgCandidates), sourceText)
   const batches = []
@@ -1074,6 +1128,69 @@ function probeAudioDurationSeconds(filePath) {
   return duration
 }
 
+function detectLongSilences(filePath, maxSilenceSeconds) {
+  if (!Number.isFinite(maxSilenceSeconds) || maxSilenceSeconds <= 0) return []
+  const result = spawnSync(
+    'ffmpeg',
+    [
+      '-hide_banner',
+      '-nostats',
+      '-i',
+      filePath,
+      '-af',
+      `silencedetect=noise=-45dB:d=${Math.max(0.5, maxSilenceSeconds)}`,
+      '-f',
+      'null',
+      '-',
+    ],
+    { encoding: 'utf8' },
+  )
+  const output = `${result.stderr || ''}\n${result.stdout || ''}`
+  const silences = []
+  for (const match of output.matchAll(/silence_start:\s*([0-9.]+)[\s\S]*?silence_end:\s*([0-9.]+)\s*\|\s*silence_duration:\s*([0-9.]+)/g)) {
+    silences.push({
+      start: Number(match[1]),
+      end: Number(match[2]),
+      duration: Number(match[3]),
+    })
+  }
+  return silences.filter(item => Number.isFinite(item.duration) && item.duration >= maxSilenceSeconds)
+}
+
+function validateSynthesizedAudio(config, item) {
+  const duration = probeAudioDurationSeconds(item.wav)
+  const textLength = Array.from(String(item.text || '')).length
+  const maxDuration = Math.max(12, textLength * config.tts.maxSecondsPerCharacter)
+  if (duration > maxDuration) {
+    throw new Error(`${item.id} 音频时长异常：${duration.toFixed(2)}s / ${textLength} 字，超过 ${maxDuration.toFixed(2)}s。`)
+  }
+  const longSilences = detectLongSilences(item.wav, config.tts.maxSilenceSeconds)
+  if (longSilences.length) {
+    const longest = longSilences.reduce((best, item) => item.duration > best.duration ? item : best, longSilences[0])
+    throw new Error(`${item.id} 含异常长静音：${longest.duration.toFixed(2)}s。`)
+  }
+  return duration
+}
+
+async function synthSegmentWithValidation(config, item, attempts = 3) {
+  let lastError = null
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      if (existsSync(item.wav)) rmSync(item.wav, { force: true })
+      await synthSegmentWithMimo(config, item.segment, item.wav)
+      validateSynthesizedAudio(config, item)
+      return
+    } catch (error) {
+      lastError = error
+      if (existsSync(item.wav)) rmSync(item.wav, { force: true })
+      if (attempt < attempts) {
+        console.warn(`⚠️  ${item.id} TTS 片段异常，重试 ${attempt + 1}/${attempts}：${error.message}`)
+      }
+    }
+  }
+  throw lastError
+}
+
 async function runConcurrent(items, workerCount, worker) {
   let nextIndex = 0
   const workers = Array.from({ length: Math.min(workerCount, items.length) }, async () => {
@@ -1127,7 +1244,8 @@ async function runSynth(config, args) {
     segments: [],
   }
 
-  manifest.segments = script.segments.map((segment) => {
+  const ttsSegments = expandLongSegmentsForTts(script.segments, config.tts.maxCharactersPerRequest)
+  manifest.segments = ttsSegments.map((segment) => {
     const key = segmentCacheKey({ ...segment, performanceStyle: config.director.performanceStyle })
     const wavPath = join(segmentDir, `${segment.id}-${key}.wav`)
     return {
@@ -1143,13 +1261,26 @@ async function runSynth(config, args) {
     }
   })
 
-  const missingSegments = manifest.segments.filter(item => !existsSync(item.wav))
-  if (missingSegments.length) {
-    console.log(`🚀 TTS 并发：${concurrency}，待合成片段：${missingSegments.length}`)
+  const segmentsToSynthesize = []
+  for (const item of manifest.segments) {
+    if (!existsSync(item.wav)) {
+      segmentsToSynthesize.push(item)
+      continue
+    }
+    try {
+      validateSynthesizedAudio(config, item)
+    } catch (error) {
+      console.warn(`⚠️  缓存音频异常，将重新合成 ${item.id}：${error.message}`)
+      rmSync(item.wav, { force: true })
+      segmentsToSynthesize.push(item)
+    }
   }
-  await runConcurrent(missingSegments, concurrency, async (item) => {
+  if (segmentsToSynthesize.length) {
+    console.log(`🚀 TTS 并发：${concurrency}，待合成片段：${segmentsToSynthesize.length}`)
+  }
+  await runConcurrent(segmentsToSynthesize, concurrency, async (item) => {
     console.log(`🎙️  合成 ${item.id} ${item.speaker} ${item.voice || '默认音色'}`)
-    await synthSegmentWithMimo(config, item.segment, item.wav)
+    await synthSegmentWithValidation(config, item)
   })
 
   for (const item of manifest.segments) {
@@ -1218,6 +1349,25 @@ async function runSynth(config, args) {
   if (!config.tts.keepIntermediateWav) {
     console.log('   中间 WAV 保留在 work/，后续会增加清理策略。')
   }
+}
+
+function expandLongSegmentsForTts(segments, maxChars) {
+  return segments.flatMap((segment) => {
+    if (!segment.text || segment.text.length <= maxChars) return [segment]
+    const chunks = splitRawTextForTts(segment.text, maxChars)
+    return chunks.map((chunk, index) => {
+      const ratioStart = segment.text.length > 0 ? chunk.start / segment.text.length : 0
+      const ratioEnd = segment.text.length > 0 ? chunk.end / segment.text.length : 1
+      const sourceLength = Math.max(0, Number(segment.sourceEnd ?? 0) - Number(segment.sourceStart ?? 0))
+      return {
+        ...segment,
+        id: `${segment.id}-p${String(index + 1).padStart(2, '0')}`,
+        text: chunk.text.replace(/\s+/g, ' ').trim(),
+        sourceStart: Math.round(Number(segment.sourceStart ?? 0) + sourceLength * ratioStart),
+        sourceEnd: Math.round(Number(segment.sourceStart ?? 0) + sourceLength * ratioEnd),
+      }
+    })
+  })
 }
 
 function getChapterOutputPaths(outRoot, chapterIndex, finalFormat = 'mp3') {
