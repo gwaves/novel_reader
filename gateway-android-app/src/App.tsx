@@ -890,18 +890,6 @@ function App() {
               </div>
               {message ? <div className={`status-line reader-status status-${connectionState}`}>{message}</div> : null}
               <div className="speech-control-panel">
-                <div>
-                  <strong>语音阅读</strong>
-                  <span>
-                    {audioUrl
-                      ? activeTimelineEntry?.text
-                        ? `正在播放：${activeTimelineEntry.text}`
-                        : '正在播放'
-                      : currentAudio
-                        ? `当前章节可播放 · ${formatDuration(currentAudio.durationMs)}`
-                        : '当前章节暂无音频'}
-                  </span>
-                </div>
                 {audioUrl ? (
                   <audio
                     className="audio-player"
@@ -911,7 +899,7 @@ function App() {
                     onTimeUpdate={(event) => setAudioTime(event.currentTarget.currentTime)}
                   />
                 ) : (
-                  <button type="button" onClick={() => void playCurrentAudio()} disabled={!currentAudio || loadingAudio}>
+                  <button className="tts-primary-action" type="button" onClick={() => void playCurrentAudio()} disabled={!currentAudio || loadingAudio}>
                     {audioButtonLabel(currentAudio, loadingAudio)}
                   </button>
                 )}

@@ -386,7 +386,7 @@ button:disabled {
 .speech-control-panel {
   display: grid;
   gap: 10px;
-  padding: 12px;
+  padding: 8px;
   border: 1px solid #d9e1e8;
   border-radius: 8px;
   background: #ffffff;
@@ -407,6 +407,12 @@ button:disabled {
   background: #2f6f73;
   border-color: #2f6f73;
   color: #ffffff;
+}
+
+.tts-primary-action {
+  width: 100%;
+  min-height: 48px;
+  font-weight: 800;
 }
 
 .reader-card {
