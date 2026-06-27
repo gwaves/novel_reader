@@ -1142,14 +1142,14 @@ function ChapterSummary({ bookPackage, chapter }: { bookPackage: BookPackage; ch
 }
 
 function Coverage({ label, value }: { label: string; value?: number }) {
-  const percent = typeof value === 'number' ? Math.round(value * 100) : 0
+  const percent = typeof value === 'number' ? Math.round(value * 100) : null
   return (
     <div className="coverage">
       <span>{label}</span>
       <div className="meter">
-        <div style={{ width: `${percent}%` }} />
+        <div style={{ width: `${percent ?? 0}%` }} />
       </div>
-      <strong>{percent}%</strong>
+      <strong>{percent === null ? '读取中' : `${percent}%`}</strong>
     </div>
   )
 }
