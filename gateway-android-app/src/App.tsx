@@ -384,10 +384,16 @@ function App() {
       saveFullPackageCache(cache)
       setFullPackageCache(cache)
       setFullPackageStatus('cached')
+      setMessage('完整数据包已下载')
     } catch (error) {
       setFullPackageStatus('error')
       setMessage(`完整包后台下载失败：${errorMessage(error)}`)
     }
+  }
+
+  async function syncCurrentFullPackage() {
+    if (!selectedBookId) return
+    await syncFullPackage(selectedBookId)
   }
 
   async function refreshAudio(bookId = selectedBookId, showMessage = true) {
@@ -715,9 +721,17 @@ function App() {
                   <strong>{bookPackage ? packageSummary(bookPackage) : '未加载'}</strong>
                 </div>
                 <div className="package-line">
-                  <span>Full Package</span>
+                  <span>完整数据包</span>
                   <strong>{fullPackageLabel(visibleFullPackageCache, fullPackageStatus)}</strong>
                 </div>
+                <button
+                  className="secondary-button full-width-button"
+                  type="button"
+                  onClick={() => void syncCurrentFullPackage()}
+                  disabled={!selectedBookId || fullPackageStatus === 'downloading'}
+                >
+                  {fullPackageStatus === 'downloading' ? '下载数据包中' : visibleFullPackageCache ? '重新下载数据包' : '下载完整数据包'}
+                </button>
                 <div className="package-line">
                   <span>Audio</span>
                   <strong>
