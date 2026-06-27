@@ -910,6 +910,7 @@ function App() {
                 style={{ '--reader-font-size': `${readerSettings.fontSize}px` } as CSSProperties}
               >
                 <h2>{currentChapter.title}</h2>
+                <ChapterSummary bookPackage={bookPackage} chapter={currentChapter} />
                 <div className="chapter-text">
                   <TextContent text={chapterContent(currentChapter)} activeEntry={activeTimelineEntry} />
                 </div>
@@ -1109,6 +1110,37 @@ function TextContent({ text, activeEntry }: { text: string; activeEntry?: AudioT
   )
 }
 
+function ChapterSummary({ bookPackage, chapter }: { bookPackage: BookPackage; chapter: Chapter }) {
+  const summary = findChapterSummary(bookPackage, chapter)
+  const short = summary ? summaryText(summary, ['short', 'brief', 'summary', 'title']) : ''
+  const detail = summary ? summaryText(summary, ['detail', 'details', 'content', 'description']) : ''
+  const keyPoints = summary ? summaryList(summary, ['keyPoints', 'keypoints', 'points', 'bullets']) : []
+  const skippable = summary ? summaryText(summary, ['skippable', 'skipReason', 'readingTip']) : ''
+
+  return (
+    <aside className={summary ? 'summary-box' : 'summary-box summary-empty'}>
+      <strong>本章概要</strong>
+      {summary ? (
+        <>
+          {short ? <p className="summary-short">{short}</p> : null}
+          {detail ? <p>{detail}</p> : null}
+          {keyPoints.length > 0 ? (
+            <ul>
+              {keyPoints.map((point, index) => (
+                <li key={`${chapter.id}-summary-${index}`}>{point}</li>
+              ))}
+            </ul>
+          ) : null}
+          {skippable ? <p className="summary-skip">{skippable}</p> : null}
+          {!short && !detail && keyPoints.length === 0 && !skippable ? <p>当前概要为空。</p> : null}
+        </>
+      ) : (
+        <p>当前同步包没有这章的概要。可以回到书库重新同步完整数据包。</p>
+      )}
+    </aside>
+  )
+}
+
 function Coverage({ label, value }: { label: string; value?: number }) {
   const percent = typeof value === 'number' ? Math.round(value * 100) : 0
   return (
@@ -1120,6 +1152,47 @@ function Coverage({ label, value }: { label: string; value?: number }) {
       <strong>{percent}%</strong>
     </div>
   )
+}
+
+function findChapterSummary(bookPackage: BookPackage, chapter: Chapter): Record<string, unknown> | null {
+  const summaries = bookPackage.summaries
+  if (Array.isArray(summaries)) {
+    const matched = summaries.find((entry) => {
+      if (!isRecord(entry)) return false
+      return (
+        entry.chapterId === chapter.id ||
+        entry.id === chapter.id ||
+        entry.chapterIndex === chapter.index ||
+        entry.index === chapter.index ||
+        entry.chapterIndex === chapter.chapterIndex ||
+        entry.index === chapter.chapterIndex
+      )
+    })
+    return isRecord(matched) ? matched : null
+  }
+  if (isRecord(summaries)) {
+    const byId = summaries[chapter.id]
+    if (isRecord(byId)) return byId
+  }
+  return null
+}
+
+function summaryText(summary: Record<string, unknown>, keys: string[]) {
+  for (const key of keys) {
+    const value = summary[key]
+    if (typeof value === 'string' && value.trim()) return value.trim()
+  }
+  return ''
+}
+
+function summaryList(summary: Record<string, unknown>, keys: string[]) {
+  for (const key of keys) {
+    const value = summary[key]
+    if (Array.isArray(value)) {
+      return value.filter((entry): entry is string => typeof entry === 'string' && Boolean(entry.trim())).map((entry) => entry.trim())
+    }
+  }
+  return []
 }
 
 async function gatewayFetch(settings: GatewaySettings, path: string) {
