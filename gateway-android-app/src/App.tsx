@@ -101,6 +101,7 @@ type NativeAudioPlugin = {
   importPackage(options: {
     bookId: string
     filePath: string
+    expectedChapterCount?: number
   }): Promise<FullPackageImportStats & { metadataPath?: string }>
   addListener(eventName: 'packageSyncProgress', listenerFunc: (event: PackageSyncProgress) => void): Promise<PluginListenerHandle>
 }
@@ -447,7 +448,7 @@ function App() {
       setFullPackageCache(downloadedCache)
       setFullPackageStatus('importing')
       setFullPackageProgress({ bookId, phase: 'import', status: 'parsing', done: 0, total: 4 })
-      const importStats = await importPackageToNativeStore(bookId, downloaded.filePath)
+      const importStats = await importPackageToNativeStore(bookId, downloaded.filePath, selectedBook?.chapterCount)
       const importedCache: FullPackageCache = {
         ...downloadedCache,
         importedAt: new Date().toISOString(),
@@ -1219,7 +1220,7 @@ async function downloadPackageToNativeFile(settings: GatewaySettings, bookId: st
   })
 }
 
-async function importPackageToNativeStore(bookId: string, filePath: string) {
+async function importPackageToNativeStore(bookId: string, filePath: string, expectedChapterCount?: number) {
   return NativeAudio.importPackage({
     bookId,
     filePath,

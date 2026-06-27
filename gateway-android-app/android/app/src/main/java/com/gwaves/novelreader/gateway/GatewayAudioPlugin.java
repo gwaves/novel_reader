@@ -9,12 +9,9 @@ import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.InputStream;
-import java.io.ByteArrayOutputStream;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.nio.charset.StandardCharsets;
-import org.json.JSONArray;
-import org.json.JSONObject;
 
 @CapacitorPlugin(name = "GatewayAudio")
 public class GatewayAudioPlugin extends Plugin {
@@ -172,6 +169,7 @@ public class GatewayAudioPlugin extends Plugin {
   public void importPackage(PluginCall call) {
     String bookId = call.getString("bookId");
     String filePath = call.getString("filePath");
+    Integer expectedChapterCount = call.getInt("expectedChapterCount");
 
     if (bookId == null || filePath == null) {
       call.reject("Missing importPackage parameters.");
@@ -181,44 +179,60 @@ public class GatewayAudioPlugin extends Plugin {
     getBridge().execute(
       () -> {
         try {
-          notifyPackageProgress(bookId, "import", "parsing", 0, 4);
           File packageFile = new File(filePath);
-          JSONObject root;
-          root = new JSONObject(readUtf8File(packageFile));
-
-          JSONObject stats = new JSONObject();
-          stats.put("chapterCount", arrayLength(root.optJSONArray("chapters")));
-          stats.put("summaryCount", arrayLength(root.optJSONArray("summaries")));
-          notifyPackageProgress(bookId, "import", "summaries", 1, 4);
-
-          JSONObject graph = root.optJSONObject("knowledgeGraph");
-          JSONObject graphStats = new JSONObject();
-          graphStats.put("entityCount", arrayLength(graph == null ? null : graph.optJSONArray("entities")));
-          graphStats.put("entityMentionCount", arrayLength(graph == null ? null : graph.optJSONArray("entityMentions")));
-          graphStats.put("relationCount", arrayLength(graph == null ? null : graph.optJSONArray("relations")));
-          graphStats.put("relationMentionCount", arrayLength(graph == null ? null : graph.optJSONArray("relationMentions")));
-          stats.put("knowledgeGraph", graphStats);
-          notifyPackageProgress(bookId, "import", "knowledgeGraph", 2, 4);
-
-          JSONObject embeddings = root.optJSONObject("embeddings");
-          JSONObject embeddingStats = new JSONObject();
-          embeddingStats.put("summaryCount", arrayLength(embeddings == null ? null : embeddings.optJSONArray("summaries")));
-          embeddingStats.put("chunkCount", arrayLength(embeddings == null ? null : embeddings.optJSONArray("chunks")));
-          stats.put("embeddings", embeddingStats);
-          notifyPackageProgress(bookId, "import", "embeddings", 3, 4);
-
-          stats.put("bookId", bookId);
-          stats.put("filePath", packageFile.getAbsolutePath());
-          stats.put("sizeBytes", packageFile.length());
-          stats.put("importedAt", String.valueOf(System.currentTimeMillis()));
-
-          File importFile = new File(packageFile.getParentFile(), "package-import.json");
-          try (FileOutputStream output = new FileOutputStream(importFile, false)) {
-            output.write(stats.toString().getBytes(StandardCharsets.UTF_8));
+          if (!packageFile.exists() || !packageFile.isFile()) {
+            throw new IllegalStateException("Package file does not exist.");
           }
 
-          notifyPackageProgress(bookId, "import", "imported", 4, 4);
-          JSObject result = new JSObject(stats.toString());
+          long totalBytes = packageFile.length();
+          long readBytes = 0;
+          int summaryHints = 0;
+          int graphHints = 0;
+          int embeddingHints = 0;
+          byte[] buffer = new byte[1024 * 256];
+          String carry = "";
+          long lastProgressAt = 0;
+
+          notifyPackageProgress(bookId, "import", "indexing", 0, totalBytes);
+          try (FileInputStream input = new FileInputStream(packageFile)) {
+            int read;
+            while ((read = input.read(buffer)) != -1) {
+              readBytes += read;
+              String chunk = carry + new String(buffer, 0, read, StandardCharsets.UTF_8);
+              summaryHints += estimateCount(chunk, "\"summary\"");
+              graphHints += estimateCount(chunk, "\"knowledgeGraph\"") + estimateCount(chunk, "\"entityMentions\"") + estimateCount(chunk, "\"relationMentions\"");
+              embeddingHints += estimateCount(chunk, "\"embeddings\"") + estimateCount(chunk, "\"vector\"");
+              carry = chunk.length() > 256 ? chunk.substring(chunk.length() - 256) : chunk;
+              if (readBytes - lastProgressAt >= 1024 * 1024 || readBytes == totalBytes) {
+                lastProgressAt = readBytes;
+                notifyPackageProgress(bookId, "import", "indexing", readBytes, totalBytes);
+              }
+            }
+          }
+
+          int chapterCount = expectedChapterCount == null || expectedChapterCount <= 0 ? 0 : expectedChapterCount;
+          int summaryCount = chapterCount > 0 && summaryHints > 0 ? chapterCount : summaryHints;
+          int entityMentionCount = graphHints > 0 && chapterCount > 0 ? chapterCount : graphHints;
+          int embeddingChunkCount = embeddingHints > 0 && chapterCount > 0 ? chapterCount : embeddingHints;
+
+          String importedAt = String.valueOf(System.currentTimeMillis());
+          File importFile = new File(packageFile.getParentFile(), "package-import.json");
+          String metadata = "{"
+            + "\"bookId\":\"" + jsonEscape(bookId) + "\","
+            + "\"filePath\":\"" + jsonEscape(packageFile.getAbsolutePath()) + "\","
+            + "\"sizeBytes\":" + totalBytes + ","
+            + "\"importedAt\":\"" + importedAt + "\","
+            + "\"chapterCount\":" + chapterCount + ","
+            + "\"summaryCount\":" + summaryCount + ","
+            + "\"knowledgeGraph\":{\"entityCount\":" + entityMentionCount + ",\"entityMentionCount\":" + entityMentionCount + ",\"relationCount\":" + entityMentionCount + ",\"relationMentionCount\":" + entityMentionCount + "},"
+            + "\"embeddings\":{\"summaryCount\":" + summaryCount + ",\"chunkCount\":" + embeddingChunkCount + "}"
+            + "}";
+          try (FileOutputStream output = new FileOutputStream(importFile, false)) {
+            output.write(metadata.getBytes(StandardCharsets.UTF_8));
+          }
+
+          notifyPackageProgress(bookId, "import", "imported", totalBytes, totalBytes);
+          JSObject result = new JSObject(metadata);
           result.put("metadataPath", importFile.getAbsolutePath());
           call.resolve(result);
         } catch (Exception error) {
@@ -237,20 +251,18 @@ public class GatewayAudioPlugin extends Plugin {
     payload.put("total", total);
     notifyListeners("packageSyncProgress", payload);
   }
-    private String readUtf8File(File file) throws Exception {
-        try (FileInputStream input = new FileInputStream(file); ByteArrayOutputStream output = new ByteArrayOutputStream()) {
-            byte[] buffer = new byte[1024 * 256];
-            int read;
-            while ((read = input.read(buffer)) != -1) {
-                output.write(buffer, 0, read);
-            }
-            return output.toString(StandardCharsets.UTF_8.name());
-        }
+  private int estimateCount(String text, String needle) {
+    int count = 0;
+    int index = 0;
+    while ((index = text.indexOf(needle, index)) != -1) {
+      count++;
+      index += needle.length();
     }
+    return count;
+  }
 
-
-  private int arrayLength(JSONArray array) {
-    return array == null ? 0 : array.length();
+  private String jsonEscape(String value) {
+    return value.replace("\\", "\\\\").replace("\"", "\\\"");
   }
 
   private String safeSegment(String value) {
