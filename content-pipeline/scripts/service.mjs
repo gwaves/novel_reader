@@ -53,6 +53,14 @@ const runBooleanFlags = new Map([
   ['resume', '--resume'],
   ['skipConfigSync', '--skip-config-sync'],
 ])
+const recommendedAudioDefaults = {
+  batchSize: '10',
+  directorConcurrency: '3',
+  minBatchSize: '6',
+  ttsConcurrency: '16',
+  ttsChapters: '2',
+  llmChapters: '1',
+}
 const redactedFlags = new Set(['--gateway-token'])
 
 export function loadServiceConfig(env = process.env) {
@@ -460,13 +468,16 @@ function createRunArgs(body, manifestPath) {
   if (splitList(steps).includes('audio') && !readString(body.chapters)) {
     throw httpError(400, 'missing_audio_chapters', 'MP3 音频步骤需要填写章节范围，例如 1-10。')
   }
+  const runOptions = splitList(steps).includes('audio')
+    ? { ...recommendedAudioDefaults, ...body }
+    : body
   const args = ['run', '--manifest', manifestPath, '--steps', steps]
   for (const [key, flag] of runOptionFlags) {
     if (key === 'steps') continue
-    appendOptionalArg(args, flag, body[key])
+    appendOptionalArg(args, flag, runOptions[key])
   }
   for (const [key, flag] of runBooleanFlags) {
-    if (body[key] === true || body[key] === 'true') args.push(flag)
+    if (runOptions[key] === true || runOptions[key] === 'true') args.push(flag)
   }
   return args
 }
@@ -655,13 +666,17 @@ function renderConsoleHtml() {
     async function renderJob(body) {
       const job = body.job;
       const manifest = body.manifest || {};
+      const previousLog = document.getElementById('jobLog');
+      const shouldStickToBottom = !previousLog || previousLog.scrollHeight - previousLog.scrollTop - previousLog.clientHeight < 24;
       const stages = ${JSON.stringify(stageNames)}.map(name => {
         const stage = manifest.stages?.[name] || { status: 'pending', message: '', error: '' };
         return '<div class="stage"><strong>' + name + '</strong><span class="status ' + stage.status + '">' + stage.status + '</span><div class="meta">' + escapeHtml(stage.error || stage.message || '') + '</div></div>';
       }).join('');
       const logs = (job.logs || []).map(item => '[' + item.at + '] ' + item.stream + ': ' + item.line).join('\\n');
       document.getElementById('detail').className = '';
-      document.getElementById('detail').innerHTML = '<div class="panel"><div class="topline"><div><h1>' + escapeHtml(job.title) + '</h1><div class="meta">' + job.id + '</div></div><span class="status ' + job.status + '">' + job.status + '</span></div><div class="meta">' + escapeHtml(job.manifestPath || '') + '</div>' + (job.error ? '<div class="meta">' + escapeHtml(job.error) + '</div>' : '') + '</div><div class="panel"><h2>阶段</h2><div class="stages">' + stages + '</div></div><div class="panel"><h2>日志</h2><pre>' + escapeHtml(logs || '等待日志...') + '</pre></div>';
+      document.getElementById('detail').innerHTML = '<div class="panel"><div class="topline"><div><h1>' + escapeHtml(job.title) + '</h1><div class="meta">' + job.id + '</div></div><span class="status ' + job.status + '">' + job.status + '</span></div><div class="meta">' + escapeHtml(job.manifestPath || '') + '</div>' + (job.error ? '<div class="meta">' + escapeHtml(job.error) + '</div>' : '') + '</div><div class="panel"><h2>阶段</h2><div class="stages">' + stages + '</div></div><div class="panel"><h2>日志</h2><pre id="jobLog">' + escapeHtml(logs || '等待日志...') + '</pre></div>';
+      const nextLog = document.getElementById('jobLog');
+      if (nextLog && shouldStickToBottom) nextLog.scrollTop = nextLog.scrollHeight;
       await loadJobs();
     }
     document.getElementById('start').addEventListener('click', async () => {
