@@ -241,7 +241,7 @@ function App() {
   const visibleAudioSyncProgress = audioSyncBookId === selectedBookId ? audioSyncProgress : null
   const visibleFullPackageCache = fullPackageCache?.bookId === selectedBookId ? fullPackageCache : null
   const visibleFullPackageProgress = fullPackageProgress?.bookId === selectedBookId ? fullPackageProgress : null
-  const displaySummaryCoverage = inferredSummaryCoverage(selectedBook, bookPackage)
+  const displaySummaryCoverage = inferredSummaryCoverage(selectedBook, bookPackage, visibleFullPackageCache)
   const displayKgCoverage = inferredKgCoverage(selectedBook, bookPackage, visibleFullPackageCache)
   const displayEmbeddingCoverage = inferredEmbeddingCoverage(selectedBook, bookPackage, visibleFullPackageCache)
   const displayAudioChapterCount =
@@ -1776,9 +1776,15 @@ function fullPackageProgressLabel(progress: PackageSyncProgress | null) {
   return ''
 }
 
-function inferredSummaryCoverage(book: BookSummary | null, bookPackage: BookPackage | null) {
+function inferredSummaryCoverage(book: BookSummary | null, bookPackage: BookPackage | null, fullPackage: FullPackageCache | null) {
+  const importedSummaryCount = fullPackage?.importStats?.summaryCount ?? 0
+  const importedChapterCount = fullPackage?.importStats?.chapterCount ?? 0
+  if (importedSummaryCount > 0 && importedChapterCount > 0) {
+    return Math.min(1, importedSummaryCount / importedChapterCount)
+  }
   if (typeof book?.summaryCoverage === 'number' && book.summaryCoverage > 0) return book.summaryCoverage
-  const summaryCount = Array.isArray(bookPackage?.summaries) ? bookPackage.summaries.length : 0
+  const summaries = bookPackage?.summaries
+  const summaryCount = Array.isArray(summaries) ? summaries.length : isRecord(summaries) ? Object.keys(summaries).length : 0
   const chapterCount = bookPackage ? packageChapters(bookPackage).length : (book?.chapterCount ?? 0)
   return chapterCount > 0 ? Math.min(1, summaryCount / chapterCount) : book?.summaryCoverage
 }
