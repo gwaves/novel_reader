@@ -10,7 +10,7 @@ const DEFAULT_CONFIG_PATH = join(homedir(), '.novel_reader', 'tts-director.confi
 const DEFAULT_MAIN_DB_PATH = join(homedir(), '.novel_reader', 'novel_reader.sqlite')
 const SCRIPT_KIND = 'novel-reader-tts-director-script'
 const ALLOWED_SEGMENT_TYPES = new Set(['narration', 'dialogue', 'thought', 'stage'])
-const DEFAULT_TTS_MAX_CHARACTERS_PER_REQUEST = 900
+const DEFAULT_TTS_MAX_CHARACTERS_PER_REQUEST = 120
 
 function printHelp() {
   console.log(`
@@ -164,7 +164,7 @@ function loadConfig(configPath) {
       concurrency: Math.max(1, Math.floor(finiteNumber(config.tts?.concurrency, 1))),
       keepIntermediateWav: Boolean(config.tts?.keepIntermediateWav),
       maxCharactersPerRequest: Math.max(
-        200,
+        40,
         Math.floor(finiteNumber(config.tts?.maxCharactersPerRequest, DEFAULT_TTS_MAX_CHARACTERS_PER_REQUEST)),
       ),
     },
@@ -269,7 +269,7 @@ function parseJsonArray(value) {
   }
 }
 
-function preSegmentText(text, limit) {
+function preSegmentText(text, limit, maxChars = DEFAULT_TTS_MAX_CHARACTERS_PER_REQUEST) {
   const sourceLimit = getSafeSourceLimit(text, limit)
   const source = text.slice(0, sourceLimit)
   const segments = []
@@ -284,15 +284,15 @@ function preSegmentText(text, limit) {
       continue
     }
     if (match.index > cursor) {
-      pushNonDialogueSegments(segments, source.slice(cursor, match.index), cursor)
+      pushNonDialogueSegments(segments, source.slice(cursor, match.index), cursor, maxChars)
     }
     const contextBefore = source.slice(Math.max(0, match.index - 24), match.index)
     const hint = inferQuoteTypeHint(contextBefore, quoteText)
-    pushSegment(segments, hint, quoteText, match.index + fullQuote.indexOf(quoteText), match.index + fullQuote.indexOf(quoteText) + quoteText.length)
+    pushSegment(segments, hint, quoteText, match.index + fullQuote.indexOf(quoteText), match.index + fullQuote.indexOf(quoteText) + quoteText.length, maxChars)
     cursor = match.index + fullQuote.length
   }
   if (cursor < source.length) {
-    pushNonDialogueSegments(segments, source.slice(cursor), cursor)
+    pushNonDialogueSegments(segments, source.slice(cursor), cursor, maxChars)
   }
 
   return segments.map((segment, index) => ({
@@ -367,26 +367,26 @@ function isLikelyDialogueQuote(text) {
   return /[。！？!?……]/.test(value) || /[我你他她咱俺本姑娘本门]/.test(value)
 }
 
-function pushNonDialogueSegments(segments, rawText, baseStart) {
+function pushNonDialogueSegments(segments, rawText, baseStart, maxChars = DEFAULT_TTS_MAX_CHARACTERS_PER_REQUEST) {
   const thoughtRegex = /(——[^。！？!?]*?心里想。|（[^）]+）|\([^）)]+\))/g
   let cursor = 0
   let match
 
   while ((match = thoughtRegex.exec(rawText))) {
     if (match.index > cursor) {
-      pushSegment(segments, 'narration', rawText.slice(cursor, match.index), baseStart + cursor, baseStart + match.index)
+      pushSegment(segments, 'narration', rawText.slice(cursor, match.index), baseStart + cursor, baseStart + match.index, maxChars)
     }
-    pushSegment(segments, 'thought', match[0], baseStart + match.index, baseStart + match.index + match[0].length)
+    pushSegment(segments, 'thought', match[0], baseStart + match.index, baseStart + match.index + match[0].length, maxChars)
     cursor = match.index + match[0].length
   }
 
   if (cursor < rawText.length) {
-    pushSegment(segments, 'narration', rawText.slice(cursor), baseStart + cursor, baseStart + rawText.length)
+    pushSegment(segments, 'narration', rawText.slice(cursor), baseStart + cursor, baseStart + rawText.length, maxChars)
   }
 }
 
-function pushSegment(segments, type, rawText, start, end) {
-  for (const chunk of splitRawTextForTts(rawText, DEFAULT_TTS_MAX_CHARACTERS_PER_REQUEST)) {
+function pushSegment(segments, type, rawText, start, end, maxChars = DEFAULT_TTS_MAX_CHARACTERS_PER_REQUEST) {
+  for (const chunk of splitRawTextForTts(rawText, maxChars)) {
     const text = chunk.text.replace(/\s+/g, ' ').trim()
     if (!text) continue
     segments.push({
@@ -824,7 +824,7 @@ async function runDraftScript(config, args) {
   const { book, chapter } = getChapter(config, bookId, chapterIndex)
   const kgCandidates = getKgCharacterCandidates(config, bookId, chapterIndex)
   const sourceLimit = getDraftSourceLimit(chapter, requestedLimit, args['allow-partial'] === true)
-  const preSegments = preSegmentText(chapter.content, sourceLimit)
+  const preSegments = preSegmentText(chapter.content, sourceLimit, config.tts.maxCharactersPerRequest)
   const sourceText = chapter.content.slice(0, sourceLimit)
   const characterCandidates = filterVoiceCandidates(buildVoiceCandidates(config, kgCandidates), sourceText)
   const batches = []
