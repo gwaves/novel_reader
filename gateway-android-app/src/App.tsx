@@ -409,7 +409,7 @@ function App() {
       pendingRestoreScrollRef.current = restoredChapterId ? options.restoreProgress?.scrollY ?? 0 : 0
       setTab('reader')
       restorePendingScroll()
-      void syncFullPackage(bookId)
+      syncFullPackageIfNeeded(bookId)
     } catch (error) {
       const cachedPackage = await loadCachedBookPackage(bookId)
       const cachedChapters = packageChapters(cachedPackage)
@@ -464,6 +464,18 @@ function App() {
       setFullPackageStatus('error')
       setMessage(`完整包同步失败：${errorMessage(error)}`)
     }
+  }
+
+  function syncFullPackageIfNeeded(bookId: string) {
+    if (!Capacitor.isNativePlatform()) return
+    const cached = loadFullPackageCache()
+    if (cached?.bookId === bookId && cached.importStats) {
+      setFullPackageCache(cached)
+      setFullPackageStatus('imported')
+      setFullPackageProgress(null)
+      return
+    }
+    void syncFullPackage(bookId)
   }
 
   async function syncCurrentFullPackage() {
