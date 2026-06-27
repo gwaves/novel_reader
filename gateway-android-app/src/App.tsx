@@ -542,12 +542,13 @@ function App() {
         setCachedAudioBookId(null)
         clearAudioUrl()
       }
-      await refreshCachedAudioIds(nextSelectedBookId ?? null)
+      void refreshCachedAudioIds(nextSelectedBookId ?? null)
+      refreshCacheSummaries()
       setConnectionState('connected')
       setMessage(`书库 ${nextBooks.length} 本`)
       if (!autoRestoreAttemptedRef.current) {
         autoRestoreAttemptedRef.current = true
-        await restoreLastReading(nextBooks)
+        void restoreLastReading(nextBooks)
       }
     } catch (error) {
       setConnectionState('error')
@@ -632,6 +633,25 @@ function App() {
     } finally {
       setLoadingPackage(false)
     }
+  }
+
+  function selectBook(bookId: string) {
+    setSelectedBookId(bookId)
+    const cachedFullPackage = loadFullPackageCache(bookId)
+    setFullPackageCache(cachedFullPackage)
+    setFullPackageStatus(cachedFullPackage?.importStats ? 'imported' : cachedFullPackage ? 'downloaded' : 'idle')
+    setFullPackageProgress(null)
+    setMessage('')
+    setBookPackage(null)
+    setCurrentChapterId(null)
+    setAudioChapters([])
+    setAudioCatalogBookId(null)
+    setCachedAudioBookId(null)
+    setCachedAudioIds(new Set())
+    setAudioSyncProgress(null)
+    setAudioSyncBookId(null)
+    clearAudioUrl()
+    void refreshCachedAudioIds(bookId)
   }
 
   async function syncFullPackage(bookId: string) {
@@ -1130,11 +1150,42 @@ function App() {
   }
 
   function findAudioSegmentIndex(currentTime: number): number | null {
+    const activeEntry = findActiveTimelineEntry(audioManifest, currentTime)
+    const sourceIndex = findAudioSegmentIndexBySourcePosition(activeEntry, currentTime)
+    if (sourceIndex != null) return sourceIndex
+
     const timeline = chapterAudioTimelineRef.current
     if (!timeline.length) return null
     const active = timeline.find((item) => currentTime >= item.startTime && currentTime < item.nextStartTime)
     if (active) return active.index
     return timeline.find((item) => currentTime < item.startTime)?.index ?? timeline.at(-1)?.index ?? null
+  }
+
+  function findAudioSegmentIndexBySourcePosition(activeEntry: AudioTimelineEntry | null, currentTime: number): number | null {
+    if (!activeEntry || typeof activeEntry.sourceStart !== 'number' || typeof activeEntry.sourceEnd !== 'number') return null
+    const segments = speechSegmentsRef.current
+    if (!segments.length) return null
+
+    const entryStartTime = activeEntry.startTime ?? 0
+    const entryEndTime = activeEntry.endTime ?? activeEntry.nextStartTime ?? entryStartTime
+    const duration = Math.max(0.001, entryEndTime - entryStartTime)
+    const ratio = clampAudioRatio((currentTime - entryStartTime) / duration)
+    const sourcePosition = activeEntry.sourceStart + ratio * Math.max(1, activeEntry.sourceEnd - activeEntry.sourceStart)
+
+    const containingIndex = segments.findIndex((segment) => sourcePosition >= segment.startChar && sourcePosition < segment.endChar)
+    if (containingIndex >= 0) return containingIndex
+
+    let nearest: { index: number; distance: number } | null = null
+    segments.forEach((segment, index) => {
+      const distance =
+        sourcePosition < segment.startChar
+          ? segment.startChar - sourcePosition
+          : sourcePosition > segment.endChar
+            ? sourcePosition - segment.endChar
+            : 0
+      if (!nearest || distance < nearest.distance) nearest = { index, distance }
+    })
+    return nearest?.index ?? null
   }
 
   function handleChapterAudioTimeUpdate(audio: HTMLAudioElement) {
@@ -1470,7 +1521,7 @@ function App() {
                     className={book.id === selectedBookId ? 'book-row active' : 'book-row'}
                     type="button"
                     key={book.id}
-                    onClick={() => void openBook(book.id)}
+                    onClick={() => selectBook(book.id)}
                   >
                     <span className="book-title">{book.title}</span>
                     <span className="book-meta">{formatBookMeta(book)}</span>
@@ -1556,7 +1607,7 @@ function App() {
                 >
                   {visibleAudioSyncProgress ? `同步音频 ${visibleAudioSyncProgress.done}/${visibleAudioSyncProgress.total}` : '同步 Audio'}
                 </button>
-                <button className="primary-button full-width-button" type="button" onClick={() => switchTab('reader')} disabled={!bookPackage}>
+                <button className="primary-button full-width-button" type="button" onClick={() => void openBook(selectedBook.id)} disabled={loadingPackage}>
                   开始阅读
                 </button>
               </div>
@@ -1596,19 +1647,6 @@ function App() {
                 </button>
               </div>
               {message ? <div className={`status-line reader-status status-${connectionState}`}>{message}</div> : null}
-              <div className="speech-control-panel">
-                <div>
-                  <strong>语音阅读</strong>
-                  <span>{getSpeechPlaybackLabel()}</span>
-                </div>
-                {renderSpeechActions()}
-                {ttsStatusMessage ? <p className="speech-status">{ttsStatusMessage}</p> : null}
-                {audioUrl ? null : (
-                  <button className="tts-primary-action secondary-audio-action" type="button" onClick={() => void playCurrentAudio()} disabled={!currentAudio || loadingAudio}>
-                    {audioButtonLabel(currentAudio, loadingAudio)}
-                  </button>
-                )}
-              </div>
               <article
                 className={`reader-card ${readerSettings.background}`}
                 onClick={handleReaderTap}
@@ -2015,10 +2053,10 @@ function findChapterSummary(bookPackage: BookPackage, chapter: Chapter): Record<
       return (
         entry.chapterId === chapter.id ||
         entry.id === chapter.id ||
-        entry.chapterIndex === chapter.index ||
-        entry.index === chapter.index ||
-        entry.chapterIndex === chapter.chapterIndex ||
-        entry.index === chapter.chapterIndex
+        sameOptionalInteger(entry.chapterIndex, chapter.index) ||
+        sameOptionalInteger(entry.index, chapter.index) ||
+        sameOptionalInteger(entry.chapterIndex, chapter.chapterIndex) ||
+        sameOptionalInteger(entry.index, chapter.chapterIndex)
       )
     })
     return isRecord(matched) ? matched : null
@@ -2028,6 +2066,10 @@ function findChapterSummary(bookPackage: BookPackage, chapter: Chapter): Record<
     if (isRecord(byId)) return byId
   }
   return null
+}
+
+function sameOptionalInteger(left: unknown, right: unknown) {
+  return typeof left === 'number' && typeof right === 'number' && left === right
 }
 
 function summaryText(summary: Record<string, unknown>, keys: string[]) {
@@ -2175,8 +2217,7 @@ function loadFullPackageCache(bookId?: string | null): FullPackageCache | null {
 
   const indexedCaches = Object.values(index).sort((left, right) => Date.parse(right.importedAt || right.cachedAt) - Date.parse(left.importedAt || left.cachedAt))
   if (indexedCaches[0]) return indexedCaches[0]
-
-  return loadLegacyFullPackageCache()
+  return null
 }
 
 function loadFullPackageCacheIndex(): Record<string, FullPackageCache> {
@@ -2193,8 +2234,6 @@ function loadFullPackageCacheIndex(): Record<string, FullPackageCache> {
     // Ignore invalid cache index and fall back to the legacy single-book key.
   }
 
-  const legacy = loadLegacyFullPackageCache()
-  if (legacy && !index[legacy.bookId]) index[legacy.bookId] = legacy
   return index
 }
 
@@ -2759,22 +2798,20 @@ function inferredSummaryCoverage(book: BookSummary | null, bookPackage: BookPack
   if (importedChapterCount > 0) {
     return importedSummaryCount > 0 ? Math.min(1, importedSummaryCount / importedChapterCount) : 1
   }
-  if (typeof book?.summaryCoverage === 'number' && book.summaryCoverage > 0) return book.summaryCoverage
   const summaries = bookPackage?.summaries
   const summaryCount = Array.isArray(summaries) ? summaries.length : isRecord(summaries) ? Object.keys(summaries).length : 0
   const chapterCount = bookPackage ? packageChapters(bookPackage).length : (book?.chapterCount ?? 0)
-  return chapterCount > 0 ? Math.min(1, summaryCount / chapterCount) : book?.summaryCoverage
+  return bookPackage && chapterCount > 0 ? Math.min(1, summaryCount / chapterCount) : 0
 }
 
 function inferredKgCoverage(book: BookSummary | null, bookPackage: BookPackage | null, fullPackage: FullPackageCache | null) {
-  if (typeof book?.kgCoverage === 'number' && book.kgCoverage > 0) return book.kgCoverage
-  return hasKnowledgeGraph(bookPackage) || hasImportedKnowledgeGraph(fullPackage) ? 1 : book?.kgCoverage
+  void book
+  return hasKnowledgeGraph(bookPackage) || hasImportedKnowledgeGraph(fullPackage) ? 1 : 0
 }
 
 function inferredEmbeddingCoverage(book: BookSummary | null, bookPackage: BookPackage | null, fullPackage: FullPackageCache | null) {
-  if (typeof book?.embeddingCoverage === 'number' && book.embeddingCoverage > 0) return book.embeddingCoverage
-  if (hasEmbeddings(bookPackage) || hasImportedEmbeddings(fullPackage)) return 1
-  return book?.embeddingCoverage
+  void book
+  return hasEmbeddings(bookPackage) || hasImportedEmbeddings(fullPackage) ? 1 : 0
 }
 
 function hasImportedPackage(fullPackage: FullPackageCache | null) {
