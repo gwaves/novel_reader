@@ -213,6 +213,13 @@ export async function buildContentPipelineService(config = loadServiceConfig()) 
     await send()
   })
 
+  app.post('/api/jobs/:jobId/stop', async (request, reply) => {
+    const job = store.getJob(request.params.jobId)
+    if (!job) throw httpError(404, 'job_not_found', `Job not found: ${request.params.jobId}`)
+    await store.stopJob(job.id)
+    reply.status(202).send(await store.readJobResponse(job.id))
+  })
+
   app.post('/api/jobs', async (request, reply) => {
     const body = readObjectBody(request.body)
     const spec = createJobSpec(body, config)
@@ -238,6 +245,7 @@ class JobStore {
   constructor(config) {
     this.config = config
     this.jobs = new Map()
+    this.activeChildren = new Map()
     this.events = new EventEmitter()
   }
 
@@ -321,6 +329,34 @@ class JobStore {
     }
   }
 
+  registerChild(job, child) {
+    this.activeChildren.set(job.id, child)
+  }
+
+  unregisterChild(job, child) {
+    if (this.activeChildren.get(job.id) === child) this.activeChildren.delete(job.id)
+  }
+
+  async stopJob(jobId) {
+    const job = this.getJob(jobId)
+    if (!job) throw httpError(404, 'job_not_found', `Job not found: ${jobId}`)
+    if (!isActiveJob(job)) throw httpError(409, 'job_not_active', `Job is not running: ${jobId}`)
+
+    job.stopRequested = true
+    job.status = 'stopping'
+    job.error = '用户请求停止任务。'
+    await this.appendLogFile(job, 'system', '用户请求停止任务。')
+    const child = this.activeChildren.get(job.id)
+    if (!child?.pid) {
+      job.status = 'stopped'
+      job.finishedAt = new Date().toISOString()
+      await this.persistAndEmit(job)
+      return
+    }
+    await this.persistAndEmit(job)
+    await killProcessTree(child.pid)
+  }
+
   appendLog(job, stream, chunk) {
     const text = chunk.toString()
     const lines = text.split(/\r?\n/)
@@ -358,6 +394,12 @@ class JobStore {
 }
 
 async function runJob(store, job) {
+  if (job.stopRequested) {
+    job.status = 'stopped'
+    job.finishedAt = new Date().toISOString()
+    await store.persistAndEmit(job)
+    return
+  }
   job.status = 'running'
   job.startedAt = new Date().toISOString()
   await store.persistAndEmit(job)
@@ -367,6 +409,14 @@ async function runJob(store, job) {
       job.currentCommand = index
       await store.persistAndEmit(job)
       const result = await runCommand(store, job, job.commands[index])
+      if (job.stopRequested) {
+        job.status = 'stopped'
+        job.exitCode = result.code
+        job.error = '任务已停止。'
+        job.finishedAt = new Date().toISOString()
+        await store.persistAndEmit(job)
+        return
+      }
       if (result.code !== 0) {
         job.status = 'failed'
         job.exitCode = result.code
@@ -381,12 +431,13 @@ async function runJob(store, job) {
     job.finishedAt = new Date().toISOString()
     await store.persistAndEmit(job)
   } catch (error) {
-    job.status = 'failed'
-    job.error = error.message
+    job.status = job.stopRequested ? 'stopped' : 'failed'
+    job.error = job.stopRequested ? '任务已停止。' : error.message
     job.finishedAt = new Date().toISOString()
     await store.persistAndEmit(job)
   } finally {
     job.pid = null
+    job.stopRequested = false
     await store.persistAndEmit(job)
   }
 }
@@ -399,6 +450,7 @@ function runCommand(store, job, commandSpec) {
       stdio: ['ignore', 'pipe', 'pipe'],
     })
     job.pid = child.pid || null
+    store.registerChild(job, child)
     void store.persistAndEmit(job)
 
     child.stdout.on('data', (chunk) => {
@@ -410,7 +462,10 @@ function runCommand(store, job, commandSpec) {
       void store.appendLogFile(job, 'stderr', chunk).then(() => store.persistAndEmit(job))
     })
     child.on('error', rejectPromise)
-    child.on('close', (code) => resolvePromise({ code: code ?? 1 }))
+    child.on('close', (code, signal) => {
+      store.unregisterChild(job, child)
+      resolvePromise({ code: code ?? (signal ? 128 : 1), signal: signal || '' })
+    })
   })
 }
 
@@ -581,6 +636,8 @@ function renderConsoleHtml() {
     .status.running, .status.queued { background: #fff3c4; color: #735b00; }
     .status.completed { background: #dbf5e7; color: #11603c; }
     .status.failed { background: #ffe1e1; color: #9b1c1c; }
+    .status.stopping { background: #fdebd3; color: #8a4b08; }
+    .status.stopped { background: #e8edf5; color: #475467; }
     .topline { display: flex; justify-content: space-between; gap: 12px; align-items: center; }
     .panel { background: #fff; border: 1px solid #d9dee8; border-radius: 8px; padding: 16px; margin-bottom: 16px; }
     .error-panel { border: 1px solid #f0b8ae; border-radius: 8px; background: #fff4f1; color: #9a3324; padding: 14px 16px; margin-bottom: 16px; }
@@ -742,8 +799,12 @@ function renderConsoleHtml() {
     async function loadJobs() {
       const body = await api('/api/jobs?limit=50');
       const root = document.getElementById('jobs');
-      root.innerHTML = body.jobs.map(job => '<div class="job ' + (job.id === state.selectedJobId ? 'active' : '') + '" data-id="' + job.id + '"><div class="topline"><strong>' + escapeHtml(job.title) + '</strong><span class="status ' + job.status + '">' + job.status + '</span></div><div class="meta">' + job.action + ' · ' + job.createdAt + '</div><div class="meta">' + escapeHtml(job.manifestPath || '') + '</div></div>').join('') || '<div class="meta">暂无任务</div>';
+      root.innerHTML = body.jobs.map(job => '<div class="job ' + (job.id === state.selectedJobId ? 'active' : '') + '" data-id="' + job.id + '"><div class="topline"><strong>' + escapeHtml(job.title) + '</strong><span class="status ' + job.status + '">' + job.status + '</span></div><div class="meta">' + job.action + ' · ' + job.createdAt + '</div><div class="meta">' + escapeHtml(job.manifestPath || '') + '</div>' + (isActiveJob(job) ? '<div class="actions"><button class="secondary stop-job" type="button" data-id="' + job.id + '">停止任务</button></div>' : '') + '</div>').join('') || '<div class="meta">暂无任务</div>';
       root.querySelectorAll('.job').forEach(el => el.addEventListener('click', () => selectJob(el.dataset.id)));
+      root.querySelectorAll('.stop-job').forEach(button => button.addEventListener('click', event => {
+        event.stopPropagation();
+        stopJob(button.dataset.id).catch(error => showError('停止任务失败', error));
+      }));
     }
     async function loadBooks() {
       const query = encodeURIComponent(document.getElementById('bookQuery').value.trim());
@@ -781,10 +842,20 @@ function renderConsoleHtml() {
       const legacyStagesPanel = productionRun ? '' : '<div class="panel"><h2>阶段</h2><div class="stages">' + stages + '</div></div>';
       const logs = (job.logs || []).map(item => '[' + item.at + '] ' + item.stream + ': ' + item.line).join('\\n');
       document.getElementById('detail').className = '';
-      document.getElementById('detail').innerHTML = '<div class="panel"><div class="topline"><div><h1>' + escapeHtml(job.title) + '</h1><div class="meta">' + job.id + '</div></div><span class="status ' + job.status + '">' + job.status + '</span></div><div class="meta">' + escapeHtml(job.manifestPath || '') + '</div>' + (job.error ? '<div class="meta">' + escapeHtml(job.error) + '</div>' : '') + '</div>' + productionRun + legacyStagesPanel + '<div class="panel"><h2>日志</h2><pre id="jobLog">' + escapeHtml(logs || '等待日志...') + '</pre></div>';
+      const stopButton = isActiveJob(job) ? '<div class="actions"><button class="secondary" id="stopSelectedJob" type="button">停止任务</button></div>' : '';
+      document.getElementById('detail').innerHTML = '<div class="panel"><div class="topline"><div><h1>' + escapeHtml(job.title) + '</h1><div class="meta">' + job.id + '</div></div><span class="status ' + job.status + '">' + job.status + '</span></div><div class="meta">' + escapeHtml(job.manifestPath || '') + '</div>' + (job.error ? '<div class="meta">' + escapeHtml(job.error) + '</div>' : '') + stopButton + '</div>' + productionRun + legacyStagesPanel + '<div class="panel"><h2>日志</h2><pre id="jobLog">' + escapeHtml(logs || '等待日志...') + '</pre></div>';
+      const stopSelectedJob = document.getElementById('stopSelectedJob');
+      if (stopSelectedJob) stopSelectedJob.addEventListener('click', () => stopJob(job.id).catch(error => showError('停止任务失败', error)));
       const nextLog = document.getElementById('jobLog');
       if (nextLog && shouldStickToBottom) nextLog.scrollTop = nextLog.scrollHeight;
       await loadJobs();
+    }
+    function isActiveJob(job) {
+      return job && (job.status === 'queued' || job.status === 'running' || job.status === 'stopping');
+    }
+    async function stopJob(jobId) {
+      await api('/api/jobs/' + encodeURIComponent(jobId) + '/stop', { method: 'POST' });
+      await selectJob(jobId);
     }
     function renderProductionRun(jobId, productionRun) {
       if (!productionRun) return '';
@@ -991,6 +1062,62 @@ function summarizeJob(job) {
     productionJobPath: job.productionJobPath,
     error: job.error,
   }
+}
+
+function isActiveJob(job) {
+  return job?.status === 'queued' || job?.status === 'running' || job?.status === 'stopping'
+}
+
+async function killProcessTree(pid) {
+  const rootPid = Number(pid)
+  if (!Number.isInteger(rootPid) || rootPid <= 0) return
+  const pids = await listProcessTree(rootPid)
+  for (const targetPid of pids) signalProcess(targetPid, 'SIGTERM')
+  await sleep(1200)
+  const remaining = await listProcessTree(rootPid)
+  for (const targetPid of remaining) signalProcess(targetPid, 'SIGKILL')
+}
+
+async function listProcessTree(rootPid) {
+  const rows = await listProcesses()
+  const childrenByParent = new Map()
+  for (const row of rows) {
+    if (!childrenByParent.has(row.ppid)) childrenByParent.set(row.ppid, [])
+    childrenByParent.get(row.ppid).push(row.pid)
+  }
+  const result = []
+  const visit = (pid) => {
+    if (!pid || result.includes(pid) || pid === process.pid) return
+    result.push(pid)
+    for (const childPid of childrenByParent.get(pid) || []) visit(childPid)
+  }
+  visit(rootPid)
+  return result.reverse()
+}
+
+async function listProcesses() {
+  try {
+    const { stdout } = await execFileAsync('ps', ['-axo', 'pid=,ppid='])
+    return stdout
+      .split(/\r?\n/)
+      .map((line) => line.trim().split(/\s+/).map(Number))
+      .filter(([pid, ppid]) => Number.isInteger(pid) && Number.isInteger(ppid))
+      .map(([pid, ppid]) => ({ pid, ppid }))
+  } catch {
+    return []
+  }
+}
+
+function signalProcess(pid, signal) {
+  try {
+    process.kill(pid, signal)
+  } catch (error) {
+    if (error.code !== 'ESRCH') throw error
+  }
+}
+
+function sleep(ms) {
+  return new Promise((resolvePromise) => setTimeout(resolvePromise, ms))
 }
 
 function readProductionJobConfig(jobPath) {

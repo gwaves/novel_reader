@@ -67,6 +67,8 @@ describe('content pipeline service', () => {
     assert.match(html, /id="tab-v2"/)
     assert.match(html, /id="chooseJob"/)
     assert.match(html, /id="startV2"/)
+    assert.match(html, /stopJob/)
+    assert.match(html, /停止任务/)
   })
 
   it('requires bearer token when configured', async () => {
@@ -108,6 +110,13 @@ describe('content pipeline service', () => {
     assert.equal(body.job.status, 'completed')
     assert.equal(body.manifest.book.id, 'test-book')
     assert.equal(body.manifest.stages.offlineImport.status, 'skipped')
+
+    const stopResponse = await app.inject({
+      method: 'POST',
+      url: `/api/jobs/${jobId}/stop`,
+    })
+    assert.equal(stopResponse.statusCode, 409)
+    assert.equal(stopResponse.json().error.code, 'job_not_active')
   })
 
   it('starts a production pipeline v2 job and exposes package run state', async () => {
