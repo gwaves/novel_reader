@@ -1,9 +1,9 @@
 #!/usr/bin/env node
 
 import { createHash, randomUUID } from 'node:crypto'
-import { execFile } from 'node:child_process'
+import { execFile, spawn } from 'node:child_process'
 import { copyFile, mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises'
-import { existsSync, readdirSync } from 'node:fs'
+import { createWriteStream, existsSync, readdirSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, dirname, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -316,7 +316,23 @@ async function executeJobStages({ runInfo, job, mainDbPath, resume }) {
     })
 
     try {
-      const result = await executePipelineStage({ stage, runInfo, job, mainDbPath, context })
+      const result = await executePipelineStage({
+        stage,
+        runInfo,
+        job,
+        mainDbPath,
+        context,
+        onChildStart: async (child) => {
+          const runningStage = stageResults[stage] || { status: 'running', startedAt }
+          stageResults[stage] = mergeRunningChildStage(runningStage, child)
+          await writeRunJson(runInfo.runJsonPath, {
+            ...runInfo.runJson,
+            status: 'running',
+            updatedAt: new Date().toISOString(),
+            stages: stageResults,
+          })
+        },
+      })
       const finishedAt = new Date().toISOString()
       stageResults[stage] = {
         status: 'completed',
@@ -364,11 +380,11 @@ async function executeJobStages({ runInfo, job, mainDbPath, resume }) {
   console.log('status: completed')
 }
 
-async function executePipelineStage({ stage, runInfo, job, mainDbPath, context }) {
+async function executePipelineStage({ stage, runInfo, job, mainDbPath, context, onChildStart }) {
   if (stage === 'publish') {
     const childRuns = []
-    if (context.packageRunJson) childRuns.push(await executeChildStage(stage, buildPublishArgs(job, context.packageRunJson), runInfo))
-    if (context.audioRunJson) childRuns.push(await executeChildStage(stage, buildPublishArgs(job, context.audioRunJson), runInfo))
+    if (context.packageRunJson) childRuns.push(await executeChildStage(stage, buildPublishArgs(job, context.packageRunJson), runInfo, { onStart: onChildStart }))
+    if (context.audioRunJson) childRuns.push(await executeChildStage(stage, buildPublishArgs(job, context.audioRunJson), runInfo, { onStart: onChildStart }))
     if (!childRuns.length) throw new Error('publish requires a completed package or audio stage.')
     return {
       message: `published ${childRuns.length} artifact run(s).`,
@@ -377,8 +393,8 @@ async function executePipelineStage({ stage, runInfo, job, mainDbPath, context }
   }
   if (stage === 'verify') {
     const childRuns = []
-    if (context.packageRunJson) childRuns.push(await executeChildStage(stage, buildVerifyArgs(job, context.packageRunJson), runInfo))
-    if (context.audioRunJson) childRuns.push(await executeChildStage(stage, buildVerifyArgs(job, context.audioRunJson), runInfo))
+    if (context.packageRunJson) childRuns.push(await executeChildStage(stage, buildVerifyArgs(job, context.packageRunJson), runInfo, { onStart: onChildStart }))
+    if (context.audioRunJson) childRuns.push(await executeChildStage(stage, buildVerifyArgs(job, context.audioRunJson), runInfo, { onStart: onChildStart }))
     if (!childRuns.length) throw new Error('verify requires a completed package or audio stage.')
     return {
       message: `verified ${childRuns.length} artifact run(s).`,
@@ -387,7 +403,7 @@ async function executePipelineStage({ stage, runInfo, job, mainDbPath, context }
   }
 
   const args = buildStageArgs(stage, job, mainDbPath, runInfo)
-  const childRun = await executeChildStage(stage, args, runInfo)
+  const childRun = await executeChildStage(stage, args, runInfo, { onStart: onChildStart })
   return {
     message: `completed ${stage}.`,
     childRunJson: childRun.childRunJson,
@@ -396,23 +412,38 @@ async function executePipelineStage({ stage, runInfo, job, mainDbPath, context }
   }
 }
 
-async function executeChildStage(stage, args, runInfo) {
+function mergeRunningChildStage(stageValue, child) {
+  if (stageValue.childRuns || child.childRunJson) {
+    return {
+      ...stageValue,
+      childRuns: [...(stageValue.childRuns || []), child],
+    }
+  }
+  return {
+    ...stageValue,
+    ...child,
+  }
+}
+
+async function executeChildStage(stage, args, runInfo, { onStart } = {}) {
   const logFile = join(runInfo.rootDir, 'logs', `${stage}-${Date.now()}.log`)
   await mkdir(dirname(logFile), { recursive: true })
+  const initialChildRunJson = readArgValue(args, '--run')
+  await onStart?.({
+    stage,
+    ...(initialChildRunJson ? { childRunJson: initialChildRunJson, childRunDir: dirname(initialChildRunJson) } : {}),
+    logFile: relativeRunPath(runInfo.rootDir, logFile),
+  })
   let stdout = ''
   let stderr = ''
   try {
-    ;({ stdout, stderr } = await execFileAsync(process.execPath, [cliFilePath, ...args], {
-      maxBuffer: 100 * 1024 * 1024,
-    }))
+    ;({ stdout, stderr } = await execFileStreaming(process.execPath, [cliFilePath, ...args], logFile))
   } catch (error) {
     stdout = error.stdout || ''
     stderr = error.stderr || error.message
-    await writeFile(logFile, `${stdout}${stderr ? `\n--- stderr ---\n${stderr}` : ''}`, 'utf8')
     attachChildStageFailureMetadata(error, { stdout, stage, runInfo, logFile, args })
     throw error
   }
-  await writeFile(logFile, `${stdout}${stderr ? `\n--- stderr ---\n${stderr}` : ''}`, 'utf8')
   const childRunDir = stdout.match(/runDir: (.+)/)?.[1]?.trim()
     || dirname(stdout.match(/(?:package|audio|report): (.+)/)?.[1]?.trim() || '')
   const childRunId = stdout.match(/run: (.+)/)?.[1]?.trim()
@@ -426,6 +457,40 @@ async function executeChildStage(stage, args, runInfo) {
     childRunJson,
     logFile: relativeRunPath(runInfo.rootDir, logFile),
   }
+}
+
+async function execFileStreaming(command, args, logFile) {
+  const logStream = createWriteStream(logFile, { flags: 'w' })
+  let stdout = ''
+  let stderr = ''
+  let wroteStderrHeader = false
+  const child = spawn(command, args, { stdio: ['ignore', 'pipe', 'pipe'] })
+  child.stdout.on('data', (chunk) => {
+    const text = chunk.toString()
+    stdout += text
+    logStream.write(text)
+  })
+  child.stderr.on('data', (chunk) => {
+    const text = chunk.toString()
+    stderr += text
+    if (!wroteStderrHeader) {
+      logStream.write('\n--- stderr ---\n')
+      wroteStderrHeader = true
+    }
+    logStream.write(text)
+  })
+  const code = await new Promise((resolve, reject) => {
+    child.once('error', reject)
+    child.once('close', resolve)
+  })
+  await new Promise((resolve) => logStream.end(resolve))
+  if (code !== 0) {
+    const error = new Error(`Command failed: ${command} ${args.join(' ')}`)
+    error.stdout = stdout
+    error.stderr = stderr
+    throw error
+  }
+  return { stdout, stderr }
 }
 
 function attachChildStageFailureMetadata(error, { stdout, stage, runInfo, logFile, args }) {

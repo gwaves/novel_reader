@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { execFile } from 'node:child_process'
+import { execFile, spawn } from 'node:child_process'
 import { createServer } from 'node:http'
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
@@ -438,6 +438,102 @@ describe('production-pipeline import', () => {
       ])
       assert.equal(JSON.parse(statusJsonStdout).status, 'completed')
     } finally {
+      await rm(tempDir, { recursive: true, force: true })
+    }
+  })
+
+  it('records child log metadata while a child stage is still running', async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), 'production-pipeline-running-child-test-'))
+    let chatServer
+    let child
+    try {
+      chatServer = await startFakeChatServer({ delayMs: 1500 })
+      const txtPath = join(tempDir, 'sample.txt')
+      const dbPath = join(tempDir, 'main.sqlite')
+      const runRoot = join(tempDir, 'runs')
+      const jobPath = join(tempDir, 'job.json')
+      await writeFile(txtPath, `第一章 开始\n这是第一章内容。`, 'utf8')
+      await execFileAsync(process.execPath, [
+        cliPath,
+        'import',
+        '--file',
+        txtPath,
+        '--book-id',
+        'sample-book',
+        '--title',
+        '样书',
+        '--main-db',
+        dbPath,
+        '--run-root',
+        runRoot,
+      ])
+      await writeFile(
+        jobPath,
+        JSON.stringify({
+          bookId: 'sample-book',
+          title: '样书',
+          mainDbPath: dbPath,
+          stages: ['summary'],
+          summary: {
+            baseUrl: chatServer.url,
+            model: 'fake-chat',
+            concurrency: 1,
+            limit: 1,
+            timeoutMs: 5000,
+          },
+        }),
+        'utf8',
+      )
+
+      const output = { stdout: '', stderr: '' }
+      child = spawn(process.execPath, [cliPath, 'run', '--job', jobPath, '--run-root', runRoot], {
+        stdio: ['ignore', 'pipe', 'pipe'],
+      })
+      child.stdout.on('data', (chunk) => {
+        output.stdout += chunk.toString()
+      })
+      child.stderr.on('data', (chunk) => {
+        output.stderr += chunk.toString()
+      })
+
+      const runJsonPath = await waitFor(async () => {
+        const bookRunRoot = join(runRoot, 'sample-book')
+        const runIds = await readdir(bookRunRoot).catch(() => [])
+        for (const runId of runIds.sort().reverse()) {
+          const candidate = join(bookRunRoot, runId, 'run.json')
+          const runJson = await readJsonIfExists(candidate)
+          if (runJson?.stages?.summary?.status === 'running' && runJson.stages.summary.logFile) {
+            return candidate
+          }
+        }
+        return null
+      }, { timeoutMs: 3000 })
+
+      const parentRunDir = dirname(runJsonPath)
+      const runningRunJson = JSON.parse(await readFile(runJsonPath, 'utf8'))
+      assert.equal(runningRunJson.status, 'running')
+      assert.equal(runningRunJson.stages.summary.status, 'running')
+      assert.ok(runningRunJson.stages.summary.logFile)
+      assert.equal(await fileExists(join(parentRunDir, runningRunJson.stages.summary.logFile)), true)
+
+      const { stdout: statusStdout } = await execFileAsync(process.execPath, [
+        cliPath,
+        'status',
+        '--run',
+        runJsonPath,
+      ])
+      assert.match(statusStdout, /- summary: running/)
+      assert.match(statusStdout, /log: /)
+
+      const exit = await waitForProcess(child)
+      child = null
+      assert.equal(exit.code, 0, `${output.stdout}\n${output.stderr}`)
+      const completedRunJson = JSON.parse(await readFile(runJsonPath, 'utf8'))
+      assert.equal(completedRunJson.status, 'completed')
+      assert.equal(completedRunJson.stages.summary.status, 'completed')
+    } finally {
+      if (child && !child.killed) child.kill()
+      await chatServer?.close()
       await rm(tempDir, { recursive: true, force: true })
     }
   })
@@ -1293,6 +1389,41 @@ async function fileExists(path) {
   }
 }
 
+async function readJsonIfExists(path) {
+  try {
+    return JSON.parse(await readFile(path, 'utf8'))
+  } catch {
+    return null
+  }
+}
+
+async function waitFor(probe, { timeoutMs = 3000, intervalMs = 50 } = {}) {
+  const deadline = Date.now() + timeoutMs
+  let lastError
+  while (Date.now() < deadline) {
+    try {
+      const value = await probe()
+      if (value) return value
+    } catch (error) {
+      lastError = error
+    }
+    await sleep(intervalMs)
+  }
+  if (lastError) throw lastError
+  throw new Error(`Timed out after ${timeoutMs}ms`)
+}
+
+function waitForProcess(child) {
+  return new Promise((resolve, reject) => {
+    child.once('error', reject)
+    child.once('close', (code, signal) => resolve({ code, signal }))
+  })
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
+}
+
 async function startFakeEmbeddingServer() {
   const server = createServer(async (request, response) => {
     const url = new URL(request.url, 'http://127.0.0.1')
@@ -1318,7 +1449,7 @@ async function startFakeEmbeddingServer() {
   }
 }
 
-async function startFakeChatServer() {
+async function startFakeChatServer({ delayMs = 0 } = {}) {
   const server = createServer(async (request, response) => {
     const url = new URL(request.url, 'http://127.0.0.1')
     if (request.method !== 'POST' || url.pathname !== '/chat/completions') {
@@ -1326,6 +1457,7 @@ async function startFakeChatServer() {
       return
     }
     const body = await readRequestJson(request)
+    if (delayMs) await sleep(delayMs)
     const prompt = body.messages?.map((message) => message.content).join('\n') || ''
     if (prompt.includes('知识图谱')) {
       sendJson(response, {
