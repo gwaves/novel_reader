@@ -1258,7 +1258,14 @@ async function runVerify(options) {
 
 async function runStatus(options) {
   const runInfo = await loadRunInfo(required(options.run, 'status requires --run <runId or run path>'))
-  console.log(JSON.stringify(runInfo.runJson, null, 2))
+  if (isFlagEnabled(options.json)) {
+    console.log(JSON.stringify(runInfo.runJson, null, 2))
+    return
+  }
+  const lines = await buildStatusLines(runInfo, {
+    logLines: clampInteger(options.logLines, 8, 0, 80),
+  })
+  console.log(lines.join('\n'))
 }
 
 async function createRun({ command, options, mainDbPath, bookId }) {
@@ -2300,6 +2307,98 @@ async function loadRunInfo(runPath) {
     rootDir: dirname(runJsonPath),
     job: runJson.job || {},
     stages: runJson.stages || {},
+  }
+}
+
+async function buildStatusLines(runInfo, { logLines }) {
+  const runJson = runInfo.runJson
+  const lines = [
+    `run: ${runJson.runId || basename(runInfo.rootDir)}`,
+    `command: ${runJson.command || 'unknown'}`,
+    `status: ${runJson.status || 'unknown'}`,
+    `runDir: ${runInfo.rootDir}`,
+  ]
+  if (runJson.job?.bookId) lines.push(`book: ${runJson.job.bookId}${runJson.job.title ? ` ${runJson.job.title}` : ''}`)
+  if (runJson.updatedAt) lines.push(`updatedAt: ${runJson.updatedAt}`)
+  const stages = runJson.stages || {}
+  const stageNames = Object.keys(stages)
+  if (!stageNames.length) {
+    lines.push('stages: none')
+    return lines
+  }
+  lines.push('stages:')
+  for (const stageName of stageNames) {
+    const stage = stages[stageName] || {}
+    lines.push(`- ${stageName}: ${stage.status || 'unknown'}${stage.message ? ` - ${stage.message}` : ''}`)
+    if (stage.error) lines.push(`  error: ${stage.error}`)
+    if (stage.startedAt) lines.push(`  startedAt: ${stage.startedAt}`)
+    if (stage.finishedAt) lines.push(`  finishedAt: ${stage.finishedAt}`)
+    appendArtifacts(lines, stage.artifacts, '  ')
+    const childRuns = normalizeChildRuns(stage)
+    for (const [index, child] of childRuns.entries()) {
+      await appendChildRunStatus(lines, runInfo.rootDir, child, {
+        label: childRuns.length > 1 ? `child ${index + 1}` : 'child',
+        logLines,
+      })
+    }
+  }
+  return lines
+}
+
+function appendArtifacts(lines, artifacts, indent) {
+  if (!artifacts || typeof artifacts !== 'object' || !Object.keys(artifacts).length) return
+  lines.push(`${indent}artifacts:`)
+  for (const [key, value] of Object.entries(artifacts)) {
+    lines.push(`${indent}  ${key}: ${value}`)
+  }
+}
+
+function normalizeChildRuns(stage) {
+  const childRuns = []
+  if (stage.childRunJson || stage.childRunDir || stage.logFile) childRuns.push(stage)
+  if (Array.isArray(stage.childRuns)) childRuns.push(...stage.childRuns)
+  return childRuns
+}
+
+async function appendChildRunStatus(lines, parentRunDir, child, { label, logLines }) {
+  lines.push(`  ${label}:`)
+  if (child.childRunJson) lines.push(`    runJson: ${child.childRunJson}`)
+  if (child.childRunDir) lines.push(`    runDir: ${child.childRunDir}`)
+  const childRunJsonPath = child.childRunJson && existsSync(child.childRunJson) ? child.childRunJson : ''
+  if (childRunJsonPath) {
+    try {
+      const childRunJson = JSON.parse(await readFile(childRunJsonPath, 'utf8'))
+      lines.push(`    status: ${childRunJson.status || 'unknown'}`)
+      const childStage = firstObjectValue(childRunJson.stages)
+      if (childStage?.message) lines.push(`    message: ${childStage.message}`)
+      if (childStage?.error) lines.push(`    error: ${childStage.error}`)
+      appendArtifacts(lines, childStage?.artifacts, '    ')
+    } catch (error) {
+      lines.push(`    statusError: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+  const logPath = child.logFile ? resolveRunArtifact(parentRunDir, child.logFile) : ''
+  if (logPath) {
+    lines.push(`    log: ${logPath}`)
+    const tail = logLines > 0 ? await readTailLines(logPath, logLines) : []
+    if (tail.length) {
+      lines.push('    logTail:')
+      for (const line of tail) lines.push(`      ${line}`)
+    }
+  }
+}
+
+function firstObjectValue(value) {
+  if (!value || typeof value !== 'object') return null
+  return Object.values(value).find((entry) => entry && typeof entry === 'object') || null
+}
+
+async function readTailLines(path, count) {
+  try {
+    const text = await readFile(path, 'utf8')
+    return text.trimEnd().split(/\r?\n/).slice(-count)
+  } catch {
+    return []
   }
 }
 
@@ -3365,6 +3464,8 @@ Options:
   --gateway-url        Gateway base URL for verify.
   --gateway-token      Gateway bearer token for verify.
   --concurrency        Summary/KG/embedding request concurrency.
+  --json               Print raw run JSON for status.
+  --log-lines          Include this many child log tail lines in status. Default: 8.
   --tts-config         Generate MP3 first with offline-tts batch-pipeline, then package it.
   --chapters           Chapter list/range for TTS generation. Default: full book.
   --tts-concurrency    TTS segment concurrency passed to offline-tts.

@@ -360,6 +360,33 @@ describe('production-pipeline import', () => {
       assert.match(resumeStdout, /skip: package already completed/)
       assert.match(resumeStdout, /skip: publish already completed/)
       assert.match(resumeStdout, /status: completed/)
+
+      const { stdout: statusStdout } = await execFileAsync(process.execPath, [
+        cliPath,
+        'status',
+        '--run',
+        runJsonPath,
+        '--log-lines',
+        '3',
+      ])
+
+      assert.match(statusStdout, /run: /)
+      assert.match(statusStdout, /status: completed/)
+      assert.match(statusStdout, /- package: completed/)
+      assert.match(statusStdout, /child:/)
+      assert.match(statusStdout, /runJson:/)
+      assert.match(statusStdout, /gatewayDataDir:/)
+      assert.match(statusStdout, /- publish: completed/)
+      assert.match(statusStdout, /logTail:/)
+
+      const { stdout: statusJsonStdout } = await execFileAsync(process.execPath, [
+        cliPath,
+        'status',
+        '--run',
+        runJsonPath,
+        '--json',
+      ])
+      assert.equal(JSON.parse(statusJsonStdout).status, 'completed')
     } finally {
       await rm(tempDir, { recursive: true, force: true })
     }
