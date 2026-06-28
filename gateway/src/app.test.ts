@@ -322,7 +322,7 @@ describe('gateway app', () => {
           summaryCoverage: 0.5,
           kgCoverage: 0.25,
           embeddingCoverage: 0.75,
-          audioChapterCount: 3,
+          audioChapterCount: 0,
         },
         {
           id: 'book-old',
@@ -331,6 +331,57 @@ describe('gateway app', () => {
           chapterCount: 8,
         },
       ],
+    })
+  })
+
+  it('reports book catalog audio counts from the current audio manifests', async () => {
+    const dataDir = await makeDataDir()
+    const audioDir = await makeDataDir()
+    await mkdir(join(audioDir, 'books', 'book-new'), { recursive: true })
+    await writeFile(
+      join(dataDir, 'books.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        books: [
+          {
+            id: 'book-new',
+            title: '新书',
+            chapterCount: 120,
+            audioChapterCount: 3,
+            updatedAt: '2026-06-25T00:00:00.000Z',
+          },
+        ],
+      }),
+      'utf8',
+    )
+    await writeFile(
+      join(audioDir, 'books', 'book-new', 'audio.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        chapters: Array.from({ length: 120 }, (_, index) => ({
+          chapterId: `chapter-${index + 1}`,
+          fileName: `chapter-${index + 1}.mp3`,
+        })),
+      }),
+      'utf8',
+    )
+    const app = buildTestApp({
+      GATEWAY_DEV_ACCESS_TOKEN: 'dev-token',
+      GATEWAY_DATA_DIR: dataDir,
+      GATEWAY_AUDIO_DIR: audioDir,
+    })
+    const response = await app.inject({
+      method: 'GET',
+      url: '/mobile/books',
+      headers: {
+        authorization: 'Bearer dev-token',
+      },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect(response.json().books[0]).toMatchObject({
+      id: 'book-new',
+      audioChapterCount: 120,
     })
   })
 

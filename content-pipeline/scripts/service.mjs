@@ -469,9 +469,6 @@ function createProduceSpec(body, config) {
 
 function createRunArgs(body, manifestPath) {
   const steps = readString(body.steps || 'import,scan,export,publish-package')
-  if (splitList(steps).includes('audio') && !readString(body.chapters)) {
-    throw httpError(400, 'missing_audio_chapters', 'MP3 音频步骤需要填写章节范围，例如 1-10。')
-  }
   const runOptions = splitList(steps).includes('audio')
     ? { ...recommendedAudioDefaults, ...body }
     : body
@@ -531,6 +528,8 @@ function renderConsoleHtml() {
     .status.failed { background: #ffe1e1; color: #9b1c1c; }
     .topline { display: flex; justify-content: space-between; gap: 12px; align-items: center; }
     .panel { background: #fff; border: 1px solid #d9dee8; border-radius: 8px; padding: 16px; margin-bottom: 16px; }
+    .error-panel { border: 1px solid #f0b8ae; border-radius: 8px; background: #fff4f1; color: #9a3324; padding: 14px 16px; margin-bottom: 16px; }
+    .error-panel strong { display: block; margin-bottom: 6px; color: #7f271b; }
     .stages { display: grid; grid-template-columns: repeat(4, minmax(130px, 1fr)); gap: 10px; }
     .stage { border: 1px solid #d9dee8; border-radius: 8px; padding: 10px; min-height: 78px; }
     .stage strong { display: block; font-size: 13px; margin-bottom: 8px; }
@@ -647,9 +646,13 @@ function renderConsoleHtml() {
     };
     async function api(path, options = {}) {
       const response = await fetch(path, { ...options, headers: { ...authHeaders(), ...(options.headers || {}) } });
-      const body = await response.json();
-      if (!response.ok) throw new Error(body.error?.message || response.statusText);
+      const body = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(body.error?.message || response.statusText || '请求失败');
       return body;
+    }
+    function showError(title, error) {
+      document.getElementById('detail').className = '';
+      document.getElementById('detail').innerHTML = '<div class="error-panel"><strong>' + escapeHtml(title) + '</strong><div>' + escapeHtml(error.message || String(error)) + '</div></div>' + document.getElementById('detail').innerHTML;
     }
     async function loadJobs() {
       const body = await api('/api/jobs?limit=50');
@@ -710,6 +713,8 @@ function renderConsoleHtml() {
         payload.action = document.getElementById('action').value;
         const body = await api('/api/jobs', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(payload) });
         await selectJob(body.job.id);
+      } catch (error) {
+        showError('启动失败', error);
       } finally {
         startButton.disabled = false;
       }

@@ -22,6 +22,7 @@ const stageNames = [
   'publishPackage',
   'publishAudio',
 ]
+const localApiRetryStatuses = new Set([408, 429, 500, 502, 503, 504])
 
 main().catch((error) => {
   console.error(`内容生产失败：${error.message}`)
@@ -379,14 +380,13 @@ async function runStep({ manifestPath, manifest, step, options, config, dryRun }
   }
 
   if (step === 'audio') {
-    if (!chapters) {
-      await failBeforeCommand({ manifest, manifestPath, stageName: 'audio', step, error: 'audio 步骤需要 --chapters，例如 1-10' })
-    }
+    const audioChapters = chapters || resolveAllAudioChapters(bookId, options, config)
     const outRoot = resolve(
       options.audioOutRoot ||
       (config.tts?.outRoot ? join(config.tts.outRoot, safePathSegment(bookId)) : join(manifest.workspace, 'audio')),
     )
     manifest.artifacts.audioRoot = outRoot
+    manifest.artifacts.audioChapters = audioChapters
     await runCommandStage({
       manifest,
       stageName: 'audio',
@@ -400,7 +400,7 @@ async function runStep({ manifestPath, manifest, step, options, config, dryRun }
         '--book-id',
         bookId,
         '--chapters',
-        chapters,
+        audioChapters,
         '--out-root',
         outRoot,
         '--resume',
@@ -590,8 +590,12 @@ async function runEmbeddingStage({ manifest, manifestPath, step, options, config
     let chunkCompleted = 0
     let chunkFailed = 0
     const batchSize = Math.max(1, Math.min(20, Number(embeddingConfig.concurrency) || 3))
+    console.log(`embedding 待处理章节：${chapterIds.length}，并发/批大小：${batchSize}`)
     for (let index = 0; index < chapterIds.length; index += batchSize) {
       const batch = chapterIds.slice(index, index + batchSize)
+      const batchNumber = Math.floor(index / batchSize) + 1
+      const batchCount = Math.ceil(chapterIds.length / batchSize)
+      console.log(`embedding batch ${batchNumber}/${batchCount}: ${index + 1}-${index + batch.length}/${chapterIds.length}`)
       const payload = await postJson(`${sourceApiBase}/api/rag/embeddings/batch`, {
         bookId,
         ...embeddingConfig,
@@ -602,6 +606,9 @@ async function runEmbeddingStage({ manifest, manifestPath, step, options, config
       failed += Number(payload.failed) || 0
       chunkCompleted += Number(payload.chunkCompleted) || 0
       chunkFailed += Number(payload.chunkFailed) || 0
+      console.log(
+        `embedding batch ${batchNumber}/${batchCount} 完成：章节 ${payload.completed ?? 0} 成功/${payload.failed ?? 0} 失败，正文片段 ${payload.chunkCompleted ?? 0} 成功/${payload.chunkFailed ?? 0} 失败；累计章节 ${completed}/${chapterIds.length}`,
+      )
       const firstError = payload.errors?.[0]?.error || payload.chunkErrors?.[0]?.error
       if (firstError) throw new Error(firstError)
     }
@@ -1019,6 +1026,37 @@ function getOfflineCoverage(bookId) {
   }
 }
 
+function resolveAllAudioChapters(bookId, options, config) {
+  const mainDbPath = resolve(
+    options.mainDb ||
+    options.mainDbPath ||
+    config.mainDbPath ||
+    process.env.NOVEL_READER_MAIN_DB ||
+    join(homedir(), '.novel_reader', 'novel_reader.sqlite'),
+  )
+  let db
+  try {
+    db = new DatabaseSync(mainDbPath, { readOnly: true })
+    const book = db.prepare(`
+      SELECT chapter_count
+      FROM books
+      WHERE id = ?
+    `).get(bookId)
+    const chapterCount =
+      typeof book?.chapter_count === 'number' && book.chapter_count > 0
+        ? book.chapter_count
+        : db.prepare(`SELECT COUNT(*) AS count FROM chapters WHERE book_id = ?`).get(bookId)?.count ?? 0
+    if (!Number.isInteger(chapterCount) || chapterCount <= 0) {
+      throw new Error(`主数据库没有可用章节：book=${bookId}`)
+    }
+    return `1-${chapterCount}`
+  } catch (error) {
+    throw new Error(`未填写 --chapters，且无法从主数据库推断全书章节范围：${mainDbPath} (${error.message})`)
+  } finally {
+    db?.close()
+  }
+}
+
 function inferSourceType(filePath) {
   const lower = filePath.toLowerCase()
   if (lower.endsWith('.txt')) return 'txt'
@@ -1135,7 +1173,7 @@ run 参数：
   --skip-config-sync         scan 前不从 PC 主数据库同步模型配置
   --limit <n>                embedding 只处理前 n 个缺失章节，便于小成本验证
   --force-embedding true     embedding 重新生成已有章节
-  --chapters <list>          audio 章节列表，如 1-10,20
+  --chapters <list>          audio 章节列表，如 1-10,20；不填则生产全书
   --tts-config <path>        TTS 配置文件
   --audio-out-root <path>    audio 输出目录
   --audio-source-root <path> publish-audio 的音频来源目录
