@@ -954,6 +954,7 @@ describe('production-pipeline import', () => {
       assert.equal(runJson.stages.audio.status, 'completed')
       assert.ok(runJson.stages.summary.childRunJson)
       assert.ok(runJson.stages.audio.childRunJson)
+      assert.match(await readFile(join(parentRunDir, runJson.stages.audio.logFile), 'utf8'), /fake director start/)
       assert.ok(
         new Date(runJson.stages.audio.startedAt).getTime() >= new Date(runJson.stages.summary.finishedAt).getTime(),
         'audio should wait for summary when both stages share a single llm scheduler slot',
@@ -1433,6 +1434,7 @@ describe('production-pipeline import', () => {
       const runJson = JSON.parse(await readFile(join(runRoot, 'sample-book', runId, 'run.json'), 'utf8'))
       assert.equal(runJson.stages.audio.artifacts.ttsSourceRoot, ttsOutRoot)
       assert.equal(runJson.stages.audio.status, 'completed')
+      assert.match(await readFile(join(runRoot, 'sample-book', runId, 'artifacts', 'tts-director.log'), 'utf8'), /fake director start/)
     } finally {
       await rm(tempDir, { recursive: true, force: true })
     }
@@ -2076,8 +2078,10 @@ const args = parseArgs(process.argv.slice(2))
 if (args._[0] !== 'batch-pipeline') throw new Error('fake director only supports batch-pipeline')
 await mkdir(args['out-root'], { recursive: true })
 await writeFile(join(args['out-root'], 'args.json'), JSON.stringify(args))
+console.log('fake director start')
 const chapters = parseChapters(args.chapters)
 for (const chapter of chapters) {
+  console.log('fake director chapter ' + chapter)
   const audioDir = join(args['out-root'], 'ch' + String(chapter).padStart(3, '0') + '-full', 'audio')
   await mkdir(audioDir, { recursive: true })
   await writeFile(join(audioDir, 'chapter.mp3'), 'fake mp3 ' + chapter)

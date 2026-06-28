@@ -487,6 +487,10 @@ async function executeChildStage(stage, args, runInfo, { onStart } = {}) {
 }
 
 async function execFileStreaming(command, args, logFile) {
+  return execFileStreamingWithMirrors(command, args, logFile)
+}
+
+async function execFileStreamingWithMirrors(command, args, logFile, { mirrorStdout = null, mirrorStderr = null } = {}) {
   const logStream = createWriteStream(logFile, { flags: 'w' })
   let stdout = ''
   let stderr = ''
@@ -496,6 +500,7 @@ async function execFileStreaming(command, args, logFile) {
     const text = chunk.toString()
     stdout += text
     logStream.write(text)
+    mirrorStdout?.write(chunk)
   })
   child.stderr.on('data', (chunk) => {
     const text = chunk.toString()
@@ -505,6 +510,7 @@ async function execFileStreaming(command, args, logFile) {
       wroteStderrHeader = true
     }
     logStream.write(text)
+    mirrorStderr?.write(chunk)
   })
   const code = await new Promise((resolve, reject) => {
     child.once('error', reject)
@@ -3335,14 +3341,15 @@ async function prepareAudioSourceRoot({ options, run, book }) {
   let stdout = ''
   let stderr = ''
   try {
-    ;({ stdout, stderr } = await execFileAsync(process.execPath, args, { maxBuffer: 100 * 1024 * 1024 }))
+    ;({ stdout, stderr } = await execFileStreamingWithMirrors(process.execPath, args, logPath, {
+      mirrorStdout: process.stdout,
+      mirrorStderr: process.stderr,
+    }))
   } catch (error) {
     stdout = error.stdout || ''
     stderr = error.stderr || error.message
-    await writeFile(logPath, `${stdout}${stderr ? `\n--- stderr ---\n${stderr}` : ''}`, 'utf8')
     throw error
   }
-  await writeFile(logPath, `${stdout}${stderr ? `\n--- stderr ---\n${stderr}` : ''}`, 'utf8')
   const summaryPath = stdout.match(/汇总文件：(.+)/)?.[1]?.trim()
     || join(sourceRoot, `batch-pipeline-${chapters.split(',')[0]}-${chapters.split(',').at(-1)}.summary.json`)
   if (existsSync(summaryPath)) options.ttsSummaryPath = summaryPath
