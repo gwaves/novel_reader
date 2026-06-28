@@ -2844,17 +2844,28 @@ function expandEmbeddingStages(stages) {
 
 function buildStageExecutionGroups(stages) {
   const groups = []
-  const parallelAfterImport = new Set(['summary', 'kg', 'chunkEmbedding'])
+  const remaining = [...stages]
+  const parallelAfterImport = new Set(['summary', 'kg', 'chunkEmbedding', 'audio'])
+  const barriers = new Set(['summaryEmbedding', 'package', 'publish', 'verify'])
   let index = 0
-  while (index < stages.length) {
-    const stage = stages[index]
+  while (index < remaining.length) {
+    const stage = remaining[index]
+    if (!stage) {
+      index += 1
+      continue
+    }
     if (parallelAfterImport.has(stage)) {
       const group = []
-      while (index < stages.length && parallelAfterImport.has(stages[index])) {
-        group.push(stages[index])
-        index += 1
+      for (let groupIndex = index; groupIndex < remaining.length; groupIndex += 1) {
+        const candidate = remaining[groupIndex]
+        if (barriers.has(candidate)) break
+        if (parallelAfterImport.has(candidate)) {
+          group.push(candidate)
+          remaining[groupIndex] = ''
+        }
       }
       groups.push(group)
+      index += 1
       continue
     }
     groups.push([stage])

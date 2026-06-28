@@ -629,6 +629,71 @@ describe('production-pipeline import', () => {
     }
   })
 
+  it('runs audio production in parallel with summary after import', async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), 'production-pipeline-audio-parallel-test-'))
+    let chatServer
+    try {
+      const txtPath = join(tempDir, 'sample.txt')
+      const dbPath = join(tempDir, 'main.sqlite')
+      const runRoot = join(tempDir, 'runs')
+      const ttsOutRoot = join(tempDir, 'generated-tts')
+      const fakeDirectorPath = join(tempDir, 'fake-tts-director.mjs')
+      const fakeConfigPath = join(tempDir, 'fake-tts-config.json')
+      const jobPath = join(tempDir, 'job.json')
+      await writeFile(txtPath, `第一章 开始\n这是第一章内容。`, 'utf8')
+      await writeFile(fakeConfigPath, JSON.stringify({ ok: true }), 'utf8')
+      await writeFile(fakeDirectorPath, fakeTtsDirectorSource(), 'utf8')
+      chatServer = await startFakeChatServer({ delayMs: 1500 })
+      await writeFile(
+        jobPath,
+        JSON.stringify({
+          bookId: 'sample-book',
+          title: '样书',
+          mainDbPath: dbPath,
+          source: { file: txtPath },
+          stages: ['import', 'summary', 'audio'],
+          llm: {
+            provider: 'openai-compatible',
+            baseUrl: chatServer.url,
+            model: 'fake-chat',
+            concurrency: 1,
+          },
+          summary: { limit: 1 },
+          audio: {
+            ttsConfig: fakeConfigPath,
+            ttsDirectorScript: fakeDirectorPath,
+            ttsOutRoot,
+            chapters: '1',
+            resume: true,
+          },
+        }),
+        'utf8',
+      )
+
+      const { stdout } = await execFileAsync(process.execPath, [
+        cliPath,
+        'run',
+        '--job',
+        jobPath,
+        '--run-root',
+        runRoot,
+      ])
+
+      const parentRunDir = stdout.match(/runDir: (.+)/)?.[1]?.trim()
+      assert.ok(parentRunDir)
+      const runJson = JSON.parse(await readFile(join(parentRunDir, 'run.json'), 'utf8'))
+      assert.equal(runJson.stages.summary.status, 'completed')
+      assert.equal(runJson.stages.audio.status, 'completed')
+      assert.ok(
+        new Date(runJson.stages.audio.finishedAt).getTime() < new Date(runJson.stages.summary.finishedAt).getTime(),
+        'audio should finish before the deliberately delayed summary stage',
+      )
+    } finally {
+      if (chatServer) await chatServer.close()
+      await rm(tempDir, { recursive: true, force: true })
+    }
+  })
+
   it('records child log metadata while a child stage is still running', async () => {
     const tempDir = await mkdtemp(join(tmpdir(), 'production-pipeline-running-child-test-'))
     let chatServer

@@ -59,8 +59,8 @@ audio chapter ids/counts when audio artifacts are present.
 The current full-flow runner can orchestrate `import`, `summary`, `kg`,
 `embedding`, `audio`, `package`, `publish`, and `verify`. In a job config,
 `embedding` is automatically split into `chunkEmbedding` and `summaryEmbedding`;
-after `import`, `summary`, `kg`, and `chunkEmbedding` may run in parallel, then
-`summaryEmbedding` runs before final packaging.
+after `import`, `summary`, `kg`, `chunkEmbedding`, and `audio` may run in
+parallel, then `summaryEmbedding` runs before final packaging.
 
 ## Job Config
 
