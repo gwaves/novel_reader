@@ -2909,7 +2909,9 @@ function buildStageExecutionPlan(job, stages) {
   const stageOptions = {}
   for (const stage of scheduledLlmStages) {
     const concurrency = allocations[stage]
-    stageOptions[stage] = stage === 'audio' ? { llmChapters: concurrency } : { concurrency }
+    stageOptions[stage] = stage === 'audio'
+      ? { directorConcurrency: concurrency, llmChapters: 1 }
+      : { concurrency }
   }
   return {
     stages: [...nonLlmStages, ...scheduledLlmStages],
@@ -3042,7 +3044,7 @@ function buildStageArgs(stage, job, mainDbPath, runInfo, stageOptions = {}) {
     if (audio.chapter) args.push('--chapter', String(audio.chapter))
     if (audio.limit) args.push('--limit', String(audio.limit))
     if (audio.batchSize || audio.batch_size) args.push('--batch-size', String(audio.batchSize || audio.batch_size))
-    if (audio.directorConcurrency || audio.director_concurrency) args.push('--director-concurrency', String(audio.directorConcurrency || audio.director_concurrency))
+    if (stageOptions.directorConcurrency || audio.directorConcurrency || audio.director_concurrency) args.push('--director-concurrency', String(stageOptions.directorConcurrency || audio.directorConcurrency || audio.director_concurrency))
     if (stageOptions.llmChapters || audio.llmChapters || audio.llm_chapters) args.push('--llm-chapters', String(stageOptions.llmChapters || audio.llmChapters || audio.llm_chapters))
     if (audio.minBatchSize || audio.min_batch_size) args.push('--min-batch-size', String(audio.minBatchSize || audio.min_batch_size))
     if (audio.ttsConcurrency || audio.tts_concurrency) args.push('--tts-concurrency', String(audio.ttsConcurrency || audio.tts_concurrency))

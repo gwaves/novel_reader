@@ -878,8 +878,12 @@ describe('production-pipeline import', () => {
       )
       const summaryReport = JSON.parse(await readFile(join(dirname(runJson.stages.summary.childRunJson), 'artifacts', 'summary-report.json'), 'utf8'))
       const kgReport = JSON.parse(await readFile(join(dirname(runJson.stages.kg.childRunJson), 'artifacts', 'kg-report.json'), 'utf8'))
+      const audioRunJson = JSON.parse(await readFile(runJson.stages.audio.childRunJson, 'utf8'))
+      const ttsArgs = JSON.parse(await readFile(join(audioRunJson.stages.audio.artifacts.ttsSourceRoot, 'args.json'), 'utf8'))
       assert.equal(summaryReport.concurrency, 3)
       assert.equal(kgReport.concurrency, 3)
+      assert.equal(ttsArgs['director-concurrency'], '4')
+      assert.equal(ttsArgs['llm-chapters'], '1')
     } finally {
       if (chatServer) await chatServer.close()
       if (embeddingServer) await embeddingServer.close()
@@ -2070,6 +2074,8 @@ function parseChapters(value) {
 
 const args = parseArgs(process.argv.slice(2))
 if (args._[0] !== 'batch-pipeline') throw new Error('fake director only supports batch-pipeline')
+await mkdir(args['out-root'], { recursive: true })
+await writeFile(join(args['out-root'], 'args.json'), JSON.stringify(args))
 const chapters = parseChapters(args.chapters)
 for (const chapter of chapters) {
   const audioDir = join(args['out-root'], 'ch' + String(chapter).padStart(3, '0') + '-full', 'audio')
