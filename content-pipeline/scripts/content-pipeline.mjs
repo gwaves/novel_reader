@@ -273,6 +273,10 @@ async function runStep({ manifestPath, manifest, step, options, config, dryRun }
   const gatewayUrl = options.gatewayUrl || config.gatewayUrl || process.env.GATEWAY_BASE_URL || ''
   const gatewayToken = options.gatewayToken || process.env.GATEWAY_DEV_ACCESS_TOKEN || ''
   const gatewayAudioDir = options.gatewayAudioDir || config.gatewayAudioDir || process.env.GATEWAY_AUDIO_DIR || 'gateway/data/audio'
+  const gatewayRemoteHost = options.gatewayRemoteHost || config.gatewayRemoteHost || process.env.GATEWAY_REMOTE_HOST || ''
+  const gatewayRemoteUser = options.gatewayRemoteUser || config.gatewayRemoteUser || process.env.GATEWAY_REMOTE_USER || ''
+  const gatewayRemoteAudioDir = options.gatewayRemoteAudioDir || config.gatewayRemoteAudioDir || process.env.GATEWAY_REMOTE_AUDIO_DIR || ''
+  const gatewayRemoteSshPort = options.gatewayRemoteSshPort || config.gatewayRemoteSshPort || process.env.GATEWAY_REMOTE_SSH_PORT || ''
   const ttsConfig = options.ttsConfig || config.tts?.config || 'offline-tts/config.example.json'
   const chapters = options.chapters || ''
 
@@ -465,8 +469,9 @@ async function runStep({ manifestPath, manifest, step, options, config, dryRun }
   }
 
   if (step === 'publish-audio') {
-    const sourceRoot = resolve(options.audioSourceRoot || manifest.artifacts.audioRoot || '')
-    if (!sourceRoot) {
+    const fallbackAudioRoot = manifest.workspace ? join(manifest.workspace, 'audio') : ''
+    const rawSourceRoot = options.audioSourceRoot || manifest.artifacts.audioRoot || fallbackAudioRoot
+    if (!rawSourceRoot) {
       await failBeforeCommand({
         manifest,
         manifestPath,
@@ -475,6 +480,7 @@ async function runStep({ manifestPath, manifest, step, options, config, dryRun }
         error: 'publish-audio 需要先运行 audio 或传入 --audio-source-root',
       })
     }
+    const sourceRoot = resolve(rawSourceRoot)
     if (!dryRun) {
       try {
         await assertDirectory(sourceRoot, 'publish-audio 音频来源目录不存在')
@@ -483,6 +489,12 @@ async function runStep({ manifestPath, manifest, step, options, config, dryRun }
       }
     }
     manifest.artifacts.gatewayAudioDir = gatewayAudioDir
+    const publishAudioArtifacts = { gatewayAudioDir }
+    if (gatewayRemoteHost) {
+      publishAudioArtifacts.gatewayRemoteAudioTarget = `${gatewayRemoteUser ? `${gatewayRemoteUser}@` : ''}${gatewayRemoteHost}:${joinRemotePath(gatewayRemoteAudioDir, 'books', bookId)}`
+      manifest.artifacts.gatewayRemoteAudioTarget = publishAudioArtifacts.gatewayRemoteAudioTarget
+    }
+    manifest.stages.publishAudio.artifacts = publishAudioArtifacts
     await runCommandStage({
       manifest,
       stageName: 'publishAudio',
@@ -498,6 +510,12 @@ async function runStep({ manifestPath, manifest, step, options, config, dryRun }
         gatewayAudioDir,
         '--source-api',
         sourceApi,
+        ...optionalArgs([
+          ['--remote-host', gatewayRemoteHost],
+          ['--remote-user', gatewayRemoteUser],
+          ['--remote-audio-dir', gatewayRemoteAudioDir],
+          ['--remote-ssh-port', gatewayRemoteSshPort],
+        ]),
       ],
       cwd: repoRoot,
       manifestPath,
@@ -918,6 +936,9 @@ function formatStageDetails(stage) {
   if (stage.name === 'publishAudio' && artifacts.gatewayAudioDir) {
     details.push(`gateway audio dir: ${artifacts.gatewayAudioDir}`)
   }
+  if (stage.name === 'publishAudio' && artifacts.gatewayRemoteAudioTarget) {
+    details.push(`gateway remote audio: ${artifacts.gatewayRemoteAudioTarget}`)
+  }
 
   return details
 }
@@ -939,6 +960,7 @@ function createManifest({ bookId, title, source, workspace, now }) {
       packageFile: '',
       audioRoot: '',
       gatewayAudioDir: '',
+      gatewayRemoteAudioTarget: '',
     },
     runs: [],
   }
@@ -1016,6 +1038,14 @@ function optionalNumberArgs(options, pairs) {
   return args
 }
 
+function optionalArgs(pairs) {
+  const args = []
+  for (const [flag, value] of pairs) {
+    if (value != null && value !== '') args.push(flag, String(value))
+  }
+  return args
+}
+
 function splitList(value) {
   return String(value)
     .split(',')
@@ -1029,6 +1059,17 @@ function safePathSegment(value) {
     .replace(/[\\/:*?"<>|]+/g, '-')
     .replace(/\s+/g, '-')
     .slice(0, 120) || 'book'
+}
+
+function joinRemotePath(...parts) {
+  return parts
+    .map((part, index) => {
+      const text = String(part || '').trim()
+      if (index === 0) return text.replace(/\/+$/, '')
+      return text.replace(/^\/+|\/+$/g, '')
+    })
+    .filter(Boolean)
+    .join('/')
 }
 
 function required(value, message) {
@@ -1102,6 +1143,12 @@ run 参数：
   --gateway-url <url>        Gateway 地址
   --gateway-token <token>    Gateway token，也可用 GATEWAY_DEV_ACCESS_TOKEN
   --gateway-audio-dir <path> Gateway 音频目录
+  --gateway-remote-host <h>  发布音频后 rsync 到远端 Gateway 主机
+  --gateway-remote-user <u>  远端 SSH 用户，可用 GATEWAY_REMOTE_USER
+  --gateway-remote-audio-dir <path>
+                            远端 Gateway 音频根目录，例如 ~/novel-reader-gateway/audio
+  --gateway-remote-ssh-port <port>
+                            远端 SSH 端口，可用 GATEWAY_REMOTE_SSH_PORT
 
 示例：
   npm run content:pipeline -- init --book-id <bookId> --title 妖刀记

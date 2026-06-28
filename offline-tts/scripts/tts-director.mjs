@@ -11,6 +11,8 @@ const DEFAULT_MAIN_DB_PATH = join(homedir(), '.novel_reader', 'novel_reader.sqli
 const SCRIPT_KIND = 'novel-reader-tts-director-script'
 const ALLOWED_SEGMENT_TYPES = new Set(['narration', 'dialogue', 'thought', 'stage'])
 const DEFAULT_TTS_MAX_CHARACTERS_PER_REQUEST = 120
+const DEFAULT_MIMO_VOICE = 'mimo_default'
+const DEFAULT_MIMO_AVAILABLE_VOICES = ['mimo_default', '冰糖', '茉莉', '苏打', '白桦', 'Mia', 'Chloe', 'Milo', 'Dean']
 
 function printHelp() {
   console.log(`
@@ -189,6 +191,10 @@ function loadConfig(configPath) {
       model: config.tts?.model || 'mimo-v2.5-tts',
       apiKey: optionalString(config.tts?.apiKey),
       apiKeyEnv: config.tts?.apiKeyEnv || 'MIMO_API_KEY',
+      defaultVoice: optionalString(config.tts?.defaultVoice) || DEFAULT_MIMO_VOICE,
+      availableVoices: Array.isArray(config.tts?.availableVoices) && config.tts.availableVoices.length
+        ? config.tts.availableVoices.map(voice => optionalString(voice)).filter(Boolean)
+        : DEFAULT_MIMO_AVAILABLE_VOICES,
       format: config.tts?.format || 'wav',
       finalFormat: config.tts?.finalFormat || 'mp3',
       mp3Bitrate: config.tts?.mp3Bitrate || '96k',
@@ -708,9 +714,10 @@ function buildDirectorScript({ config, book, chapter, preSegments, decisions, ch
       : rawSpeaker
     const character = characterByName.get(speaker)
     const isNarration = type === 'narration'
-    const voice = isNarration
+    const rawVoice = isNarration
       ? config.director.defaultNarrator.voice
       : optionalString(decision.voice) || character?.voice || null
+    const voice = normalizeTtsVoice(config, rawVoice)
     const style = isNarration
       ? config.director.defaultNarrator.style
       : optionalString(decision.style) || character?.style || ''
@@ -767,6 +774,18 @@ function inferCharacterFromContext(preSegment, characterCandidates) {
 
 function defaultSpeaker(type) {
   return type === 'narration' ? '旁白' : '未知角色'
+}
+
+function normalizeTtsVoice(config, voice) {
+  const requestedVoice = optionalString(voice)
+  const availableVoices = new Set(
+    (config.tts.availableVoices?.length ? config.tts.availableVoices : DEFAULT_MIMO_AVAILABLE_VOICES)
+      .map(item => optionalString(item))
+      .filter(Boolean),
+  )
+  const fallbackVoice = availableVoices.has(config.tts.defaultVoice) ? config.tts.defaultVoice : DEFAULT_MIMO_VOICE
+  if (!requestedVoice) return fallbackVoice
+  return availableVoices.has(requestedVoice) ? requestedVoice : fallbackVoice
 }
 
 function normalizeConfidence(value, fallback) {
@@ -1097,6 +1116,16 @@ function segmentCacheKey(segment) {
     .slice(0, 16)
 }
 
+function normalizeSegmentForTts(config, segment) {
+  const normalizedVoice = normalizeTtsVoice(config, segment.voice)
+  if (normalizedVoice === segment.voice) return segment
+  return {
+    ...segment,
+    voice: normalizedVoice,
+    originalVoice: segment.originalVoice || segment.voice || null,
+  }
+}
+
 function getSegmentTtsStyle(config, segment) {
   return [config.director.performanceStyle, segment.style || '自然清晰的中文小说朗读。']
     .filter(Boolean)
@@ -1123,7 +1152,7 @@ async function synthSegmentWithMimo(config, segment, outputPath) {
       ],
       audio: {
         format: config.tts.format,
-        voice: segment.voice || 'mimo_default',
+        voice: normalizeTtsVoice(config, segment.voice),
       },
     }),
   })
@@ -1477,6 +1506,7 @@ async function runSynth(config, args) {
   }
 
   const ttsSegments = expandLongSegmentsForTts(script.segments, config.tts.maxCharactersPerRequest)
+    .map(segment => normalizeSegmentForTts(config, segment))
   manifest.segments = ttsSegments.map((segment) => {
     const key = segmentCacheKey({ ...segment, performanceStyle: config.director.performanceStyle })
     const wavPath = join(segmentDir, `${segment.id}-${key}.wav`)

@@ -35,6 +35,10 @@ const runOptionFlags = new Map([
   ['gatewayUrl', '--gateway-url'],
   ['gatewayToken', '--gateway-token'],
   ['gatewayAudioDir', '--gateway-audio-dir'],
+  ['gatewayRemoteHost', '--gateway-remote-host'],
+  ['gatewayRemoteUser', '--gateway-remote-user'],
+  ['gatewayRemoteAudioDir', '--gateway-remote-audio-dir'],
+  ['gatewayRemoteSshPort', '--gateway-remote-ssh-port'],
   ['audioSourceRoot', '--audio-source-root'],
   ['audioOutRoot', '--audio-out-root'],
   ['ttsConfig', '--tts-config'],
@@ -574,6 +578,19 @@ function renderConsoleHtml() {
         <label>章节 <input id="chapters" placeholder="1-10" /></label>
         <label>扫描 <select id="scanType"><option value="">all</option><option>summary</option><option>kg</option></select></label>
       </div>
+      <h2>发布</h2>
+      <label>Gateway URL <input id="gatewayUrl" placeholder="https://192.168.88.100:8888" /></label>
+      <label>Gateway Token <input id="gatewayToken" type="password" autocomplete="off" placeholder="GATEWAY_DEV_ACCESS_TOKEN" /></label>
+      <label>音频来源目录 <input id="audioSourceRoot" placeholder="默认 manifest workspace/audio" /></label>
+      <label>本地 Gateway 音频目录 <input id="gatewayAudioDir" placeholder="gateway/data/audio 或 ~/.novel_reader_gateway/audio" /></label>
+      <div class="row">
+        <label>远端 Host <input id="gatewayRemoteHost" placeholder="192.168.88.100" /></label>
+        <label>远端用户 <input id="gatewayRemoteUser" placeholder="可选，例如 gwaves" /></label>
+      </div>
+      <div class="row">
+        <label>远端音频目录 <input id="gatewayRemoteAudioDir" placeholder="~/novel-reader-gateway/audio" /></label>
+        <label>SSH 端口 <input id="gatewayRemoteSshPort" placeholder="22" /></label>
+      </div>
       <div class="actions">
         <button id="start">启动</button>
         <button class="secondary" id="refresh">刷新</button>
@@ -593,7 +610,7 @@ function renderConsoleHtml() {
   </div>
   <script>
     const state = { selectedJobId: '', eventSource: null };
-    const fields = ['token','action','bookId','title','sourceFile','manifestPath','steps','chapters','scanType','bookQuery'];
+    const fields = ['token','action','bookId','title','sourceFile','manifestPath','steps','chapters','scanType','gatewayUrl','gatewayToken','audioSourceRoot','gatewayAudioDir','gatewayRemoteHost','gatewayRemoteUser','gatewayRemoteAudioDir','gatewayRemoteSshPort','bookQuery'];
     for (const id of fields) {
       const saved = localStorage.getItem('pipeline.' + id);
       const el = document.getElementById(id);

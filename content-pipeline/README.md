@@ -104,6 +104,20 @@ npm run content:pipeline -- run \
   --gateway-audio-dir gateway/data/audio
 ```
 
+发布到远端 Gateway 机器时，`publish-audio` 可以把本地整理好的 `books/<bookId>/` 继续同步到远端音频挂载目录：
+
+```bash
+npm run content:pipeline -- run \
+  --manifest tmp/content-pipeline/<bookId>/production-manifest.json \
+  --steps publish-package,publish-audio \
+  --audio-source-root tmp/content-pipeline/<bookId>/audio \
+  --gateway-url https://192.168.88.100:8888 \
+  --gateway-token <GATEWAY_DEV_ACCESS_TOKEN> \
+  --gateway-audio-dir ~/.novel_reader_gateway/audio \
+  --gateway-remote-host 192.168.88.100 \
+  --gateway-remote-audio-dir '~/novel-reader-gateway/audio'
+```
+
 ## 当前边界
 
 - `ingest --file` 已支持 TXT/EPUB/MOBI/AZW/AZW3 导入到主数据库，并按文件 sha256 稳定生成默认 `bookId`，重复提交同一文件会复用同一书籍记录。

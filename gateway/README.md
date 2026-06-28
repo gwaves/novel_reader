@@ -141,4 +141,17 @@ npm run gateway:publish-audio -- \
 
 脚本会扫描 `<source-root>/chNNN-full/audio/chapter.mp3` 和 `manifest.json`，根据本地移动数据包章节序号匹配真实 `chapterId`，复制到 `GATEWAY_AUDIO_DIR/books/<bookId>/`，并生成 `audio.json`。可以用 `--package-file path/to/package.json` 跳过本地 API，或用 `--dry-run` 只检查映射结果。
 
+如果 Gateway 跑在远端机器上，可以在本地整理完音频目录后直接同步到远端挂载目录。例如家里网关机器 `192.168.88.100` 的 compose 挂载了 `~/novel-reader-gateway/audio:/audio:ro`：
+
+```bash
+npm run gateway:publish-audio -- \
+  --book-id <bookId> \
+  --source-root tmp/content-pipeline/<bookId>/audio \
+  --gateway-audio-dir ~/.novel_reader_gateway/audio \
+  --remote-host 192.168.88.100 \
+  --remote-audio-dir '~/novel-reader-gateway/audio'
+```
+
+需要指定 SSH 用户或端口时，增加 `--remote-user <user>` 和 `--remote-ssh-port <port>`；脚本会把 `books/<bookId>/` 同步到远端，并默认删除远端该书目录里已经不存在的旧文件。
+
 未配置 AI、embedding 或对象存储时，`/capabilities` 会明确返回对应能力不可用，而不是在运行时崩溃。
