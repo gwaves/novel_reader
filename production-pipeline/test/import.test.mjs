@@ -629,7 +629,123 @@ describe('production-pipeline import', () => {
     }
   })
 
-  it('runs audio production in parallel with summary after import', async () => {
+  it('allocates shared llm concurrency by scheduler weights', async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), 'production-pipeline-llm-scheduler-test-'))
+    let chatServer
+    try {
+      const txtPath = join(tempDir, 'sample.txt')
+      const dbPath = join(tempDir, 'main.sqlite')
+      const runRoot = join(tempDir, 'runs')
+      const jobPath = join(tempDir, 'job.json')
+      await writeFile(txtPath, `第一章 开始\n这是第一章内容。`, 'utf8')
+      chatServer = await startFakeChatServer()
+      await writeFile(
+        jobPath,
+        JSON.stringify({
+          bookId: 'sample-book',
+          title: '样书',
+          mainDbPath: dbPath,
+          source: { file: txtPath },
+          stages: ['import', 'summary', 'kg'],
+          llm: {
+            provider: 'openai-compatible',
+            baseUrl: chatServer.url,
+            model: 'fake-chat',
+            concurrency: 3,
+            scheduler: {
+              weights: {
+                summary: 3,
+                kg: 1,
+              },
+            },
+          },
+          summary: { limit: 1 },
+          kg: { limit: 1 },
+        }),
+        'utf8',
+      )
+
+      const { stdout } = await execFileAsync(process.execPath, [
+        cliPath,
+        'run',
+        '--job',
+        jobPath,
+        '--run-root',
+        runRoot,
+      ])
+
+      const parentRunDir = stdout.match(/runDir: (.+)/)?.[1]?.trim()
+      assert.ok(parentRunDir)
+      const runJson = JSON.parse(await readFile(join(parentRunDir, 'run.json'), 'utf8'))
+      const summaryReport = JSON.parse(await readFile(join(dirname(runJson.stages.summary.childRunJson), 'artifacts', 'summary-report.json'), 'utf8'))
+      const kgReport = JSON.parse(await readFile(join(dirname(runJson.stages.kg.childRunJson), 'artifacts', 'kg-report.json'), 'utf8'))
+      assert.equal(summaryReport.concurrency, 2)
+      assert.equal(kgReport.concurrency, 1)
+    } finally {
+      if (chatServer) await chatServer.close()
+      await rm(tempDir, { recursive: true, force: true })
+    }
+  })
+
+  it('queues llm stages when scheduler concurrency is smaller than active stages', async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), 'production-pipeline-llm-scheduler-queue-test-'))
+    let chatServer
+    try {
+      const txtPath = join(tempDir, 'sample.txt')
+      const dbPath = join(tempDir, 'main.sqlite')
+      const runRoot = join(tempDir, 'runs')
+      const jobPath = join(tempDir, 'job.json')
+      await writeFile(txtPath, `第一章 开始\n这是第一章内容。`, 'utf8')
+      chatServer = await startFakeChatServer({ delayMs: 100 })
+      await writeFile(
+        jobPath,
+        JSON.stringify({
+          bookId: 'sample-book',
+          title: '样书',
+          mainDbPath: dbPath,
+          source: { file: txtPath },
+          stages: ['import', 'summary', 'kg'],
+          llm: {
+            provider: 'openai-compatible',
+            baseUrl: chatServer.url,
+            model: 'fake-chat',
+            concurrency: 1,
+            scheduler: {
+              weights: {
+                summary: 1,
+                kg: 1,
+              },
+            },
+          },
+          summary: { limit: 1 },
+          kg: { limit: 1 },
+        }),
+        'utf8',
+      )
+
+      const { stdout } = await execFileAsync(process.execPath, [
+        cliPath,
+        'run',
+        '--job',
+        jobPath,
+        '--run-root',
+        runRoot,
+      ])
+
+      const parentRunDir = stdout.match(/runDir: (.+)/)?.[1]?.trim()
+      assert.ok(parentRunDir)
+      const runJson = JSON.parse(await readFile(join(parentRunDir, 'run.json'), 'utf8'))
+      assert.ok(
+        new Date(runJson.stages.kg.startedAt).getTime() >= new Date(runJson.stages.summary.finishedAt).getTime(),
+        'kg should wait until summary releases the only llm scheduler slot',
+      )
+    } finally {
+      if (chatServer) await chatServer.close()
+      await rm(tempDir, { recursive: true, force: true })
+    }
+  })
+
+  it('runs scheduled audio production after sharing the llm pool', async () => {
     const tempDir = await mkdtemp(join(tmpdir(), 'production-pipeline-audio-parallel-test-'))
     let chatServer
     try {
@@ -657,6 +773,12 @@ describe('production-pipeline import', () => {
             baseUrl: chatServer.url,
             model: 'fake-chat',
             concurrency: 1,
+            scheduler: {
+              weights: {
+                summary: 4,
+                audio: 1,
+              },
+            },
           },
           summary: { limit: 1 },
           audio: {
@@ -684,9 +806,11 @@ describe('production-pipeline import', () => {
       const runJson = JSON.parse(await readFile(join(parentRunDir, 'run.json'), 'utf8'))
       assert.equal(runJson.stages.summary.status, 'completed')
       assert.equal(runJson.stages.audio.status, 'completed')
+      assert.ok(runJson.stages.summary.childRunJson)
+      assert.ok(runJson.stages.audio.childRunJson)
       assert.ok(
-        new Date(runJson.stages.audio.finishedAt).getTime() < new Date(runJson.stages.summary.finishedAt).getTime(),
-        'audio should finish before the deliberately delayed summary stage',
+        new Date(runJson.stages.audio.startedAt).getTime() >= new Date(runJson.stages.summary.finishedAt).getTime(),
+        'audio should wait for summary when both stages share a single llm scheduler slot',
       )
     } finally {
       if (chatServer) await chatServer.close()

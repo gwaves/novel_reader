@@ -69,8 +69,14 @@ The job JSON is the repeatable production contract. It should include:
 - `bookId`: canonical id shared by the main DB, Gateway package, and audio catalog.
 - `mainDbPath`: Novel Reader SQLite database path.
 - `stages`: ordered stage list, for example `["summary", "kg", "embedding", "audio", "package", "publish", "verify"]`.
-- `llm`: shared chat provider settings for `summary` and `kg`, including model-specific `concurrency`, retries, and timeout.
-- `summary` / `kg`: optional stage limits or overrides; stage-level `concurrency` overrides `llm.concurrency`.
+- `llm`: shared chat provider settings for `summary` and `kg`, including model-specific `concurrency`, retries, timeout, and optional weighted scheduling.
+- `llm.scheduler`: when present, the full-flow runner treats `llm.concurrency`
+  as a shared pool for active LLM stages. `weights.summary`, `weights.kg`, and
+  `weights.audio` divide the pool among runnable stages; if the pool is smaller
+  than the number of runnable LLM stages, lower-priority stages wait for the next
+  batch. Without `llm.scheduler`, existing stage-level concurrency behavior is
+  unchanged.
+- `summary` / `kg`: optional stage limits or overrides; stage-level `concurrency` overrides `llm.concurrency` when the weighted scheduler is not enabled.
 - `embedding`: provider, base URL, model, concurrency, retries, and timeout.
 - `audio`: either `sourceRoot` for existing MP3 artifacts or `ttsConfig` for generating MP3 first; optional `chapters`, `ttsConcurrency`, `ttsChapters`, and strictness.
 - `gateway` / `publish` / `verify`: rsync target and Gateway HTTP verification settings.
@@ -115,6 +121,13 @@ cat > tmp/production-pipeline-datang.job.json <<'JSON'
     "apiKey": "LLM_API_KEY_PLACEHOLDER",
     "model": "qwen3.6-27b",
     "concurrency": 4,
+    "scheduler": {
+      "weights": {
+        "summary": 4,
+        "kg": 2,
+        "audio": 1
+      }
+    },
     "timeoutMs": 300000
   },
   "summary": { "limit": 0 },

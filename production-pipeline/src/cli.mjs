@@ -307,16 +307,25 @@ async function executeJobStages({ runInfo, job, mainDbPath, resume }) {
       return true
     })
     if (!runnableStages.length) continue
-    const settled = await Promise.allSettled(runnableStages.map((stage) => executeJobStageWithTracking({
-      stage,
-      runInfo,
-      job,
-      mainDbPath,
-      context,
-      stageResults,
-    })))
-    const rejected = settled.find((result) => result.status === 'rejected')
-    if (rejected) throw rejected.reason
+    const pendingStages = [...runnableStages]
+    while (pendingStages.length) {
+      const plan = buildStageExecutionPlan(job, pendingStages)
+      const settled = await Promise.allSettled(plan.stages.map((stage) => executeJobStageWithTracking({
+        stage,
+        runInfo,
+        job,
+        mainDbPath,
+        context,
+        stageResults,
+        stageOptions: plan.stageOptions[stage] || {},
+      })))
+      const rejected = settled.find((result) => result.status === 'rejected')
+      if (rejected) throw rejected.reason
+      for (const stage of plan.stages) {
+        const index = pendingStages.indexOf(stage)
+        if (index >= 0) pendingStages.splice(index, 1)
+      }
+    }
   }
 
   const finishedAt = new Date().toISOString()
@@ -331,7 +340,7 @@ async function executeJobStages({ runInfo, job, mainDbPath, resume }) {
   console.log('status: completed')
 }
 
-async function executeJobStageWithTracking({ stage, runInfo, job, mainDbPath, context, stageResults }) {
+async function executeJobStageWithTracking({ stage, runInfo, job, mainDbPath, context, stageResults, stageOptions = {} }) {
   const startedAt = new Date().toISOString()
   stageResults[stage] = {
     status: 'running',
@@ -351,6 +360,7 @@ async function executeJobStageWithTracking({ stage, runInfo, job, mainDbPath, co
       job,
       mainDbPath,
       context,
+      stageOptions,
       onChildStart: async (child) => {
         const runningStage = stageResults[stage] || { status: 'running', startedAt }
         stageResults[stage] = mergeRunningChildStage(runningStage, child)
@@ -397,7 +407,7 @@ async function executeJobStageWithTracking({ stage, runInfo, job, mainDbPath, co
   }
 }
 
-async function executePipelineStage({ stage, runInfo, job, mainDbPath, context, onChildStart }) {
+async function executePipelineStage({ stage, runInfo, job, mainDbPath, context, stageOptions = {}, onChildStart }) {
   if (stage === 'publish') {
     const childRuns = []
     if (context.packageRunJson) childRuns.push(await executeChildStage(stage, buildPublishArgs(job, context.packageRunJson), runInfo, { onStart: onChildStart }))
@@ -419,7 +429,7 @@ async function executePipelineStage({ stage, runInfo, job, mainDbPath, context, 
     }
   }
 
-  const args = buildStageArgs(stage, job, mainDbPath, runInfo)
+  const args = buildStageArgs(stage, job, mainDbPath, runInfo, stageOptions)
   const childRun = await executeChildStage(stage, args, runInfo, { onStart: onChildStart })
   return {
     message: `completed ${stage}.`,
@@ -2874,7 +2884,85 @@ function buildStageExecutionGroups(stages) {
   return groups
 }
 
-function buildStageArgs(stage, job, mainDbPath, runInfo) {
+function buildStageExecutionPlan(job, stages) {
+  const scheduler = normalizeLlmScheduler(job)
+  if (!scheduler) return { stages, stageOptions: {} }
+
+  const llmStages = stages.filter((stage) => isSchedulableLlmStage(stage, job) && scheduler.weights[stage] > 0)
+  if (!llmStages.length) return { stages, stageOptions: {} }
+
+  const nonLlmStages = stages.filter((stage) => !llmStages.includes(stage))
+  const allocations = allocateWeightedSlots(llmStages, scheduler.concurrency, scheduler.weights)
+  const scheduledLlmStages = llmStages.filter((stage) => allocations[stage] > 0)
+  if (!scheduledLlmStages.length) {
+    throw new Error('LLM scheduler could not allocate any stage concurrency.')
+  }
+
+  const stageOptions = {}
+  for (const stage of scheduledLlmStages) {
+    const concurrency = allocations[stage]
+    stageOptions[stage] = stage === 'audio' ? { llmChapters: concurrency } : { concurrency }
+  }
+  return {
+    stages: [...nonLlmStages, ...scheduledLlmStages],
+    stageOptions,
+  }
+}
+
+function normalizeLlmScheduler(job) {
+  const llm = job.llm || {}
+  const scheduler = llm.scheduler || llm.scheduling
+  if (!scheduler) return null
+  const concurrency = clampInteger(scheduler.concurrency ?? llm.concurrency, 0, 1, 64)
+  if (!concurrency) return null
+  const weights = {
+    summary: 4,
+    kg: 2,
+    audio: 1,
+    ...(scheduler.weights || scheduler.stageWeights || scheduler.stage_weights || {}),
+  }
+  return {
+    concurrency,
+    weights: Object.fromEntries(Object.entries(weights).map(([stage, weight]) => [stage, Math.max(0, Number(weight) || 0)])),
+  }
+}
+
+function isSchedulableLlmStage(stage, job) {
+  if (stage === 'summary' || stage === 'kg') return true
+  if (stage !== 'audio') return false
+  const audio = job.audio || {}
+  return Boolean(audio.ttsConfig || audio.tts_config)
+}
+
+function allocateWeightedSlots(stages, totalSlots, weights) {
+  const selected = stages
+    .map((stage, index) => ({ stage, index, weight: Math.max(0, Number(weights[stage]) || 0) }))
+    .filter((entry) => entry.weight > 0)
+    .sort((left, right) => right.weight - left.weight || left.index - right.index)
+    .slice(0, totalSlots)
+  if (!selected.length) return {}
+
+  const allocations = Object.fromEntries(selected.map((entry) => [entry.stage, 1]))
+  let remainingSlots = totalSlots - selected.length
+  while (remainingSlots > 0) {
+    const totalWeight = selected.reduce((sum, entry) => sum + entry.weight, 0)
+    let best = selected[0]
+    let bestScore = -Infinity
+    for (const entry of selected) {
+      const ideal = (totalSlots * entry.weight) / totalWeight
+      const score = ideal - allocations[entry.stage]
+      if (score > bestScore) {
+        best = entry
+        bestScore = score
+      }
+    }
+    allocations[best.stage] += 1
+    remainingSlots -= 1
+  }
+  return allocations
+}
+
+function buildStageArgs(stage, job, mainDbPath, runInfo, stageOptions = {}) {
   const common = ['--book-id', job.bookId, '--main-db', mainDbPath, '--run-root', join(runInfo.rootDir, 'stage-runs', stage)]
   if (stage === 'import') {
     const file = job.source?.file || job.source?.path || job.file
@@ -2897,7 +2985,7 @@ function buildStageArgs(stage, job, mainDbPath, runInfo) {
       '--model',
       required(summary.model, 'summary stage requires job.llm.model or job.summary.model'),
       '--concurrency',
-      String(summary.concurrency ?? 4),
+      String(stageOptions.concurrency ?? summary.concurrency ?? 4),
     ]
     if (summary.apiKey) args.push('--api-key', summary.apiKey)
     if (summary.temperature !== undefined) args.push('--temperature', String(summary.temperature))
@@ -2920,7 +3008,7 @@ function buildStageArgs(stage, job, mainDbPath, runInfo) {
       '--model',
       required(kg.model, 'kg stage requires job.llm.model or job.kg.model'),
       '--concurrency',
-      String(kg.concurrency ?? 3),
+      String(stageOptions.concurrency ?? kg.concurrency ?? 3),
     ]
     if (kg.apiKey) args.push('--api-key', kg.apiKey)
     if (kg.temperature !== undefined) args.push('--temperature', String(kg.temperature))
@@ -2945,7 +3033,7 @@ function buildStageArgs(stage, job, mainDbPath, runInfo) {
     if (audio.limit) args.push('--limit', String(audio.limit))
     if (audio.batchSize || audio.batch_size) args.push('--batch-size', String(audio.batchSize || audio.batch_size))
     if (audio.directorConcurrency || audio.director_concurrency) args.push('--director-concurrency', String(audio.directorConcurrency || audio.director_concurrency))
-    if (audio.llmChapters || audio.llm_chapters) args.push('--llm-chapters', String(audio.llmChapters || audio.llm_chapters))
+    if (stageOptions.llmChapters || audio.llmChapters || audio.llm_chapters) args.push('--llm-chapters', String(stageOptions.llmChapters || audio.llmChapters || audio.llm_chapters))
     if (audio.minBatchSize || audio.min_batch_size) args.push('--min-batch-size', String(audio.minBatchSize || audio.min_batch_size))
     if (audio.ttsConcurrency || audio.tts_concurrency) args.push('--tts-concurrency', String(audio.ttsConcurrency || audio.tts_concurrency))
     if (audio.ttsChapters || audio.tts_chapters) args.push('--tts-chapters', String(audio.ttsChapters || audio.tts_chapters))
