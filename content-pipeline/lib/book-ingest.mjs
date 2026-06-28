@@ -407,11 +407,36 @@ function parseEpub(filePath, buffer) {
 
     const html = readZipText(entries, item.href)
     const { heading, text } = extractHtmlText(html)
-    if (text) chapters.push({ title: heading || stripExtension(item.href), content: text })
+    if (text && isReadableEpubText(text)) {
+      chapters.push({ title: heading || stripExtension(item.href), content: text })
+    }
   }
 
   if (!chapters.length) throw new Error('EPUB 中没有识别到可阅读章节。')
-  return { title: metadataTitle, chapters }
+  return { title: metadataTitle, chapters: selectEpubChapters(chapters) }
+}
+
+function selectEpubChapters(spineChapters) {
+  const fullText = spineChapters.map((chapter) => chapter.content).join('\n')
+  const textChapters = splitChapters(fullText)
+  const spineWordCount = spineChapters.reduce((sum, chapter) => sum + countWords(chapter.content), 0)
+  const textWordCount = textChapters.reduce((sum, chapter) => sum + countWords(chapter.content), 0)
+  const preservesMostContent = spineWordCount === 0 || textWordCount / spineWordCount > 0.85
+
+  if (textChapters.length >= spineChapters.length * 2 && preservesMostContent) {
+    return textChapters
+  }
+
+  return spineChapters
+}
+
+function isReadableEpubText(text) {
+  const normalized = text.replace(/\s+/g, ' ').trim()
+  if (!normalized) return false
+  if (countWords(normalized) < 80 && /^(?:cover|table of contents|目录)(?:\b|$)/i.test(normalized)) {
+    return false
+  }
+  return true
 }
 
 function readZipEntries(buffer) {

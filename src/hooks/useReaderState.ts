@@ -1616,6 +1616,29 @@ function makeChapterFromText(index: number, title: string, text: string): Chapte
   }
 }
 
+function isReadableEpubText(text: string): boolean {
+  const normalized = text.replace(/\s+/g, ' ').trim()
+  if (!normalized) return false
+  if (countWords(normalized) < 80 && /^(?:cover|table of contents|目录)(?:\b|$)/i.test(normalized)) {
+    return false
+  }
+  return true
+}
+
+function selectEpubChapters(spineChapters: Chapter[]): Chapter[] {
+  const fullText = spineChapters.map((chapter) => chapter.content).join('\n')
+  const textChapters = splitChapters(fullText)
+  const spineWordCount = spineChapters.reduce((sum, chapter) => sum + chapter.wordCount, 0)
+  const textWordCount = textChapters.reduce((sum, chapter) => sum + chapter.wordCount, 0)
+  const preservesMostContent = spineWordCount === 0 || textWordCount / spineWordCount > 0.85
+
+  if (textChapters.length >= spineChapters.length * 2 && preservesMostContent) {
+    return textChapters
+  }
+
+  return spineChapters
+}
+
 async function parseEpubFile(file: File): Promise<ImportedBookContent> {
   const entries = readZipEntries(await file.arrayBuffer())
   const containerXml = await readZipText(entries, 'META-INF/container.xml')
@@ -1653,7 +1676,7 @@ async function parseEpubFile(file: File): Promise<ImportedBookContent> {
 
     const html = await readZipText(entries, item.href)
     const { heading, text } = extractHtmlText(html)
-    if (!text) continue
+    if (!text || !isReadableEpubText(text)) continue
 
     chapters.push(makeChapterFromText(chapters.length + 1, heading || stripExtension(item.href), text))
   }
@@ -1662,7 +1685,7 @@ async function parseEpubFile(file: File): Promise<ImportedBookContent> {
     throw new Error('EPUB 中没有识别到可阅读章节。')
   }
 
-  return { title: metadataTitle, chapters }
+  return { title: metadataTitle, chapters: selectEpubChapters(chapters) }
 }
 
 async function parseImportedBook(
