@@ -129,6 +129,7 @@ function writeBookToMainDb(dbPath, book) {
   mkdirSync(dirname(dbPath), { recursive: true })
   const db = new DatabaseSync(dbPath)
   db.exec(`
+    PRAGMA busy_timeout = 60000;
     PRAGMA journal_mode = WAL;
     PRAGMA foreign_keys = ON;
 

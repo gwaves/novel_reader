@@ -1788,7 +1788,7 @@ async function writeBookToMainDb(dbPath, book) {
   const DatabaseSync = await loadDatabaseSync()
   const db = new DatabaseSync(dbPath)
   try {
-    db.exec('PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;')
+    configureSqliteConnection(db)
     ensureMainDbSchema(db)
     const existing = db.prepare('SELECT id FROM books WHERE id = ?').get(book.id)
     if (existing && !book.replace) {
@@ -1827,7 +1827,7 @@ async function writeBookToMainDb(dbPath, book) {
 async function openMainDbForEmbedding(dbPath) {
   const DatabaseSync = await loadDatabaseSync()
   const db = new DatabaseSync(dbPath)
-  db.exec('PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;')
+  configureSqliteConnection(db)
   ensureEmbeddingSchema(db)
   return db
 }
@@ -1835,7 +1835,7 @@ async function openMainDbForEmbedding(dbPath) {
 async function openMainDbForSummary(dbPath) {
   const DatabaseSync = await loadDatabaseSync()
   const db = new DatabaseSync(dbPath)
-  db.exec('PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;')
+  configureSqliteConnection(db)
   ensureSummarySchema(db)
   return db
 }
@@ -1843,9 +1843,13 @@ async function openMainDbForSummary(dbPath) {
 async function openMainDbForKg(dbPath) {
   const DatabaseSync = await loadDatabaseSync()
   const db = new DatabaseSync(dbPath)
-  db.exec('PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;')
+  configureSqliteConnection(db)
   ensureKgSchema(db)
   return db
+}
+
+function configureSqliteConnection(db) {
+  db.exec('PRAGMA busy_timeout = 60000; PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;')
 }
 
 function ensureSummarySchema(db) {
@@ -2448,6 +2452,7 @@ async function initializeItemsDb(itemsDbPath) {
   const DatabaseSync = await loadDatabaseSync()
   const db = new DatabaseSync(itemsDbPath)
   try {
+    configureSqliteConnection(db)
     db.exec(`
       CREATE TABLE IF NOT EXISTS stage_items (
         stage TEXT NOT NULL,
@@ -2472,6 +2477,7 @@ async function recordStageItem(itemsDbPath, item) {
   const DatabaseSync = await loadDatabaseSync()
   const db = new DatabaseSync(itemsDbPath)
   try {
+    configureSqliteConnection(db)
     db.prepare(`
       INSERT INTO stage_items (
         stage,
