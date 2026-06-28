@@ -1,0 +1,27 @@
+{
+  "bookId": "mqxe7ya6-yiulrd3l",
+  "title": "大唐双龙传",
+  "source": {
+    "type": "main-db",
+    "mainDbPath": "~/.novel_reader/novel_reader.sqlite"
+  },
+  "stages": ["summary", "kg", "embedding", "audio", "package", "publish", "verify"],
+  "embedding": {
+    "provider": "openai-compatible",
+    "baseUrl": "https://kspmas.ksyun.com/v1",
+    "model": "qwen3-embedding-8b",
+    "dimension": 4096,
+    "concurrency": 16,
+    "retries": 5
+  },
+  "audio": {
+    "chapters": "all",
+    "concurrency": 16
+  },
+  "gateway": {
+    "host": "192.168.88.100",
+    "user": "gwaves",
+    "root": "/home/gwaves/novel-reader-gateway",
+    "url": "https://192.168.88.100:8888"
+  }
+}
