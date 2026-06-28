@@ -69,6 +69,7 @@ describe('content pipeline service', () => {
     assert.match(html, /id="startV2"/)
     assert.match(html, /stopJob/)
     assert.match(html, /停止任务/)
+    assert.match(html, /production-log-viewer/)
   })
 
   it('requires bearer token when configured', async () => {
@@ -188,6 +189,15 @@ describe('content pipeline service', () => {
     })
     assert.equal(childRunResponse.statusCode, 200)
     assert.equal(childRunResponse.json().command, 'package')
+
+    const logViewerResponse = await app.inject({
+      method: 'GET',
+      url: `/api/jobs/${jobId}/production-log-viewer?path=${encodeURIComponent(body.productionRun.runJson.stages.package.logFile)}`,
+    })
+    assert.equal(logViewerResponse.statusCode, 200)
+    assert.match(logViewerResponse.body, /setInterval\(refreshLog, intervalMs\)/)
+    assert.match(logViewerResponse.body, /const intervalMs = 5000/)
+    assert.match(logViewerResponse.body, /production-file/)
 
     const outsideResponse = await app.inject({
       method: 'GET',

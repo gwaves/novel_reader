@@ -184,6 +184,23 @@ export async function buildContentPipelineService(config = loadServiceConfig()) 
     return reply.send(createReadStream(filePath))
   })
 
+  app.get('/api/jobs/:jobId/production-log-viewer', async (request, reply) => {
+    const job = store.getJob(request.params.jobId)
+    if (!job) throw httpError(404, 'job_not_found', `Job not found: ${request.params.jobId}`)
+    const productionRun = await readProductionRunState(job)
+    if (!productionRun?.runDir) throw httpError(404, 'production_run_not_found', `Production run not found for job: ${job.id}`)
+    const requestedPath = requiredString(readQueryValue(request.query, 'path'), 'path is required.')
+    const filePath = resolveProductionRunFile(productionRun.runDir, requestedPath)
+    const token = readString(readQueryValue(request.query, 'token'))
+    const dataUrl = `/api/jobs/${encodeURIComponent(job.id)}/production-file?path=${encodeURIComponent(requestedPath)}${token ? `&token=${encodeURIComponent(token)}` : ''}`
+    reply.type('text/html; charset=utf-8').send(renderProductionLogViewerHtml({
+      title: `${job.title || job.id} log`,
+      path: relative(productionRun.runDir, filePath),
+      dataUrl,
+      intervalMs: 5_000,
+    }))
+  })
+
   app.get('/api/jobs/:jobId/events', async (request, reply) => {
     const job = store.getJob(request.params.jobId)
     if (!job) throw httpError(404, 'job_not_found', `Job not found: ${request.params.jobId}`)
@@ -865,7 +882,7 @@ function renderConsoleHtml() {
         const stage = stages[name] || {};
         const children = normalizeProductionChildren(stage).map((child, index) => {
           const label = child.childRunJson ? renderProductionFileLink(jobId, 'runJson', child.childRunJson) : (child.childRunDir ? 'runDir: ' + escapeHtml(child.childRunDir) : '');
-          return '<div class="child"><div class="meta mono">' + (label || ('child ' + (index + 1))) + '</div>' + (child.logFile ? '<div class="meta mono">' + renderProductionFileLink(jobId, 'log', child.logFile) + '</div>' : '') + '</div>';
+          return '<div class="child"><div class="meta mono">' + (label || ('child ' + (index + 1))) + '</div>' + (child.logFile ? '<div class="meta mono">' + renderProductionLogLink(jobId, 'log', child.logFile) + '</div>' : '') + '</div>';
         }).join('');
         return '<div class="stage"><strong>' + escapeHtml(name) + '</strong><span class="status ' + escapeHtml(stage.status || 'unknown') + '">' + escapeHtml(stage.status || 'unknown') + '</span><div class="meta">' + escapeHtml(stage.error || stage.message || '') + '</div>' + children + '</div>';
       }).join('');
@@ -875,6 +892,11 @@ function renderConsoleHtml() {
     function renderProductionFileLink(jobId, label, path) {
       const token = document.getElementById('token').value.trim();
       const url = '/api/jobs/' + encodeURIComponent(jobId) + '/production-file?path=' + encodeURIComponent(path) + (token ? '&token=' + encodeURIComponent(token) : '');
+      return '<a href="' + url + '" target="_blank" rel="noopener">' + escapeHtml(label) + ': ' + escapeHtml(path) + '</a>';
+    }
+    function renderProductionLogLink(jobId, label, path) {
+      const token = document.getElementById('token').value.trim();
+      const url = '/api/jobs/' + encodeURIComponent(jobId) + '/production-log-viewer?path=' + encodeURIComponent(path) + (token ? '&token=' + encodeURIComponent(token) : '');
       return '<a href="' + url + '" target="_blank" rel="noopener">' + escapeHtml(label) + ': ' + escapeHtml(path) + '</a>';
     }
     function normalizeProductionChildren(stage) {
@@ -968,6 +990,71 @@ function renderConsoleHtml() {
   </script>
 </body>
 </html>`
+}
+
+function renderProductionLogViewerHtml({ title, path, dataUrl, intervalMs }) {
+  return `<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>${escapeHtmlText(title)}</title>
+  <style>
+    :root { color-scheme: light dark; font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+    body { margin: 0; background: #f6f8fb; color: #17212f; }
+    header { position: sticky; top: 0; z-index: 1; display: flex; gap: 16px; align-items: center; justify-content: space-between; padding: 14px 18px; border-bottom: 1px solid #d8e0ea; background: rgba(246, 248, 251, 0.94); backdrop-filter: blur(10px); }
+    h1 { margin: 0; font-size: 18px; line-height: 1.3; }
+    .meta { color: #607086; font-size: 13px; overflow-wrap: anywhere; }
+    .actions { display: flex; gap: 10px; align-items: center; flex-shrink: 0; }
+    button { border: 1px solid #c8d3df; border-radius: 6px; background: #fff; color: #17212f; padding: 8px 12px; font-weight: 700; cursor: pointer; }
+    pre { box-sizing: border-box; height: calc(100vh - 75px); margin: 0; padding: 18px; overflow: auto; background: #0f1726; color: #dbe7ff; font: 13px/1.55 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+    @media (prefers-color-scheme: dark) {
+      body { background: #111820; color: #e8eef7; }
+      header { border-bottom-color: #2d3a49; background: rgba(17, 24, 32, 0.94); }
+      button { border-color: #3a4a5c; background: #17212f; color: #e8eef7; }
+      .meta { color: #9aabba; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div>
+      <h1>${escapeHtmlText(title)}</h1>
+      <div class="meta">${escapeHtmlText(path)} · 每 5 秒自动刷新 · <span id="status">等待刷新</span></div>
+    </div>
+    <div class="actions">
+      <button id="refresh" type="button">刷新</button>
+    </div>
+  </header>
+  <pre id="log">加载中...</pre>
+  <script>
+    const dataUrl = ${JSON.stringify(dataUrl)};
+    const intervalMs = ${Number(intervalMs) || 5000};
+    const log = document.getElementById('log');
+    const status = document.getElementById('status');
+    async function refreshLog() {
+      const shouldStickToBottom = log.scrollHeight - log.scrollTop - log.clientHeight < 32;
+      try {
+        const response = await fetch(dataUrl, { cache: 'no-store' });
+        const text = await response.text();
+        if (!response.ok) throw new Error(text || response.statusText);
+        log.textContent = text || '暂无日志';
+        status.textContent = '已刷新 ' + new Date().toLocaleTimeString();
+        if (shouldStickToBottom) log.scrollTop = log.scrollHeight;
+      } catch (error) {
+        status.textContent = '刷新失败：' + error.message;
+      }
+    }
+    document.getElementById('refresh').addEventListener('click', refreshLog);
+    refreshLog();
+    setInterval(refreshLog, intervalMs);
+  </script>
+</body>
+</html>`
+}
+
+function escapeHtmlText(value) {
+  return String(value ?? '').replace(/[&<>"']/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]))
 }
 
 function listMainBooks(mainDbPath, { query = '', limit = 50 } = {}) {
