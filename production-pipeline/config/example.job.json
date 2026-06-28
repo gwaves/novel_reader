@@ -5,7 +5,16 @@
   "source": {
     "type": "main-db"
   },
-  "stages": ["embedding", "audio", "package", "publish", "verify"],
+  "stages": ["summary", "embedding", "audio", "package", "publish", "verify"],
+  "llm": {
+    "provider": "openai-compatible",
+    "baseUrl": "http://llm-provider.example/v1",
+    "apiKey": "LLM_API_KEY_PLACEHOLDER",
+    "model": "qwen3.6-27b",
+    "concurrency": 4,
+    "retries": 3,
+    "timeoutMs": 300000
+  },
   "embedding": {
     "provider": "openai-compatible",
     "baseUrl": "https://embedding-provider.example/v1",

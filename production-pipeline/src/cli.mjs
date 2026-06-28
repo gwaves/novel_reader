@@ -47,6 +47,10 @@ async function main() {
     await runPackage(options)
     return
   }
+  if (command === 'summary') {
+    await runSummary(options)
+    return
+  }
   if (command === 'audio') {
     await runAudio(options)
     return
@@ -454,6 +458,148 @@ async function runPackage(options) {
       job: { bookId },
       stages: {
         package: {
+          status: 'failed',
+          startedAt,
+          finishedAt,
+          error: error.message,
+        },
+      },
+    })
+    throw error
+  }
+}
+
+async function runSummary(options) {
+  const bookId = required(options.bookId, 'summary requires --book-id <id>')
+  const model = required(options.model, 'summary requires --model <name>')
+  const provider = String(options.provider || 'openai-compatible').trim()
+  const baseUrl = required(options.baseUrl, 'summary requires --base-url <url>')
+  const mainDbPath = expandPath(options.mainDb || options.mainDbPath || defaultMainDbPath)
+  const run = await createRun({ command: 'summary', options: redactSensitiveOptions(options), mainDbPath, bookId })
+  const startedAt = new Date().toISOString()
+
+  try {
+    const concurrency = clampInteger(options.concurrency, 4, 1, 32)
+    const limit = clampInteger(options.limit, 0, 0, Number.MAX_SAFE_INTEGER)
+    const timeoutMs = clampInteger(options.timeoutMs, 300_000, 1_000, 900_000)
+    const maxAttempts = clampInteger(options.maxAttempts || options.retries, 3, 1, 10)
+    const force = isFlagEnabled(options.force)
+    const llmConfig = {
+      provider,
+      model,
+      baseUrl,
+      apiKey: options.apiKey || process.env.LLM_API_KEY || process.env.OPENAI_API_KEY || '',
+      temperature: Number.isFinite(Number(options.temperature)) ? Number(options.temperature) : 0,
+      thinkingEnabled: !isFlagEnabled(options.disableThinking),
+      timeoutMs,
+      maxAttempts,
+    }
+
+    const db = await openMainDbForSummary(mainDbPath)
+    let targets
+    try {
+      targets = readSummaryTargets(db, { bookId, force, limit })
+    } finally {
+      db.close()
+    }
+
+    const results = {
+      completed: 0,
+      failed: 0,
+      total: targets.length,
+      errors: [],
+    }
+
+    if (!isFlagEnabled(options.dryRun) && targets.length > 0) {
+      await runPool(targets, concurrency, async (chapter) => {
+        try {
+          const summary = await generateChapterSummary(chapter, llmConfig)
+          const writeDb = await openMainDbForSummary(mainDbPath)
+          try {
+            writeSummary(writeDb, chapter.id, summary)
+          } finally {
+            writeDb.close()
+          }
+          results.completed += 1
+        } catch (error) {
+          results.failed += 1
+          pushLimited(results.errors, {
+            chapterId: chapter.id,
+            chapterIndex: chapter.chapterIndex,
+            error: error instanceof Error ? error.message : String(error),
+          })
+        }
+      })
+    }
+
+    const finishedAt = new Date().toISOString()
+    const report = {
+      schemaVersion: 1,
+      generatedAt: finishedAt,
+      bookId,
+      provider,
+      model,
+      concurrency,
+      force,
+      dryRun: isFlagEnabled(options.dryRun),
+      targetChapters: targets.length,
+      ...results,
+    }
+    const reportPath = join(run.artifactsDir, 'summary-report.json')
+    await writeJson(reportPath, report)
+    await initializeItemsDb(run.itemsDbPath)
+    await recordStageItem(run.itemsDbPath, {
+      stage: 'summary',
+      itemId: bookId,
+      itemType: 'book',
+      status: results.failed ? 'failed' : (isFlagEnabled(options.dryRun) ? 'skipped' : 'completed'),
+      attempts: 1,
+      startedAt,
+      finishedAt,
+      metadata: report,
+    })
+    await writeRunJson(run.runJsonPath, {
+      runId: run.runId,
+      command: 'summary',
+      status: results.failed ? 'failed' : (isFlagEnabled(options.dryRun) ? 'skipped' : 'completed'),
+      createdAt: run.createdAt,
+      updatedAt: finishedAt,
+      mainDbPath,
+      job: { bookId, provider, model },
+      stages: {
+        summary: {
+          status: results.failed ? 'failed' : (isFlagEnabled(options.dryRun) ? 'skipped' : 'completed'),
+          startedAt,
+          finishedAt,
+          message: `summary targets ${targets.length}, completed ${results.completed}, failed ${results.failed}.`,
+          artifacts: {
+            summaryReport: relativeRunPath(run.rootDir, reportPath),
+          },
+        },
+      },
+    })
+
+    console.log(`run: ${run.runId}`)
+    console.log(`book: ${bookId}`)
+    console.log(`summary targets: ${targets.length}`)
+    console.log(`completed: ${results.completed}`)
+    console.log(`failed: ${results.failed}`)
+    console.log(`report: ${reportPath}`)
+    console.log(`runDir: ${run.rootDir}`)
+    if (isFlagEnabled(options.dryRun)) console.log('dry-run: summaries were not generated or written')
+    if (results.failed) throw new Error('Summary completed with failures.')
+  } catch (error) {
+    const finishedAt = new Date().toISOString()
+    await writeRunJson(run.runJsonPath, {
+      runId: run.runId,
+      command: 'summary',
+      status: 'failed',
+      createdAt: run.createdAt,
+      updatedAt: finishedAt,
+      mainDbPath,
+      job: { bookId, provider, model },
+      stages: {
+        summary: {
           status: 'failed',
           startedAt,
           finishedAt,
@@ -1048,6 +1194,67 @@ async function openMainDbForEmbedding(dbPath) {
   return db
 }
 
+async function openMainDbForSummary(dbPath) {
+  const DatabaseSync = await loadDatabaseSync()
+  const db = new DatabaseSync(dbPath)
+  db.exec('PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;')
+  ensureSummarySchema(db)
+  return db
+}
+
+function ensureSummarySchema(db) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS summaries (
+      chapter_id TEXT PRIMARY KEY REFERENCES chapters(id) ON DELETE CASCADE,
+      short TEXT NOT NULL,
+      detail TEXT NOT NULL,
+      key_points_json TEXT NOT NULL,
+      skippable TEXT NOT NULL,
+      generated_by TEXT NOT NULL,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+  `)
+}
+
+function readSummaryTargets(db, { bookId, force, limit }) {
+  const rows = db.prepare(`
+    SELECT
+      c.id,
+      c.book_id AS bookId,
+      c.chapter_index AS chapterIndex,
+      c.title,
+      c.content,
+      c.word_count AS wordCount
+    FROM chapters c
+    LEFT JOIN summaries s ON s.chapter_id = c.id
+    WHERE c.book_id = ?
+      AND (? = 1 OR s.chapter_id IS NULL)
+    ORDER BY c.chapter_index, c.title
+  `).all(bookId, force ? 1 : 0).map(plainObject)
+  return limit > 0 ? rows.slice(0, limit) : rows
+}
+
+function writeSummary(db, chapterId, summary) {
+  db.prepare(`
+    INSERT INTO summaries (chapter_id, short, detail, key_points_json, skippable, generated_by, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+    ON CONFLICT(chapter_id) DO UPDATE SET
+      short = excluded.short,
+      detail = excluded.detail,
+      key_points_json = excluded.key_points_json,
+      skippable = excluded.skippable,
+      generated_by = excluded.generated_by,
+      updated_at = CURRENT_TIMESTAMP
+  `).run(
+    chapterId,
+    summary.short,
+    summary.detail,
+    JSON.stringify(summary.keyPoints),
+    summary.skippable,
+    summary.generatedBy,
+  )
+}
+
 function ensureEmbeddingSchema(db) {
   db.exec(`
     CREATE TABLE IF NOT EXISTS summary_embeddings (
@@ -1440,6 +1647,29 @@ function buildStageArgs(stage, job, mainDbPath, runInfo) {
     return args
   }
   if (stage === 'package') return ['package', ...common]
+  if (stage === 'summary') {
+    const summary = { ...(job.llm || {}), ...(job.summary || {}) }
+    const args = [
+      'summary',
+      ...common,
+      '--provider',
+      summary.provider || 'openai-compatible',
+      '--base-url',
+      required(summary.baseUrl || summary.base_url, 'summary stage requires job.llm.baseUrl or job.summary.baseUrl'),
+      '--model',
+      required(summary.model, 'summary stage requires job.llm.model or job.summary.model'),
+      '--concurrency',
+      String(summary.concurrency ?? 4),
+    ]
+    if (summary.apiKey) args.push('--api-key', summary.apiKey)
+    if (summary.temperature !== undefined) args.push('--temperature', String(summary.temperature))
+    if (summary.timeoutMs) args.push('--timeout-ms', String(summary.timeoutMs))
+    if (summary.maxAttempts || summary.retries) args.push('--max-attempts', String(summary.maxAttempts || summary.retries))
+    if (summary.limit) args.push('--limit', String(summary.limit))
+    if (isFlagEnabled(summary.force)) args.push('--force')
+    if (summary.thinkingEnabled === false || isFlagEnabled(summary.disableThinking)) args.push('--disable-thinking')
+    return args.filter((arg) => arg !== '')
+  }
   if (stage === 'audio') {
     const sourceRoot = job.audio?.sourceRoot || job.audio?.source_root
     const args = ['audio', ...common, '--source-root', required(sourceRoot, 'audio stage requires job.audio.sourceRoot')]
@@ -1704,6 +1934,126 @@ async function callEmbeddingProvider(text, config, utils) {
   }, config, utils)
 }
 
+async function generateChapterSummary(chapter, config) {
+  const prompt = buildSummaryPrompt(chapter, config.thinkingEnabled)
+  const raw = await retryTransientRequest(async () => {
+    if (String(config.provider || '').toLowerCase() === 'ollama') {
+      return callOllamaGenerate(prompt, config)
+    }
+    return callOpenAICompatibleChat(
+      [
+        { role: 'system', content: '你是长篇网络小说陪读助手。你必须只输出符合要求的 JSON。' },
+        { role: 'user', content: prompt },
+      ],
+      config,
+    )
+  }, config)
+  const parsed = parseSummaryResponse(raw)
+  return {
+    ...parsed,
+    generatedBy: String(config.provider || 'openai-compatible').toLowerCase() === 'ollama' ? 'ollama' : 'openai',
+  }
+}
+
+function buildSummaryPrompt(chapter, thinkingEnabled) {
+  const thinkingInstruction = thinkingEnabled
+    ? '请先用 /think 进行推理，但最终输出必须是 JSON，不要输出任何其他内容。'
+    : '请直接输出 JSON，不要输出任何推理过程。'
+
+  return `${thinkingInstruction}
+
+你是资深网络小说阅读助手。请严格根据下面这一章的内容生成一份概要 JSON，JSON 字段如下：
+- short: 一句话概括本章核心情节（不超过 60 字）。
+- detail: 详细概要，包含起因、经过、结果（150-300 字）。
+- keyPoints: 字符串数组，列出本章 3-6 个必须记住的关键信息点。
+- skippable: 判断本章是否可跳读。如果是过渡章、纯回忆、重复描写，返回"可跳读：简要说明原因"；否则返回"不可跳读：简要说明原因"。
+
+只返回 JSON，不要加 markdown 代码块，不要解释。
+
+章节标题：${chapter.title}
+章节字数：${chapter.wordCount ?? countWords(chapter.content)}
+
+正文：
+${String(chapter.content || '').slice(0, 12000)}`
+}
+
+async function callOpenAICompatibleChat(messages, config) {
+  const baseUrl = trimTrailingSlash(config.baseUrl)
+  const headers = { 'content-type': 'application/json' }
+  if (config.apiKey?.trim()) headers.authorization = `Bearer ${config.apiKey.trim()}`
+  const body = {
+    model: config.model,
+    messages,
+    temperature: config.temperature ?? 0,
+    response_format: { type: 'json_object' },
+  }
+  if (config.thinkingEnabled === false) {
+    body.extra_body = { enable_thinking: false }
+    body.chat_template_kwargs = { enable_thinking: false }
+  }
+  const response = await fetch(`${baseUrl}/chat/completions`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(body),
+    signal: AbortSignal.timeout(config.timeoutMs),
+  })
+  if (!response.ok) {
+    const error = new Error(`OpenAI-compatible chat failed: ${response.status} ${response.statusText}`)
+    error.status = response.status
+    throw error
+  }
+  const data = await response.json()
+  return data.choices?.[0]?.message?.content ?? ''
+}
+
+async function callOllamaGenerate(prompt, config) {
+  const baseUrl = trimTrailingSlash(config.baseUrl || 'http://127.0.0.1:11434')
+  const response = await fetch(`${baseUrl}/api/generate`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({
+      model: config.model,
+      prompt,
+      stream: false,
+      format: 'json',
+      options: { temperature: config.temperature ?? 0 },
+    }),
+    signal: AbortSignal.timeout(config.timeoutMs),
+  })
+  if (!response.ok) {
+    const error = new Error(`Ollama generate failed: ${response.status} ${response.statusText}`)
+    error.status = response.status
+    throw error
+  }
+  const data = await response.json()
+  return data.response || ''
+}
+
+function parseSummaryResponse(raw) {
+  const jsonText = String(raw || '')
+    .trim()
+    .replace(/^```json\s*/i, '')
+    .replace(/^```\s*/i, '')
+    .replace(/```$/i, '')
+    .trim()
+  try {
+    const parsed = JSON.parse(jsonText)
+    return {
+      short: String(parsed.short || '模型没有返回一句话概要。'),
+      detail: String(parsed.detail || '模型没有返回详细概要。'),
+      keyPoints: Array.isArray(parsed.keyPoints) ? parsed.keyPoints.slice(0, 6).map(String) : [],
+      skippable: String(parsed.skippable || '暂无跳读建议。'),
+    }
+  } catch {
+    return {
+      short: '模型已返回内容，但不是标准 JSON。',
+      detail: String(raw || '').slice(0, 600),
+      keyPoints: [],
+      skippable: '请重试，或换一个更擅长中文指令的模型。',
+    }
+  }
+}
+
 async function callOpenAICompatibleEmbedding(text, config) {
   const baseUrl = trimTrailingSlash(config.baseUrl)
   const headers = { 'content-type': 'application/json' }
@@ -1754,6 +2104,20 @@ async function retryEmbeddingRequest(request, config, utils) {
         ? utils.isRetryableEmbeddingError(error)
         : isRetryableEmbeddingError(error)
       if (attempt >= config.maxAttempts || !retryable) throw error
+      await sleep(config.retryBaseDelayMs || 1000)
+    }
+  }
+  throw lastError
+}
+
+async function retryTransientRequest(request, config) {
+  let lastError
+  for (let attempt = 1; attempt <= config.maxAttempts; attempt += 1) {
+    try {
+      return await request(attempt)
+    } catch (error) {
+      lastError = error
+      if (attempt >= config.maxAttempts || !isRetryableEmbeddingError(error)) throw error
       await sleep(config.retryBaseDelayMs || 1000)
     }
   }
@@ -1972,6 +2336,7 @@ Usage:
   npm run production-pipeline -- resume --run <runId|runDir|run.json>
   npm run production-pipeline -- import --file <path> [--book-id <id>] [--title <title>] [--dry-run] [--replace]
   npm run production-pipeline -- package --book-id <id>
+  npm run production-pipeline -- summary --book-id <id> --provider <openai|ollama> --base-url <url> --model <name>
   npm run production-pipeline -- audio --book-id <id> --source-root <path>
   npm run production-pipeline -- embedding --book-id <id> --provider <ollama|openai> --base-url <url> --model <name>
   npm run production-pipeline -- publish --run <runId|runDir|run.json> [--dry-run]

@@ -524,6 +524,68 @@ describe('production-pipeline import', () => {
     }
   })
 
+  it('generates summaries directly into the main DB without a local API service', async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), 'production-pipeline-summary-test-'))
+    let chatServer
+    try {
+      const txtPath = join(tempDir, 'sample.txt')
+      const dbPath = join(tempDir, 'main.sqlite')
+      const runRoot = join(tempDir, 'runs')
+      await writeFile(txtPath, `第一章 开始\n这是第一章内容。\n\n第二章 继续\n这是第二章内容。`, 'utf8')
+      await execFileAsync(process.execPath, [
+        cliPath,
+        'import',
+        '--file',
+        txtPath,
+        '--book-id',
+        'sample-book',
+        '--title',
+        '样书',
+        '--main-db',
+        dbPath,
+        '--run-root',
+        runRoot,
+      ])
+      chatServer = await startFakeChatServer()
+
+      const { stdout } = await execFileAsync(process.execPath, [
+        cliPath,
+        'summary',
+        '--book-id',
+        'sample-book',
+        '--provider',
+        'openai-compatible',
+        '--base-url',
+        chatServer.url,
+        '--model',
+        'fake-chat',
+        '--concurrency',
+        '2',
+        '--main-db',
+        dbPath,
+        '--run-root',
+        runRoot,
+      ])
+
+      assert.match(stdout, /summary targets: 2/)
+      assert.match(stdout, /completed: 2/)
+      const db = new DatabaseSync(dbPath, { readOnly: true })
+      try {
+        const rows = db.prepare('SELECT chapter_id AS chapterId, short, detail, key_points_json AS keyPointsJson FROM summaries ORDER BY chapter_id')
+          .all()
+          .map(plainRow)
+        assert.equal(rows.length, 2)
+        assert.equal(rows[0].short, '本章概要')
+        assert.deepEqual(JSON.parse(rows[0].keyPointsJson), ['要点一', '要点二'])
+      } finally {
+        db.close()
+      }
+    } finally {
+      if (chatServer) await chatServer.close()
+      await rm(tempDir, { recursive: true, force: true })
+    }
+  })
+
 })
 
 function plainRow(row) {
@@ -576,6 +638,40 @@ async function startFakeEmbeddingServer() {
     const base = Math.max(1, input.length % 10)
     sendJson(response, {
       data: [{ embedding: [base, base + 1, base + 2] }],
+    })
+  })
+  await new Promise((resolve, reject) => {
+    server.once('error', reject)
+    server.listen(0, '127.0.0.1', resolve)
+  })
+  const address = server.address()
+  return {
+    url: `http://127.0.0.1:${address.port}`,
+    close: () => new Promise((resolve, reject) => server.close((error) => (error ? reject(error) : resolve()))),
+  }
+}
+
+async function startFakeChatServer() {
+  const server = createServer(async (request, response) => {
+    const url = new URL(request.url, 'http://127.0.0.1')
+    if (request.method !== 'POST' || url.pathname !== '/chat/completions') {
+      sendJson(response, { error: { code: 'not_found' } }, 404)
+      return
+    }
+    await readRequestJson(request)
+    sendJson(response, {
+      choices: [
+        {
+          message: {
+            content: JSON.stringify({
+              short: '本章概要',
+              detail: '本章详细概要，包含起因、经过和结果。',
+              keyPoints: ['要点一', '要点二'],
+              skippable: '不可跳读：主线推进。',
+            }),
+          },
+        },
+      ],
     })
   })
   await new Promise((resolve, reject) => {

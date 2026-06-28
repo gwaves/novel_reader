@@ -21,6 +21,7 @@ for final verification.
 npm run production-pipeline -- run --job production-pipeline/config/example.job.json
 npm run production-pipeline -- resume --run <runId|runDir|run.json>
 npm run production-pipeline -- import --file <path> --book-id <bookId> --title <title>
+npm run production-pipeline -- summary --book-id <bookId> --provider openai-compatible --base-url <url> --model <model>
 npm run production-pipeline -- package --book-id <bookId>
 npm run production-pipeline -- embedding --book-id <bookId> --provider openai --base-url <url> --model <model> --concurrency 16
 npm run production-pipeline -- audio --book-id <bookId> --source-root tmp/tts/<book>
@@ -32,8 +33,10 @@ npm run production-pipeline -- status --run <runId>
 `run` reads a job JSON and executes the configured stages in order. `resume`
 loads an existing `run.json` and skips stages whose status is already
 `completed`. `import` writes canonical `books` and `chapters` rows into the main database.
-`package` reads those rows and writes Gateway-ready artifacts under the run
-directory. `embedding` reads `summaries` and `chapters` directly from SQLite,
+`summary` reads chapters directly from SQLite, calls the configured chat model,
+and writes the `summaries` table without requiring the old `127.0.0.1:5174` API
+service. `package` reads those rows and writes Gateway-ready artifacts under the
+run directory. `embedding` reads `summaries` and `chapters` directly from SQLite,
 calls the configured embedding provider, and writes `summary_embeddings` plus
 `chapter_chunk_embeddings` without requiring the old `127.0.0.1:5174` API
 service. `audio` maps existing `audio/chapter.mp3` outputs back to canonical main
@@ -43,9 +46,9 @@ published book. `verify` checks the live Gateway HTTP APIs against the run
 artifacts, including library visibility, package chapter ids, and audio chapter
 ids/counts when audio artifacts are present.
 
-The current full-flow runner can orchestrate `import`, `package`, `embedding`,
-`audio`, `publish`, and `verify`. `summary` and `kg` remain planned stage names
-until their workers are moved into v2.
+The current full-flow runner can orchestrate `import`, `summary`, `package`,
+`embedding`, `audio`, `publish`, and `verify`. `kg` remains a planned stage name
+until its worker is moved into v2.
 
 ## Job Config
 
