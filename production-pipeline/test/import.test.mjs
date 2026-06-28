@@ -372,10 +372,98 @@ describe('production-pipeline import', () => {
       await rm(tempDir, { recursive: true, force: true })
     }
   })
+
+  it('generates embeddings directly into the main DB without a local API service', async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), 'production-pipeline-embedding-test-'))
+    let embeddingServer
+    try {
+      const txtPath = join(tempDir, 'sample.txt')
+      const dbPath = join(tempDir, 'main.sqlite')
+      const runRoot = join(tempDir, 'runs')
+      await writeFile(txtPath, `第一章 开始\n这是第一章内容。\n\n第二章 继续\n这是第二章内容。`, 'utf8')
+      await execFileAsync(process.execPath, [
+        cliPath,
+        'import',
+        '--file',
+        txtPath,
+        '--book-id',
+        'sample-book',
+        '--title',
+        '样书',
+        '--main-db',
+        dbPath,
+        '--run-root',
+        runRoot,
+      ])
+      seedSummaries(dbPath)
+      embeddingServer = await startFakeEmbeddingServer()
+
+      const { stdout } = await execFileAsync(process.execPath, [
+        cliPath,
+        'embedding',
+        '--book-id',
+        'sample-book',
+        '--provider',
+        'openai',
+        '--base-url',
+        embeddingServer.url,
+        '--model',
+        'fake-embedding',
+        '--concurrency',
+        '2',
+        '--main-db',
+        dbPath,
+        '--run-root',
+        runRoot,
+      ])
+
+      assert.match(stdout, /embedding targets: 2/)
+      assert.match(stdout, /completed: 2/)
+      const db = new DatabaseSync(dbPath, { readOnly: true })
+      try {
+        const summaryCount = db.prepare('SELECT COUNT(*) AS count FROM summary_embeddings WHERE book_id = ?').get('sample-book').count
+        const chunkCount = db.prepare('SELECT COUNT(*) AS count FROM chapter_chunk_embeddings WHERE book_id = ?').get('sample-book').count
+        assert.equal(summaryCount, 2)
+        assert.equal(chunkCount, 2)
+        const dimension = db.prepare('SELECT dimension FROM summary_embeddings LIMIT 1').get().dimension
+        assert.equal(dimension, 3)
+      } finally {
+        db.close()
+      }
+    } finally {
+      if (embeddingServer) await embeddingServer.close()
+      await rm(tempDir, { recursive: true, force: true })
+    }
+  })
 })
 
 function plainRow(row) {
   return Object.assign({}, row)
+}
+
+function seedSummaries(dbPath) {
+  const db = new DatabaseSync(dbPath)
+  try {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS summaries (
+        chapter_id TEXT PRIMARY KEY REFERENCES chapters(id) ON DELETE CASCADE,
+        short TEXT NOT NULL,
+        detail TEXT NOT NULL,
+        key_points_json TEXT NOT NULL,
+        skippable TEXT NOT NULL,
+        generated_by TEXT NOT NULL,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      );
+    `)
+    const insert = db.prepare(`
+      INSERT INTO summaries (chapter_id, short, detail, key_points_json, skippable, generated_by, updated_at)
+      VALUES (?, ?, ?, ?, 'false', 'test', CURRENT_TIMESTAMP)
+    `)
+    insert.run('1-第一章 开始', '短摘要一', '详细摘要一', JSON.stringify(['要点一']))
+    insert.run('2-第二章 继续', '短摘要二', '详细摘要二', JSON.stringify(['要点二']))
+  } finally {
+    db.close()
+  }
 }
 
 async function fileExists(path) {
@@ -385,6 +473,37 @@ async function fileExists(path) {
   } catch {
     return false
   }
+}
+
+async function startFakeEmbeddingServer() {
+  const server = createServer(async (request, response) => {
+    const url = new URL(request.url, 'http://127.0.0.1')
+    if (request.method !== 'POST' || url.pathname !== '/embeddings') {
+      sendJson(response, { error: { code: 'not_found' } }, 404)
+      return
+    }
+    const body = await readRequestJson(request)
+    const input = String(body.input || '')
+    const base = Math.max(1, input.length % 10)
+    sendJson(response, {
+      data: [{ embedding: [base, base + 1, base + 2] }],
+    })
+  })
+  await new Promise((resolve, reject) => {
+    server.once('error', reject)
+    server.listen(0, '127.0.0.1', resolve)
+  })
+  const address = server.address()
+  return {
+    url: `http://127.0.0.1:${address.port}`,
+    close: () => new Promise((resolve, reject) => server.close((error) => (error ? reject(error) : resolve()))),
+  }
+}
+
+async function readRequestJson(request) {
+  const chunks = []
+  for await (const chunk of request) chunks.push(chunk)
+  return JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}')
 }
 
 async function startFakeGateway({ token, bookPackage, audioCatalog }) {

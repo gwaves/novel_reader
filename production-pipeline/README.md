@@ -20,6 +20,7 @@ for final verification.
 ```bash
 npm run production-pipeline -- import --file <path> --book-id <bookId> --title <title>
 npm run production-pipeline -- package --book-id <bookId>
+npm run production-pipeline -- embedding --book-id <bookId> --provider openai --base-url <url> --model <model> --concurrency 16
 npm run production-pipeline -- audio --book-id <bookId> --source-root tmp/tts/<book>
 npm run production-pipeline -- publish --run <runId|runDir|run.json> --remote-host <host> --remote-user <user>
 npm run production-pipeline -- verify --run <runId|runDir|run.json> --gateway-url <url> --gateway-token <token>
@@ -28,15 +29,18 @@ npm run production-pipeline -- status --run <runId>
 
 `import` writes canonical `books` and `chapters` rows into the main database.
 `package` reads those rows and writes Gateway-ready artifacts under the run
-directory. `audio` maps existing `audio/chapter.mp3` outputs back to canonical
-main database chapter ids and writes Gateway `audio.json`. `publish` uses `rsync`
-for package/audio files and merges `books.json` so the Gateway book list can see
-the published book. `verify` checks the live Gateway HTTP APIs against the run
+directory. `embedding` reads `summaries` and `chapters` directly from SQLite,
+calls the configured embedding provider, and writes `summary_embeddings` plus
+`chapter_chunk_embeddings` without requiring the old `127.0.0.1:5174` API
+service. `audio` maps existing `audio/chapter.mp3` outputs back to canonical main
+database chapter ids and writes Gateway `audio.json`. `publish` uses `rsync` for
+package/audio files and merges `books.json` so the Gateway book list can see the
+published book. `verify` checks the live Gateway HTTP APIs against the run
 artifacts, including library visibility, package chapter ids, and audio chapter
 ids/counts when audio artifacts are present.
 
-Planned commands still include stage-level `run`, `resume`, and `verify` once
-summary, KG, embedding, and audio workers are added.
+Planned commands still include stage-level `run` and `resume` once summary, KG,
+embedding, and audio workers are wired into a single full-flow runner.
 
 ## Run Layout
 

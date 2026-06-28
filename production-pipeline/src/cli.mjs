@@ -14,6 +14,7 @@ const defaultRemoteRoot = '/home/gwaves/novel-reader-gateway'
 const execFileAsync = promisify(execFile)
 let DatabaseSyncCtor
 let bookIngestModule
+let embeddingUtilsModule
 
 main().catch((error) => {
   console.error(`production-pipeline failed: ${error.message}`)
@@ -38,6 +39,10 @@ async function main() {
   }
   if (command === 'audio') {
     await runAudio(options)
+    return
+  }
+  if (command === 'embedding') {
+    await runEmbedding(options)
     return
   }
   if (command === 'publish') {
@@ -89,8 +94,8 @@ async function runImport(options) {
         sha256,
         sizeBytes: sourceBuffer.byteLength,
       },
-      dryRun: Boolean(options.dryRun),
-      replace: Boolean(options.replace),
+      dryRun: isFlagEnabled(options.dryRun),
+      replace: isFlagEnabled(options.replace),
       chapters: chapters.map((chapter) => ({
         id: chapter.id,
         index: chapter.index,
@@ -118,19 +123,19 @@ async function runImport(options) {
       stage: 'import',
       itemId: bookId,
       itemType: 'book',
-      status: options.dryRun ? 'skipped' : 'running',
+      status: isFlagEnabled(options.dryRun) ? 'skipped' : 'running',
       attempts: 1,
       startedAt,
       metadata: { chapterCount: chapters.length, sourceSha256: sha256 },
     })
 
-    if (!options.dryRun) {
+    if (!isFlagEnabled(options.dryRun)) {
       await writeBookToMainDb(mainDbPath, {
         id: bookId,
         title,
         importedAt,
         chapters,
-        replace: Boolean(options.replace),
+        replace: isFlagEnabled(options.replace),
       })
     }
 
@@ -139,7 +144,7 @@ async function runImport(options) {
       stage: 'import',
       itemId: bookId,
       itemType: 'book',
-      status: options.dryRun ? 'skipped' : 'completed',
+      status: isFlagEnabled(options.dryRun) ? 'skipped' : 'completed',
       attempts: 1,
       startedAt,
       finishedAt,
@@ -148,17 +153,17 @@ async function runImport(options) {
     await writeRunJson(run.runJsonPath, {
       runId: run.runId,
       command: 'import',
-      status: options.dryRun ? 'skipped' : 'completed',
+      status: isFlagEnabled(options.dryRun) ? 'skipped' : 'completed',
       createdAt: run.createdAt,
       updatedAt: finishedAt,
       mainDbPath,
       job: { bookId, title, source: importReport.source },
       stages: {
         import: {
-          status: options.dryRun ? 'skipped' : 'completed',
+          status: isFlagEnabled(options.dryRun) ? 'skipped' : 'completed',
           startedAt,
           finishedAt,
-          message: options.dryRun
+          message: isFlagEnabled(options.dryRun)
             ? `dry-run parsed ${chapters.length} chapters.`
             : `imported ${chapters.length} chapters.`,
           artifacts: {
@@ -173,7 +178,7 @@ async function runImport(options) {
     console.log(`book: ${bookId} ${title}`)
     console.log(`chapters: ${chapters.length}`)
     console.log(`runDir: ${run.rootDir}`)
-    if (options.dryRun) console.log('dry-run: main database was not modified')
+    if (isFlagEnabled(options.dryRun)) console.log('dry-run: main database was not modified')
   } catch (error) {
     const finishedAt = new Date().toISOString()
     await writeRunJson(run.runJsonPath, {
@@ -300,7 +305,7 @@ async function runAudio(options) {
     for (const artifact of artifacts) {
       const chapter = chaptersByIndex.get(artifact.chapterNumber)
       if (!chapter) {
-        if (options.strict) throw new Error(`No chapter ${artifact.chapterNumber} found in main DB for ${bookId}`)
+        if (isFlagEnabled(options.strict)) throw new Error(`No chapter ${artifact.chapterNumber} found in main DB for ${bookId}`)
         continue
       }
       const chapterId = String(chapter.id)
@@ -326,7 +331,7 @@ async function runAudio(options) {
         updatedAt: mp3Stat.mtime.toISOString(),
       })
 
-      if (!options.dryRun) {
+      if (!isFlagEnabled(options.dryRun)) {
         await mkdir(targetDir, { recursive: true })
         await copyFile(artifact.mp3Path, targetMp3)
         copiedFiles += 1
@@ -352,7 +357,7 @@ async function runAudio(options) {
       stage: 'audio',
       itemId: bookId,
       itemType: 'book',
-      status: options.dryRun ? 'skipped' : 'completed',
+      status: isFlagEnabled(options.dryRun) ? 'skipped' : 'completed',
       attempts: 1,
       startedAt,
       finishedAt,
@@ -365,14 +370,14 @@ async function runAudio(options) {
     await writeRunJson(run.runJsonPath, {
       runId: run.runId,
       command: 'audio',
-      status: options.dryRun ? 'skipped' : 'completed',
+      status: isFlagEnabled(options.dryRun) ? 'skipped' : 'completed',
       createdAt: run.createdAt,
       updatedAt: finishedAt,
       mainDbPath,
       job: { bookId, title: book.title, sourceRoot },
       stages: {
         audio: {
-          status: options.dryRun ? 'skipped' : 'completed',
+          status: isFlagEnabled(options.dryRun) ? 'skipped' : 'completed',
           startedAt,
           finishedAt,
           message: `prepared ${catalog.chapters.length} audio chapters.`,
@@ -388,7 +393,7 @@ async function runAudio(options) {
     console.log(`book: ${bookId} ${book.title}`)
     console.log(`audio chapters: ${catalog.chapters.length}`)
     console.log(`audio: ${catalogPath}`)
-    if (options.dryRun) console.log('dry-run: audio files were not copied')
+    if (isFlagEnabled(options.dryRun)) console.log('dry-run: audio files were not copied')
   } catch (error) {
     const finishedAt = new Date().toISOString()
     await writeRunJson(run.runJsonPath, {
@@ -401,6 +406,143 @@ async function runAudio(options) {
       job: { bookId, sourceRoot },
       stages: {
         audio: {
+          status: 'failed',
+          startedAt,
+          finishedAt,
+          error: error.message,
+        },
+      },
+    })
+    throw error
+  }
+}
+
+async function runEmbedding(options) {
+  const bookId = required(options.bookId, 'embedding requires --book-id <id>')
+  const model = required(options.model, 'embedding requires --model <name>')
+  const provider = String(options.provider || 'ollama').trim()
+  const baseUrl = required(options.baseUrl, 'embedding requires --base-url <url>')
+  const mainDbPath = expandPath(options.mainDb || options.mainDbPath || defaultMainDbPath)
+  const run = await createRun({ command: 'embedding', options: redactSensitiveOptions(options), mainDbPath, bookId })
+  const startedAt = new Date().toISOString()
+
+  try {
+    const concurrency = clampInteger(options.concurrency, provider === 'ollama' ? 3 : 8, 1, 32)
+    const limit = clampInteger(options.limit, 0, 0, Number.MAX_SAFE_INTEGER)
+    const timeoutMs = clampInteger(options.timeoutMs, 300_000, 1_000, 900_000)
+    const maxAttempts = clampInteger(options.maxAttempts || options.retries, 4, 1, 10)
+    const force = isFlagEnabled(options.force)
+    const embeddingConfig = {
+      provider,
+      model,
+      baseUrl,
+      apiKey: options.apiKey || process.env.EMBEDDING_API_KEY || process.env.OPENAI_API_KEY || '',
+      timeoutMs,
+      maxAttempts,
+    }
+    const utils = await loadEmbeddingUtils()
+    const db = await openMainDbForEmbedding(mainDbPath)
+    let targets
+    try {
+      targets = readEmbeddingTargets(db, { bookId, model, force, limit, utils })
+    } finally {
+      db.close()
+    }
+
+    const results = {
+      completed: 0,
+      failed: 0,
+      total: targets.length,
+      chunkCompleted: 0,
+      chunkFailed: 0,
+      errors: [],
+      chunkErrors: [],
+      dimension: null,
+    }
+
+    if (!isFlagEnabled(options.dryRun) && targets.length > 0) {
+      await runPool(targets, concurrency, async (target) => {
+        await embedChapterTarget({
+          dbPath: mainDbPath,
+          bookId,
+          model,
+          force,
+          target,
+          embeddingConfig,
+          utils,
+          results,
+        })
+      })
+    }
+
+    const finishedAt = new Date().toISOString()
+    const report = {
+      schemaVersion: 1,
+      generatedAt: finishedAt,
+      bookId,
+      provider,
+      model,
+      concurrency,
+      force,
+      dryRun: isFlagEnabled(options.dryRun),
+      targetChapters: targets.length,
+      ...results,
+    }
+    const reportPath = join(run.artifactsDir, 'embedding-report.json')
+    await writeJson(reportPath, report)
+    await initializeItemsDb(run.itemsDbPath)
+    await recordStageItem(run.itemsDbPath, {
+      stage: 'embedding',
+      itemId: bookId,
+      itemType: 'book',
+      status: results.failed || results.chunkFailed ? 'failed' : (isFlagEnabled(options.dryRun) ? 'skipped' : 'completed'),
+      attempts: 1,
+      startedAt,
+      finishedAt,
+      metadata: report,
+    })
+    await writeRunJson(run.runJsonPath, {
+      runId: run.runId,
+      command: 'embedding',
+      status: results.failed || results.chunkFailed ? 'failed' : (isFlagEnabled(options.dryRun) ? 'skipped' : 'completed'),
+      createdAt: run.createdAt,
+      updatedAt: finishedAt,
+      mainDbPath,
+      job: { bookId, provider, model },
+      stages: {
+        embedding: {
+          status: results.failed || results.chunkFailed ? 'failed' : (isFlagEnabled(options.dryRun) ? 'skipped' : 'completed'),
+          startedAt,
+          finishedAt,
+          message: `embedding targets ${targets.length}, completed ${results.completed}, failed ${results.failed}.`,
+          artifacts: {
+            embeddingReport: relativeRunPath(run.rootDir, reportPath),
+          },
+        },
+      },
+    })
+
+    console.log(`run: ${run.runId}`)
+    console.log(`book: ${bookId}`)
+    console.log(`embedding targets: ${targets.length}`)
+    console.log(`completed: ${results.completed}`)
+    console.log(`failed: ${results.failed}`)
+    console.log(`chunks: ${results.chunkCompleted}/${results.chunkCompleted + results.chunkFailed}`)
+    console.log(`report: ${reportPath}`)
+    if (isFlagEnabled(options.dryRun)) console.log('dry-run: embeddings were not generated or written')
+    if (results.failed || results.chunkFailed) throw new Error('Embedding completed with failures.')
+  } catch (error) {
+    const finishedAt = new Date().toISOString()
+    await writeRunJson(run.runJsonPath, {
+      runId: run.runId,
+      command: 'embedding',
+      status: 'failed',
+      createdAt: run.createdAt,
+      updatedAt: finishedAt,
+      mainDbPath,
+      job: { bookId, provider, model },
+      stages: {
+        embedding: {
           status: 'failed',
           startedAt,
           finishedAt,
@@ -449,7 +591,7 @@ async function runPublish(options) {
     booksJsonPath,
     audioDir: hasAudio ? audioDir : '',
   })
-  if (options.dryRun) {
+  if (isFlagEnabled(options.dryRun)) {
     console.log(`book: ${bookId}`)
     if (hasPackage) {
       console.log(`package: ${packagePath}`)
@@ -712,6 +854,215 @@ async function writeBookToMainDb(dbPath, book) {
   }
 }
 
+async function openMainDbForEmbedding(dbPath) {
+  const DatabaseSync = await loadDatabaseSync()
+  const db = new DatabaseSync(dbPath)
+  db.exec('PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;')
+  ensureEmbeddingSchema(db)
+  return db
+}
+
+function ensureEmbeddingSchema(db) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS summary_embeddings (
+      chapter_id TEXT PRIMARY KEY REFERENCES chapters(id) ON DELETE CASCADE,
+      book_id TEXT NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+      model TEXT NOT NULL,
+      dimension INTEGER NOT NULL,
+      embedding_json TEXT NOT NULL,
+      generated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+    CREATE INDEX IF NOT EXISTS idx_summary_embeddings_book ON summary_embeddings(book_id);
+
+    CREATE TABLE IF NOT EXISTS chapter_chunk_embeddings (
+      id TEXT PRIMARY KEY,
+      book_id TEXT NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+      chapter_id TEXT NOT NULL REFERENCES chapters(id) ON DELETE CASCADE,
+      chapter_index INTEGER NOT NULL,
+      chunk_index INTEGER NOT NULL,
+      start_offset INTEGER NOT NULL,
+      end_offset INTEGER NOT NULL,
+      text TEXT NOT NULL,
+      model TEXT NOT NULL,
+      dimension INTEGER NOT NULL,
+      embedding_json TEXT NOT NULL,
+      generated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(chapter_id, chunk_index, model)
+    );
+    CREATE INDEX IF NOT EXISTS idx_chunk_embeddings_book_model ON chapter_chunk_embeddings(book_id, model);
+    CREATE INDEX IF NOT EXISTS idx_chunk_embeddings_chapter ON chapter_chunk_embeddings(chapter_id, model);
+  `)
+}
+
+function readEmbeddingTargets(db, { bookId, model, force, limit, utils }) {
+  const summaries = db.prepare(`
+    SELECT
+      s.chapter_id AS chapterId,
+      s.short,
+      s.detail,
+      s.key_points_json AS keyPointsJson
+    FROM summaries s
+    JOIN chapters c ON c.id = s.chapter_id
+    WHERE c.book_id = ?
+    ORDER BY c.chapter_index
+  `).all(bookId).map(plainObject)
+  const summaryByChapterId = new Map(summaries.map((summary) => [summary.chapterId, summary]))
+  const chapters = db.prepare(`
+    SELECT
+      id,
+      book_id AS bookId,
+      chapter_index AS chapterIndex,
+      title,
+      content,
+      word_count AS wordCount
+    FROM chapters
+    WHERE book_id = ?
+    ORDER BY chapter_index, title
+  `).all(bookId).map(plainObject)
+  const getSummaryEmbedding = db.prepare('SELECT chapter_id AS chapterId, dimension FROM summary_embeddings WHERE chapter_id = ? AND model = ?')
+  const countChunks = db.prepare('SELECT COUNT(*) AS count FROM chapter_chunk_embeddings WHERE chapter_id = ? AND model = ?')
+  const targets = []
+
+  for (const chapter of chapters) {
+    const summary = summaryByChapterId.get(chapter.id)
+    if (!summary) continue
+    const chunks = utils.splitChapterIntoChunks(chapter)
+    const existingSummary = getSummaryEmbedding.get(chapter.id, model)
+    const existingChunks = countChunks.get(chapter.id, model)?.count ?? 0
+    if (!force && existingSummary && existingChunks >= chunks.length) continue
+    targets.push({ chapter, summary, chunks })
+    if (limit > 0 && targets.length >= limit) break
+  }
+  return targets
+}
+
+async function embedChapterTarget({ dbPath, bookId, model, force, target, embeddingConfig, utils, results }) {
+  const summaryText = utils.buildSummaryText(target.summary)
+  if (!summaryText) {
+    results.failed += 1
+    pushLimited(results.errors, {
+      chapterId: target.chapter.id,
+      chapterIndex: target.chapter.chapterIndex,
+      error: 'Summary text is empty.',
+    })
+    return
+  }
+
+  try {
+    const db = await openMainDbForEmbedding(dbPath)
+    try {
+      const existingSummary = db.prepare('SELECT chapter_id AS chapterId FROM summary_embeddings WHERE chapter_id = ? AND model = ?')
+        .get(target.chapter.id, model)
+      if (force || !existingSummary) {
+        const summaryEmbedding = utils.l2Normalize(await callEmbeddingProvider(summaryText, embeddingConfig, utils))
+        writeSummaryEmbedding(db, {
+          chapterId: target.chapter.id,
+          bookId,
+          model,
+          embedding: summaryEmbedding,
+        })
+        results.dimension ??= summaryEmbedding.length
+      }
+
+      const existingChunks = db.prepare('SELECT COUNT(*) AS count FROM chapter_chunk_embeddings WHERE chapter_id = ? AND model = ?')
+        .get(target.chapter.id, model)?.count ?? 0
+      if (force || existingChunks < target.chunks.length) {
+        db.prepare('DELETE FROM chapter_chunk_embeddings WHERE chapter_id = ? AND model = ?').run(target.chapter.id, model)
+        for (const chunk of target.chunks) {
+          try {
+            const chunkText = `第 ${target.chapter.chapterIndex} 章：${target.chapter.title}\n\n${chunk.text}`
+            const chunkEmbedding = utils.l2Normalize(await callEmbeddingProvider(chunkText, embeddingConfig, utils))
+            writeChunkEmbedding(db, {
+              id: utils.buildChunkEmbeddingId(chunk.id, model),
+              bookId,
+              chapterId: target.chapter.id,
+              chapterIndex: target.chapter.chapterIndex,
+              chunk,
+              model,
+              embedding: chunkEmbedding,
+            })
+            results.dimension ??= chunkEmbedding.length
+            results.chunkCompleted += 1
+          } catch (error) {
+            results.chunkFailed += 1
+            pushLimited(results.chunkErrors, {
+              chapterId: target.chapter.id,
+              chapterIndex: target.chapter.chapterIndex,
+              chunkIndex: chunk.chunkIndex,
+              error: error instanceof Error ? error.message : String(error),
+            })
+          }
+        }
+      }
+      results.completed += 1
+    } finally {
+      db.close()
+    }
+  } catch (error) {
+    results.failed += 1
+    pushLimited(results.errors, {
+      chapterId: target.chapter.id,
+      chapterIndex: target.chapter.chapterIndex,
+      error: error instanceof Error ? error.message : String(error),
+    })
+  }
+}
+
+function writeSummaryEmbedding(db, { chapterId, bookId, model, embedding }) {
+  db.prepare(`
+    INSERT INTO summary_embeddings (chapter_id, book_id, model, dimension, embedding_json, generated_at)
+    VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+    ON CONFLICT(chapter_id) DO UPDATE SET
+      book_id = excluded.book_id,
+      model = excluded.model,
+      dimension = excluded.dimension,
+      embedding_json = excluded.embedding_json,
+      generated_at = excluded.generated_at
+  `).run(chapterId, bookId, model, embedding.length, JSON.stringify(embedding))
+}
+
+function writeChunkEmbedding(db, { id, bookId, chapterId, chapterIndex, chunk, model, embedding }) {
+  db.prepare(`
+    INSERT INTO chapter_chunk_embeddings (
+      id,
+      book_id,
+      chapter_id,
+      chapter_index,
+      chunk_index,
+      start_offset,
+      end_offset,
+      text,
+      model,
+      dimension,
+      embedding_json,
+      generated_at
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+    ON CONFLICT(chapter_id, chunk_index, model) DO UPDATE SET
+      id = excluded.id,
+      book_id = excluded.book_id,
+      chapter_index = excluded.chapter_index,
+      start_offset = excluded.start_offset,
+      end_offset = excluded.end_offset,
+      text = excluded.text,
+      dimension = excluded.dimension,
+      embedding_json = excluded.embedding_json,
+      generated_at = excluded.generated_at
+  `).run(
+    id,
+    bookId,
+    chapterId,
+    chapterIndex,
+    chunk.chunkIndex,
+    chunk.startOffset,
+    chunk.endOffset,
+    chunk.text,
+    model,
+    embedding.length,
+    JSON.stringify(embedding),
+  )
+}
+
 function ensureMainDbSchema(db) {
   db.exec(`
     CREATE TABLE IF NOT EXISTS books (
@@ -886,7 +1237,7 @@ async function readExistingGatewayCatalog(options) {
     return parseCatalog(await readFile(catalogPath, 'utf8'))
   }
   if (options.remoteHost) {
-    if (options.dryRun) return { schemaVersion: 1, books: [] }
+    if (isFlagEnabled(options.dryRun)) return { schemaVersion: 1, books: [] }
     const remoteDataDir = remoteDataDirFromOptions(options)
     try {
       const sshArgs = sshBaseArgs(options).concat(['cat', remoteShellQuote(remoteDataDir + '/books.json')])
@@ -1036,6 +1387,91 @@ async function collectAudioArtifacts(root) {
   return artifacts
 }
 
+async function callEmbeddingProvider(text, config, utils) {
+  return retryEmbeddingRequest(async () => {
+    const provider = String(config.provider || '').toLowerCase()
+    if (provider === 'openai' || provider === 'openai-compatible') {
+      return callOpenAICompatibleEmbedding(text, config)
+    }
+    return callOllamaEmbedding(text, config)
+  }, config, utils)
+}
+
+async function callOpenAICompatibleEmbedding(text, config) {
+  const baseUrl = trimTrailingSlash(config.baseUrl)
+  const headers = { 'content-type': 'application/json' }
+  if (config.apiKey?.trim()) headers.authorization = `Bearer ${config.apiKey.trim()}`
+  const response = await fetch(`${baseUrl}/embeddings`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({ model: config.model, input: text, encoding_format: 'float' }),
+    signal: AbortSignal.timeout(config.timeoutMs),
+  })
+  if (!response.ok) {
+    const error = new Error(`OpenAI-compatible embedding failed: ${response.status} ${response.statusText}`)
+    error.status = response.status
+    throw error
+  }
+  const data = await response.json()
+  const embedding = data?.data?.[0]?.embedding
+  if (!Array.isArray(embedding)) throw new Error('OpenAI-compatible embedding response missing data[0].embedding.')
+  return embedding
+}
+
+async function callOllamaEmbedding(text, config) {
+  const baseUrl = trimTrailingSlash(config.baseUrl || 'http://127.0.0.1:11434')
+  const response = await fetch(`${baseUrl}/api/embeddings`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ model: config.model, prompt: text }),
+    signal: AbortSignal.timeout(config.timeoutMs),
+  })
+  if (!response.ok) {
+    const error = new Error(`Ollama embedding failed: ${response.status} ${response.statusText}`)
+    error.status = response.status
+    throw error
+  }
+  const data = await response.json()
+  if (!Array.isArray(data?.embedding)) throw new Error('Ollama embedding response missing embedding.')
+  return data.embedding
+}
+
+async function retryEmbeddingRequest(request, config, utils) {
+  let lastError
+  for (let attempt = 1; attempt <= config.maxAttempts; attempt += 1) {
+    try {
+      return await request(attempt)
+    } catch (error) {
+      lastError = error
+      const retryable = utils.isRetryableEmbeddingError
+        ? utils.isRetryableEmbeddingError(error)
+        : isRetryableEmbeddingError(error)
+      if (attempt >= config.maxAttempts || !retryable) throw error
+      await sleep(config.retryBaseDelayMs || 1000)
+    }
+  }
+  throw lastError
+}
+
+function isRetryableEmbeddingError(error) {
+  if (error?.name === 'AbortError') return true
+  if ([408, 429, 500, 502, 503, 504].includes(Number(error?.status))) return true
+  const message = error instanceof Error ? error.message : String(error || '')
+  return /\b(408|429|500|502|503|504)\b|Bad Gateway|ECONNRESET|ETIMEDOUT|timeout/i.test(message)
+}
+
+async function runPool(items, concurrency, worker) {
+  let nextIndex = 0
+  const workers = Array.from({ length: Math.min(concurrency, items.length) }, async () => {
+    while (nextIndex < items.length) {
+      const item = items[nextIndex]
+      nextIndex += 1
+      await worker(item)
+    }
+  })
+  await Promise.all(workers)
+}
+
 async function walkFiles(dir, depth, onFile) {
   if (depth < 0) return
   const entries = await readdir(dir, { withFileTypes: true }).catch(() => [])
@@ -1096,6 +1532,29 @@ function safePathSegment(value) {
 
 function trimTrailingSlash(value) {
   return String(value || '').replace(/\/+$/, '')
+}
+
+function clampInteger(value, fallback, min, max) {
+  const number = Number(value)
+  if (!Number.isFinite(number)) return fallback
+  return Math.max(min, Math.min(max, Math.floor(number)))
+}
+
+function isFlagEnabled(value) {
+  if (value === undefined || value === null || value === false) return false
+  if (value === true) return true
+  return !['', '0', 'false', 'no', 'off'].includes(String(value).trim().toLowerCase())
+}
+
+function pushLimited(array, value, limit = 5) {
+  if (array.length < limit) array.push(value)
+}
+
+function redactSensitiveOptions(options) {
+  const redacted = { ...options }
+  if (redacted.apiKey) redacted.apiKey = '[redacted]'
+  if (redacted.gatewayToken) redacted.gatewayToken = '[redacted]'
+  return redacted
 }
 
 function parseArgs(argv) {
@@ -1166,6 +1625,13 @@ async function loadBookIngest() {
   return bookIngestModule
 }
 
+async function loadEmbeddingUtils() {
+  if (!embeddingUtilsModule) {
+    embeddingUtilsModule = await import('./embedding-utils.mjs')
+  }
+  return embeddingUtilsModule
+}
+
 async function writeJson(path, value) {
   await mkdir(dirname(path), { recursive: true })
   await writeFile(path, `${JSON.stringify(value, null, 2)}\n`, 'utf8')
@@ -1186,6 +1652,7 @@ Usage:
   npm run production-pipeline -- import --file <path> [--book-id <id>] [--title <title>] [--dry-run] [--replace]
   npm run production-pipeline -- package --book-id <id>
   npm run production-pipeline -- audio --book-id <id> --source-root <path>
+  npm run production-pipeline -- embedding --book-id <id> --provider <ollama|openai> --base-url <url> --model <name>
   npm run production-pipeline -- publish --run <runId|runDir|run.json> [--dry-run]
   npm run production-pipeline -- verify --run <runId|runDir|run.json> --gateway-url <url>
   npm run production-pipeline -- status --run <runId|runDir|run.json>
@@ -1197,6 +1664,8 @@ Options:
   --gateway-audio-dir  Local Gateway audio directory for publish.
   --gateway-url        Gateway base URL for verify.
   --gateway-token      Gateway bearer token for verify.
+  --concurrency        Embedding request concurrency.
+  --force              Regenerate existing embedding rows.
   --remote-host        Remote Gateway host for rsync publish.
   --remote-user        Remote SSH user.
   --remote-root        Remote Gateway root. Default: ${defaultRemoteRoot}
