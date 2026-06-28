@@ -145,9 +145,15 @@ export async function buildContentPipelineService(config = loadServiceConfig()) 
     }
   })
 
-  app.post('/api/system/choose-file', async () => ({
-    path: await chooseLocalBookFile(),
-  }))
+  app.post('/api/system/choose-file', async (request) => {
+    const body = request.body && typeof request.body === 'object' && !Array.isArray(request.body) ? request.body : {}
+    const kind = readString(body.kind)
+    return {
+      path: await chooseLocalFile(kind === 'job'
+        ? { prompt: '选择 Production Pipeline v2 Job JSON', types: ['json'] }
+        : { prompt: '选择要导入 Novel Reader 的电子书', types: ['txt', 'epub', 'mobi', 'azw', 'azw3', 'pdf'] }),
+    }
+  })
 
   app.get('/api/jobs', async (request) => {
     const limit = clampInteger(readQueryValue(request.query, 'limit'), 1, 200, 50)
@@ -557,6 +563,11 @@ function renderConsoleHtml() {
     .actions { display: flex; gap: 8px; margin-top: 14px; }
     button { border: 1px solid #1f5eff; background: #1f5eff; color: #fff; border-radius: 6px; padding: 9px 12px; cursor: pointer; }
     button.secondary { background: #fff; color: #1f5eff; }
+    button:disabled { opacity: 0.55; cursor: not-allowed; }
+    .tabs { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin: 14px 0 16px; }
+    .tab-button { background: #fff; color: #314056; border-color: #cfd6e3; }
+    .tab-button.active { background: #1f5eff; color: #fff; border-color: #1f5eff; }
+    .tab-panel[hidden] { display: none; }
     .step-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin: 10px 0; }
     .step-option { display: flex; align-items: center; gap: 8px; border: 1px solid #d9dee8; border-radius: 6px; padding: 8px 10px; color: #1d2433; margin: 0; cursor: pointer; }
     .step-option input { width: auto; margin: 0; }
@@ -589,65 +600,77 @@ function renderConsoleHtml() {
     <aside>
       <h1>Content Pipeline</h1>
       <label>Token <input id="token" type="password" autocomplete="off" placeholder="CONTENT_PIPELINE_SERVICE_TOKEN" /></label>
-      <label>模式
-        <select id="action">
-          <option value="produce">创建并运行</option>
-          <option value="production-v2">Production v2</option>
-          <option value="run">继续现有 manifest</option>
-          <option value="ingest">只导入文件</option>
-          <option value="init">只创建 manifest</option>
-        </select>
-      </label>
-      <label>Book ID <input id="bookId" placeholder="已有书籍 ID" /></label>
-      <label>标题 <input id="title" placeholder="书名，可选" /></label>
-      <label>V2 Job JSON <input id="jobPath" placeholder="production-pipeline/config/*.json" /></label>
-      <label>文件路径 <input id="sourceFile" placeholder="/path/to/book.txt、.epub、.mobi、.azw3" /></label>
-      <div class="actions">
-        <button class="secondary" id="chooseFile">选择文件</button>
+      <div class="tabs">
+        <button class="tab-button active" type="button" data-tab="v2">Production v2</button>
+        <button class="tab-button" type="button" data-tab="legacy">Legacy</button>
       </div>
-      <label>Manifest <input id="manifestPath" placeholder="默认 tmp/content-pipeline/<bookId>/production-manifest.json" /></label>
-      <label>步骤 <input id="steps" value="import,scan,export,publish-package" hidden /></label>
-      <div class="preset-row">
-        <button class="secondary" type="button" data-preset="package">数据包</button>
-        <button class="secondary" type="button" data-preset="full">全流程</button>
-        <button class="secondary" type="button" data-preset="audio">只音频</button>
+      <div class="tab-panel" id="tab-v2">
+        <label>V2 Job JSON <input id="jobPath" placeholder="production-pipeline/config/shuanglongzhuan_jog.json" /></label>
+        <div class="actions">
+          <button class="secondary" id="chooseJob" type="button">选择 JSON</button>
+          <button id="startV2" type="button">启动 v2</button>
+          <button class="secondary" id="refreshV2" type="button">刷新</button>
+        </div>
       </div>
-      <div class="step-grid" id="stepOptions">
-        <label class="step-option"><input type="checkbox" value="import" checked />导入离线库</label>
-        <label class="step-option"><input type="checkbox" value="scan" checked />概要/图谱</label>
-        <label class="step-option"><input type="checkbox" value="export" checked />导回主库</label>
-        <label class="step-option"><input type="checkbox" value="embedding" />Embedding</label>
-        <label class="step-option"><input type="checkbox" value="audio" />MP3 音频</label>
-        <label class="step-option"><input type="checkbox" value="publish-package" checked />发布数据包</label>
-        <label class="step-option"><input type="checkbox" value="publish-audio" />发布音频</label>
+      <div class="tab-panel" id="tab-legacy" hidden>
+        <label>模式
+          <select id="action">
+            <option value="produce">创建并运行</option>
+            <option value="run">继续现有 manifest</option>
+            <option value="ingest">只导入文件</option>
+            <option value="init">只创建 manifest</option>
+          </select>
+        </label>
+        <label>Book ID <input id="bookId" placeholder="已有书籍 ID" /></label>
+        <label>标题 <input id="title" placeholder="书名，可选" /></label>
+        <label>文件路径 <input id="sourceFile" placeholder="/path/to/book.txt、.epub、.mobi、.azw3" /></label>
+        <div class="actions">
+          <button class="secondary" id="chooseFile" type="button">选择文件</button>
+        </div>
+        <label>Manifest <input id="manifestPath" placeholder="默认 tmp/content-pipeline/<bookId>/production-manifest.json" /></label>
+        <label>步骤 <input id="steps" value="import,scan,export,publish-package" hidden /></label>
+        <div class="preset-row">
+          <button class="secondary" type="button" data-preset="package">数据包</button>
+          <button class="secondary" type="button" data-preset="full">全流程</button>
+          <button class="secondary" type="button" data-preset="audio">只音频</button>
+        </div>
+        <div class="step-grid" id="stepOptions">
+          <label class="step-option"><input type="checkbox" value="import" checked />导入离线库</label>
+          <label class="step-option"><input type="checkbox" value="scan" checked />概要/图谱</label>
+          <label class="step-option"><input type="checkbox" value="export" checked />导回主库</label>
+          <label class="step-option"><input type="checkbox" value="embedding" />Embedding</label>
+          <label class="step-option"><input type="checkbox" value="audio" />MP3 音频</label>
+          <label class="step-option"><input type="checkbox" value="publish-package" checked />发布数据包</label>
+          <label class="step-option"><input type="checkbox" value="publish-audio" />发布音频</label>
+        </div>
+        <div class="row">
+          <label>章节 <input id="chapters" placeholder="1-10" /></label>
+          <label>扫描 <select id="scanType"><option value="">all</option><option>summary</option><option>kg</option></select></label>
+        </div>
+        <h2>发布</h2>
+        <label>Gateway URL <input id="gatewayUrl" placeholder="https://192.168.88.100:8888" /></label>
+        <label>Gateway Token <input id="gatewayToken" type="password" autocomplete="off" placeholder="GATEWAY_DEV_ACCESS_TOKEN" /></label>
+        <label>音频来源目录 <input id="audioSourceRoot" placeholder="默认 manifest workspace/audio" /></label>
+        <label>本地 Gateway 音频目录 <input id="gatewayAudioDir" placeholder="gateway/data/audio 或 ~/.novel_reader_gateway/audio" /></label>
+        <div class="row">
+          <label>远端 Host <input id="gatewayRemoteHost" placeholder="192.168.88.100" /></label>
+          <label>远端用户 <input id="gatewayRemoteUser" placeholder="可选，例如 gwaves" /></label>
+        </div>
+        <div class="row">
+          <label>远端音频目录 <input id="gatewayRemoteAudioDir" placeholder="~/novel-reader-gateway/audio" /></label>
+          <label>SSH 端口 <input id="gatewayRemoteSshPort" placeholder="22" /></label>
+        </div>
+        <div class="actions">
+          <button id="start" type="button">启动</button>
+          <button class="secondary" id="refresh" type="button">刷新</button>
+        </div>
+        <h2>主数据库书籍</h2>
+        <label>搜索 <input id="bookQuery" placeholder="书名或 book id" /></label>
+        <div class="actions">
+          <button class="secondary" id="searchBooks" type="button">查询书籍</button>
+        </div>
+        <div id="books" class="jobs"></div>
       </div>
-      <div class="row">
-        <label>章节 <input id="chapters" placeholder="1-10" /></label>
-        <label>扫描 <select id="scanType"><option value="">all</option><option>summary</option><option>kg</option></select></label>
-      </div>
-      <h2>发布</h2>
-      <label>Gateway URL <input id="gatewayUrl" placeholder="https://192.168.88.100:8888" /></label>
-      <label>Gateway Token <input id="gatewayToken" type="password" autocomplete="off" placeholder="GATEWAY_DEV_ACCESS_TOKEN" /></label>
-      <label>音频来源目录 <input id="audioSourceRoot" placeholder="默认 manifest workspace/audio" /></label>
-      <label>本地 Gateway 音频目录 <input id="gatewayAudioDir" placeholder="gateway/data/audio 或 ~/.novel_reader_gateway/audio" /></label>
-      <div class="row">
-        <label>远端 Host <input id="gatewayRemoteHost" placeholder="192.168.88.100" /></label>
-        <label>远端用户 <input id="gatewayRemoteUser" placeholder="可选，例如 gwaves" /></label>
-      </div>
-      <div class="row">
-        <label>远端音频目录 <input id="gatewayRemoteAudioDir" placeholder="~/novel-reader-gateway/audio" /></label>
-        <label>SSH 端口 <input id="gatewayRemoteSshPort" placeholder="22" /></label>
-      </div>
-      <div class="actions">
-        <button id="start">启动</button>
-        <button class="secondary" id="refresh">刷新</button>
-      </div>
-      <h2>主数据库书籍</h2>
-      <label>搜索 <input id="bookQuery" placeholder="书名或 book id" /></label>
-      <div class="actions">
-        <button class="secondary" id="searchBooks">查询书籍</button>
-      </div>
-      <div id="books" class="jobs"></div>
       <h2>任务</h2>
       <div id="jobs" class="jobs"></div>
     </aside>
@@ -664,6 +687,20 @@ function renderConsoleHtml() {
       if (saved !== null) el.value = saved;
       el.addEventListener('input', () => localStorage.setItem('pipeline.' + id, el.value));
     }
+    const savedTab = localStorage.getItem('pipeline.activeTab') || 'v2';
+    function activateTab(tab) {
+      const active = tab === 'legacy' ? 'legacy' : 'v2';
+      document.getElementById('tab-v2').hidden = active !== 'v2';
+      document.getElementById('tab-legacy').hidden = active !== 'legacy';
+      document.querySelectorAll('[data-tab]').forEach(button => {
+        button.classList.toggle('active', button.dataset.tab === active);
+      });
+      localStorage.setItem('pipeline.activeTab', active);
+    }
+    document.querySelectorAll('[data-tab]').forEach(button => {
+      button.addEventListener('click', () => activateTab(button.dataset.tab));
+    });
+    activateTab(savedTab);
     const stepInput = document.getElementById('steps');
     const stepBoxes = Array.from(document.querySelectorAll('#stepOptions input[type="checkbox"]'));
     function syncStepBoxesFromInput() {
@@ -795,11 +832,48 @@ function renderConsoleHtml() {
         startButton.disabled = false;
       }
     });
+    document.getElementById('startV2').addEventListener('click', async () => {
+      const startButton = document.getElementById('startV2');
+      startButton.disabled = true;
+      try {
+        const jobPath = document.getElementById('jobPath').value.trim();
+        const body = await api('/api/jobs', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ action: 'production-v2', jobPath }),
+        });
+        await selectJob(body.job.id);
+      } catch (error) {
+        showError('启动 v2 失败', error);
+      } finally {
+        startButton.disabled = false;
+      }
+    });
     document.getElementById('refresh').addEventListener('click', loadJobs);
+    document.getElementById('refreshV2').addEventListener('click', loadJobs);
     document.getElementById('searchBooks').addEventListener('click', loadBooks);
+    document.getElementById('chooseJob').addEventListener('click', async () => {
+      try {
+        const body = await api('/api/system/choose-file', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ kind: 'job' }),
+        });
+        if (body.path) {
+          document.getElementById('jobPath').value = body.path;
+          localStorage.setItem('pipeline.jobPath', body.path);
+        }
+      } catch (error) {
+        showError('选择 JSON 失败', error);
+      }
+    });
     document.getElementById('chooseFile').addEventListener('click', async () => {
       try {
-        const body = await api('/api/system/choose-file', { method: 'POST' });
+        const body = await api('/api/system/choose-file', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ kind: 'book' }),
+        });
         if (body.path) {
           document.getElementById('sourceFile').value = body.path;
           document.getElementById('action').value = 'produce';
@@ -869,12 +943,13 @@ function listMainBooks(mainDbPath, { query = '', limit = 50 } = {}) {
   }
 }
 
-async function chooseLocalBookFile() {
+async function chooseLocalFile({ prompt, types }) {
   if (process.platform !== 'darwin') {
     throw httpError(501, 'file_picker_unavailable', 'File picker is currently implemented for macOS only.')
   }
+  const quotedTypes = types.map((type) => `"${type}"`).join(', ')
   const script = [
-    'set selectedFile to choose file with prompt "选择要导入 Novel Reader 的电子书" of type {"txt", "epub", "mobi", "azw", "azw3", "pdf"}',
+    `set selectedFile to choose file with prompt "${escapeAppleScriptString(prompt)}" of type {${quotedTypes}}`,
     'POSIX path of selectedFile',
   ].join('\n')
   try {
@@ -889,6 +964,10 @@ async function chooseLocalBookFile() {
     }
     throw httpError(500, 'file_picker_failed', `Failed to open file picker: ${message}`)
   }
+}
+
+function escapeAppleScriptString(value) {
+  return String(value).replace(/\\/g, '\\\\').replace(/"/g, '\\"')
 }
 
 function tableHasColumn(db, tableName, columnName) {

@@ -57,6 +57,18 @@ describe('content pipeline service', () => {
     assert.equal(response.json().service, 'novel-reader-content-pipeline')
   })
 
+  it('renders a dedicated production v2 tab', async () => {
+    const app = await buildTestApp()
+    const response = await app.inject({ method: 'GET', url: '/' })
+    const html = response.body
+
+    assert.equal(response.statusCode, 200)
+    assert.match(html, /data-tab="v2"/)
+    assert.match(html, /id="tab-v2"/)
+    assert.match(html, /id="chooseJob"/)
+    assert.match(html, /id="startV2"/)
+  })
+
   it('requires bearer token when configured', async () => {
     const app = await buildTestApp({ CONTENT_PIPELINE_SERVICE_TOKEN: 'secret' })
     const response = await app.inject({
