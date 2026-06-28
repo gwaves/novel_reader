@@ -6,6 +6,7 @@ Gateway consumes filesystem assets. Production Pipeline v2 publishes bulk assets
 ## Filesystem Layout
 
 ```text
+data/books.json
 data/books/<bookId>/package.json
 audio/books/<bookId>/audio.json
 audio/books/<bookId>/chxxx-.../chapter.mp3
@@ -20,6 +21,8 @@ audio/books/<bookId>/chxxx-.../manifest.json
 - Audio catalog order must match package chapter order.
 - A book must not be published under a temporary slug if the main database has a
   stable book id.
+- `data/books.json` must include the same stable book id, otherwise Gateway can
+  serve the package by direct URL but the mobile library will not list the book.
 
 ## Publish
 
@@ -43,4 +46,3 @@ After publish, verify through Gateway HTTP APIs:
 - `/mobile/books/:bookId/audio`
 - sampled `/mobile/books/:bookId/audio/:chapterId/manifest`
 - sampled `/mobile/books/:bookId/audio/:chapterId/download`
-

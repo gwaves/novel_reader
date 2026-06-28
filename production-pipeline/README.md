@@ -15,15 +15,22 @@ for final verification.
   assets can be large.
 - Gateway HTTP APIs are used for verification after publish, not for bulk upload.
 
-## Planned Commands
+## Current Commands
 
 ```bash
-npm run production-pipeline -- create --book-id <bookId>
-npm run production-pipeline -- run --job production-pipeline/jobs/<job>.json
-npm run production-pipeline -- resume --run <runId>
+npm run production-pipeline -- import --file <path> --book-id <bookId> --title <title>
+npm run production-pipeline -- package --book-id <bookId>
+npm run production-pipeline -- publish --run <runId|runDir|run.json> --remote-host <host> --remote-user <user>
 npm run production-pipeline -- status --run <runId>
-npm run production-pipeline -- verify --run <runId>
 ```
+
+`import` writes canonical `books` and `chapters` rows into the main database.
+`package` reads those rows and writes Gateway-ready artifacts under the run
+directory. `publish` uses `rsync` for the package files and merges `books.json`
+so the Gateway book list can see the published book.
+
+Planned commands still include stage-level `run`, `resume`, and `verify` once
+summary, KG, embedding, and audio workers are added.
 
 ## Run Layout
 
@@ -54,4 +61,3 @@ Planned stages:
 - `package`
 - `publish`
 - `verify`
-

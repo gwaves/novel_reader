@@ -1,13 +1,17 @@
 #!/usr/bin/env node
 
 import { createHash, randomUUID } from 'node:crypto'
-import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { execFile } from 'node:child_process'
+import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
+import { promisify } from 'node:util'
 
 const defaultRunRoot = 'tmp/production-pipeline/runs'
 const defaultMainDbPath = '~/.novel_reader/novel_reader.sqlite'
+const defaultRemoteRoot = '/home/gwaves/novel-reader-gateway'
+const execFileAsync = promisify(execFile)
 let DatabaseSyncCtor
 let bookIngestModule
 
@@ -26,6 +30,14 @@ async function main() {
 
   if (command === 'import') {
     await runImport(options)
+    return
+  }
+  if (command === 'package') {
+    await runPackage(options)
+    return
+  }
+  if (command === 'publish') {
+    await runPublish(options)
     return
   }
   if (command === 'status') {
@@ -176,20 +188,143 @@ async function runImport(options) {
   }
 }
 
-async function runStatus(options) {
-  const runPath = required(options.run, 'status requires --run <runId or run path>')
-  const runJsonPath = runPath.endsWith('.json')
-    ? resolve(runPath)
-    : existsSync(resolve(runPath, 'run.json'))
-      ? resolve(runPath, 'run.json')
-      : resolve(defaultRunRoot, runPath, 'run.json')
-  const run = JSON.parse(await readFile(runJsonPath, 'utf8'))
-  console.log(JSON.stringify(run, null, 2))
+async function runPackage(options) {
+  const bookId = required(options.bookId, 'package requires --book-id <id>')
+  const mainDbPath = expandPath(options.mainDb || options.mainDbPath || defaultMainDbPath)
+  const run = await createRun({ command: 'package', options, mainDbPath, bookId })
+  const startedAt = new Date().toISOString()
+
+  try {
+    const book = await readBookFromMainDb(mainDbPath, bookId)
+    const generatedAt = new Date().toISOString()
+    const bookPackage = buildGatewayBookPackage(book, generatedAt)
+    const gatewayDataDir = join(run.artifactsDir, 'gateway-data')
+    const packagePath = join(gatewayDataDir, 'books', bookId, 'package.json')
+    const bookSummaryPath = join(gatewayDataDir, 'book-summary.json')
+
+    await writeJson(packagePath, bookPackage)
+    await writeJson(bookSummaryPath, bookPackage.book)
+    await initializeItemsDb(run.itemsDbPath)
+    await recordStageItem(run.itemsDbPath, {
+      stage: 'package',
+      itemId: bookId,
+      itemType: 'book',
+      status: 'completed',
+      attempts: 1,
+      startedAt,
+      finishedAt: generatedAt,
+      metadata: {
+        chapterCount: book.chapters.length,
+        wordCount: bookPackage.book.wordCount,
+      },
+    })
+    await writeRunJson(run.runJsonPath, {
+      runId: run.runId,
+      command: 'package',
+      status: 'completed',
+      createdAt: run.createdAt,
+      updatedAt: generatedAt,
+      mainDbPath,
+      job: { bookId, title: book.title },
+      stages: {
+        package: {
+          status: 'completed',
+          startedAt,
+          finishedAt: generatedAt,
+          message: `packaged ${book.chapters.length} chapters.`,
+          artifacts: {
+            gatewayDataDir: relativeRunPath(run.rootDir, gatewayDataDir),
+            packageFile: relativeRunPath(run.rootDir, packagePath),
+            bookSummary: relativeRunPath(run.rootDir, bookSummaryPath),
+          },
+        },
+      },
+    })
+
+    console.log(`run: ${run.runId}`)
+    console.log(`book: ${bookId} ${book.title}`)
+    console.log(`chapters: ${book.chapters.length}`)
+    console.log(`package: ${packagePath}`)
+  } catch (error) {
+    const finishedAt = new Date().toISOString()
+    await writeRunJson(run.runJsonPath, {
+      runId: run.runId,
+      command: 'package',
+      status: 'failed',
+      createdAt: run.createdAt,
+      updatedAt: finishedAt,
+      mainDbPath,
+      job: { bookId },
+      stages: {
+        package: {
+          status: 'failed',
+          startedAt,
+          finishedAt,
+          error: error.message,
+        },
+      },
+    })
+    throw error
+  }
 }
 
-async function createRun({ command, options, mainDbPath }) {
+async function runPublish(options) {
+  const runInfo = await loadRunInfo(required(options.run, 'publish requires --run <runId or run path>'))
+  const bookId = runInfo.job?.bookId || required(options.bookId, 'publish requires a packaged run with job.bookId or --book-id <id>')
+  const gatewayDataDir = resolveRunArtifact(
+    runInfo.rootDir,
+    runInfo.stages?.package?.artifacts?.gatewayDataDir || join('artifacts', 'gateway-data'),
+  )
+  const packageDir = join(gatewayDataDir, 'books', bookId)
+  const packagePath = join(packageDir, 'package.json')
+  const bookSummaryPath = join(gatewayDataDir, 'book-summary.json')
+  if (!existsSync(packagePath)) throw new Error(`Package artifact not found: ${packagePath}`)
+  if (!existsSync(bookSummaryPath)) throw new Error(`Book summary artifact not found: ${bookSummaryPath}`)
+
+  const bookSummary = JSON.parse(await readFile(bookSummaryPath, 'utf8'))
+  const booksJsonPath = join(gatewayDataDir, 'books.json')
+  const existingCatalog = await readExistingGatewayCatalog(options)
+  await writeJson(booksJsonPath, mergeBookCatalog(existingCatalog, bookSummary))
+
+  const startedAt = new Date().toISOString()
+  const publishPlan = buildPublishPlan(options, gatewayDataDir, packageDir, booksJsonPath, bookId)
+  if (options.dryRun) {
+    console.log(`book: ${bookId}`)
+    console.log(`package: ${packagePath}`)
+    console.log(`catalog: ${booksJsonPath}`)
+    for (const command of publishPlan.commands) console.log(`dry-run: ${command.join(' ')}`)
+    return
+  }
+
+  for (const command of publishPlan.commands) {
+    const [bin, ...args] = command
+    await execFileAsync(bin, args, { maxBuffer: 20 * 1024 * 1024 })
+  }
+
+  const finishedAt = new Date().toISOString()
+  await writeRunJson(runInfo.runJsonPath, mergeRunStage(runInfo.runJson, 'publish', {
+    status: 'completed',
+    startedAt,
+    finishedAt,
+    message: `published ${bookId} package with rsync.`,
+    target: publishPlan.target,
+    artifacts: {
+      booksJson: relativeRunPath(runInfo.rootDir, booksJsonPath),
+    },
+  }))
+
+  console.log(`book: ${bookId}`)
+  console.log(`published: ${publishPlan.target}`)
+}
+
+async function runStatus(options) {
+  const runInfo = await loadRunInfo(required(options.run, 'status requires --run <runId or run path>'))
+  console.log(JSON.stringify(runInfo.runJson, null, 2))
+}
+
+async function createRun({ command, options, mainDbPath, bookId }) {
   const runId = options.runId || `${new Date().toISOString().replace(/[:.]/g, '-')}-${randomUUID().slice(0, 8)}`
-  const rootDir = resolve(options.runRoot || defaultRunRoot, runId)
+  const rootDir = resolve(options.runRoot || defaultRunRoot, bookId || '', runId)
   const artifactsDir = join(rootDir, 'artifacts')
   const logsDir = join(rootDir, 'logs')
   const checkpointsDir = join(rootDir, 'checkpoints')
@@ -226,6 +361,60 @@ function normalizeParsedChapters(parsedChapters, bookId) {
       }
     })
     .filter((chapter) => chapter.title && chapter.content)
+}
+
+async function readBookFromMainDb(dbPath, bookId) {
+  const DatabaseSync = await loadDatabaseSync()
+  const db = new DatabaseSync(dbPath, { readOnly: true })
+  try {
+    const book = db.prepare(`
+      SELECT id, title, imported_at AS importedAt, chapter_count AS chapterCount, updated_at AS updatedAt
+      FROM books
+      WHERE id = ?
+    `).get(bookId)
+    if (!book) throw new Error(`Book not found in main DB: ${bookId}`)
+
+    const chapters = db.prepare(`
+      SELECT id, chapter_index AS chapterIndex, title, content, word_count AS wordCount, updated_at AS updatedAt
+      FROM chapters
+      WHERE book_id = ?
+      ORDER BY chapter_index, title
+    `).all(bookId)
+    if (!chapters.length) throw new Error(`Book has no chapters in main DB: ${bookId}`)
+
+    return {
+      ...plainObject(book),
+      chapters: chapters.map(plainObject),
+    }
+  } finally {
+    db.close()
+  }
+}
+
+function buildGatewayBookPackage(book, generatedAt) {
+  const chapters = book.chapters.map((chapter, index) => ({
+    id: String(chapter.id),
+    index: numberOrDefault(chapter.chapterIndex, index + 1),
+    chapterIndex: numberOrDefault(chapter.chapterIndex, index + 1),
+    title: String(chapter.title || `第 ${index + 1} 章`),
+    content: String(chapter.content || ''),
+    wordCount: numberOrDefault(chapter.wordCount, countWords(String(chapter.content || ''))),
+    updatedAt: chapter.updatedAt || generatedAt,
+  }))
+  const wordCount = chapters.reduce((sum, chapter) => sum + chapter.wordCount, 0)
+  return {
+    schemaVersion: 1,
+    generatedAt,
+    book: {
+      id: String(book.id),
+      title: String(book.title || book.id),
+      ...(book.author ? { author: String(book.author) } : {}),
+      chapterCount: chapters.length,
+      wordCount,
+      updatedAt: book.updatedAt || book.importedAt || generatedAt,
+    },
+    chapters,
+  }
 }
 
 async function writeBookToMainDb(dbPath, book) {
@@ -357,6 +546,155 @@ async function recordStageItem(itemsDbPath, item) {
   }
 }
 
+async function loadRunInfo(runPath) {
+  const runJsonPath = await resolveRunJsonPath(runPath)
+  const runJson = JSON.parse(await readFile(runJsonPath, 'utf8'))
+  return {
+    runJson,
+    runJsonPath,
+    rootDir: dirname(runJsonPath),
+    job: runJson.job || {},
+    stages: runJson.stages || {},
+  }
+}
+
+async function resolveRunJsonPath(runPath) {
+  if (runPath.endsWith('.json')) return resolve(runPath)
+  const directRunDir = resolve(runPath, 'run.json')
+  if (existsSync(directRunDir)) return directRunDir
+  const defaultRunDir = resolve(defaultRunRoot, runPath, 'run.json')
+  if (existsSync(defaultRunDir)) return defaultRunDir
+  const runRoot = resolve(defaultRunRoot)
+  if (existsSync(runRoot)) {
+    for (const entry of await readdir(runRoot, { withFileTypes: true })) {
+      if (!entry.isDirectory()) continue
+      const nestedRunJson = join(runRoot, entry.name, runPath, 'run.json')
+      if (existsSync(nestedRunJson)) return nestedRunJson
+    }
+  }
+  return defaultRunDir
+}
+
+function resolveRunArtifact(runDir, artifactPath) {
+  if (artifactPath.startsWith('/')) return artifactPath
+  return resolve(runDir, artifactPath)
+}
+
+async function readExistingGatewayCatalog(options) {
+  if (options.catalogFile) {
+    return parseCatalog(await readFile(expandPath(options.catalogFile), 'utf8'))
+  }
+  if (options.gatewayDataDir) {
+    const catalogPath = join(expandPath(options.gatewayDataDir), 'books.json')
+    if (!existsSync(catalogPath)) return { schemaVersion: 1, books: [] }
+    return parseCatalog(await readFile(catalogPath, 'utf8'))
+  }
+  if (options.remoteHost) {
+    if (options.dryRun) return { schemaVersion: 1, books: [] }
+    const remoteDataDir = remoteDataDirFromOptions(options)
+    try {
+      const sshArgs = sshBaseArgs(options).concat(['cat', remoteShellQuote(remoteDataDir + '/books.json')])
+      const { stdout } = await execFileAsync('ssh', sshArgs, { maxBuffer: 20 * 1024 * 1024 })
+      return parseCatalog(stdout)
+    } catch {
+      return { schemaVersion: 1, books: [] }
+    }
+  }
+  return { schemaVersion: 1, books: [] }
+}
+
+function parseCatalog(raw) {
+  try {
+    const parsed = JSON.parse(raw)
+    if (parsed?.schemaVersion === 1 && Array.isArray(parsed.books)) return parsed
+  } catch {
+    // Fall through to an empty catalog.
+  }
+  return { schemaVersion: 1, books: [] }
+}
+
+function mergeBookCatalog(existingCatalog, bookSummary) {
+  const books = (Array.isArray(existingCatalog?.books) ? existingCatalog.books : [])
+    .filter((book) => book?.id && book.id !== bookSummary.id)
+  books.push(bookSummary)
+  books.sort((left, right) => {
+    const updatedDiff = Date.parse(right.updatedAt || '') - Date.parse(left.updatedAt || '')
+    return updatedDiff || String(left.title || left.id).localeCompare(String(right.title || right.id))
+  })
+  return {
+    schemaVersion: 1,
+    books,
+  }
+}
+
+function buildPublishPlan(options, gatewayDataDir, packageDir, booksJsonPath, bookId) {
+  if (options.gatewayDataDir) {
+    const dataDir = expandPath(options.gatewayDataDir)
+    return {
+      target: dataDir,
+      commands: [
+        ['mkdir', '-p', join(dataDir, 'books', bookId)],
+        ['rsync', '-a', `${packageDir}/`, `${join(dataDir, 'books', bookId)}/`],
+        ['rsync', '-a', booksJsonPath, `${join(dataDir, 'books.json')}`],
+      ],
+    }
+  }
+  if (!options.remoteHost) {
+    throw new Error('publish requires --gateway-data-dir <path> or --remote-host <host>')
+  }
+
+  const remoteDataDir = remoteDataDirFromOptions(options)
+  const remoteBookDir = join(remoteDataDir, 'books', bookId)
+  const remoteHost = remoteLogin(options)
+  const sshArgs = sshBaseArgs(options)
+  const rsyncSsh = rsyncSshCommand(options)
+  return {
+    target: `${remoteHost}:${remoteDataDir}`,
+    commands: [
+      ['ssh', ...sshArgs, 'mkdir', '-p', remoteShellQuote(remoteBookDir)],
+      ['rsync', '-az', '--delete', '-e', rsyncSsh, `${packageDir}/`, `${remoteHost}:${remoteShellQuote(remoteBookDir)}/`],
+      ['rsync', '-az', '-e', rsyncSsh, booksJsonPath, `${remoteHost}:${remoteShellQuote(join(remoteDataDir, 'books.json'))}`],
+    ],
+  }
+}
+
+function remoteDataDirFromOptions(options) {
+  return options.remoteDataDir || join(options.remoteRoot || defaultRemoteRoot, 'data')
+}
+
+function remoteLogin(options) {
+  return options.remoteUser ? `${options.remoteUser}@${options.remoteHost}` : options.remoteHost
+}
+
+function sshBaseArgs(options) {
+  const args = []
+  if (options.remoteSshPort || options.sshPort) args.push('-p', String(options.remoteSshPort || options.sshPort))
+  args.push(remoteLogin(options))
+  return args
+}
+
+function rsyncSshCommand(options) {
+  const args = ['ssh']
+  if (options.remoteSshPort || options.sshPort) args.push('-p', String(options.remoteSshPort || options.sshPort))
+  return args.join(' ')
+}
+
+function remoteShellQuote(value) {
+  return `'${String(value).replace(/'/g, "'\\''")}'`
+}
+
+function mergeRunStage(runJson, stage, stageValue) {
+  return {
+    ...runJson,
+    status: stageValue.status === 'failed' ? 'failed' : runJson.status,
+    updatedAt: stageValue.finishedAt || new Date().toISOString(),
+    stages: {
+      ...(runJson.stages || {}),
+      [stage]: stageValue,
+    },
+  }
+}
+
 function parseArgs(argv) {
   const options = {}
   for (let index = 0; index < argv.length; index += 1) {
@@ -403,6 +741,14 @@ function countWords(text) {
   return cjk + words
 }
 
+function plainObject(value) {
+  return Object.assign({}, value)
+}
+
+function numberOrDefault(value, fallback) {
+  return Number.isFinite(Number(value)) ? Number(value) : fallback
+}
+
 async function loadDatabaseSync() {
   if (!DatabaseSyncCtor) {
     ;({ DatabaseSync: DatabaseSyncCtor } = await import('node:sqlite'))
@@ -435,11 +781,17 @@ function printHelp() {
 
 Usage:
   npm run production-pipeline -- import --file <path> [--book-id <id>] [--title <title>] [--dry-run] [--replace]
+  npm run production-pipeline -- package --book-id <id>
+  npm run production-pipeline -- publish --run <runId|runDir|run.json> [--dry-run]
   npm run production-pipeline -- status --run <runId|runDir|run.json>
 
 Options:
   --main-db <path>     Main Novel Reader SQLite database.
   --run-root <path>    Run storage root. Default: ${defaultRunRoot}
+  --gateway-data-dir   Local Gateway data directory for publish.
+  --remote-host        Remote Gateway host for rsync publish.
+  --remote-user        Remote SSH user.
+  --remote-root        Remote Gateway root. Default: ${defaultRemoteRoot}
   --dry-run            Parse and write run artifacts without modifying the main DB.
   --replace            Replace an existing book with the same bookId.
 `)
