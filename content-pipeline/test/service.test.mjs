@@ -1,6 +1,6 @@
 import { afterEach, describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, rm } from 'node:fs/promises'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { DatabaseSync } from 'node:sqlite'
@@ -87,6 +87,56 @@ describe('content pipeline service', () => {
     assert.equal(body.job.status, 'completed')
     assert.equal(body.manifest.book.id, 'test-book')
     assert.equal(body.manifest.stages.offlineImport.status, 'skipped')
+  })
+
+  it('starts a production pipeline v2 job and exposes run state', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'content-pipeline-production-v2-test-'))
+    tempDirs.push(dataDir)
+    const txtPath = join(dataDir, 'sample.txt')
+    const dbPath = join(dataDir, 'main.sqlite')
+    const runRoot = join(dataDir, 'production-runs')
+    const jobPath = join(dataDir, 'job.json')
+    await writeFile(txtPath, `第一章 开始\n这是第一章内容。`, 'utf8')
+    await writeFile(
+      jobPath,
+      JSON.stringify({
+        bookId: 'v2-book',
+        title: 'V2 测试书',
+        mainDbPath: dbPath,
+        source: { type: 'txt', file: txtPath },
+        stages: ['import'],
+        import: { replace: true },
+      }),
+      'utf8',
+    )
+
+    const app = await buildTestApp()
+    const response = await app.inject({
+      method: 'POST',
+      url: '/api/jobs',
+      payload: {
+        action: 'production-v2',
+        jobPath,
+        runRoot,
+      },
+    })
+
+    assert.equal(response.statusCode, 202)
+    assert.equal(response.json().job.action, 'production-v2')
+    const jobId = response.json().job.id
+
+    let body
+    for (let attempt = 0; attempt < 60; attempt += 1) {
+      const poll = await app.inject({ method: 'GET', url: `/api/jobs/${jobId}` })
+      body = poll.json()
+      if (body.job.status === 'completed' || body.job.status === 'failed') break
+      await new Promise((resolvePromise) => setTimeout(resolvePromise, 50))
+    }
+
+    assert.equal(body.job.status, 'completed')
+    assert.equal(body.productionRun.runJson.status, 'completed')
+    assert.equal(body.productionRun.runJson.stages.import.status, 'completed')
+    assert.ok(body.productionRun.runJson.stages.import.logFile)
   })
 
   it('defaults audio jobs without chapters to the full book range', async () => {

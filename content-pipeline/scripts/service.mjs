@@ -4,10 +4,10 @@ import Fastify from 'fastify'
 import { randomUUID } from 'node:crypto'
 import { execFile, spawn } from 'node:child_process'
 import { EventEmitter } from 'node:events'
-import { createReadStream } from 'node:fs'
+import { createReadStream, existsSync, readdirSync, readFileSync } from 'node:fs'
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
-import { dirname, join, resolve } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
@@ -16,6 +16,7 @@ const execFileAsync = promisify(execFile)
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..')
 const pipelineScript = join(repoRoot, 'content-pipeline', 'scripts', 'content-pipeline.mjs')
+const productionPipelineScript = join(repoRoot, 'production-pipeline', 'src', 'cli.mjs')
 const stageNames = [
   'ingest',
   'offlineImport',
@@ -76,6 +77,7 @@ export function loadServiceConfig(env = process.env) {
     jobsFile: join(dataDir, 'jobs.json'),
     logsDir: join(dataDir, 'logs'),
     workRoot: resolve(env.CONTENT_PIPELINE_WORK_ROOT || join(repoRoot, 'tmp', 'content-pipeline')),
+    productionRunRoot: resolve(env.PRODUCTION_PIPELINE_RUN_ROOT || join(repoRoot, 'tmp', 'production-pipeline', 'runs')),
     mainDbPath: resolve(
       env.CONTENT_PIPELINE_MAIN_DB ||
       env.NOVEL_READER_MAIN_DB ||
@@ -254,6 +256,9 @@ class JobStore {
       startedAt: '',
       finishedAt: '',
       manifestPath: spec.manifestPath,
+      productionRunRoot: spec.productionRunRoot || '',
+      productionBookId: spec.productionBookId || '',
+      productionJobPath: spec.productionJobPath || '',
       logFile: join(this.config.logsDir, `${Date.now()}-${spec.action}-${safePathSegment(spec.title)}.log`),
       commands: spec.commands.map((command) => ({
         command: command.command,
@@ -296,6 +301,7 @@ class JobStore {
     return {
       job,
       manifest: await readJsonIfExists(job.manifestPath),
+      productionRun: await readProductionRunState(job),
     }
   }
 
@@ -398,6 +404,7 @@ function createJobSpec(body, config) {
   if (action === 'ingest') return createIngestSpec(body, config)
   if (action === 'run') return createRunSpec(body, config)
   if (action === 'produce') return createProduceSpec(body, config)
+  if (action === 'production-v2' || action === 'productionV2') return createProductionV2Spec(body, config)
   throw httpError(400, 'invalid_job_action', `Unsupported job action: ${action}`)
 }
 
@@ -467,6 +474,25 @@ function createProduceSpec(body, config) {
   }
 }
 
+function createProductionV2Spec(body, config) {
+  const jobPath = resolve(requiredString(body.jobPath || body.productionJobPath || body.manifestPath || body.manifest, 'jobPath is required.'))
+  const jobConfig = readProductionJobConfig(jobPath)
+  const bookId = readString(body.bookId || jobConfig.bookId || '')
+  if (!bookId) throw httpError(400, 'missing_required_field', 'bookId is required or must be present in the v2 job file.')
+  const title = readString(body.title || jobConfig.title || bookId)
+  const runRoot = resolve(readString(body.productionRunRoot || body.runRoot) || config.productionRunRoot)
+  const args = ['run', '--job', jobPath, '--run-root', runRoot]
+  return {
+    action: 'production-v2',
+    title,
+    manifestPath: jobPath,
+    productionRunRoot: runRoot,
+    productionBookId: bookId,
+    productionJobPath: jobPath,
+    commands: [productionPipelineCommand(args)],
+  }
+}
+
 function createRunArgs(body, manifestPath) {
   const steps = readString(body.steps || 'import,scan,export,publish-package')
   const runOptions = splitList(steps).includes('audio')
@@ -487,6 +513,14 @@ function pipelineCommand(args) {
   return {
     command: process.execPath,
     args: [pipelineScript, ...args],
+    cwd: repoRoot,
+  }
+}
+
+function productionPipelineCommand(args) {
+  return {
+    command: process.execPath,
+    args: [productionPipelineScript, ...args],
     cwd: repoRoot,
   }
 }
@@ -533,6 +567,8 @@ function renderConsoleHtml() {
     .stages { display: grid; grid-template-columns: repeat(4, minmax(130px, 1fr)); gap: 10px; }
     .stage { border: 1px solid #d9dee8; border-radius: 8px; padding: 10px; min-height: 78px; }
     .stage strong { display: block; font-size: 13px; margin-bottom: 8px; }
+    .stage .child { border-top: 1px solid #edf0f5; margin-top: 8px; padding-top: 8px; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
     pre { margin: 0; white-space: pre-wrap; overflow-wrap: anywhere; background: #101828; color: #e5e7eb; border-radius: 8px; padding: 14px; min-height: 280px; max-height: 480px; overflow: auto; }
     .empty { color: #667085; padding: 24px; text-align: center; }
     @media (max-width: 900px) { .shell { grid-template-columns: 1fr; } aside { border-right: 0; border-bottom: 1px solid #d9dee8; } .stages { grid-template-columns: repeat(2, minmax(120px, 1fr)); } }
@@ -546,6 +582,7 @@ function renderConsoleHtml() {
       <label>模式
         <select id="action">
           <option value="produce">创建并运行</option>
+          <option value="production-v2">Production v2</option>
           <option value="run">继续现有 manifest</option>
           <option value="ingest">只导入文件</option>
           <option value="init">只创建 manifest</option>
@@ -553,6 +590,7 @@ function renderConsoleHtml() {
       </label>
       <label>Book ID <input id="bookId" placeholder="已有书籍 ID" /></label>
       <label>标题 <input id="title" placeholder="书名，可选" /></label>
+      <label>V2 Job JSON <input id="jobPath" placeholder="production-pipeline/config/*.json" /></label>
       <label>文件路径 <input id="sourceFile" placeholder="/path/to/book.txt、.epub、.mobi、.azw3" /></label>
       <div class="actions">
         <button class="secondary" id="chooseFile">选择文件</button>
@@ -609,7 +647,7 @@ function renderConsoleHtml() {
   </div>
   <script>
     const state = { selectedJobId: '', eventSource: null };
-    const fields = ['token','action','bookId','title','sourceFile','manifestPath','steps','chapters','scanType','gatewayUrl','gatewayToken','audioSourceRoot','gatewayAudioDir','gatewayRemoteHost','gatewayRemoteUser','gatewayRemoteAudioDir','gatewayRemoteSshPort','bookQuery'];
+    const fields = ['token','action','bookId','title','jobPath','sourceFile','manifestPath','steps','chapters','scanType','gatewayUrl','gatewayToken','audioSourceRoot','gatewayAudioDir','gatewayRemoteHost','gatewayRemoteUser','gatewayRemoteAudioDir','gatewayRemoteSshPort','bookQuery'];
     for (const id of fields) {
       const saved = localStorage.getItem('pipeline.' + id);
       const el = document.getElementById(id);
@@ -692,12 +730,34 @@ function renderConsoleHtml() {
         const stage = manifest.stages?.[name] || { status: 'pending', message: '', error: '' };
         return '<div class="stage"><strong>' + name + '</strong><span class="status ' + stage.status + '">' + stage.status + '</span><div class="meta">' + escapeHtml(stage.error || stage.message || '') + '</div></div>';
       }).join('');
+      const productionRun = renderProductionRun(body.productionRun);
+      const legacyStagesPanel = productionRun ? '' : '<div class="panel"><h2>阶段</h2><div class="stages">' + stages + '</div></div>';
       const logs = (job.logs || []).map(item => '[' + item.at + '] ' + item.stream + ': ' + item.line).join('\\n');
       document.getElementById('detail').className = '';
-      document.getElementById('detail').innerHTML = '<div class="panel"><div class="topline"><div><h1>' + escapeHtml(job.title) + '</h1><div class="meta">' + job.id + '</div></div><span class="status ' + job.status + '">' + job.status + '</span></div><div class="meta">' + escapeHtml(job.manifestPath || '') + '</div>' + (job.error ? '<div class="meta">' + escapeHtml(job.error) + '</div>' : '') + '</div><div class="panel"><h2>阶段</h2><div class="stages">' + stages + '</div></div><div class="panel"><h2>日志</h2><pre id="jobLog">' + escapeHtml(logs || '等待日志...') + '</pre></div>';
+      document.getElementById('detail').innerHTML = '<div class="panel"><div class="topline"><div><h1>' + escapeHtml(job.title) + '</h1><div class="meta">' + job.id + '</div></div><span class="status ' + job.status + '">' + job.status + '</span></div><div class="meta">' + escapeHtml(job.manifestPath || '') + '</div>' + (job.error ? '<div class="meta">' + escapeHtml(job.error) + '</div>' : '') + '</div>' + productionRun + legacyStagesPanel + '<div class="panel"><h2>日志</h2><pre id="jobLog">' + escapeHtml(logs || '等待日志...') + '</pre></div>';
       const nextLog = document.getElementById('jobLog');
       if (nextLog && shouldStickToBottom) nextLog.scrollTop = nextLog.scrollHeight;
       await loadJobs();
+    }
+    function renderProductionRun(productionRun) {
+      if (!productionRun) return '';
+      const run = productionRun.runJson || {};
+      const stages = run.stages || {};
+      const stageCards = Object.keys(stages).map(name => {
+        const stage = stages[name] || {};
+        const children = normalizeProductionChildren(stage).map((child, index) => {
+          const label = child.childRunJson ? 'runJson: ' + child.childRunJson : (child.childRunDir ? 'runDir: ' + child.childRunDir : '');
+          return '<div class="child"><div class="meta mono">' + escapeHtml(label || ('child ' + (index + 1))) + '</div>' + (child.logFile ? '<div class="meta mono">log: ' + escapeHtml(child.logFile) + '</div>' : '') + '</div>';
+        }).join('');
+        return '<div class="stage"><strong>' + escapeHtml(name) + '</strong><span class="status ' + escapeHtml(stage.status || 'unknown') + '">' + escapeHtml(stage.status || 'unknown') + '</span><div class="meta">' + escapeHtml(stage.error || stage.message || '') + '</div>' + children + '</div>';
+      }).join('');
+      return '<div class="panel"><div class="topline"><div><h2>Production v2</h2><div class="meta mono">' + escapeHtml(productionRun.runJsonPath || '等待 run.json...') + '</div></div><span class="status ' + escapeHtml(run.status || 'pending') + '">' + escapeHtml(run.status || 'pending') + '</span></div>' + (stageCards ? '<div class="stages">' + stageCards + '</div>' : '<div class="meta">等待 v2 任务启动。</div>') + '</div>';
+    }
+    function normalizeProductionChildren(stage) {
+      const children = [];
+      if (stage.childRunJson || stage.childRunDir || stage.logFile) children.push(stage);
+      if (Array.isArray(stage.childRuns)) children.push(...stage.childRuns);
+      return children;
     }
     document.getElementById('start').addEventListener('click', async () => {
       const startButton = document.getElementById('start');
@@ -829,7 +889,62 @@ function summarizeJob(job) {
     createdAt: job.createdAt,
     updatedAt: job.updatedAt,
     manifestPath: job.manifestPath,
+    productionRunRoot: job.productionRunRoot,
+    productionBookId: job.productionBookId,
+    productionJobPath: job.productionJobPath,
     error: job.error,
+  }
+}
+
+function readProductionJobConfig(jobPath) {
+  try {
+    return JSON.parse(readFileSync(jobPath, 'utf8'))
+  } catch (error) {
+    if (error.code === 'ENOENT') throw httpError(400, 'job_file_not_found', `Production v2 job file not found: ${jobPath}`)
+    throw httpError(400, 'invalid_job_file', `Cannot read production v2 job file: ${error.message}`)
+  }
+}
+
+async function readProductionRunState(job) {
+  if (job.action !== 'production-v2') return null
+  const runJsonPath = findProductionRunJson(job)
+  if (!runJsonPath) {
+    return {
+      runJsonPath: '',
+      runDir: '',
+      runJson: null,
+    }
+  }
+  return {
+    runJsonPath,
+    runDir: dirname(runJsonPath),
+    runJson: await readJsonIfExists(runJsonPath),
+  }
+}
+
+function findProductionRunJson(job) {
+  const runRoot = readString(job.productionRunRoot)
+  const bookId = readString(job.productionBookId)
+  if (!runRoot || !bookId) return ''
+  const bookRunRoot = join(runRoot, bookId)
+  if (!existsSync(bookRunRoot)) return ''
+  const entries = readDirectoryEntries(bookRunRoot)
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => join(bookRunRoot, entry.name, 'run.json'))
+    .filter((runJsonPath) => existsSync(runJsonPath))
+    .sort((a, b) => {
+      const aName = basename(dirname(a))
+      const bName = basename(dirname(b))
+      return bName.localeCompare(aName)
+    })
+  return entries[0] || ''
+}
+
+function readDirectoryEntries(dir) {
+  try {
+    return readdirSync(dir, { withFileTypes: true })
+  } catch {
+    return []
   }
 }
 
