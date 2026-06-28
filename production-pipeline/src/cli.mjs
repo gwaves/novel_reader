@@ -415,6 +415,9 @@ async function runPackage(options) {
       finishedAt: generatedAt,
       metadata: {
         chapterCount: book.chapters.length,
+        summaryCount: book.summaries.length,
+        summaryEmbeddingCount: book.embeddingCoverage.summary.embeddedSummaries,
+        chunkEmbeddingCount: book.embeddingCoverage.chunks.embeddedChunks,
         wordCount: bookPackage.book.wordCount,
       },
     })
@@ -444,6 +447,9 @@ async function runPackage(options) {
     console.log(`run: ${run.runId}`)
     console.log(`book: ${bookId} ${book.title}`)
     console.log(`chapters: ${book.chapters.length}`)
+    console.log(`summaries: ${book.summaries.length}`)
+    console.log(`summary embeddings: ${book.embeddingCoverage.summary.embeddedSummaries}/${book.summaries.length}`)
+    console.log(`chunk embeddings: ${book.embeddingCoverage.chunks.embeddedChunks}`)
     console.log(`package: ${packagePath}`)
     console.log(`runDir: ${run.rootDir}`)
   } catch (error) {
@@ -993,6 +999,30 @@ async function runVerify(options) {
       actual: remoteChapters.map((chapter) => chapter.id),
       expected: expectedChapters.map((chapter) => chapter.id),
     }))
+    if (Array.isArray(expected.package.summaries)) {
+      const remoteSummaries = Array.isArray(remotePackage?.summaries) ? remotePackage.summaries : []
+      checks.push(assertCheck('package.summaryCount', remoteSummaries.length === expected.package.summaries.length, {
+        actual: remoteSummaries.length,
+        expected: expected.package.summaries.length,
+      }))
+      checks.push(assertCheck('package.summaryChapterIds', sameOrderedStrings(
+        remoteSummaries.map((summary) => summary.chapterId),
+        expected.package.summaries.map((summary) => summary.chapterId),
+      ), {
+        actual: remoteSummaries.map((summary) => summary.chapterId),
+        expected: expected.package.summaries.map((summary) => summary.chapterId),
+      }))
+    }
+    if (expected.package.embeddings?.coverage) {
+      checks.push(assertCheck(
+        'package.embeddingCoverage',
+        sameJson(remotePackage?.embeddings?.coverage, expected.package.embeddings.coverage),
+        {
+          actual: remotePackage?.embeddings?.coverage,
+          expected: expected.package.embeddings.coverage,
+        },
+      ))
+    }
   }
 
   if (expected.audio) {
@@ -1110,10 +1140,14 @@ async function readBookFromMainDb(dbPath, bookId) {
       ORDER BY chapter_index, title
     `).all(bookId)
     if (!chapters.length) throw new Error(`Book has no chapters in main DB: ${bookId}`)
+    const summaries = readSummariesForPackage(db, bookId)
+    const embeddingCoverage = readEmbeddingCoverageForPackage(db, bookId, chapters.length, summaries.length)
 
     return {
       ...plainObject(book),
       chapters: chapters.map(plainObject),
+      summaries,
+      embeddingCoverage,
     }
   } finally {
     db.close()
@@ -1130,6 +1164,16 @@ function buildGatewayBookPackage(book, generatedAt) {
     wordCount: numberOrDefault(chapter.wordCount, countWords(String(chapter.content || ''))),
     updatedAt: chapter.updatedAt || generatedAt,
   }))
+  const summaries = book.summaries.map((summary) => ({
+    chapterId: String(summary.chapterId),
+    short: String(summary.short || ''),
+    detail: String(summary.detail || ''),
+    keyPoints: safeJsonParse(summary.keyPointsJson, []),
+    skippable: summary.skippable,
+    generatedBy: summary.generatedBy,
+    updatedAt: summary.updatedAt || generatedAt,
+  }))
+  const embeddingCoverage = normalizeEmbeddingCoverage(book.embeddingCoverage, chapters.length, summaries.length)
   const wordCount = chapters.reduce((sum, chapter) => sum + chapter.wordCount, 0)
   return {
     schemaVersion: 1,
@@ -1140,9 +1184,109 @@ function buildGatewayBookPackage(book, generatedAt) {
       ...(book.author ? { author: String(book.author) } : {}),
       chapterCount: chapters.length,
       wordCount,
+      summaryCoverage: coverageRatio(summaries.length, chapters.length),
+      embeddingCoverage: embeddingCoverage.summary.coverage,
       updatedAt: book.updatedAt || book.importedAt || generatedAt,
     },
     chapters,
+    summaries,
+    embeddings: {
+      coverage: embeddingCoverage,
+      summaries: [],
+      chunks: [],
+    },
+  }
+}
+
+function readSummariesForPackage(db, bookId) {
+  if (!sqliteTableExists(db, 'summaries')) return []
+  return db.prepare(`
+    SELECT
+      s.chapter_id AS chapterId,
+      s.short,
+      s.detail,
+      s.key_points_json AS keyPointsJson,
+      s.skippable,
+      s.generated_by AS generatedBy,
+      s.updated_at AS updatedAt
+    FROM summaries s
+    JOIN chapters c ON c.id = s.chapter_id
+    WHERE c.book_id = ?
+    ORDER BY c.chapter_index, c.title
+  `).all(bookId).map(plainObject)
+}
+
+function readEmbeddingCoverageForPackage(db, bookId, totalChapters, totalSummaries) {
+  const summary = sqliteTableExists(db, 'summary_embeddings')
+    ? db.prepare(`
+      SELECT
+        COUNT(*) AS embeddedSummaries,
+        COUNT(DISTINCT chapter_id) AS embeddedChapters
+      FROM summary_embeddings
+      WHERE book_id = ?
+    `).get(bookId)
+    : { embeddedSummaries: 0, embeddedChapters: 0 }
+  const chunks = sqliteTableExists(db, 'chapter_chunk_embeddings')
+    ? db.prepare(`
+      SELECT
+        COUNT(*) AS embeddedChunks,
+        COUNT(DISTINCT chapter_id) AS embeddedChapters
+      FROM chapter_chunk_embeddings
+      WHERE book_id = ?
+    `).get(bookId)
+    : { embeddedChunks: 0, embeddedChapters: 0 }
+  return normalizeEmbeddingCoverage({
+    summary: {
+      embeddedSummaries: numberOrDefault(summary.embeddedSummaries, 0),
+      embeddedChapters: numberOrDefault(summary.embeddedChapters, 0),
+      models: readEmbeddingModelStats(db, 'summary_embeddings', bookId),
+    },
+    chunks: {
+      embeddedChunks: numberOrDefault(chunks.embeddedChunks, 0),
+      embeddedChapters: numberOrDefault(chunks.embeddedChapters, 0),
+      models: readEmbeddingModelStats(db, 'chapter_chunk_embeddings', bookId),
+    },
+  }, totalChapters, totalSummaries)
+}
+
+function readEmbeddingModelStats(db, tableName, bookId) {
+  if (!sqliteTableExists(db, tableName)) return []
+  return db.prepare(`
+    SELECT model, dimension, COUNT(*) AS count
+    FROM ${tableName}
+    WHERE book_id = ?
+    GROUP BY model, dimension
+    ORDER BY count DESC, model ASC, dimension ASC
+  `).all(bookId).map((row) => ({
+    model: String(row.model || ''),
+    dimension: numberOrDefault(row.dimension, 0),
+    count: numberOrDefault(row.count, 0),
+  }))
+}
+
+function normalizeEmbeddingCoverage(coverage, totalChapters, totalSummaries) {
+  const summary = coverage?.summary || {}
+  const chunks = coverage?.chunks || {}
+  const embeddedSummaryChapters = numberOrDefault(summary.embeddedChapters, 0)
+  const embeddedSummaries = numberOrDefault(summary.embeddedSummaries, embeddedSummaryChapters)
+  const embeddedChunkChapters = numberOrDefault(chunks.embeddedChapters, 0)
+  const embeddedChunks = numberOrDefault(chunks.embeddedChunks, 0)
+  return {
+    summary: {
+      embeddedSummaries,
+      embeddedChapters: embeddedSummaryChapters,
+      totalSummaries,
+      totalChapters,
+      coverage: coverageRatio(embeddedSummaryChapters, totalSummaries || totalChapters),
+      models: Array.isArray(summary.models) ? summary.models : [],
+    },
+    chunks: {
+      embeddedChunks,
+      embeddedChapters: embeddedChunkChapters,
+      totalChapters,
+      coverage: coverageRatio(embeddedChunkChapters, totalChapters),
+      models: Array.isArray(chunks.models) ? chunks.models : [],
+    },
   }
 }
 
@@ -1618,6 +1762,10 @@ function assertCheck(name, ok, detail = {}) {
 function sameOrderedStrings(actual, expected) {
   if (actual.length !== expected.length) return false
   return actual.every((value, index) => String(value) === String(expected[index]))
+}
+
+function sameJson(actual, expected) {
+  return JSON.stringify(actual ?? null) === JSON.stringify(expected ?? null)
 }
 
 function normalizeJobConfig(job) {
@@ -2292,6 +2440,24 @@ function plainObject(value) {
 
 function numberOrDefault(value, fallback) {
   return Number.isFinite(Number(value)) ? Number(value) : fallback
+}
+
+function coverageRatio(done, total) {
+  const denominator = numberOrDefault(total, 0)
+  if (denominator <= 0) return 0
+  return Number((numberOrDefault(done, 0) / denominator).toFixed(4))
+}
+
+function safeJsonParse(value, fallback) {
+  try {
+    return JSON.parse(value)
+  } catch {
+    return fallback
+  }
+}
+
+function sqliteTableExists(db, tableName) {
+  return Boolean(db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(tableName))
 }
 
 async function loadDatabaseSync() {

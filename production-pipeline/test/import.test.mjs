@@ -150,6 +150,8 @@ describe('production-pipeline import', () => {
         '--run-root',
         runRoot,
       ])
+      seedSummaries(dbPath)
+      seedEmbeddings(dbPath)
 
       const { stdout } = await execFileAsync(process.execPath, [
         cliPath,
@@ -170,8 +172,27 @@ describe('production-pipeline import', () => {
       assert.equal(bookPackage.schemaVersion, 1)
       assert.equal(bookPackage.book.id, 'sample-book')
       assert.equal(bookPackage.book.chapterCount, 2)
+      assert.equal(bookPackage.book.summaryCoverage, 1)
+      assert.equal(bookPackage.book.embeddingCoverage, 1)
       assert.equal(bookPackage.chapters[0].id, '1-第一章 开始')
       assert.equal(bookPackage.chapters[0].content, '这是第一章内容。')
+      assert.deepEqual(
+        bookPackage.summaries.map((summary) => [summary.chapterId, summary.keyPoints]),
+        [
+          ['1-第一章 开始', ['要点一']],
+          ['2-第二章 继续', ['要点二']],
+        ],
+      )
+      assert.deepEqual(bookPackage.embeddings.coverage.summary, {
+        embeddedSummaries: 2,
+        embeddedChapters: 2,
+        totalSummaries: 2,
+        totalChapters: 2,
+        coverage: 1,
+        models: [{ model: 'fake-embedding', dimension: 3, count: 2 }],
+      })
+      assert.equal(bookPackage.embeddings.coverage.chunks.embeddedChunks, 2)
+      assert.equal(bookPackage.embeddings.coverage.chunks.embeddedChapters, 2)
 
       const runId = stdout.match(/run: (.+)/)?.[1]?.trim()
       assert.ok(runId)
@@ -450,7 +471,7 @@ describe('production-pipeline import', () => {
         'dev-token',
       ])
 
-      assert.match(stdout, /checks: 5\/5/)
+      assert.match(stdout, /checks: 8\/8/)
       const runJson = JSON.parse(await readFile(join(runRoot, 'sample-book', runId, 'run.json'), 'utf8'))
       assert.equal(runJson.stages.verify.status, 'completed')
       const report = JSON.parse(await readFile(join(runRoot, 'sample-book', runId, 'artifacts', 'verify-report.json'), 'utf8'))
@@ -612,6 +633,53 @@ function seedSummaries(dbPath) {
     `)
     insert.run('1-第一章 开始', '短摘要一', '详细摘要一', JSON.stringify(['要点一']))
     insert.run('2-第二章 继续', '短摘要二', '详细摘要二', JSON.stringify(['要点二']))
+  } finally {
+    db.close()
+  }
+}
+
+function seedEmbeddings(dbPath) {
+  const db = new DatabaseSync(dbPath)
+  try {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS summary_embeddings (
+        chapter_id TEXT PRIMARY KEY REFERENCES chapters(id) ON DELETE CASCADE,
+        book_id TEXT NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+        model TEXT NOT NULL,
+        dimension INTEGER NOT NULL,
+        embedding_json TEXT NOT NULL,
+        generated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      );
+      CREATE TABLE IF NOT EXISTS chapter_chunk_embeddings (
+        id TEXT PRIMARY KEY,
+        book_id TEXT NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+        chapter_id TEXT NOT NULL REFERENCES chapters(id) ON DELETE CASCADE,
+        chapter_index INTEGER NOT NULL,
+        chunk_index INTEGER NOT NULL,
+        start_offset INTEGER NOT NULL,
+        end_offset INTEGER NOT NULL,
+        text TEXT NOT NULL,
+        model TEXT NOT NULL,
+        dimension INTEGER NOT NULL,
+        embedding_json TEXT NOT NULL,
+        generated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(chapter_id, chunk_index, model)
+      );
+    `)
+    const insertSummary = db.prepare(`
+      INSERT INTO summary_embeddings (chapter_id, book_id, model, dimension, embedding_json, generated_at)
+      VALUES (?, 'sample-book', 'fake-embedding', 3, '[1,2,3]', CURRENT_TIMESTAMP)
+    `)
+    insertSummary.run('1-第一章 开始')
+    insertSummary.run('2-第二章 继续')
+    const insertChunk = db.prepare(`
+      INSERT INTO chapter_chunk_embeddings (
+        id, book_id, chapter_id, chapter_index, chunk_index, start_offset, end_offset, text, model, dimension, embedding_json, generated_at
+      )
+      VALUES (?, 'sample-book', ?, ?, 0, 0, 8, ?, 'fake-embedding', 3, '[1,2,3]', CURRENT_TIMESTAMP)
+    `)
+    insertChunk.run('sample-book:1-第一章 开始:0:fake-embedding', '1-第一章 开始', 1, '这是第一章内容。')
+    insertChunk.run('sample-book:2-第二章 继续:0:fake-embedding', '2-第二章 继续', 2, '这是第二章内容。')
   } finally {
     db.close()
   }
