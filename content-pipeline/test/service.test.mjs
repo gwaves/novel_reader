@@ -1,7 +1,7 @@
 import { afterEach, describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { dirname, join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { DatabaseSync } from 'node:sqlite'
 import { buildContentPipelineService, loadServiceConfig } from '../scripts/service.mjs'
@@ -25,6 +25,15 @@ async function removeTempDir(dir) {
     }
   }
   await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 })
+}
+
+async function fileExists(path) {
+  try {
+    await readFile(path)
+    return true
+  } catch {
+    return false
+  }
 }
 
 async function buildTestApp(overrides = {}) {
@@ -89,7 +98,7 @@ describe('content pipeline service', () => {
     assert.equal(body.manifest.stages.offlineImport.status, 'skipped')
   })
 
-  it('starts a production pipeline v2 job and exposes run state', async () => {
+  it('starts a production pipeline v2 job and exposes package run state', async () => {
     const dataDir = await mkdtemp(join(tmpdir(), 'content-pipeline-production-v2-test-'))
     tempDirs.push(dataDir)
     const txtPath = join(dataDir, 'sample.txt')
@@ -104,7 +113,7 @@ describe('content pipeline service', () => {
         title: 'V2 测试书',
         mainDbPath: dbPath,
         source: { type: 'txt', file: txtPath },
-        stages: ['import'],
+        stages: ['import', 'package'],
         import: { replace: true },
       }),
       'utf8',
@@ -137,6 +146,20 @@ describe('content pipeline service', () => {
     assert.equal(body.productionRun.runJson.status, 'completed')
     assert.equal(body.productionRun.runJson.stages.import.status, 'completed')
     assert.ok(body.productionRun.runJson.stages.import.logFile)
+    assert.equal(body.productionRun.runJson.stages.package.status, 'completed')
+    assert.ok(body.productionRun.runJson.stages.package.childRunJson)
+    assert.ok(body.productionRun.runJson.stages.package.logFile)
+
+    const packageRun = JSON.parse(
+      await readFile(body.productionRun.runJson.stages.package.childRunJson, 'utf8'),
+    )
+    const artifacts = packageRun.stages.package.artifacts
+    assert.ok(artifacts.gatewayDataDir)
+    assert.ok(artifacts.packageFile)
+    assert.equal(
+      await fileExists(join(dirname(body.productionRun.runJson.stages.package.childRunJson), artifacts.packageFile)),
+      true,
+    )
   })
 
   it('defaults audio jobs without chapters to the full book range', async () => {
