@@ -39,6 +39,10 @@ async function main() {
     await runJob(options)
     return
   }
+  if (command === 'doctor') {
+    await runDoctor(options)
+    return
+  }
   if (command === 'resume') {
     await runResume(options)
     return
@@ -241,6 +245,41 @@ async function runJob(options) {
     stages: {},
   })
   await executeJobStages({ runInfo: await loadRunInfo(run.runJsonPath), job, mainDbPath, resume: false })
+}
+
+async function runDoctor(options) {
+  const jobPath = resolve(required(options.job, 'doctor requires --job <path>'))
+  const rawJob = JSON.parse(await readFile(jobPath, 'utf8'))
+  const checks = []
+  let job = null
+  try {
+    job = normalizeJobConfig(rawJob)
+    addDoctorCheck(checks, 'job.parse', true, `loaded ${jobPath}`)
+  } catch (error) {
+    addDoctorCheck(checks, 'job.parse', false, error.message)
+  }
+  if (job) {
+    const mainDbPath = expandPath(options.mainDb || options.mainDbPath || job.mainDbPath || job.source?.mainDbPath || defaultMainDbPath)
+    await inspectJobPreflight({ checks, job, jobPath, mainDbPath })
+  }
+  const failed = checks.filter((check) => !check.ok)
+  const report = {
+    schemaVersion: 1,
+    generatedAt: new Date().toISOString(),
+    jobPath,
+    ok: failed.length === 0,
+    checks,
+  }
+  if (isFlagEnabled(options.json)) {
+    console.log(JSON.stringify(report, null, 2))
+  } else {
+    console.log(`job: ${jobPath}`)
+    console.log(`checks: ${checks.length - failed.length}/${checks.length}`)
+    for (const check of checks) {
+      console.log(`${check.ok ? 'ok' : 'fail'}: ${check.name}${check.message ? ` - ${check.message}` : ''}`)
+    }
+  }
+  if (failed.length) throw new Error(`Doctor failed: ${failed.length} check(s) failed.`)
 }
 
 async function runResume(options) {
@@ -2470,6 +2509,63 @@ function sameJson(actual, expected) {
   return JSON.stringify(actual ?? null) === JSON.stringify(expected ?? null)
 }
 
+async function inspectJobPreflight({ checks, job, jobPath, mainDbPath }) {
+  addDoctorCheck(checks, 'job.bookId', Boolean(job.bookId), job.bookId || 'missing')
+  addDoctorCheck(checks, 'job.stages', job.stages.length > 0, job.stages.join(', ') || 'missing')
+  addDoctorCheck(checks, 'mainDb.path', Boolean(mainDbPath), mainDbPath)
+  const sourceFile = job.source?.file || job.source?.path || job.file
+  if (job.stages.includes('import')) {
+    addDoctorCheck(checks, 'import.sourceFile', Boolean(sourceFile), sourceFile || 'missing job.source.file')
+    if (sourceFile) addDoctorCheck(checks, 'import.sourceFile.exists', existsSync(expandPath(sourceFile)), expandPath(sourceFile))
+  } else {
+    addDoctorCheck(checks, 'mainDb.exists', existsSync(mainDbPath), mainDbPath)
+  }
+
+  const fakeRunInfo = { rootDir: dirname(jobPath) }
+  for (const stage of job.stages) {
+    if (stage === 'publish' || stage === 'verify') continue
+    try {
+      buildStageArgs(stage, job, mainDbPath, fakeRunInfo)
+      addDoctorCheck(checks, `stage.${stage}.config`, true, 'ok')
+    } catch (error) {
+      addDoctorCheck(checks, `stage.${stage}.config`, false, error.message)
+    }
+  }
+
+  if (job.stages.includes('audio')) {
+    const audio = job.audio || {}
+    const sourceRoot = audio.sourceRoot || audio.source_root
+    const ttsConfig = audio.ttsConfig || audio.tts_config
+    if (sourceRoot) addDoctorCheck(checks, 'audio.sourceRoot.exists', existsSync(expandPath(sourceRoot)), expandPath(sourceRoot))
+    if (ttsConfig) {
+      addDoctorCheck(checks, 'audio.ttsConfig.exists', existsSync(expandPath(ttsConfig)), expandPath(ttsConfig))
+      const directorScript = audio.ttsDirectorScript || audio.tts_director_script || join(dirname(cliFilePath), '..', '..', 'offline-tts', 'scripts', 'tts-director.mjs')
+      addDoctorCheck(checks, 'audio.ttsDirector.exists', existsSync(expandPath(directorScript)), expandPath(directorScript))
+    }
+  }
+
+  if (job.stages.includes('publish')) {
+    const publish = { ...(job.gateway || {}), ...(job.publish || {}) }
+    const hasLocal = Boolean(publish.gatewayDataDir)
+    const hasRemote = Boolean(publish.remoteHost || publish.host)
+    addDoctorCheck(checks, 'publish.target', hasLocal || hasRemote, hasLocal ? publish.gatewayDataDir : (publish.remoteHost || publish.host || 'missing'))
+  }
+
+  if (job.stages.includes('verify')) {
+    const verify = { ...(job.gateway || {}), ...(job.verify || {}) }
+    addDoctorCheck(checks, 'verify.gatewayUrl', Boolean(verify.gatewayUrl || verify.url), verify.gatewayUrl || verify.url || 'missing')
+    addDoctorCheck(checks, 'verify.gatewayToken', Boolean(verify.gatewayToken || verify.token), (verify.gatewayToken || verify.token) ? '[present]' : 'missing')
+  }
+}
+
+function addDoctorCheck(checks, name, ok, message = '') {
+  checks.push({
+    name,
+    ok: Boolean(ok),
+    message: String(message || ''),
+  })
+}
+
 function normalizeJobConfig(job) {
   if (!job || typeof job !== 'object') throw new Error('Job config must be an object.')
   const bookId = required(job.bookId, 'job requires bookId')
@@ -2593,7 +2689,7 @@ function buildStageArgs(stage, job, mainDbPath, runInfo) {
 }
 
 function buildPublishArgs(job, childRunJson) {
-  const publish = job.publish || job.gateway || {}
+  const publish = { ...(job.gateway || {}), ...(job.publish || {}) }
   const args = ['publish', '--run', childRunJson]
   if (publish.gatewayDataDir) args.push('--gateway-data-dir', publish.gatewayDataDir)
   if (publish.gatewayAudioDir) args.push('--gateway-audio-dir', publish.gatewayAudioDir)
@@ -2608,7 +2704,7 @@ function buildPublishArgs(job, childRunJson) {
 }
 
 function buildVerifyArgs(job, childRunJson) {
-  const verify = job.verify || job.gateway || {}
+  const verify = { ...(job.gateway || {}), ...(job.verify || {}) }
   const args = ['verify', '--run', childRunJson]
   if (verify.gatewayUrl || verify.url) args.push('--gateway-url', verify.gatewayUrl || verify.url)
   if (verify.gatewayToken || verify.token) args.push('--gateway-token', verify.gatewayToken || verify.token)
@@ -3444,6 +3540,7 @@ function printHelp() {
 
 Usage:
   npm run production-pipeline -- run --job <path>
+  npm run production-pipeline -- doctor --job <path>
   npm run production-pipeline -- resume --run <runId|runDir|run.json>
   npm run production-pipeline -- import --file <path> [--book-id <id>] [--title <title>] [--dry-run] [--replace]
   npm run production-pipeline -- package --book-id <id>

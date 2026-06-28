@@ -19,6 +19,7 @@ for final verification.
 
 ```bash
 npm run production-pipeline -- run --job production-pipeline/config/example.job.json
+npm run production-pipeline -- doctor --job production-pipeline/config/example.job.json
 npm run production-pipeline -- resume --run <runId|runDir|run.json>
 npm run production-pipeline -- import --file <path> --book-id <bookId> --title <title>
 npm run production-pipeline -- summary --book-id <bookId> --provider openai-compatible --base-url <url> --model <model>
@@ -32,8 +33,10 @@ npm run production-pipeline -- verify --run <runId|runDir|run.json> --gateway-ur
 npm run production-pipeline -- status --run <runId|runDir|run.json>
 ```
 
-`run` reads a job JSON and executes the configured stages in order. `resume`
-loads an existing `run.json` and skips stages whose status is already
+`doctor` preflights a job JSON without creating a run or touching SQLite, so
+missing source files, TTS config, provider settings, and Gateway credentials
+surface before a long production run. `run` reads a job JSON and executes the
+configured stages in order. `resume` loads an existing `run.json` and skips stages whose status is already
 `completed`. `import` writes canonical `books` and `chapters` rows into the main database.
 `summary` reads chapters directly from SQLite, calls the configured chat model,
 and writes the `summaries` table without requiring the old `127.0.0.1:5174` API

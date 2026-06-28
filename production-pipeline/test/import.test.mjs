@@ -442,6 +442,155 @@ describe('production-pipeline import', () => {
     }
   })
 
+  it('preflights a job config before a long run', async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), 'production-pipeline-doctor-test-'))
+    try {
+      const txtPath = join(tempDir, 'sample.txt')
+      const jobPath = join(tempDir, 'job.json')
+      const badJobPath = join(tempDir, 'bad-job.json')
+      const ttsConfigPath = join(tempDir, 'tts-config.json')
+      await writeFile(txtPath, `第一章 开始\n这是第一章内容。`, 'utf8')
+      await writeFile(ttsConfigPath, JSON.stringify({ ok: true }), 'utf8')
+      await writeFile(
+        jobPath,
+        JSON.stringify({
+          bookId: 'sample-book',
+          title: '样书',
+          mainDbPath: join(tempDir, 'main.sqlite'),
+          source: { type: 'txt', file: txtPath },
+          stages: ['import', 'summary', 'kg', 'embedding', 'audio', 'package', 'publish', 'verify'],
+          llm: {
+            provider: 'openai-compatible',
+            baseUrl: 'http://127.0.0.1:30000/v1',
+            model: 'fake-chat',
+          },
+          embedding: {
+            provider: 'openai-compatible',
+            baseUrl: 'http://127.0.0.1:30001/v1',
+            model: 'fake-embedding',
+          },
+          audio: {
+            ttsConfig: ttsConfigPath,
+          },
+          gateway: {
+            host: '127.0.0.1',
+            user: 'gwaves',
+            url: 'https://127.0.0.1:8888',
+            token: 'dev-token',
+          },
+        }),
+        'utf8',
+      )
+
+      const { stdout } = await execFileAsync(process.execPath, [
+        cliPath,
+        'doctor',
+        '--job',
+        jobPath,
+      ])
+      assert.match(stdout, /checks: \d+\/\d+/)
+      assert.match(stdout, /ok: import.sourceFile.exists/)
+      assert.match(stdout, /ok: audio.ttsConfig.exists/)
+      assert.match(stdout, /ok: verify.gatewayToken/)
+
+      const { stdout: jsonStdout } = await execFileAsync(process.execPath, [
+        cliPath,
+        'doctor',
+        '--job',
+        jobPath,
+        '--json',
+      ])
+      assert.equal(JSON.parse(jsonStdout).ok, true)
+
+      await writeFile(
+        badJobPath,
+        JSON.stringify({
+          bookId: 'bad-book',
+          source: { type: 'txt', file: join(tempDir, 'missing.txt') },
+          stages: ['import', 'verify'],
+          gateway: { url: 'https://127.0.0.1:8888' },
+        }),
+        'utf8',
+      )
+      await assert.rejects(
+        () => execFileAsync(process.execPath, [cliPath, 'doctor', '--job', badJobPath]),
+        /Doctor failed: \d+ check\(s\) failed\./,
+      )
+    } finally {
+      await rm(tempDir, { recursive: true, force: true })
+    }
+  })
+
+  it('merges gateway defaults with publish and verify overrides', async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), 'production-pipeline-gateway-merge-test-'))
+    try {
+      const txtPath = join(tempDir, 'sample.txt')
+      const dbPath = join(tempDir, 'main.sqlite')
+      const runRoot = join(tempDir, 'runs')
+      const gatewayDataDir = join(tempDir, 'gateway-data')
+      const jobPath = join(tempDir, 'job.json')
+      await writeFile(txtPath, `第一章 开始\n这是第一章内容。`, 'utf8')
+      await mkdir(gatewayDataDir, { recursive: true })
+      await writeFile(join(gatewayDataDir, 'books.json'), JSON.stringify({ schemaVersion: 1, books: [] }), 'utf8')
+      await execFileAsync(process.execPath, [
+        cliPath,
+        'import',
+        '--file',
+        txtPath,
+        '--book-id',
+        'sample-book',
+        '--title',
+        '样书',
+        '--main-db',
+        dbPath,
+        '--run-root',
+        runRoot,
+      ])
+      await writeFile(
+        jobPath,
+        JSON.stringify({
+          bookId: 'sample-book',
+          title: '样书',
+          mainDbPath: dbPath,
+          stages: ['package', 'publish'],
+          gateway: {
+            gatewayDataDir,
+            url: 'https://127.0.0.1:8888',
+            token: 'dev-token',
+          },
+          publish: {
+            dryRun: true,
+          },
+        }),
+        'utf8',
+      )
+
+      const { stdout: doctorStdout } = await execFileAsync(process.execPath, [
+        cliPath,
+        'doctor',
+        '--job',
+        jobPath,
+      ])
+      assert.match(doctorStdout, /ok: publish.target/)
+
+      const { stdout } = await execFileAsync(process.execPath, [
+        cliPath,
+        'run',
+        '--job',
+        jobPath,
+        '--run-root',
+        runRoot,
+      ])
+      assert.match(stdout, /completed: publish/)
+      const parentRunDir = stdout.match(/runDir: (.+)/)?.[1]?.trim()
+      const runJson = JSON.parse(await readFile(join(parentRunDir, 'run.json'), 'utf8'))
+      const publishLog = await readFile(join(parentRunDir, runJson.stages.publish.childRuns[0].logFile), 'utf8')
+      assert.match(publishLog, new RegExp(escapeRegExp(gatewayDataDir)))
+    } finally {
+      await rm(tempDir, { recursive: true, force: true })
+    }
+  })
+
   it('maps audio files to canonical main DB chapter ids', async () => {
     const tempDir = await mkdtemp(join(tmpdir(), 'production-pipeline-audio-test-'))
     try {
@@ -827,6 +976,10 @@ describe('production-pipeline import', () => {
 
 function plainRow(row) {
   return Object.assign({}, row)
+}
+
+function escapeRegExp(value) {
+  return String(value).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
 
 function seedSummaries(dbPath) {
