@@ -780,13 +780,13 @@ async function runKg(options) {
 
 async function runAudio(options) {
   const bookId = required(options.bookId, 'audio requires --book-id <id>')
-  const sourceRoot = resolve(required(options.sourceRoot, 'audio requires --source-root <path>'))
   const mainDbPath = expandPath(options.mainDb || options.mainDbPath || defaultMainDbPath)
   const run = await createRun({ command: 'audio', options, mainDbPath, bookId })
   const startedAt = new Date().toISOString()
 
   try {
     const book = await readBookFromMainDb(mainDbPath, bookId)
+    const sourceRoot = await prepareAudioSourceRoot({ options, run, book })
     const artifacts = await collectAudioArtifacts(sourceRoot)
     if (!artifacts.length) throw new Error(`No audio/chapter.mp3 files found under ${sourceRoot}`)
 
@@ -862,6 +862,7 @@ async function runAudio(options) {
         audioChapterCount: catalog.chapters.length,
         copiedFiles,
         sourceRoot,
+        generatedTts: shouldGenerateTts(options),
       },
     })
     await writeRunJson(run.runJsonPath, {
@@ -881,6 +882,12 @@ async function runAudio(options) {
           artifacts: {
             gatewayAudioDir: relativeRunPath(run.rootDir, join(run.artifactsDir, 'gateway-audio')),
             audioCatalog: relativeRunPath(run.rootDir, catalogPath),
+            ...(shouldGenerateTts(options)
+              ? {
+                  ttsSourceRoot: relativeRunPath(run.rootDir, sourceRoot),
+                  ...(options.ttsSummaryPath ? { ttsSummary: relativeRunPath(run.rootDir, options.ttsSummaryPath) } : {}),
+                }
+              : {}),
           },
         },
       },
@@ -901,7 +908,7 @@ async function runAudio(options) {
       createdAt: run.createdAt,
       updatedAt: finishedAt,
       mainDbPath,
-      job: { bookId, sourceRoot },
+      job: { bookId, sourceRoot: options.sourceRoot || options.ttsOutRoot },
       stages: {
         audio: {
           status: 'failed',
@@ -2437,9 +2444,28 @@ function buildStageArgs(stage, job, mainDbPath, runInfo) {
     return args.filter((arg) => arg !== '')
   }
   if (stage === 'audio') {
-    const sourceRoot = job.audio?.sourceRoot || job.audio?.source_root
-    const args = ['audio', ...common, '--source-root', required(sourceRoot, 'audio stage requires job.audio.sourceRoot')]
-    if (isFlagEnabled(job.audio?.strict)) args.push('--strict')
+    const audio = job.audio || {}
+    const sourceRoot = audio.sourceRoot || audio.source_root
+    const ttsConfig = audio.ttsConfig || audio.tts_config
+    const args = ['audio', ...common]
+    if (sourceRoot) args.push('--source-root', sourceRoot)
+    if (ttsConfig) args.push('--tts-config', ttsConfig)
+    if (audio.ttsOutRoot || audio.tts_out_root) args.push('--tts-out-root', audio.ttsOutRoot || audio.tts_out_root)
+    if (audio.ttsDirectorScript || audio.tts_director_script) args.push('--tts-director-script', audio.ttsDirectorScript || audio.tts_director_script)
+    if (audio.chapters) args.push('--chapters', String(audio.chapters))
+    if (audio.chapter) args.push('--chapter', String(audio.chapter))
+    if (audio.limit) args.push('--limit', String(audio.limit))
+    if (audio.batchSize || audio.batch_size) args.push('--batch-size', String(audio.batchSize || audio.batch_size))
+    if (audio.directorConcurrency || audio.director_concurrency) args.push('--director-concurrency', String(audio.directorConcurrency || audio.director_concurrency))
+    if (audio.llmChapters || audio.llm_chapters) args.push('--llm-chapters', String(audio.llmChapters || audio.llm_chapters))
+    if (audio.minBatchSize || audio.min_batch_size) args.push('--min-batch-size', String(audio.minBatchSize || audio.min_batch_size))
+    if (audio.ttsConcurrency || audio.tts_concurrency) args.push('--tts-concurrency', String(audio.ttsConcurrency || audio.tts_concurrency))
+    if (audio.ttsChapters || audio.tts_chapters) args.push('--tts-chapters', String(audio.ttsChapters || audio.tts_chapters))
+    if (isFlagEnabled(audio.strict)) args.push('--strict')
+    if (isFlagEnabled(audio.resume)) args.push('--resume')
+    if (isFlagEnabled(audio.allowPartial || audio.allow_partial)) args.push('--allow-partial')
+    if (isFlagEnabled(audio.noAdaptiveTts || audio.no_adaptive_tts)) args.push('--no-adaptive-tts')
+    if (!sourceRoot && !ttsConfig) throw new Error('audio stage requires job.audio.sourceRoot or job.audio.ttsConfig')
     return args
   }
   if (stage === 'embedding') {
@@ -2671,6 +2697,67 @@ function mergeRunStage(runJson, stage, stageValue) {
       [stage]: stageValue,
     },
   }
+}
+
+async function prepareAudioSourceRoot({ options, run, book }) {
+  if (!shouldGenerateTts(options)) {
+    return resolve(required(options.sourceRoot, 'audio requires --source-root <path>, or --tts-config <path> to generate MP3 first'))
+  }
+  const sourceRoot = resolve(options.ttsOutRoot || join(run.artifactsDir, 'tts-source'))
+  if (isFlagEnabled(options.dryRun)) return sourceRoot
+
+  const chapters = audioChapterSelection(options, book.chapters.length)
+  const directorScript = resolve(options.ttsDirectorScript || join(dirname(cliFilePath), '..', '..', 'offline-tts', 'scripts', 'tts-director.mjs'))
+  const args = [
+    directorScript,
+    'batch-pipeline',
+    '--config',
+    expandPath(required(options.ttsConfig, 'audio TTS generation requires --tts-config <path>')),
+    '--book-id',
+    book.id,
+    '--chapters',
+    chapters,
+    '--out-root',
+    sourceRoot,
+  ]
+  if (isFlagEnabled(options.resume)) args.push('--resume')
+  if (isFlagEnabled(options.allowPartial)) args.push('--allow-partial')
+  if (options.limit) args.push('--limit', String(options.limit))
+  if (options.batchSize) args.push('--batch-size', String(options.batchSize))
+  if (options.directorConcurrency) args.push('--director-concurrency', String(options.directorConcurrency))
+  if (options.llmChapters) args.push('--llm-chapters', String(options.llmChapters))
+  if (options.minBatchSize) args.push('--min-batch-size', String(options.minBatchSize))
+  if (options.ttsConcurrency) args.push('--tts-concurrency', String(options.ttsConcurrency))
+  if (options.ttsChapters) args.push('--tts-chapters', String(options.ttsChapters))
+  if (isFlagEnabled(options.noAdaptiveTts)) args.push('--no-adaptive-tts')
+
+  const logPath = join(run.artifactsDir, 'tts-director.log')
+  let stdout = ''
+  let stderr = ''
+  try {
+    ;({ stdout, stderr } = await execFileAsync(process.execPath, args, { maxBuffer: 100 * 1024 * 1024 }))
+  } catch (error) {
+    stdout = error.stdout || ''
+    stderr = error.stderr || error.message
+    await writeFile(logPath, `${stdout}${stderr ? `\n--- stderr ---\n${stderr}` : ''}`, 'utf8')
+    throw error
+  }
+  await writeFile(logPath, `${stdout}${stderr ? `\n--- stderr ---\n${stderr}` : ''}`, 'utf8')
+  const summaryPath = stdout.match(/汇总文件：(.+)/)?.[1]?.trim()
+    || join(sourceRoot, `batch-pipeline-${chapters.split(',')[0]}-${chapters.split(',').at(-1)}.summary.json`)
+  if (existsSync(summaryPath)) options.ttsSummaryPath = summaryPath
+  return sourceRoot
+}
+
+function shouldGenerateTts(options) {
+  return Boolean(options.ttsConfig || options.generateTts || options.ttsOutRoot)
+}
+
+function audioChapterSelection(options, totalChapters) {
+  if (options.chapters) return String(options.chapters)
+  if (options.chapter) return String(options.chapter)
+  if (totalChapters <= 0) throw new Error('Book has no chapters for TTS generation.')
+  return `1-${totalChapters}`
 }
 
 async function collectAudioArtifacts(root) {
@@ -3263,6 +3350,7 @@ Usage:
   npm run production-pipeline -- summary --book-id <id> --provider <openai|ollama> --base-url <url> --model <name>
   npm run production-pipeline -- kg --book-id <id> --provider <openai|ollama> --base-url <url> --model <name>
   npm run production-pipeline -- audio --book-id <id> --source-root <path>
+  npm run production-pipeline -- audio --book-id <id> --tts-config <path> [--chapters 1-10]
   npm run production-pipeline -- embedding --book-id <id> --provider <ollama|openai> --base-url <url> --model <name>
   npm run production-pipeline -- publish --run <runId|runDir|run.json> [--dry-run]
   npm run production-pipeline -- verify --run <runId|runDir|run.json> --gateway-url <url>
@@ -3277,6 +3365,10 @@ Options:
   --gateway-url        Gateway base URL for verify.
   --gateway-token      Gateway bearer token for verify.
   --concurrency        Summary/KG/embedding request concurrency.
+  --tts-config         Generate MP3 first with offline-tts batch-pipeline, then package it.
+  --chapters           Chapter list/range for TTS generation. Default: full book.
+  --tts-concurrency    TTS segment concurrency passed to offline-tts.
+  --tts-chapters       TTS chapter concurrency passed to offline-tts.
   --force              Regenerate existing embedding rows.
   --remote-host        Remote Gateway host for rsync publish.
   --remote-user        Remote SSH user.

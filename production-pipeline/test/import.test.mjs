@@ -426,6 +426,73 @@ describe('production-pipeline import', () => {
     }
   })
 
+  it('generates TTS source audio before packaging Gateway audio artifacts', async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), 'production-pipeline-audio-tts-test-'))
+    try {
+      const txtPath = join(tempDir, 'sample.txt')
+      const dbPath = join(tempDir, 'main.sqlite')
+      const runRoot = join(tempDir, 'runs')
+      const ttsOutRoot = join(tempDir, 'generated-tts')
+      const fakeDirectorPath = join(tempDir, 'fake-tts-director.mjs')
+      const fakeConfigPath = join(tempDir, 'fake-tts-config.json')
+      await writeFile(txtPath, `第一章 开始\n这是第一章内容。\n\n第二章 继续\n这是第二章内容。`, 'utf8')
+      await writeFile(fakeConfigPath, JSON.stringify({ ok: true }), 'utf8')
+      await writeFile(fakeDirectorPath, fakeTtsDirectorSource(), 'utf8')
+      await execFileAsync(process.execPath, [
+        cliPath,
+        'import',
+        '--file',
+        txtPath,
+        '--book-id',
+        'sample-book',
+        '--title',
+        '样书',
+        '--main-db',
+        dbPath,
+        '--run-root',
+        runRoot,
+      ])
+
+      const { stdout } = await execFileAsync(process.execPath, [
+        cliPath,
+        'audio',
+        '--book-id',
+        'sample-book',
+        '--tts-config',
+        fakeConfigPath,
+        '--tts-director-script',
+        fakeDirectorPath,
+        '--tts-out-root',
+        ttsOutRoot,
+        '--chapters',
+        '1-2',
+        '--resume',
+        '--main-db',
+        dbPath,
+        '--run-root',
+        runRoot,
+      ])
+
+      assert.match(stdout, /audio chapters: 2/)
+      const catalogPath = stdout.match(/audio: (.+)/)?.[1]?.trim()
+      assert.ok(catalogPath)
+      const catalog = JSON.parse(await readFile(catalogPath, 'utf8'))
+      assert.deepEqual(
+        catalog.chapters.map((chapter) => chapter.chapterId),
+        ['1-第一章 开始', '2-第二章 继续'],
+      )
+      assert.equal(await fileExists(join(ttsOutRoot, 'ch001-full', 'audio', 'chapter.mp3')), true)
+      assert.equal(await fileExists(join(dirname(catalogPath), catalog.chapters[0].fileName)), true)
+      const runId = stdout.match(/run: (.+)/)?.[1]?.trim()
+      assert.ok(runId)
+      const runJson = JSON.parse(await readFile(join(runRoot, 'sample-book', runId, 'run.json'), 'utf8'))
+      assert.equal(runJson.stages.audio.artifacts.ttsSourceRoot, ttsOutRoot)
+      assert.equal(runJson.stages.audio.status, 'completed')
+    } finally {
+      await rm(tempDir, { recursive: true, force: true })
+    }
+  })
+
   it('verifies Gateway package output against a published Gateway API', async () => {
     const tempDir = await mkdtemp(join(tmpdir(), 'production-pipeline-verify-test-'))
     let gateway
@@ -849,6 +916,59 @@ function seedKnowledgeGraph(dbPath) {
   } finally {
     db.close()
   }
+}
+
+function fakeTtsDirectorSource() {
+  return `
+import { mkdir, writeFile } from 'node:fs/promises'
+import { join } from 'node:path'
+
+function parseArgs(argv) {
+  const args = { _: [] }
+  for (let index = 0; index < argv.length; index += 1) {
+    const token = argv[index]
+    if (!token.startsWith('--')) {
+      args._.push(token)
+      continue
+    }
+    const key = token.slice(2)
+    const next = argv[index + 1]
+    if (!next || next.startsWith('--')) {
+      args[key] = true
+    } else {
+      args[key] = next
+      index += 1
+    }
+  }
+  return args
+}
+
+function parseChapters(value) {
+  const result = []
+  for (const part of String(value || '').split(',')) {
+    const range = part.match(/^(\\d+)-(\\d+)$/)
+    if (range) {
+      for (let chapter = Number(range[1]); chapter <= Number(range[2]); chapter += 1) result.push(chapter)
+    } else if (part.trim()) {
+      result.push(Number(part))
+    }
+  }
+  return result
+}
+
+const args = parseArgs(process.argv.slice(2))
+if (args._[0] !== 'batch-pipeline') throw new Error('fake director only supports batch-pipeline')
+const chapters = parseChapters(args.chapters)
+for (const chapter of chapters) {
+  const audioDir = join(args['out-root'], 'ch' + String(chapter).padStart(3, '0') + '-full', 'audio')
+  await mkdir(audioDir, { recursive: true })
+  await writeFile(join(audioDir, 'chapter.mp3'), 'fake mp3 ' + chapter)
+  await writeFile(join(audioDir, 'manifest.json'), JSON.stringify({ version: 2, durationMs: chapter * 1000 }))
+}
+const summaryPath = join(args['out-root'], 'batch-pipeline-' + chapters[0] + '-' + chapters.at(-1) + '.summary.json')
+await writeFile(summaryPath, JSON.stringify({ chapters }))
+console.log('汇总文件：' + summaryPath)
+`
 }
 
 async function fileExists(path) {
