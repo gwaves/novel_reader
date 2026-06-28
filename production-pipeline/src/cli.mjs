@@ -2892,7 +2892,15 @@ function buildStageExecutionPlan(job, stages) {
   if (!llmStages.length) return { stages, stageOptions: {} }
 
   const nonLlmStages = stages.filter((stage) => !llmStages.includes(stage))
-  const allocations = allocateWeightedSlots(llmStages, scheduler.concurrency, scheduler.weights)
+  const allocationStages = scheduler.borrowIdle ? llmStages : scheduler.weightedStages
+  const rawAllocations = allocateWeightedSlots(allocationStages, scheduler.concurrency, scheduler.weights)
+  const allocations = Object.fromEntries(llmStages.map((stage) => [stage, rawAllocations[stage] || 0]))
+  if (!Object.values(allocations).some((concurrency) => concurrency > 0)) {
+    const fallbackStage = llmStages
+      .map((stage, index) => ({ stage, index, weight: scheduler.weights[stage] || 0 }))
+      .sort((left, right) => right.weight - left.weight || left.index - right.index)[0]?.stage
+    if (fallbackStage) allocations[fallbackStage] = 1
+  }
   const scheduledLlmStages = llmStages.filter((stage) => allocations[stage] > 0)
   if (!scheduledLlmStages.length) {
     throw new Error('LLM scheduler could not allocate any stage concurrency.')
@@ -2923,6 +2931,8 @@ function normalizeLlmScheduler(job) {
   }
   return {
     concurrency,
+    borrowIdle: !('borrowIdle' in scheduler || 'borrow_idle' in scheduler) || isFlagEnabled(scheduler.borrowIdle ?? scheduler.borrow_idle),
+    weightedStages: Object.keys(weights).filter((stage) => weights[stage] > 0),
     weights: Object.fromEntries(Object.entries(weights).map(([stage, weight]) => [stage, Math.max(0, Number(weight) || 0)])),
   }
 }

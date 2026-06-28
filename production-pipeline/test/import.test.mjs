@@ -745,6 +745,62 @@ describe('production-pipeline import', () => {
     }
   })
 
+  it('can reserve idle llm scheduler shares when borrowIdle is disabled', async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), 'production-pipeline-llm-scheduler-reserve-test-'))
+    let chatServer
+    try {
+      const txtPath = join(tempDir, 'sample.txt')
+      const dbPath = join(tempDir, 'main.sqlite')
+      const runRoot = join(tempDir, 'runs')
+      const jobPath = join(tempDir, 'job.json')
+      await writeFile(txtPath, `第一章 开始\n这是第一章内容。`, 'utf8')
+      chatServer = await startFakeChatServer()
+      await writeFile(
+        jobPath,
+        JSON.stringify({
+          bookId: 'sample-book',
+          title: '样书',
+          mainDbPath: dbPath,
+          source: { file: txtPath },
+          stages: ['import', 'summary'],
+          llm: {
+            provider: 'openai-compatible',
+            baseUrl: chatServer.url,
+            model: 'fake-chat',
+            concurrency: 4,
+            scheduler: {
+              borrowIdle: false,
+              weights: {
+                summary: 1,
+                kg: 3,
+              },
+            },
+          },
+          summary: { limit: 1 },
+        }),
+        'utf8',
+      )
+
+      const { stdout } = await execFileAsync(process.execPath, [
+        cliPath,
+        'run',
+        '--job',
+        jobPath,
+        '--run-root',
+        runRoot,
+      ])
+
+      const parentRunDir = stdout.match(/runDir: (.+)/)?.[1]?.trim()
+      assert.ok(parentRunDir)
+      const runJson = JSON.parse(await readFile(join(parentRunDir, 'run.json'), 'utf8'))
+      const summaryReport = JSON.parse(await readFile(join(dirname(runJson.stages.summary.childRunJson), 'artifacts', 'summary-report.json'), 'utf8'))
+      assert.equal(summaryReport.concurrency, 1)
+    } finally {
+      if (chatServer) await chatServer.close()
+      await rm(tempDir, { recursive: true, force: true })
+    }
+  })
+
   it('runs scheduled audio production after sharing the llm pool', async () => {
     const tempDir = await mkdtemp(join(tmpdir(), 'production-pipeline-audio-parallel-test-'))
     let chatServer

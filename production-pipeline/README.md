@@ -74,8 +74,9 @@ The job JSON is the repeatable production contract. It should include:
   as a shared pool for active LLM stages. `weights.summary`, `weights.kg`, and
   `weights.audio` divide the pool among runnable stages; if the pool is smaller
   than the number of runnable LLM stages, lower-priority stages wait for the next
-  batch. Without `llm.scheduler`, existing stage-level concurrency behavior is
-  unchanged.
+  batch. `borrowIdle` defaults to `true`, so active stages can borrow the share
+  of absent stages; set it to `false` to keep weighted shares reserved. Without
+  `llm.scheduler`, existing stage-level concurrency behavior is unchanged.
 - `summary` / `kg`: optional stage limits or overrides; stage-level `concurrency` overrides `llm.concurrency` when the weighted scheduler is not enabled.
 - `embedding`: provider, base URL, model, concurrency, retries, and timeout.
 - `audio`: either `sourceRoot` for existing MP3 artifacts or `ttsConfig` for generating MP3 first; optional `chapters`, `ttsConcurrency`, `ttsChapters`, and strictness.
@@ -122,6 +123,7 @@ cat > tmp/production-pipeline-datang.job.json <<'JSON'
     "model": "qwen3.6-27b",
     "concurrency": 4,
     "scheduler": {
+      "borrowIdle": true,
       "weights": {
         "summary": 4,
         "kg": 2,
