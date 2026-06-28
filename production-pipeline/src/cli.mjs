@@ -703,6 +703,7 @@ async function runSummary(options) {
           results.completed += 1
         } catch (error) {
           results.failed += 1
+          console.warn(`[${new Date().toISOString()}] summary chapter failed: chapter=${chapter.chapterIndex} id=${chapter.id} error=${error instanceof Error ? error.message : String(error)}`)
           pushLimited(results.errors, {
             chapterId: chapter.id,
             chapterIndex: chapter.chapterIndex,
@@ -865,6 +866,7 @@ async function runKg(options) {
           results.completed += 1
         } catch (error) {
           results.failed += 1
+          console.warn(`[${new Date().toISOString()}] kg chapter failed: chapter=${chapter.chapterIndex} id=${chapter.id} error=${error instanceof Error ? error.message : String(error)}`)
           pushLimited(results.errors, {
             chapterId: chapter.id,
             chapterIndex: chapter.chapterIndex,
@@ -3691,6 +3693,10 @@ async function runPool(items, concurrency, worker) {
     }
   })
   await Promise.all(workers)
+}
+
+function sleep(ms) {
+  return new Promise((resolvePromise) => setTimeout(resolvePromise, ms))
 }
 
 function createStageProgressLogger({ stage, total, getProgress, intervalMs = 30_000, every = 10 }) {
