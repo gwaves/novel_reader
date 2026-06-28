@@ -44,6 +44,10 @@ async function main() {
     await runPublish(options)
     return
   }
+  if (command === 'verify') {
+    await runVerify(options)
+    return
+  }
   if (command === 'status') {
     await runStatus(options)
     return
@@ -477,6 +481,97 @@ async function runPublish(options) {
   console.log(`published: ${publishPlan.target}`)
 }
 
+async function runVerify(options) {
+  const runInfo = await loadRunInfo(required(options.run, 'verify requires --run <runId or run path>'))
+  const bookId = runInfo.job?.bookId || required(options.bookId, 'verify requires a run with job.bookId or --book-id <id>')
+  const gatewayUrl = trimTrailingSlash(
+    options.gatewayUrl || options.gatewayURL || process.env.GATEWAY_BASE_URL || process.env.GATEWAY_URL || '',
+  )
+  const gatewayToken = options.gatewayToken || process.env.GATEWAY_DEV_ACCESS_TOKEN || ''
+  if (!gatewayUrl) throw new Error('verify requires --gateway-url <url> or GATEWAY_BASE_URL')
+  if (!gatewayToken) throw new Error('verify requires --gateway-token <token> or GATEWAY_DEV_ACCESS_TOKEN')
+
+  const startedAt = new Date().toISOString()
+  const expected = await loadExpectedGatewayArtifacts(runInfo, bookId)
+  const checks = []
+  const health = await fetchGatewayJson(gatewayUrl, '/health')
+  checks.push(assertCheck('health', health.status === 'ok', { status: health.status }))
+
+  const library = await fetchGatewayJson(gatewayUrl, '/mobile/books', gatewayToken)
+  const libraryBook = Array.isArray(library.books) ? library.books.find((book) => book?.id === bookId) : null
+  checks.push(assertCheck('library.bookListed', Boolean(libraryBook), { bookId }))
+
+  if (expected.package) {
+    const packageResponse = await fetchGatewayJson(
+      gatewayUrl,
+      `/mobile/books/${encodeURIComponent(bookId)}/package?include=full`,
+      gatewayToken,
+    )
+    const remotePackage = packageResponse.package
+    const remoteChapters = Array.isArray(remotePackage?.chapters) ? remotePackage.chapters : []
+    const expectedChapters = expected.package.chapters
+    checks.push(assertCheck('package.bookId', remotePackage?.book?.id === bookId, { actual: remotePackage?.book?.id, expected: bookId }))
+    checks.push(assertCheck('package.chapterCount', remoteChapters.length === expectedChapters.length, {
+      actual: remoteChapters.length,
+      expected: expectedChapters.length,
+    }))
+    checks.push(assertCheck('package.chapterIds', sameOrderedStrings(remoteChapters.map((chapter) => chapter.id), expectedChapters.map((chapter) => chapter.id)), {
+      actual: remoteChapters.map((chapter) => chapter.id),
+      expected: expectedChapters.map((chapter) => chapter.id),
+    }))
+  }
+
+  if (expected.audio) {
+    const audioResponse = await fetchGatewayJson(gatewayUrl, `/mobile/books/${encodeURIComponent(bookId)}/audio`, gatewayToken)
+    const remoteAudioChapters = Array.isArray(audioResponse.chapters) ? audioResponse.chapters : []
+    const expectedAudioChapters = expected.audio.chapters
+    checks.push(assertCheck('audio.chapterCount', remoteAudioChapters.length === expectedAudioChapters.length, {
+      actual: remoteAudioChapters.length,
+      expected: expectedAudioChapters.length,
+    }))
+    checks.push(assertCheck('audio.chapterIds', sameOrderedStrings(
+      remoteAudioChapters.map((chapter) => chapter.chapterId),
+      expectedAudioChapters.map((chapter) => chapter.chapterId),
+    ), {
+      actual: remoteAudioChapters.map((chapter) => chapter.chapterId),
+      expected: expectedAudioChapters.map((chapter) => chapter.chapterId),
+    }))
+  }
+
+  const failedChecks = checks.filter((check) => !check.ok)
+  const finishedAt = new Date().toISOString()
+  const report = {
+    schemaVersion: 1,
+    generatedAt: finishedAt,
+    gatewayUrl,
+    bookId,
+    ok: failedChecks.length === 0,
+    checks,
+  }
+  const reportPath = join(runInfo.rootDir, 'artifacts', 'verify-report.json')
+  await writeJson(reportPath, report)
+  await writeRunJson(runInfo.runJsonPath, mergeRunStage(runInfo.runJson, 'verify', {
+    status: report.ok ? 'completed' : 'failed',
+    startedAt,
+    finishedAt,
+    message: report.ok ? 'Gateway verification passed.' : `Gateway verification failed: ${failedChecks.length} checks failed.`,
+    gatewayUrl,
+    artifacts: {
+      verifyReport: relativeRunPath(runInfo.rootDir, reportPath),
+    },
+    checks,
+  }))
+
+  console.log(`book: ${bookId}`)
+  console.log(`gateway: ${gatewayUrl}`)
+  console.log(`checks: ${checks.filter((check) => check.ok).length}/${checks.length}`)
+  console.log(`report: ${reportPath}`)
+  if (!report.ok) {
+    for (const check of failedChecks) console.error(`failed: ${check.name}`)
+    throw new Error(`Gateway verification failed: ${failedChecks.length} checks failed.`)
+  }
+}
+
 async function runStatus(options) {
   const runInfo = await loadRunInfo(required(options.run, 'status requires --run <runId or run path>'))
   console.log(JSON.stringify(runInfo.runJson, null, 2))
@@ -718,6 +813,23 @@ async function loadRunInfo(runPath) {
   }
 }
 
+async function loadExpectedGatewayArtifacts(runInfo, bookId) {
+  const packageRoot = resolveRunArtifact(
+    runInfo.rootDir,
+    runInfo.stages?.package?.artifacts?.gatewayDataDir || join('artifacts', 'gateway-data'),
+  )
+  const audioRoot = resolveRunArtifact(
+    runInfo.rootDir,
+    runInfo.stages?.audio?.artifacts?.gatewayAudioDir || join('artifacts', 'gateway-audio'),
+  )
+  const packagePath = join(packageRoot, 'books', bookId, 'package.json')
+  const audioPath = join(audioRoot, 'books', bookId, 'audio.json')
+  return {
+    package: existsSync(packagePath) ? JSON.parse(await readFile(packagePath, 'utf8')) : null,
+    audio: existsSync(audioPath) ? JSON.parse(await readFile(audioPath, 'utf8')) : null,
+  }
+}
+
 async function resolveRunJsonPath(runPath) {
   if (runPath.endsWith('.json')) return resolve(runPath)
   const directRunDir = resolve(runPath, 'run.json')
@@ -738,6 +850,30 @@ async function resolveRunJsonPath(runPath) {
 function resolveRunArtifact(runDir, artifactPath) {
   if (artifactPath.startsWith('/')) return artifactPath
   return resolve(runDir, artifactPath)
+}
+
+async function fetchGatewayJson(gatewayUrl, path, token = '') {
+  const response = await fetch(`${gatewayUrl}${path}`, {
+    headers: token ? { authorization: `Bearer ${token}` } : {},
+    signal: AbortSignal.timeout(30_000),
+  })
+  if (!response.ok) {
+    throw new Error(`Gateway ${path} returned ${response.status}: ${await response.text()}`)
+  }
+  return response.json()
+}
+
+function assertCheck(name, ok, detail = {}) {
+  return {
+    name,
+    ok: Boolean(ok),
+    detail,
+  }
+}
+
+function sameOrderedStrings(actual, expected) {
+  if (actual.length !== expected.length) return false
+  return actual.every((value, index) => String(value) === String(expected[index]))
 }
 
 async function readExistingGatewayCatalog(options) {
@@ -958,6 +1094,10 @@ function safePathSegment(value) {
     .slice(0, 80) || 'chapter'
 }
 
+function trimTrailingSlash(value) {
+  return String(value || '').replace(/\/+$/, '')
+}
+
 function parseArgs(argv) {
   const options = {}
   for (let index = 0; index < argv.length; index += 1) {
@@ -1047,6 +1187,7 @@ Usage:
   npm run production-pipeline -- package --book-id <id>
   npm run production-pipeline -- audio --book-id <id> --source-root <path>
   npm run production-pipeline -- publish --run <runId|runDir|run.json> [--dry-run]
+  npm run production-pipeline -- verify --run <runId|runDir|run.json> --gateway-url <url>
   npm run production-pipeline -- status --run <runId|runDir|run.json>
 
 Options:
@@ -1054,6 +1195,8 @@ Options:
   --run-root <path>    Run storage root. Default: ${defaultRunRoot}
   --gateway-data-dir   Local Gateway data directory for publish.
   --gateway-audio-dir  Local Gateway audio directory for publish.
+  --gateway-url        Gateway base URL for verify.
+  --gateway-token      Gateway bearer token for verify.
   --remote-host        Remote Gateway host for rsync publish.
   --remote-user        Remote SSH user.
   --remote-root        Remote Gateway root. Default: ${defaultRemoteRoot}

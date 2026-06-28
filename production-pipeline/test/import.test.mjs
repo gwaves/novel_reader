@@ -1,6 +1,7 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { execFile } from 'node:child_process'
+import { createServer } from 'node:http'
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -306,6 +307,71 @@ describe('production-pipeline import', () => {
       await rm(tempDir, { recursive: true, force: true })
     }
   })
+
+  it('verifies Gateway package output against a published Gateway API', async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), 'production-pipeline-verify-test-'))
+    let gateway
+    try {
+      const txtPath = join(tempDir, 'sample.txt')
+      const dbPath = join(tempDir, 'main.sqlite')
+      const runRoot = join(tempDir, 'runs')
+      await writeFile(txtPath, `第一章 开始\n这是第一章内容。\n\n第二章 继续\n这是第二章内容。`, 'utf8')
+      await execFileAsync(process.execPath, [
+        cliPath,
+        'import',
+        '--file',
+        txtPath,
+        '--book-id',
+        'sample-book',
+        '--title',
+        '样书',
+        '--main-db',
+        dbPath,
+        '--run-root',
+        runRoot,
+      ])
+      const { stdout: packageStdout } = await execFileAsync(process.execPath, [
+        cliPath,
+        'package',
+        '--book-id',
+        'sample-book',
+        '--main-db',
+        dbPath,
+        '--run-root',
+        runRoot,
+      ])
+      const packagePath = packageStdout.match(/package: (.+)/)?.[1]?.trim()
+      const runId = packageStdout.match(/run: (.+)/)?.[1]?.trim()
+      assert.ok(packagePath)
+      assert.ok(runId)
+      const bookPackage = JSON.parse(await readFile(packagePath, 'utf8'))
+      gateway = await startFakeGateway({
+        token: 'dev-token',
+        bookPackage,
+        audioCatalog: { schemaVersion: 1, chapters: [] },
+      })
+
+      const { stdout } = await execFileAsync(process.execPath, [
+        cliPath,
+        'verify',
+        '--run',
+        join(runRoot, 'sample-book', runId, 'run.json'),
+        '--gateway-url',
+        gateway.url,
+        '--gateway-token',
+        'dev-token',
+      ])
+
+      assert.match(stdout, /checks: 5\/5/)
+      const runJson = JSON.parse(await readFile(join(runRoot, 'sample-book', runId, 'run.json'), 'utf8'))
+      assert.equal(runJson.stages.verify.status, 'completed')
+      const report = JSON.parse(await readFile(join(runRoot, 'sample-book', runId, 'artifacts', 'verify-report.json'), 'utf8'))
+      assert.equal(report.ok, true)
+    } finally {
+      if (gateway) await gateway.close()
+      await rm(tempDir, { recursive: true, force: true })
+    }
+  })
 })
 
 function plainRow(row) {
@@ -319,4 +385,48 @@ async function fileExists(path) {
   } catch {
     return false
   }
+}
+
+async function startFakeGateway({ token, bookPackage, audioCatalog }) {
+  const server = createServer((request, response) => {
+    const url = new URL(request.url, 'http://127.0.0.1')
+    if (url.pathname === '/health') {
+      sendJson(response, { status: 'ok' })
+      return
+    }
+    if (request.headers.authorization !== `Bearer ${token}`) {
+      sendJson(response, { error: { code: 'invalid_token' } }, 401)
+      return
+    }
+    if (url.pathname === '/mobile/books') {
+      sendJson(response, {
+        schemaVersion: 1,
+        books: [{ ...bookPackage.book, audioChapterCount: audioCatalog.chapters.length }],
+      })
+      return
+    }
+    if (url.pathname === `/mobile/books/${bookPackage.book.id}/package`) {
+      sendJson(response, { package: bookPackage })
+      return
+    }
+    if (url.pathname === `/mobile/books/${bookPackage.book.id}/audio`) {
+      sendJson(response, audioCatalog)
+      return
+    }
+    sendJson(response, { error: { code: 'not_found' } }, 404)
+  })
+  await new Promise((resolve, reject) => {
+    server.once('error', reject)
+    server.listen(0, '127.0.0.1', resolve)
+  })
+  const address = server.address()
+  return {
+    url: `http://127.0.0.1:${address.port}`,
+    close: () => new Promise((resolve, reject) => server.close((error) => (error ? reject(error) : resolve()))),
+  }
+}
+
+function sendJson(response, value, statusCode = 200) {
+  response.writeHead(statusCode, { 'content-type': 'application/json; charset=utf-8' })
+  response.end(JSON.stringify(value))
 }

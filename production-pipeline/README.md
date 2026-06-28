@@ -22,6 +22,7 @@ npm run production-pipeline -- import --file <path> --book-id <bookId> --title <
 npm run production-pipeline -- package --book-id <bookId>
 npm run production-pipeline -- audio --book-id <bookId> --source-root tmp/tts/<book>
 npm run production-pipeline -- publish --run <runId|runDir|run.json> --remote-host <host> --remote-user <user>
+npm run production-pipeline -- verify --run <runId|runDir|run.json> --gateway-url <url> --gateway-token <token>
 npm run production-pipeline -- status --run <runId>
 ```
 
@@ -30,7 +31,9 @@ npm run production-pipeline -- status --run <runId>
 directory. `audio` maps existing `audio/chapter.mp3` outputs back to canonical
 main database chapter ids and writes Gateway `audio.json`. `publish` uses `rsync`
 for package/audio files and merges `books.json` so the Gateway book list can see
-the published book.
+the published book. `verify` checks the live Gateway HTTP APIs against the run
+artifacts, including library visibility, package chapter ids, and audio chapter
+ids/counts when audio artifacts are present.
 
 Planned commands still include stage-level `run`, `resume`, and `verify` once
 summary, KG, embedding, and audio workers are added.
