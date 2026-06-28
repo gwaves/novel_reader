@@ -114,6 +114,28 @@ describe('gateway app', () => {
     })
   })
 
+  it('reports Ollama embeddings as configured without an API key', async () => {
+    const app = buildTestApp({
+      GATEWAY_DEV_ACCESS_TOKEN: 'dev-token',
+      GATEWAY_EMBEDDING_PROVIDER: 'ollama',
+      GATEWAY_EMBEDDING_BASE_URL: 'http://192.168.88.100:11434',
+      GATEWAY_EMBEDDING_MODEL: 'qwen3-embedding:8b',
+    })
+    const response = await app.inject({
+      method: 'GET',
+      url: '/capabilities',
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect(response.json()).toMatchObject({
+      features: {
+        embeddings: {
+          available: true,
+        },
+      },
+    })
+  })
+
   it('returns unified errors for unknown routes', async () => {
     const app = buildTestApp()
     const response = await app.inject({
@@ -849,6 +871,47 @@ describe('gateway app', () => {
         body: JSON.stringify({
           input: '文本',
           model: 'text-embedding-test',
+        }),
+      }),
+    )
+  })
+
+  it('forwards protected embedding requests to an Ollama upstream', async () => {
+    const fetchMock = vi.fn(async () => jsonResponse({ embedding: [0.3, 0.4, 0.5] }))
+    vi.stubGlobal('fetch', fetchMock)
+    const app = buildTestApp({
+      GATEWAY_DEV_ACCESS_TOKEN: 'dev-token',
+      GATEWAY_EMBEDDING_PROVIDER: 'ollama',
+      GATEWAY_EMBEDDING_BASE_URL: 'http://ollama.example.test:11434',
+      GATEWAY_EMBEDDING_MODEL: 'qwen3-embedding:8b',
+    })
+    const response = await app.inject({
+      method: 'POST',
+      url: '/ai/embeddings',
+      headers: {
+        authorization: 'Bearer dev-token',
+      },
+      payload: {
+        input: '文本',
+      },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect(response.json()).toMatchObject({
+      object: 'list',
+      model: 'qwen3-embedding:8b',
+      data: [{ embedding: [0.3, 0.4, 0.5], index: 0 }],
+    })
+    expect(fetchMock).toHaveBeenCalledWith(
+      'http://ollama.example.test:11434/api/embeddings',
+      expect.objectContaining({
+        method: 'POST',
+        headers: expect.not.objectContaining({
+          authorization: expect.any(String),
+        }),
+        body: JSON.stringify({
+          model: 'qwen3-embedding:8b',
+          prompt: '文本',
         }),
       }),
     )

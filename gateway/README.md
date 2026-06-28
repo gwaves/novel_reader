@@ -105,7 +105,7 @@ npm run gateway:publish-package -- \
 
 脚本默认读取 `NOVEL_READER_API_BASE_URL`、`GATEWAY_BASE_URL`、`GATEWAY_DEV_ACCESS_TOKEN` 和 `NOVEL_READER_SYNC_TOKEN`。如果已经有导出的 JSON 文件，也可以用 `--source-file path/to/package.json` 跳过本地 API；`--dry-run` 可只校验不上传。
 
-AI 转发第一版只支持 OpenAI-compatible 接口。`POST /ai/chat` 转发到 `<GATEWAY_AI_BASE_URL>/chat/completions`，`POST /ai/embeddings` 转发到 `<GATEWAY_EMBEDDING_BASE_URL>/embeddings`。如果请求体未指定 `model`，Gateway 会分别注入 `GATEWAY_AI_MODEL` 或 `GATEWAY_EMBEDDING_MODEL`。
+AI chat 转发第一版支持 OpenAI-compatible 接口。`POST /ai/chat` 转发到 `<GATEWAY_AI_BASE_URL>/chat/completions`。Embedding 转发支持 OpenAI-compatible 和 Ollama：默认 `GATEWAY_EMBEDDING_PROVIDER=openai-compatible` 时转发到 `<GATEWAY_EMBEDDING_BASE_URL>/embeddings`；设置 `GATEWAY_EMBEDDING_PROVIDER=ollama` 时转发到 `<GATEWAY_EMBEDDING_BASE_URL>/api/embeddings`，例如 `http://192.168.88.100:11434` + `qwen3-embedding:8b`。如果请求体未指定 `model`，Gateway 会分别注入 `GATEWAY_AI_MODEL` 或 `GATEWAY_EMBEDDING_MODEL`。
 
 本地 MP3 第一版从 `GATEWAY_AUDIO_DIR/books/<bookId>/audio.json` 读取清单，音频文件与 `audio.json` 放在同一目录或其子目录。清单格式：
 

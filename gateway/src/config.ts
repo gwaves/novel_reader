@@ -26,6 +26,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     GATEWAY_AI_BASE_URL: readOptionalString(env, 'GATEWAY_AI_BASE_URL'),
     GATEWAY_AI_API_KEY: readOptionalString(env, 'GATEWAY_AI_API_KEY'),
     GATEWAY_AI_MODEL: readOptionalString(env, 'GATEWAY_AI_MODEL'),
+    GATEWAY_EMBEDDING_PROVIDER: readEnum(
+      env,
+      'GATEWAY_EMBEDDING_PROVIDER',
+      ['openai-compatible', 'openai', 'ollama'] as const,
+      'openai-compatible',
+    ),
     GATEWAY_EMBEDDING_BASE_URL: readOptionalString(env, 'GATEWAY_EMBEDDING_BASE_URL'),
     GATEWAY_EMBEDDING_API_KEY: readOptionalString(env, 'GATEWAY_EMBEDDING_API_KEY'),
     GATEWAY_EMBEDDING_MODEL: readOptionalString(env, 'GATEWAY_EMBEDDING_MODEL'),
@@ -65,6 +71,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
         model: parsed.GATEWAY_AI_MODEL,
       },
       embeddings: {
+        provider: parsed.GATEWAY_EMBEDDING_PROVIDER,
         baseUrl: parsed.GATEWAY_EMBEDDING_BASE_URL,
         apiKey: parsed.GATEWAY_EMBEDDING_API_KEY,
         apiKeyConfigured: Boolean(parsed.GATEWAY_EMBEDDING_API_KEY),

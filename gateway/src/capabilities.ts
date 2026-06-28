@@ -2,8 +2,10 @@ import type { GatewayConfig } from './config.js'
 
 export function buildCapabilities(config: GatewayConfig) {
   const aiConfigured = Boolean(config.upstreams.ai.baseUrl && config.upstreams.ai.apiKeyConfigured)
+  const embeddingProvider = config.upstreams.embeddings.provider
   const embeddingsConfigured = Boolean(
-    config.upstreams.embeddings.baseUrl && config.upstreams.embeddings.apiKeyConfigured,
+    config.upstreams.embeddings.baseUrl &&
+      (embeddingProvider === 'ollama' || config.upstreams.embeddings.apiKeyConfigured),
   )
   return {
     service: 'novel-reader-gateway',
@@ -33,7 +35,11 @@ export function buildCapabilities(config: GatewayConfig) {
       },
       embeddings: {
         available: embeddingsConfigured,
-        reason: embeddingsConfigured ? undefined : 'embedding upstream base URL and API key are not configured',
+        reason: embeddingsConfigured
+          ? undefined
+          : embeddingProvider === 'ollama'
+            ? 'Ollama embedding upstream base URL is not configured'
+            : 'embedding upstream base URL and API key are not configured',
       },
       audio: {
         available: true,
