@@ -46,8 +46,35 @@ npm run content:pipeline:service
 - `CONTENT_PIPELINE_WORK_ROOT`：manifest 默认工作根目录，默认 `tmp/content-pipeline`。
 - `CONTENT_PIPELINE_MAIN_DB`：书籍查询使用的主数据库；默认依次读取 `NOVEL_READER_MAIN_DB`、`NOVEL_READER_DB_PATH` 或 `~/.novel_reader/novel_reader.sqlite`。
 - `CONTENT_PIPELINE_SERVICE_TOKEN`：设置后 API 需要 `Authorization: Bearer <token>`；本机开发可不设置。
+- `PRODUCTION_PIPELINE_RUN_ROOT`：Production Pipeline v2 的默认 run 根目录，默认 `tmp/production-pipeline/runs`。
 
 不知道 `bookId` 时，先在控制台左侧“主数据库书籍”里搜索书名或直接点“查询书籍”，选中书籍后会自动填入 `Book ID` 和标题。
+
+### 使用 Production Pipeline v2
+
+新的 v2 流水线不依赖 PC 本地 API 服务。打开 `http://127.0.0.1:6290` 后，将“模式”切到
+`Production v2`，在 `V2 Job JSON` 中填写 v2 job 文件路径，例如：
+
+```text
+production-pipeline/config/shuanglongzhuan_jog.json
+```
+
+点击“启动”后，控制台会调用：
+
+```bash
+npm run production-pipeline -- run --job <job.json>
+```
+
+任务详情里会显示 v2 的 `run.json`、阶段状态、子阶段 `runJson` 和日志路径。也可以直接通过 API 启动：
+
+```bash
+curl -X POST http://127.0.0.1:6290/api/jobs \
+  -H 'content-type: application/json' \
+  -d '{
+    "action": "production-v2",
+    "jobPath": "production-pipeline/config/example.job.json"
+  }'
+```
 
 使用配置文件提供默认 Gateway、脚本路径和输出目录：
 
