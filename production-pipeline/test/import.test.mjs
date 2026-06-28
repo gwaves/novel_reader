@@ -75,7 +75,7 @@ describe('production-pipeline import', () => {
     try {
       const txtPath = join(tempDir, 'sample.txt')
       const dbPath = join(tempDir, 'main.sqlite')
-      await writeFile(txtPath, `第一章 开始\n这是第一章内容。\n\n第二章 继续\n这是第二章内容。`, 'utf8')
+      await writeFile(txtPath, `第一章 开始\n这是第一章内容。`, 'utf8')
 
       const { stdout } = await execFileAsync(process.execPath, [
         cliPath,
@@ -104,7 +104,7 @@ describe('production-pipeline import', () => {
       const txtPath = join(tempDir, 'sample.txt')
       const dbPath = join(tempDir, 'main.sqlite')
       const runRoot = join(tempDir, 'runs')
-      await writeFile(txtPath, `第一章 开始\n这是第一章内容。\n\n第二章 继续\n这是第二章内容。`, 'utf8')
+      await writeFile(txtPath, `第一章 开始\n这是第一章内容。`, 'utf8')
 
       const args = [
         cliPath,
@@ -452,7 +452,7 @@ describe('production-pipeline import', () => {
       const dbPath = join(tempDir, 'main.sqlite')
       const runRoot = join(tempDir, 'runs')
       const jobPath = join(tempDir, 'job.json')
-      await writeFile(txtPath, `第一章 开始\n这是第一章内容。`, 'utf8')
+      await writeFile(txtPath, `第一章 开始\n这是第一章内容。\n\n第二章 继续\n这是第二章内容。`, 'utf8')
       await execFileAsync(process.execPath, [
         cliPath,
         'import',
@@ -598,7 +598,7 @@ describe('production-pipeline import', () => {
       const jobPath = join(tempDir, 'job.json')
       const badJobPath = join(tempDir, 'bad-job.json')
       const ttsConfigPath = join(tempDir, 'tts-config.json')
-      await writeFile(txtPath, `第一章 开始\n这是第一章内容。`, 'utf8')
+      await writeFile(txtPath, `第一章 开始\n这是第一章内容。\n\n第二章 继续\n这是第二章内容。`, 'utf8')
       await writeFile(ttsConfigPath, JSON.stringify({ ok: true }), 'utf8')
       await writeFile(
         jobPath,
@@ -666,6 +666,54 @@ describe('production-pipeline import', () => {
         /Doctor failed: \d+ check\(s\) failed\./,
       )
     } finally {
+      await rm(tempDir, { recursive: true, force: true })
+    }
+  })
+
+  it('preflights Ollama embedding model names before running', async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), 'production-pipeline-doctor-ollama-test-'))
+    let embeddingServer
+    try {
+      embeddingServer = await startFakeOllamaEmbeddingServer({ models: ['qwen3-embedding:8b'] })
+      const dbPath = join(tempDir, 'main.sqlite')
+      const jobPath = join(tempDir, 'job.json')
+      const badJobPath = join(tempDir, 'bad-job.json')
+      await writeFile(dbPath, '')
+      const baseJob = {
+        bookId: 'sample-book',
+        title: '样书',
+        mainDbPath: dbPath,
+        stages: ['embedding'],
+        embedding: {
+          provider: 'ollama',
+          baseUrl: embeddingServer.url,
+          model: 'qwen3-embedding:8b',
+        },
+      }
+      await writeFile(jobPath, JSON.stringify(baseJob), 'utf8')
+      await writeFile(
+        badJobPath,
+        JSON.stringify({
+          ...baseJob,
+          embedding: { ...baseJob.embedding, model: 'qwen3-embedding-8:b' },
+        }),
+        'utf8',
+      )
+
+      const { stdout } = await execFileAsync(process.execPath, [
+        cliPath,
+        'doctor',
+        '--job',
+        jobPath,
+      ])
+      assert.match(stdout, /ok: embedding\.ollama\.model - qwen3-embedding:8b/)
+
+      await assert.rejects(
+        () => execFileAsync(process.execPath, [cliPath, 'doctor', '--job', badJobPath]),
+        /Doctor failed: 1 check\(s\) failed\./,
+      )
+    } finally {
+      if (embeddingServer) await embeddingServer.close()
       await rm(tempDir, { recursive: true, force: true })
     }
   })
@@ -1008,6 +1056,75 @@ describe('production-pipeline import', () => {
         assert.equal(chunkCount, 2)
         const dimension = db.prepare('SELECT dimension FROM summary_embeddings LIMIT 1').get().dimension
         assert.equal(dimension, 3)
+      } finally {
+        db.close()
+      }
+    } finally {
+      if (embeddingServer) await embeddingServer.close()
+      await rm(tempDir, { recursive: true, force: true })
+    }
+  })
+
+  it('generates embeddings through the Ollama embedding API shape', async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), 'production-pipeline-ollama-embedding-test-'))
+    let embeddingServer
+    try {
+      const txtPath = join(tempDir, 'sample.txt')
+      const dbPath = join(tempDir, 'main.sqlite')
+      const runRoot = join(tempDir, 'runs')
+      await writeFile(txtPath, `第一章 开始\n这是第一章内容。\n\n第二章 继续\n这是第二章内容。`, 'utf8')
+      await execFileAsync(process.execPath, [
+        cliPath,
+        'import',
+        '--file',
+        txtPath,
+        '--book-id',
+        'sample-book',
+        '--title',
+        '样书',
+        '--main-db',
+        dbPath,
+        '--run-root',
+        runRoot,
+      ])
+      seedSummaries(dbPath)
+      embeddingServer = await startFakeOllamaEmbeddingServer()
+
+      const { stdout } = await execFileAsync(process.execPath, [
+        cliPath,
+        'embedding',
+        '--book-id',
+        'sample-book',
+        '--provider',
+        'ollama',
+        '--base-url',
+        embeddingServer.url,
+        '--model',
+        'qwen3-embedding:8b',
+        '--limit',
+        '1',
+        '--main-db',
+        dbPath,
+        '--run-root',
+        runRoot,
+      ])
+
+      assert.match(stdout, /embedding targets: 1/)
+      assert.match(stdout, /embedding finish: 1\/1 completed=1 failed=0 chunkCompleted=1 chunkFailed=0/)
+      assert.equal(embeddingServer.requests.length, 2)
+      assert.deepEqual(
+        [...new Set(embeddingServer.requests.map((request) => request.model))],
+        ['qwen3-embedding:8b'],
+      )
+      assert.ok(embeddingServer.requests.every((request) => request.prompt && !('input' in request)))
+      const db = new DatabaseSync(dbPath, { readOnly: true })
+      try {
+        const summaryCount = db.prepare('SELECT COUNT(*) AS count FROM summary_embeddings WHERE book_id = ? AND model = ?')
+          .get('sample-book', 'qwen3-embedding:8b').count
+        const chunkCount = db.prepare('SELECT COUNT(*) AS count FROM chapter_chunk_embeddings WHERE book_id = ? AND model = ?')
+          .get('sample-book', 'qwen3-embedding:8b').count
+        assert.equal(summaryCount, 1)
+        assert.equal(chunkCount, 1)
       } finally {
         db.close()
       }
@@ -1450,6 +1567,40 @@ async function startFakeEmbeddingServer() {
   })
   const address = server.address()
   return {
+    url: `http://127.0.0.1:${address.port}`,
+    close: () => new Promise((resolve, reject) => server.close((error) => (error ? reject(error) : resolve()))),
+  }
+}
+
+async function startFakeOllamaEmbeddingServer({ models = ['qwen3-embedding:8b'] } = {}) {
+  const requests = []
+  const server = createServer(async (request, response) => {
+    const url = new URL(request.url, 'http://127.0.0.1')
+    if (request.method === 'GET' && url.pathname === '/api/tags') {
+      sendJson(response, {
+        models: models.map((model) => ({ name: model, model })),
+      })
+      return
+    }
+    if (request.method !== 'POST' || url.pathname !== '/api/embeddings') {
+      sendJson(response, { error: { code: 'not_found' } }, 404)
+      return
+    }
+    const body = await readRequestJson(request)
+    requests.push(body)
+    const prompt = String(body.prompt || '')
+    const base = Math.max(1, prompt.length % 10)
+    sendJson(response, {
+      embedding: [base, base + 1, base + 2],
+    })
+  })
+  await new Promise((resolve, reject) => {
+    server.once('error', reject)
+    server.listen(0, '127.0.0.1', resolve)
+  })
+  const address = server.address()
+  return {
+    requests,
     url: `http://127.0.0.1:${address.port}`,
     close: () => new Promise((resolve, reject) => server.close((error) => (error ? reject(error) : resolve()))),
   }

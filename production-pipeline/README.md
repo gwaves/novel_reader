@@ -25,7 +25,7 @@ npm run production-pipeline -- import --file <path> --book-id <bookId> --title <
 npm run production-pipeline -- summary --book-id <bookId> --provider openai-compatible --base-url <url> --model <model>
 npm run production-pipeline -- kg --book-id <bookId> --provider openai-compatible --base-url <url> --model <model>
 npm run production-pipeline -- package --book-id <bookId>
-npm run production-pipeline -- embedding --book-id <bookId> --provider openai --base-url <url> --model <model> --concurrency 16
+npm run production-pipeline -- embedding --book-id <bookId> --provider ollama --base-url http://192.168.88.100:11434 --model qwen3-embedding:8b --concurrency 16
 npm run production-pipeline -- audio --book-id <bookId> --source-root tmp/tts/<book>
 npm run production-pipeline -- audio --book-id <bookId> --tts-config ~/.novel_reader/tts-director.config.json --chapters 1-10
 npm run production-pipeline -- publish --run <runId|runDir|run.json> --remote-host <host> --remote-user <user>
@@ -73,6 +73,25 @@ Embedding does not call `127.0.0.1:5174`; it opens SQLite directly. Publish uses
 `rsync` for data/audio files. Verify uses the live Gateway HTTP APIs after
 publish.
 
+Recommended Ollama embedding config:
+
+```json
+{
+  "embedding": {
+    "provider": "ollama",
+    "baseUrl": "http://192.168.88.100:11434",
+    "model": "qwen3-embedding:8b",
+    "concurrency": 16,
+    "retries": 5,
+    "timeoutMs": 300000
+  }
+}
+```
+
+OpenAI-compatible embedding endpoints are still supported by setting
+`provider` to `openai-compatible`; v2 will call `/embeddings` for those and
+`/api/embeddings` for Ollama.
+
 Example for a 大唐双龙传-style TXT import:
 
 ```bash
@@ -95,9 +114,9 @@ cat > tmp/production-pipeline-datang.job.json <<'JSON'
   "summary": { "concurrency": 4 },
   "kg": { "concurrency": 3 },
   "embedding": {
-    "provider": "openai-compatible",
-    "baseUrl": "https://embedding-provider.example/v1",
-    "model": "qwen3-embedding-8b",
+    "provider": "ollama",
+    "baseUrl": "http://192.168.88.100:11434",
+    "model": "qwen3-embedding:8b",
     "concurrency": 16,
     "retries": 5
   },

@@ -2720,6 +2720,10 @@ async function inspectJobPreflight({ checks, job, jobPath, mainDbPath }) {
     }
   }
 
+  if (job.stages.includes('embedding')) {
+    await inspectEmbeddingPreflight(checks, job)
+  }
+
   if (job.stages.includes('publish')) {
     const publish = { ...(job.gateway || {}), ...(job.publish || {}) }
     const hasLocal = Boolean(publish.gatewayDataDir)
@@ -2732,6 +2736,32 @@ async function inspectJobPreflight({ checks, job, jobPath, mainDbPath }) {
     addDoctorCheck(checks, 'verify.gatewayUrl', Boolean(verify.gatewayUrl || verify.url), verify.gatewayUrl || verify.url || 'missing')
     addDoctorCheck(checks, 'verify.gatewayToken', Boolean(verify.gatewayToken || verify.token), (verify.gatewayToken || verify.token) ? '[present]' : 'missing')
   }
+}
+
+async function inspectEmbeddingPreflight(checks, job) {
+  const embedding = job.embedding || {}
+  const provider = String(embedding.provider || 'ollama').toLowerCase()
+  if (provider !== 'ollama') return
+  const baseUrl = embedding.baseUrl || embedding.base_url
+  const model = embedding.model
+  if (!baseUrl || !model) return
+  try {
+    const models = await fetchOllamaModelNames(baseUrl)
+    addDoctorCheck(checks, 'embedding.ollama.model', models.includes(model), models.includes(model) ? model : `missing ${model}; available: ${models.join(', ') || 'none'}`)
+  } catch (error) {
+    addDoctorCheck(checks, 'embedding.ollama.model', false, error instanceof Error ? error.message : String(error))
+  }
+}
+
+async function fetchOllamaModelNames(baseUrl) {
+  const response = await fetch(`${trimTrailingSlash(baseUrl)}/api/tags`, {
+    signal: AbortSignal.timeout(5_000),
+  })
+  if (!response.ok) throw new Error(`Ollama tags failed: ${response.status} ${response.statusText}`)
+  const data = await response.json()
+  return (Array.isArray(data?.models) ? data.models : [])
+    .map((model) => String(model.name || model.model || '').trim())
+    .filter(Boolean)
 }
 
 function addDoctorCheck(checks, name, ok, message = '') {

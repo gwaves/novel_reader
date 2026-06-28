@@ -5,7 +5,15 @@
   "source": {
     "type": "main-db"
   },
-  "stages": ["summary", "kg", "embedding", "audio", "package", "publish", "verify"],
+  "stages": [
+    "summary",
+    "kg",
+    "embedding",
+    "audio",
+    "package",
+    "publish",
+    "verify"
+  ],
   "llm": {
     "provider": "openai-compatible",
     "baseUrl": "http://llm-provider.example/v1",
@@ -22,9 +30,9 @@
     "concurrency": 3
   },
   "embedding": {
-    "provider": "openai-compatible",
-    "baseUrl": "https://embedding-provider.example/v1",
-    "model": "qwen3-embedding-8b",
+    "provider": "ollama",
+    "baseUrl": "http://192.168.88.100:11434",
+    "model": "qwen3-embedding:8b",
     "concurrency": 16,
     "retries": 5,
     "timeoutMs": 300000
