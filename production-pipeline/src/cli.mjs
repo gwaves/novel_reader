@@ -2856,7 +2856,7 @@ function buildStageExecutionGroups(stages) {
   const groups = []
   const remaining = [...stages]
   const parallelAfterImport = new Set(['summary', 'kg', 'chunkEmbedding', 'audio'])
-  const barriers = new Set(['summaryEmbedding', 'package', 'publish', 'verify'])
+  const barriers = new Set(['package', 'publish', 'verify'])
   let index = 0
   while (index < remaining.length) {
     const stage = remaining[index]

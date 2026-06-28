@@ -801,6 +801,92 @@ describe('production-pipeline import', () => {
     }
   })
 
+  it('runs audio with initial parallel stages even when it follows embedding in the job', async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), 'production-pipeline-audio-after-embedding-test-'))
+    let chatServer
+    let embeddingServer
+    try {
+      const txtPath = join(tempDir, 'sample.txt')
+      const dbPath = join(tempDir, 'main.sqlite')
+      const runRoot = join(tempDir, 'runs')
+      const ttsOutRoot = join(tempDir, 'generated-tts')
+      const fakeDirectorPath = join(tempDir, 'fake-tts-director.mjs')
+      const fakeConfigPath = join(tempDir, 'fake-tts-config.json')
+      const jobPath = join(tempDir, 'job.json')
+      await writeFile(txtPath, `第一章 开始\n这是第一章内容。`, 'utf8')
+      await writeFile(fakeConfigPath, JSON.stringify({ ok: true }), 'utf8')
+      await writeFile(fakeDirectorPath, fakeTtsDirectorSource(), 'utf8')
+      chatServer = await startFakeChatServer()
+      embeddingServer = await startFakeEmbeddingServer()
+      await writeFile(
+        jobPath,
+        JSON.stringify({
+          bookId: 'sample-book',
+          title: '样书',
+          mainDbPath: dbPath,
+          source: { file: txtPath },
+          stages: ['import', 'summary', 'kg', 'embedding', 'audio'],
+          llm: {
+            provider: 'openai-compatible',
+            baseUrl: chatServer.url,
+            model: 'fake-chat',
+            concurrency: 10,
+            scheduler: {
+              weights: {
+                summary: 3,
+                kg: 3,
+                audio: 4,
+              },
+            },
+          },
+          summary: { limit: 1 },
+          kg: { limit: 1 },
+          embedding: {
+            provider: 'openai-compatible',
+            baseUrl: embeddingServer.url,
+            model: 'fake-embedding',
+            concurrency: 2,
+          },
+          audio: {
+            ttsConfig: fakeConfigPath,
+            ttsDirectorScript: fakeDirectorPath,
+            ttsOutRoot,
+            chapters: '1',
+            resume: true,
+          },
+        }),
+        'utf8',
+      )
+
+      const { stdout } = await execFileAsync(process.execPath, [
+        cliPath,
+        'run',
+        '--job',
+        jobPath,
+        '--run-root',
+        runRoot,
+      ])
+
+      const parentRunDir = stdout.match(/runDir: (.+)/)?.[1]?.trim()
+      assert.ok(parentRunDir)
+      const runJson = JSON.parse(await readFile(join(parentRunDir, 'run.json'), 'utf8'))
+      assert.equal(runJson.stages.audio.status, 'completed')
+      assert.equal(runJson.stages.summaryEmbedding.status, 'completed')
+      assert.ok(
+        new Date(runJson.stages.audio.startedAt).getTime() <= new Date(runJson.stages.summaryEmbedding.startedAt).getTime(),
+        'audio should start before summaryEmbedding even when audio is listed after embedding',
+      )
+      const summaryReport = JSON.parse(await readFile(join(dirname(runJson.stages.summary.childRunJson), 'artifacts', 'summary-report.json'), 'utf8'))
+      const kgReport = JSON.parse(await readFile(join(dirname(runJson.stages.kg.childRunJson), 'artifacts', 'kg-report.json'), 'utf8'))
+      assert.equal(summaryReport.concurrency, 3)
+      assert.equal(kgReport.concurrency, 3)
+    } finally {
+      if (chatServer) await chatServer.close()
+      if (embeddingServer) await embeddingServer.close()
+      await rm(tempDir, { recursive: true, force: true })
+    }
+  })
+
   it('runs scheduled audio production after sharing the llm pool', async () => {
     const tempDir = await mkdtemp(join(tmpdir(), 'production-pipeline-audio-parallel-test-'))
     let chatServer
