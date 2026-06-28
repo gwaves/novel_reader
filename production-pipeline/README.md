@@ -69,7 +69,8 @@ The job JSON is the repeatable production contract. It should include:
 - `bookId`: canonical id shared by the main DB, Gateway package, and audio catalog.
 - `mainDbPath`: Novel Reader SQLite database path.
 - `stages`: ordered stage list, for example `["summary", "kg", "embedding", "audio", "package", "publish", "verify"]`.
-- `llm` / `summary` / `kg`: chat provider settings and optional stage limits.
+- `llm`: shared chat provider settings for `summary` and `kg`, including model-specific `concurrency`, retries, and timeout.
+- `summary` / `kg`: optional stage limits or overrides; stage-level `concurrency` overrides `llm.concurrency`.
 - `embedding`: provider, base URL, model, concurrency, retries, and timeout.
 - `audio`: either `sourceRoot` for existing MP3 artifacts or `ttsConfig` for generating MP3 first; optional `chapters`, `ttsConcurrency`, `ttsChapters`, and strictness.
 - `gateway` / `publish` / `verify`: rsync target and Gateway HTTP verification settings.
@@ -116,8 +117,8 @@ cat > tmp/production-pipeline-datang.job.json <<'JSON'
     "concurrency": 4,
     "timeoutMs": 300000
   },
-  "summary": { "concurrency": 4 },
-  "kg": { "concurrency": 3 },
+  "summary": { "limit": 0 },
+  "kg": { "limit": 0 },
   "embedding": {
     "provider": "ollama",
     "baseUrl": "http://192.168.88.100:11434",

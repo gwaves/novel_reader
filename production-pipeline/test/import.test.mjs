@@ -577,6 +577,58 @@ describe('production-pipeline import', () => {
     }
   })
 
+  it('applies llm concurrency to summary and kg stages', async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), 'production-pipeline-llm-concurrency-test-'))
+    let chatServer
+    try {
+      const txtPath = join(tempDir, 'sample.txt')
+      const dbPath = join(tempDir, 'main.sqlite')
+      const runRoot = join(tempDir, 'runs')
+      const jobPath = join(tempDir, 'job.json')
+      await writeFile(txtPath, `第一章 开始\n这是第一章内容。`, 'utf8')
+      chatServer = await startFakeChatServer()
+      await writeFile(
+        jobPath,
+        JSON.stringify({
+          bookId: 'sample-book',
+          title: '样书',
+          mainDbPath: dbPath,
+          source: { file: txtPath },
+          stages: ['import', 'summary', 'kg'],
+          llm: {
+            provider: 'openai-compatible',
+            baseUrl: chatServer.url,
+            model: 'fake-chat',
+            concurrency: 2,
+          },
+          summary: { limit: 1 },
+          kg: { limit: 1 },
+        }),
+        'utf8',
+      )
+
+      const { stdout } = await execFileAsync(process.execPath, [
+        cliPath,
+        'run',
+        '--job',
+        jobPath,
+        '--run-root',
+        runRoot,
+      ])
+
+      const parentRunDir = stdout.match(/runDir: (.+)/)?.[1]?.trim()
+      assert.ok(parentRunDir)
+      const runJson = JSON.parse(await readFile(join(parentRunDir, 'run.json'), 'utf8'))
+      const summaryReport = JSON.parse(await readFile(join(dirname(runJson.stages.summary.childRunJson), 'artifacts', 'summary-report.json'), 'utf8'))
+      const kgReport = JSON.parse(await readFile(join(dirname(runJson.stages.kg.childRunJson), 'artifacts', 'kg-report.json'), 'utf8'))
+      assert.equal(summaryReport.concurrency, 2)
+      assert.equal(kgReport.concurrency, 2)
+    } finally {
+      if (chatServer) await chatServer.close()
+      await rm(tempDir, { recursive: true, force: true })
+    }
+  })
+
   it('records child log metadata while a child stage is still running', async () => {
     const tempDir = await mkdtemp(join(tmpdir(), 'production-pipeline-running-child-test-'))
     let chatServer

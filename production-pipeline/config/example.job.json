@@ -24,10 +24,10 @@
     "timeoutMs": 300000
   },
   "summary": {
-    "concurrency": 4
+    "limit": 0
   },
   "kg": {
-    "concurrency": 3
+    "limit": 0
   },
   "embedding": {
     "provider": "ollama",
