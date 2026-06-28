@@ -7,7 +7,7 @@ import { EventEmitter } from 'node:events'
 import { createReadStream, existsSync, readdirSync, readFileSync } from 'node:fs'
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
-import { basename, dirname, join, resolve } from 'node:path'
+import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
@@ -166,6 +166,16 @@ export async function buildContentPipelineService(config = loadServiceConfig()) 
     if (!job) throw httpError(404, 'job_not_found', `Job not found: ${request.params.jobId}`)
     reply.type('text/plain; charset=utf-8')
     return reply.send(createReadStream(job.logFile))
+  })
+
+  app.get('/api/jobs/:jobId/production-file', async (request, reply) => {
+    const job = store.getJob(request.params.jobId)
+    if (!job) throw httpError(404, 'job_not_found', `Job not found: ${request.params.jobId}`)
+    const productionRun = await readProductionRunState(job)
+    if (!productionRun?.runDir) throw httpError(404, 'production_run_not_found', `Production run not found for job: ${job.id}`)
+    const filePath = resolveProductionRunFile(productionRun.runDir, requiredString(readQueryValue(request.query, 'path'), 'path is required.'))
+    reply.type(filePath.endsWith('.json') ? 'application/json; charset=utf-8' : 'text/plain; charset=utf-8')
+    return reply.send(createReadStream(filePath))
   })
 
   app.get('/api/jobs/:jobId/events', async (request, reply) => {
@@ -730,7 +740,7 @@ function renderConsoleHtml() {
         const stage = manifest.stages?.[name] || { status: 'pending', message: '', error: '' };
         return '<div class="stage"><strong>' + name + '</strong><span class="status ' + stage.status + '">' + stage.status + '</span><div class="meta">' + escapeHtml(stage.error || stage.message || '') + '</div></div>';
       }).join('');
-      const productionRun = renderProductionRun(body.productionRun);
+      const productionRun = renderProductionRun(job.id, body.productionRun);
       const legacyStagesPanel = productionRun ? '' : '<div class="panel"><h2>阶段</h2><div class="stages">' + stages + '</div></div>';
       const logs = (job.logs || []).map(item => '[' + item.at + '] ' + item.stream + ': ' + item.line).join('\\n');
       document.getElementById('detail').className = '';
@@ -739,19 +749,25 @@ function renderConsoleHtml() {
       if (nextLog && shouldStickToBottom) nextLog.scrollTop = nextLog.scrollHeight;
       await loadJobs();
     }
-    function renderProductionRun(productionRun) {
+    function renderProductionRun(jobId, productionRun) {
       if (!productionRun) return '';
       const run = productionRun.runJson || {};
       const stages = run.stages || {};
       const stageCards = Object.keys(stages).map(name => {
         const stage = stages[name] || {};
         const children = normalizeProductionChildren(stage).map((child, index) => {
-          const label = child.childRunJson ? 'runJson: ' + child.childRunJson : (child.childRunDir ? 'runDir: ' + child.childRunDir : '');
-          return '<div class="child"><div class="meta mono">' + escapeHtml(label || ('child ' + (index + 1))) + '</div>' + (child.logFile ? '<div class="meta mono">log: ' + escapeHtml(child.logFile) + '</div>' : '') + '</div>';
+          const label = child.childRunJson ? renderProductionFileLink(jobId, 'runJson', child.childRunJson) : (child.childRunDir ? 'runDir: ' + escapeHtml(child.childRunDir) : '');
+          return '<div class="child"><div class="meta mono">' + (label || ('child ' + (index + 1))) + '</div>' + (child.logFile ? '<div class="meta mono">' + renderProductionFileLink(jobId, 'log', child.logFile) + '</div>' : '') + '</div>';
         }).join('');
         return '<div class="stage"><strong>' + escapeHtml(name) + '</strong><span class="status ' + escapeHtml(stage.status || 'unknown') + '">' + escapeHtml(stage.status || 'unknown') + '</span><div class="meta">' + escapeHtml(stage.error || stage.message || '') + '</div>' + children + '</div>';
       }).join('');
-      return '<div class="panel"><div class="topline"><div><h2>Production v2</h2><div class="meta mono">' + escapeHtml(productionRun.runJsonPath || '等待 run.json...') + '</div></div><span class="status ' + escapeHtml(run.status || 'pending') + '">' + escapeHtml(run.status || 'pending') + '</span></div>' + (stageCards ? '<div class="stages">' + stageCards + '</div>' : '<div class="meta">等待 v2 任务启动。</div>') + '</div>';
+      const runJsonLink = productionRun.runJsonPath ? renderProductionFileLink(jobId, 'run.json', productionRun.runJsonPath) : '等待 run.json...';
+      return '<div class="panel"><div class="topline"><div><h2>Production v2</h2><div class="meta mono">' + runJsonLink + '</div></div><span class="status ' + escapeHtml(run.status || 'pending') + '">' + escapeHtml(run.status || 'pending') + '</span></div>' + (stageCards ? '<div class="stages">' + stageCards + '</div>' : '<div class="meta">等待 v2 任务启动。</div>') + '</div>';
+    }
+    function renderProductionFileLink(jobId, label, path) {
+      const token = document.getElementById('token').value.trim();
+      const url = '/api/jobs/' + encodeURIComponent(jobId) + '/production-file?path=' + encodeURIComponent(path) + (token ? '&token=' + encodeURIComponent(token) : '');
+      return '<a href="' + url + '" target="_blank" rel="noopener">' + escapeHtml(label) + ': ' + escapeHtml(path) + '</a>';
     }
     function normalizeProductionChildren(stage) {
       const children = [];
@@ -938,6 +954,17 @@ function findProductionRunJson(job) {
       return bName.localeCompare(aName)
     })
   return entries[0] || ''
+}
+
+function resolveProductionRunFile(runDir, value) {
+  const root = resolve(runDir)
+  const target = isAbsolute(value) ? resolve(value) : resolve(root, value)
+  const relativePath = relative(root, target)
+  if (relativePath === '' || relativePath.startsWith('..') || isAbsolute(relativePath)) {
+    throw httpError(403, 'production_file_outside_run', 'Requested file is outside the production run directory.')
+  }
+  if (!existsSync(target)) throw httpError(404, 'production_file_not_found', `Production file not found: ${value}`)
+  return target
 }
 
 function readDirectoryEntries(dir) {

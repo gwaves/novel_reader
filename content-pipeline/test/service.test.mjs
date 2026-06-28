@@ -160,6 +160,19 @@ describe('content pipeline service', () => {
       await fileExists(join(dirname(body.productionRun.runJson.stages.package.childRunJson), artifacts.packageFile)),
       true,
     )
+
+    const childRunResponse = await app.inject({
+      method: 'GET',
+      url: `/api/jobs/${jobId}/production-file?path=${encodeURIComponent(body.productionRun.runJson.stages.package.childRunJson)}`,
+    })
+    assert.equal(childRunResponse.statusCode, 200)
+    assert.equal(childRunResponse.json().command, 'package')
+
+    const outsideResponse = await app.inject({
+      method: 'GET',
+      url: `/api/jobs/${jobId}/production-file?path=${encodeURIComponent(jobPath)}`,
+    })
+    assert.equal(outsideResponse.statusCode, 403)
   })
 
   it('defaults audio jobs without chapters to the full book range', async () => {
