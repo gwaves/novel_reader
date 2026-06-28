@@ -52,8 +52,8 @@ describe('production-pipeline import', () => {
           .all()
           .map(plainRow)
         assert.deepEqual(chapters, [
-          { id: '1-第一章 开始', chapterIndex: 1, title: '第一章 开始' },
-          { id: '2-第二章 继续', chapterIndex: 2, title: '第二章 继续' },
+          { id: 'sample-book:ch00001', chapterIndex: 1, title: '第一章 开始' },
+          { id: 'sample-book:ch00002', chapterIndex: 2, title: '第二章 继续' },
         ])
       } finally {
         db.close()
@@ -129,6 +129,83 @@ describe('production-pipeline import', () => {
     }
   })
 
+  it('uses book-scoped chapter ids to avoid collisions with existing books', async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), 'production-pipeline-import-collision-test-'))
+    try {
+      const txtPath = join(tempDir, 'sample.txt')
+      const dbPath = join(tempDir, 'main.sqlite')
+      const runRoot = join(tempDir, 'runs')
+      await writeFile(txtPath, `第一章 开始\n这是第一章内容。`, 'utf8')
+
+      const db = new DatabaseSync(dbPath)
+      try {
+        db.exec(`
+          PRAGMA foreign_keys = ON;
+          CREATE TABLE books (
+            id TEXT PRIMARY KEY,
+            title TEXT NOT NULL,
+            imported_at TEXT NOT NULL,
+            chapter_count INTEGER NOT NULL DEFAULT 0,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+          );
+          CREATE TABLE chapters (
+            id TEXT PRIMARY KEY,
+            book_id TEXT NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+            chapter_index INTEGER NOT NULL,
+            title TEXT NOT NULL,
+            content TEXT NOT NULL,
+            word_count INTEGER NOT NULL,
+            updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+          );
+        `)
+        db.prepare('INSERT INTO books (id, title, imported_at, chapter_count) VALUES (?, ?, ?, ?)').run(
+          'legacy-book',
+          '旧书',
+          '2026-06-28T00:00:00.000Z',
+          1,
+        )
+        db.prepare('INSERT INTO chapters (id, book_id, chapter_index, title, content, word_count) VALUES (?, ?, ?, ?, ?, ?)').run(
+          '1-第一章 开始',
+          'legacy-book',
+          1,
+          '第一章 开始',
+          '旧章节内容。',
+          6,
+        )
+      } finally {
+        db.close()
+      }
+
+      await execFileAsync(process.execPath, [
+        cliPath,
+        'import',
+        '--file',
+        txtPath,
+        '--book-id',
+        'sample-book',
+        '--main-db',
+        dbPath,
+        '--run-root',
+        runRoot,
+      ])
+
+      const verifyDb = new DatabaseSync(dbPath, { readOnly: true })
+      try {
+        const rows = verifyDb.prepare('SELECT id, book_id AS bookId FROM chapters ORDER BY book_id, chapter_index')
+          .all()
+          .map(plainRow)
+        assert.deepEqual(rows, [
+          { id: '1-第一章 开始', bookId: 'legacy-book' },
+          { id: 'sample-book:ch00001', bookId: 'sample-book' },
+        ])
+      } finally {
+        verifyDb.close()
+      }
+    } finally {
+      await rm(tempDir, { recursive: true, force: true })
+    }
+  })
+
   it('packages a main DB book into Gateway package artifacts', async () => {
     const tempDir = await mkdtemp(join(tmpdir(), 'production-pipeline-package-test-'))
     try {
@@ -175,13 +252,13 @@ describe('production-pipeline import', () => {
       assert.equal(bookPackage.book.chapterCount, 2)
       assert.equal(bookPackage.book.summaryCoverage, 1)
       assert.equal(bookPackage.book.embeddingCoverage, 1)
-      assert.equal(bookPackage.chapters[0].id, '1-第一章 开始')
+      assert.equal(bookPackage.chapters[0].id, 'sample-book:ch00001')
       assert.equal(bookPackage.chapters[0].content, '这是第一章内容。')
       assert.deepEqual(
         bookPackage.summaries.map((summary) => [summary.chapterId, summary.keyPoints]),
         [
-          ['1-第一章 开始', ['要点一']],
-          ['2-第二章 继续', ['要点二']],
+          ['sample-book:ch00001', ['要点一']],
+          ['sample-book:ch00002', ['要点二']],
         ],
       )
       assert.deepEqual(bookPackage.embeddings.coverage.summary, {
@@ -836,13 +913,13 @@ describe('production-pipeline import', () => {
       const catalog = JSON.parse(await readFile(catalogPath, 'utf8'))
       assert.deepEqual(
         catalog.chapters.map((chapter) => chapter.chapterId),
-        ['1-第一章 开始', '2-第二章 继续'],
+        ['sample-book:ch00001', 'sample-book:ch00002'],
       )
       assert.equal(catalog.chapters[0].timelineVersion, 2)
       assert.equal(catalog.chapters[0].durationMs, 1250)
       assert.equal(catalog.chapters[1].timelineVersion, 3)
       assert.equal(catalog.chapters[1].durationMs, 2500)
-      assert.match(catalog.chapters[0].fileName, /^ch001-1\//)
+      assert.match(catalog.chapters[0].fileName, /^ch001-sample-book-ch00001\//)
       assert.equal(await fileExists(join(dirname(catalogPath), catalog.chapters[0].fileName)), true)
     } finally {
       await rm(tempDir, { recursive: true, force: true })
@@ -902,7 +979,7 @@ describe('production-pipeline import', () => {
       const catalog = JSON.parse(await readFile(catalogPath, 'utf8'))
       assert.deepEqual(
         catalog.chapters.map((chapter) => chapter.chapterId),
-        ['1-第一章 开始', '2-第二章 继续'],
+        ['sample-book:ch00001', 'sample-book:ch00002'],
       )
       assert.equal(await fileExists(join(ttsOutRoot, 'ch001-full', 'audio', 'chapter.mp3')), true)
       assert.equal(await fileExists(join(dirname(catalogPath), catalog.chapters[0].fileName)), true)
@@ -957,7 +1034,7 @@ describe('production-pipeline import', () => {
         schemaVersion: 1,
         chapters: [
           {
-            chapterId: '1-第一章 开始',
+            chapterId: 'sample-book:ch00001',
             title: '第一章 开始',
             fileName: 'ch001-1/chapter.mp3',
             manifestFileName: 'ch001-1/manifest.json',
@@ -1291,8 +1368,8 @@ function seedSummaries(dbPath) {
       INSERT INTO summaries (chapter_id, short, detail, key_points_json, skippable, generated_by, updated_at)
       VALUES (?, ?, ?, ?, 'false', 'test', CURRENT_TIMESTAMP)
     `)
-    insert.run('1-第一章 开始', '短摘要一', '详细摘要一', JSON.stringify(['要点一']))
-    insert.run('2-第二章 继续', '短摘要二', '详细摘要二', JSON.stringify(['要点二']))
+    insert.run('sample-book:ch00001', '短摘要一', '详细摘要一', JSON.stringify(['要点一']))
+    insert.run('sample-book:ch00002', '短摘要二', '详细摘要二', JSON.stringify(['要点二']))
   } finally {
     db.close()
   }
@@ -1330,16 +1407,16 @@ function seedEmbeddings(dbPath) {
       INSERT INTO summary_embeddings (chapter_id, book_id, model, dimension, embedding_json, generated_at)
       VALUES (?, 'sample-book', 'fake-embedding', 3, '[1,2,3]', CURRENT_TIMESTAMP)
     `)
-    insertSummary.run('1-第一章 开始')
-    insertSummary.run('2-第二章 继续')
+    insertSummary.run('sample-book:ch00001')
+    insertSummary.run('sample-book:ch00002')
     const insertChunk = db.prepare(`
       INSERT INTO chapter_chunk_embeddings (
         id, book_id, chapter_id, chapter_index, chunk_index, start_offset, end_offset, text, model, dimension, embedding_json, generated_at
       )
       VALUES (?, 'sample-book', ?, ?, 0, 0, 8, ?, 'fake-embedding', 3, '[1,2,3]', CURRENT_TIMESTAMP)
     `)
-    insertChunk.run('sample-book:1-第一章 开始:0:fake-embedding', '1-第一章 开始', 1, '这是第一章内容。')
-    insertChunk.run('sample-book:2-第二章 继续:0:fake-embedding', '2-第二章 继续', 2, '这是第二章内容。')
+    insertChunk.run('sample-book:ch00001:0:fake-embedding', 'sample-book:ch00001', 1, '这是第一章内容。')
+    insertChunk.run('sample-book:ch00002:0:fake-embedding', 'sample-book:ch00002', 2, '这是第二章内容。')
   } finally {
     db.close()
   }
@@ -1348,9 +1425,9 @@ function seedEmbeddings(dbPath) {
 function pruneSecondChapterGeneratedData(dbPath) {
   const db = new DatabaseSync(dbPath)
   try {
-    db.prepare('DELETE FROM summaries WHERE chapter_id = ?').run('2-第二章 继续')
-    db.prepare('DELETE FROM summary_embeddings WHERE chapter_id = ?').run('2-第二章 继续')
-    db.prepare('DELETE FROM chapter_chunk_embeddings WHERE chapter_id = ?').run('2-第二章 继续')
+    db.prepare('DELETE FROM summaries WHERE chapter_id = ?').run('sample-book:ch00002')
+    db.prepare('DELETE FROM summary_embeddings WHERE chapter_id = ?').run('sample-book:ch00002')
+    db.prepare('DELETE FROM chapter_chunk_embeddings WHERE chapter_id = ?').run('sample-book:ch00002')
   } finally {
     db.close()
   }
@@ -1429,11 +1506,11 @@ function seedKnowledgeGraph(dbPath) {
     db.prepare(`
       INSERT INTO kg_entity_mentions (id, entity_id, book_id, chapter_id, chapter_index, evidence, confidence)
       VALUES (?, ?, 'sample-book', ?, ?, ?, 0.9)
-    `).run('mention-a', 'entity-a', '1-第一章 开始', 1, '阿甲出现')
+    `).run('mention-a', 'entity-a', 'sample-book:ch00001', 1, '阿甲出现')
     db.prepare(`
       INSERT INTO kg_entity_mentions (id, entity_id, book_id, chapter_id, chapter_index, evidence, confidence)
       VALUES (?, ?, 'sample-book', ?, ?, ?, 0.8)
-    `).run('mention-b', 'entity-b', '1-第一章 开始', 1, '乙门出现')
+    `).run('mention-b', 'entity-b', 'sample-book:ch00001', 1, '乙门出现')
     db.prepare(`
       INSERT INTO kg_relations (
         id, book_id, source_entity_id, target_entity_id, type, description, confidence,
@@ -1443,7 +1520,7 @@ function seedKnowledgeGraph(dbPath) {
     `).run()
     db.prepare(`
       INSERT INTO kg_relation_mentions (id, relation_id, book_id, chapter_id, chapter_index, evidence, confidence)
-      VALUES ('relation-mention-a-b', 'relation-a-b', 'sample-book', '1-第一章 开始', 1, '阿甲在长安帮助乙门', 0.85)
+      VALUES ('relation-mention-a-b', 'relation-a-b', 'sample-book', 'sample-book:ch00001', 1, '阿甲在长安帮助乙门', 0.85)
     `).run()
   } finally {
     db.close()

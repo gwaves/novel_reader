@@ -1508,7 +1508,7 @@ function normalizeParsedChapters(parsedChapters, bookId) {
       const title = String(chapter.title || `第 ${index + 1} 章`).trim()
       const content = String(chapter.content || '').trim()
       return {
-        id: `${index + 1}-${title}`,
+        id: buildChapterId(bookId, index + 1),
         bookId,
         index: index + 1,
         title,
@@ -1517,6 +1517,10 @@ function normalizeParsedChapters(parsedChapters, bookId) {
       }
     })
     .filter((chapter) => chapter.title && chapter.content)
+}
+
+function buildChapterId(bookId, chapterIndex) {
+  return `${bookId}:ch${String(chapterIndex).padStart(5, '0')}`
 }
 
 async function readBookFromMainDb(dbPath, bookId) {
