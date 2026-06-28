@@ -996,6 +996,8 @@ describe('production-pipeline import', () => {
         runRoot,
       ])
 
+      assert.match(stdout, /embedding start: 0\/2 completed=0 failed=0 chunkCompleted=0 chunkFailed=0/)
+      assert.match(stdout, /embedding finish: 2\/2 completed=2 failed=0 chunkCompleted=2 chunkFailed=0/)
       assert.match(stdout, /embedding targets: 2/)
       assert.match(stdout, /completed: 2/)
       const db = new DatabaseSync(dbPath, { readOnly: true })
@@ -1058,6 +1060,8 @@ describe('production-pipeline import', () => {
         runRoot,
       ])
 
+      assert.match(stdout, /kg start: 0\/2 completed=0 failed=0 entityMentions=0 relationMentions=0/)
+      assert.match(stdout, /kg finish: 2\/2 completed=2 failed=0 entityMentions=4 relationMentions=2/)
       assert.match(stdout, /kg targets: 2/)
       assert.match(stdout, /completed: 2/)
       const db = new DatabaseSync(dbPath, { readOnly: true })
@@ -1121,6 +1125,8 @@ describe('production-pipeline import', () => {
         runRoot,
       ])
 
+      assert.match(stdout, /summary start: 0\/2 completed=0 failed=0/)
+      assert.match(stdout, /summary finish: 2\/2 completed=2 failed=0/)
       assert.match(stdout, /summary targets: 2/)
       assert.match(stdout, /completed: 2/)
       const db = new DatabaseSync(dbPath, { readOnly: true })

@@ -647,6 +647,15 @@ async function runSummary(options) {
       total: targets.length,
       errors: [],
     }
+    const progress = createStageProgressLogger({
+      stage: 'summary',
+      total: targets.length,
+      getProgress: () => ({
+        completed: results.completed,
+        failed: results.failed,
+      }),
+    })
+    progress.start()
 
     if (!isFlagEnabled(options.dryRun) && targets.length > 0) {
       await runPool(targets, concurrency, async (chapter) => {
@@ -667,8 +676,10 @@ async function runSummary(options) {
             error: error instanceof Error ? error.message : String(error),
           })
         }
+        progress.tick()
       })
     }
+    progress.finish()
 
     const finishedAt = new Date().toISOString()
     const report = {
@@ -791,6 +802,17 @@ async function runKg(options) {
       relationMentions: 0,
       errors: [],
     }
+    const progress = createStageProgressLogger({
+      stage: 'kg',
+      total: targets.length,
+      getProgress: () => ({
+        completed: results.completed,
+        failed: results.failed,
+        entityMentions: results.entityMentions,
+        relationMentions: results.relationMentions,
+      }),
+    })
+    progress.start()
 
     if (!isFlagEnabled(options.dryRun) && targets.length > 0) {
       await runPool(targets, concurrency, async (chapter) => {
@@ -822,8 +844,10 @@ async function runKg(options) {
             errorDb.close()
           }
         }
+        progress.tick()
       })
     }
+    progress.finish()
 
     const finishedAt = new Date().toISOString()
     const report = {
@@ -1092,6 +1116,17 @@ async function runEmbedding(options) {
       chunkErrors: [],
       dimension: null,
     }
+    const progress = createStageProgressLogger({
+      stage: 'embedding',
+      total: targets.length,
+      getProgress: () => ({
+        completed: results.completed,
+        failed: results.failed,
+        chunkCompleted: results.chunkCompleted,
+        chunkFailed: results.chunkFailed,
+      }),
+    })
+    progress.start()
 
     if (!isFlagEnabled(options.dryRun) && targets.length > 0) {
       await runPool(targets, concurrency, async (target) => {
@@ -1105,8 +1140,10 @@ async function runEmbedding(options) {
           utils,
           results,
         })
+        progress.tick()
       })
     }
+    progress.finish()
 
     const finishedAt = new Date().toISOString()
     const report = {
@@ -3419,6 +3456,61 @@ async function runPool(items, concurrency, worker) {
     }
   })
   await Promise.all(workers)
+}
+
+function createStageProgressLogger({ stage, total, getProgress, intervalMs = 30_000, every = 10 }) {
+  let lastLoggedAt = 0
+  let lastLoggedDone = -1
+
+  const readProgress = () => {
+    const progress = getProgress()
+    const completed = Number(progress.completed) || 0
+    const failed = Number(progress.failed) || 0
+    return {
+      ...progress,
+      completed,
+      failed,
+      done: completed + failed,
+    }
+  }
+
+  const log = (label) => {
+    const progress = readProgress()
+    lastLoggedAt = Date.now()
+    lastLoggedDone = progress.done
+    console.log(`[${new Date().toISOString()}] ${stage} ${label}: ${formatStageProgress(progress, total)}`)
+  }
+
+  return {
+    start() {
+      log('start')
+    },
+    tick() {
+      const progress = readProgress()
+      if (progress.done === lastLoggedDone) return
+      const dueByCount = every > 0 && progress.done > 0 && progress.done % every === 0
+      const dueByTime = Date.now() - lastLoggedAt >= intervalMs
+      const finished = total === 0 || progress.done >= total
+      if (dueByCount || dueByTime || finished) log('progress')
+    },
+    finish() {
+      log('finish')
+    },
+  }
+}
+
+function formatStageProgress(progress, total) {
+  const parts = [
+    `${progress.done}/${total}`,
+    `completed=${progress.completed}`,
+    `failed=${progress.failed}`,
+  ]
+  for (const [key, value] of Object.entries(progress)) {
+    if (['completed', 'failed', 'done'].includes(key)) continue
+    if (value == null || value === '') continue
+    parts.push(`${key}=${value}`)
+  }
+  return parts.join(' ')
 }
 
 async function walkFiles(dir, depth, onFile) {
