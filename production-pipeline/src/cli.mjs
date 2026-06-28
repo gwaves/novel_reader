@@ -3311,7 +3311,14 @@ async function prepareAudioSourceRoot({ options, run, book }) {
   if (!shouldGenerateTts(options)) {
     return resolve(required(options.sourceRoot, 'audio requires --source-root <path>, or --tts-config <path> to generate MP3 first'))
   }
-  const sourceRoot = resolve(options.ttsOutRoot || join(run.artifactsDir, 'tts-source'))
+  const defaultSourceRoot = join(run.artifactsDir, 'tts-source')
+  const reusableSourceRoot = !options.ttsOutRoot && isFlagEnabled(options.resume)
+    ? await findReusableTtsSourceRoot(run)
+    : ''
+  const sourceRoot = resolve(options.ttsOutRoot || reusableSourceRoot || defaultSourceRoot)
+  if (reusableSourceRoot) {
+    console.log(`reuse TTS source root: ${sourceRoot}`)
+  }
   if (isFlagEnabled(options.dryRun)) return sourceRoot
 
   const chapters = audioChapterSelection(options, book.chapters.length)
@@ -3356,6 +3363,27 @@ async function prepareAudioSourceRoot({ options, run, book }) {
     || join(sourceRoot, `batch-pipeline-${chapters.split(',')[0]}-${chapters.split(',').at(-1)}.summary.json`)
   if (existsSync(summaryPath)) options.ttsSummaryPath = summaryPath
   return sourceRoot
+}
+
+async function findReusableTtsSourceRoot(run) {
+  const parentDir = dirname(run.rootDir)
+  const currentRunName = basename(run.rootDir)
+  const entries = await readdir(parentDir, { withFileTypes: true }).catch(() => [])
+  const candidates = []
+  for (const entry of entries) {
+    if (!entry.isDirectory() || entry.name === currentRunName) continue
+    const sourceRoot = join(parentDir, entry.name, 'artifacts', 'tts-source')
+    if (!existsSync(sourceRoot)) continue
+    const artifacts = await collectAudioArtifacts(sourceRoot)
+    if (!artifacts.length) continue
+    candidates.push({
+      sourceRoot,
+      audioChapterCount: new Set(artifacts.map((artifact) => artifact.chapterNumber)).size,
+      name: entry.name,
+    })
+  }
+  candidates.sort((left, right) => right.audioChapterCount - left.audioChapterCount || right.name.localeCompare(left.name))
+  return candidates[0]?.sourceRoot || ''
 }
 
 function shouldGenerateTts(options) {
