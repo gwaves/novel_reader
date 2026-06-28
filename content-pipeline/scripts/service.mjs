@@ -182,16 +182,16 @@ export async function buildContentPipelineService(config = loadServiceConfig()) 
       reply.raw.write(`event: job\n`)
       reply.raw.write(`data: ${JSON.stringify(await store.readJobResponse(job.id))}\n\n`)
     }
-    const heartbeat = setInterval(() => {
-      reply.raw.write(`event: heartbeat\ndata: {}\n\n`)
-    }, 15_000)
+    const refresh = setInterval(() => {
+      void send()
+    }, 5_000)
     const listener = (updatedJob) => {
       if (updatedJob.id === job.id) void send()
     }
 
     store.events.on('job', listener)
     request.raw.on('close', () => {
-      clearInterval(heartbeat)
+      clearInterval(refresh)
       store.events.off('job', listener)
     })
     await send()
