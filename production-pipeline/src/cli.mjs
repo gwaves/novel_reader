@@ -340,6 +340,7 @@ async function executeJobStages({ runInfo, job, mainDbPath, resume }) {
         startedAt,
         finishedAt,
         error: error.message,
+        ...childFailureMetadata(error),
       }
       await writeRunJson(runInfo.runJsonPath, {
         ...runInfo.runJson,
@@ -408,6 +409,7 @@ async function executeChildStage(stage, args, runInfo) {
     stdout = error.stdout || ''
     stderr = error.stderr || error.message
     await writeFile(logFile, `${stdout}${stderr ? `\n--- stderr ---\n${stderr}` : ''}`, 'utf8')
+    attachChildStageFailureMetadata(error, { stdout, stage, runInfo, logFile, args })
     throw error
   }
   await writeFile(logFile, `${stdout}${stderr ? `\n--- stderr ---\n${stderr}` : ''}`, 'utf8')
@@ -423,6 +425,28 @@ async function executeChildStage(stage, args, runInfo) {
     childRunDir: childRunJson ? dirname(childRunJson) : childRunDir,
     childRunJson,
     logFile: relativeRunPath(runInfo.rootDir, logFile),
+  }
+}
+
+function attachChildStageFailureMetadata(error, { stdout, stage, runInfo, logFile, args }) {
+  const childRunDir = stdout.match(/runDir: (.+)/)?.[1]?.trim()
+    || dirname(stdout.match(/(?:package|audio|report): (.+)/)?.[1]?.trim() || '')
+  const childRunId = stdout.match(/run: (.+)/)?.[1]?.trim()
+  const childRunJson = childRunDir && existsSync(join(childRunDir, 'run.json'))
+    ? join(childRunDir, 'run.json')
+    : findChildRunJson(runInfo.rootDir, stage, childRunId) || readArgValue(args, '--run')
+  error.childRunId = childRunId || undefined
+  error.childRunDir = childRunJson ? dirname(childRunJson) : (childRunDir || undefined)
+  error.childRunJson = childRunJson || undefined
+  error.logFile = relativeRunPath(runInfo.rootDir, logFile)
+}
+
+function childFailureMetadata(error) {
+  return {
+    ...(error.childRunId ? { childRunId: error.childRunId } : {}),
+    ...(error.childRunDir ? { childRunDir: error.childRunDir } : {}),
+    ...(error.childRunJson ? { childRunJson: error.childRunJson } : {}),
+    ...(error.logFile ? { logFile: error.logFile } : {}),
   }
 }
 

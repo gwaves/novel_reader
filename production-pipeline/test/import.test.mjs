@@ -2,7 +2,7 @@ import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { execFile } from 'node:child_process'
 import { createServer } from 'node:http'
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { DatabaseSync } from 'node:sqlite'
@@ -437,6 +437,59 @@ describe('production-pipeline import', () => {
         '--json',
       ])
       assert.equal(JSON.parse(statusJsonStdout).status, 'completed')
+    } finally {
+      await rm(tempDir, { recursive: true, force: true })
+    }
+  })
+
+  it('keeps child log metadata when a child stage fails', async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), 'production-pipeline-failed-child-test-'))
+    try {
+      const runRoot = join(tempDir, 'runs')
+      const jobPath = join(tempDir, 'job.json')
+      await writeFile(
+        jobPath,
+        JSON.stringify({
+          bookId: 'missing-book',
+          title: '缺失书',
+          mainDbPath: join(tempDir, 'missing.sqlite'),
+          stages: ['package'],
+        }),
+        'utf8',
+      )
+
+      await assert.rejects(
+        () => execFileAsync(process.execPath, [
+          cliPath,
+          'run',
+          '--job',
+          jobPath,
+          '--run-root',
+          runRoot,
+        ]),
+        /Command failed:/,
+      )
+
+      const bookRunRoot = join(runRoot, 'missing-book')
+      const runId = (await readdir(bookRunRoot)).sort().at(-1)
+      const runJsonPath = join(bookRunRoot, runId, 'run.json')
+      const runJson = JSON.parse(await readFile(runJsonPath, 'utf8'))
+      assert.equal(runJson.status, 'failed')
+      assert.equal(runJson.stages.package.status, 'failed')
+      assert.ok(runJson.stages.package.logFile)
+      const logText = await readFile(join(dirname(runJsonPath), runJson.stages.package.logFile), 'utf8')
+      assert.match(logText, /Book not found|no such table|SQLITE_ERROR|unable to open database file/)
+
+      const { stdout: statusStdout } = await execFileAsync(process.execPath, [
+        cliPath,
+        'status',
+        '--run',
+        runJsonPath,
+        '--log-lines',
+        '5',
+      ])
+      assert.match(statusStdout, /- package: failed/)
+      assert.match(statusStdout, /logTail:/)
     } finally {
       await rm(tempDir, { recursive: true, force: true })
     }
