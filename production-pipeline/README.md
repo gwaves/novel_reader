@@ -18,6 +18,8 @@ for final verification.
 ## Current Commands
 
 ```bash
+npm run production-pipeline -- run --job production-pipeline/config/example.job.json
+npm run production-pipeline -- resume --run <runId|runDir|run.json>
 npm run production-pipeline -- import --file <path> --book-id <bookId> --title <title>
 npm run production-pipeline -- package --book-id <bookId>
 npm run production-pipeline -- embedding --book-id <bookId> --provider openai --base-url <url> --model <model> --concurrency 16
@@ -27,7 +29,9 @@ npm run production-pipeline -- verify --run <runId|runDir|run.json> --gateway-ur
 npm run production-pipeline -- status --run <runId>
 ```
 
-`import` writes canonical `books` and `chapters` rows into the main database.
+`run` reads a job JSON and executes the configured stages in order. `resume`
+loads an existing `run.json` and skips stages whose status is already
+`completed`. `import` writes canonical `books` and `chapters` rows into the main database.
 `package` reads those rows and writes Gateway-ready artifacts under the run
 directory. `embedding` reads `summaries` and `chapters` directly from SQLite,
 calls the configured embedding provider, and writes `summary_embeddings` plus
@@ -39,18 +43,69 @@ published book. `verify` checks the live Gateway HTTP APIs against the run
 artifacts, including library visibility, package chapter ids, and audio chapter
 ids/counts when audio artifacts are present.
 
-Planned commands still include stage-level `run` and `resume` once summary, KG,
-embedding, and audio workers are wired into a single full-flow runner.
+The current full-flow runner can orchestrate `import`, `package`, `embedding`,
+`audio`, `publish`, and `verify`. `summary` and `kg` remain planned stage names
+until their workers are moved into v2.
+
+## Job Config
+
+The job JSON is the repeatable production contract. It should include:
+
+- `bookId`: canonical id shared by the main DB, Gateway package, and audio catalog.
+- `mainDbPath`: Novel Reader SQLite database path.
+- `stages`: ordered stage list, for example `["embedding", "audio", "package", "publish", "verify"]`.
+- `embedding`: provider, base URL, model, concurrency, retries, and timeout.
+- `audio`: source directory for existing MP3 artifacts and optional strictness.
+- `gateway` / `publish` / `verify`: rsync target and Gateway HTTP verification settings.
+
+Embedding does not call `127.0.0.1:5174`; it opens SQLite directly. Publish uses
+`rsync` for data/audio files. Verify uses the live Gateway HTTP APIs after
+publish.
+
+Example for a 大唐双龙传-style main-DB book:
+
+```bash
+cat > tmp/production-pipeline-datang.job.json <<'JSON'
+{
+  "bookId": "mqxe7ya6-yiulrd3l",
+  "title": "大唐双龙传",
+  "mainDbPath": "~/.novel_reader/novel_reader.sqlite",
+  "source": { "type": "main-db" },
+  "stages": ["embedding", "audio", "package", "publish", "verify"],
+  "embedding": {
+    "provider": "openai-compatible",
+    "baseUrl": "https://embedding-provider.example/v1",
+    "model": "qwen3-embedding-8b",
+    "concurrency": 16,
+    "retries": 5
+  },
+  "audio": {
+    "sourceRoot": "tmp/tts/datang",
+    "chapters": "all"
+  },
+  "gateway": {
+    "host": "gateway.example.lan",
+    "user": "gwaves",
+    "root": "/home/gwaves/novel-reader-gateway",
+    "url": "https://gateway.example.lan:8888",
+    "token": "GATEWAY_TOKEN_PLACEHOLDER"
+  }
+}
+JSON
+
+npm run production-pipeline -- run --job tmp/production-pipeline-datang.job.json
+```
 
 ## Run Layout
 
 ```text
-tmp/production-pipeline/runs/<runId>/
+tmp/production-pipeline/runs/<bookId>/<runId>/
   run.json
   items.sqlite
   logs/
   artifacts/
   checkpoints/
+  stage-runs/
 ```
 
 `run.json` is the human-readable run summary. `items.sqlite` stores item-level

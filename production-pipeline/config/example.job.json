@@ -1,27 +1,33 @@
 {
   "bookId": "mqxe7ya6-yiulrd3l",
   "title": "大唐双龙传",
+  "mainDbPath": "~/.novel_reader/novel_reader.sqlite",
   "source": {
-    "type": "main-db",
-    "mainDbPath": "~/.novel_reader/novel_reader.sqlite"
+    "type": "main-db"
   },
-  "stages": ["summary", "kg", "embedding", "audio", "package", "publish", "verify"],
+  "stages": ["embedding", "audio", "package", "publish", "verify"],
   "embedding": {
     "provider": "openai-compatible",
-    "baseUrl": "https://kspmas.ksyun.com/v1",
+    "baseUrl": "https://embedding-provider.example/v1",
     "model": "qwen3-embedding-8b",
-    "dimension": 4096,
     "concurrency": 16,
-    "retries": 5
+    "retries": 5,
+    "timeoutMs": 300000
   },
   "audio": {
     "chapters": "all",
-    "concurrency": 16
+    "sourceRoot": "tmp/tts/datang",
+    "concurrency": 16,
+    "strict": true
+  },
+  "publish": {
+    "dryRun": false
   },
   "gateway": {
-    "host": "192.168.88.100",
+    "host": "gateway.example.lan",
     "user": "gwaves",
     "root": "/home/gwaves/novel-reader-gateway",
-    "url": "https://192.168.88.100:8888"
+    "url": "https://gateway.example.lan:8888",
+    "token": "GATEWAY_TOKEN_PLACEHOLDER"
   }
 }

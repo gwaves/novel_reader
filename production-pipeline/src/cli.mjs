@@ -3,14 +3,16 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { execFile } from 'node:child_process'
 import { copyFile, mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises'
-import { existsSync } from 'node:fs'
+import { existsSync, readdirSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, dirname, join, relative, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
 
 const defaultRunRoot = 'tmp/production-pipeline/runs'
 const defaultMainDbPath = '~/.novel_reader/novel_reader.sqlite'
 const defaultRemoteRoot = '/home/gwaves/novel-reader-gateway'
+const cliFilePath = fileURLToPath(import.meta.url)
 const execFileAsync = promisify(execFile)
 let DatabaseSyncCtor
 let bookIngestModule
@@ -31,6 +33,14 @@ async function main() {
 
   if (command === 'import') {
     await runImport(options)
+    return
+  }
+  if (command === 'run') {
+    await runJob(options)
+    return
+  }
+  if (command === 'resume') {
+    await runResume(options)
     return
   }
   if (command === 'package') {
@@ -201,6 +211,179 @@ async function runImport(options) {
   }
 }
 
+async function runJob(options) {
+  const jobPath = resolve(required(options.job, 'run requires --job <path>'))
+  const job = normalizeJobConfig(JSON.parse(await readFile(jobPath, 'utf8')))
+  const mainDbPath = expandPath(options.mainDb || options.mainDbPath || job.mainDbPath || job.source?.mainDbPath || defaultMainDbPath)
+  const run = await createRun({
+    command: 'run',
+    options: redactSensitiveOptions(options),
+    mainDbPath,
+    bookId: job.bookId,
+  })
+  await writeRunJson(run.runJsonPath, {
+    runId: run.runId,
+    command: 'run',
+    status: 'running',
+    createdAt: run.createdAt,
+    updatedAt: run.createdAt,
+    mainDbPath,
+    jobPath,
+    job,
+    stages: {},
+  })
+  await executeJobStages({ runInfo: await loadRunInfo(run.runJsonPath), job, mainDbPath, resume: false })
+}
+
+async function runResume(options) {
+  const runInfo = await loadRunInfo(required(options.run, 'resume requires --run <runId or run path>'))
+  const job = normalizeJobConfig(runInfo.runJson.job || {})
+  const mainDbPath = runInfo.runJson.mainDbPath || expandPath(job.mainDbPath || job.source?.mainDbPath || defaultMainDbPath)
+  await executeJobStages({ runInfo, job, mainDbPath, resume: true })
+}
+
+async function executeJobStages({ runInfo, job, mainDbPath, resume }) {
+  const stages = normalizeStageList(job.stages)
+  const stageResults = { ...(runInfo.runJson.stages || {}) }
+  const context = {
+    packageRunJson: findLatestChildRun(stageResults.package),
+    audioRunJson: findLatestChildRun(stageResults.audio),
+  }
+
+  for (const stage of stages) {
+    if (resume && stageResults[stage]?.status === 'completed') {
+      console.log(`skip: ${stage} already completed`)
+      continue
+    }
+
+    const startedAt = new Date().toISOString()
+    stageResults[stage] = {
+      status: 'running',
+      startedAt,
+    }
+    await writeRunJson(runInfo.runJsonPath, {
+      ...runInfo.runJson,
+      status: 'running',
+      updatedAt: startedAt,
+      stages: stageResults,
+    })
+
+    try {
+      const result = await executePipelineStage({ stage, runInfo, job, mainDbPath, context })
+      const finishedAt = new Date().toISOString()
+      stageResults[stage] = {
+        status: 'completed',
+        startedAt,
+        finishedAt,
+        ...result,
+      }
+      if (stage === 'package') context.packageRunJson = result.childRunJson
+      if (stage === 'audio') context.audioRunJson = result.childRunJson
+      await writeRunJson(runInfo.runJsonPath, {
+        ...runInfo.runJson,
+        status: 'running',
+        updatedAt: finishedAt,
+        stages: stageResults,
+      })
+      console.log(`completed: ${stage}`)
+    } catch (error) {
+      const finishedAt = new Date().toISOString()
+      stageResults[stage] = {
+        status: 'failed',
+        startedAt,
+        finishedAt,
+        error: error.message,
+      }
+      await writeRunJson(runInfo.runJsonPath, {
+        ...runInfo.runJson,
+        status: 'failed',
+        updatedAt: finishedAt,
+        stages: stageResults,
+      })
+      throw error
+    }
+  }
+
+  const finishedAt = new Date().toISOString()
+  await writeRunJson(runInfo.runJsonPath, {
+    ...runInfo.runJson,
+    status: 'completed',
+    updatedAt: finishedAt,
+    stages: stageResults,
+  })
+  console.log(`run: ${runInfo.runJson.runId}`)
+  console.log(`runDir: ${runInfo.rootDir}`)
+  console.log('status: completed')
+}
+
+async function executePipelineStage({ stage, runInfo, job, mainDbPath, context }) {
+  if (stage === 'publish') {
+    const childRuns = []
+    if (context.packageRunJson) childRuns.push(await executeChildStage(stage, buildPublishArgs(job, context.packageRunJson), runInfo))
+    if (context.audioRunJson) childRuns.push(await executeChildStage(stage, buildPublishArgs(job, context.audioRunJson), runInfo))
+    if (!childRuns.length) throw new Error('publish requires a completed package or audio stage.')
+    return {
+      message: `published ${childRuns.length} artifact run(s).`,
+      childRuns,
+    }
+  }
+  if (stage === 'verify') {
+    const childRuns = []
+    if (context.packageRunJson) childRuns.push(await executeChildStage(stage, buildVerifyArgs(job, context.packageRunJson), runInfo))
+    if (context.audioRunJson) childRuns.push(await executeChildStage(stage, buildVerifyArgs(job, context.audioRunJson), runInfo))
+    if (!childRuns.length) throw new Error('verify requires a completed package or audio stage.')
+    return {
+      message: `verified ${childRuns.length} artifact run(s).`,
+      childRuns,
+    }
+  }
+
+  const args = buildStageArgs(stage, job, mainDbPath, runInfo)
+  const childRun = await executeChildStage(stage, args, runInfo)
+  return {
+    message: `completed ${stage}.`,
+    childRunJson: childRun.childRunJson,
+    childRunDir: childRun.childRunDir,
+    logFile: childRun.logFile,
+  }
+}
+
+async function executeChildStage(stage, args, runInfo) {
+  const logFile = join(runInfo.rootDir, 'logs', `${stage}-${Date.now()}.log`)
+  await mkdir(dirname(logFile), { recursive: true })
+  let stdout = ''
+  let stderr = ''
+  try {
+    ;({ stdout, stderr } = await execFileAsync(process.execPath, [cliFilePath, ...args], {
+      maxBuffer: 100 * 1024 * 1024,
+    }))
+  } catch (error) {
+    stdout = error.stdout || ''
+    stderr = error.stderr || error.message
+    await writeFile(logFile, `${stdout}${stderr ? `\n--- stderr ---\n${stderr}` : ''}`, 'utf8')
+    throw error
+  }
+  await writeFile(logFile, `${stdout}${stderr ? `\n--- stderr ---\n${stderr}` : ''}`, 'utf8')
+  const childRunDir = stdout.match(/runDir: (.+)/)?.[1]?.trim()
+    || dirname(stdout.match(/(?:package|audio|report): (.+)/)?.[1]?.trim() || '')
+  const childRunId = stdout.match(/run: (.+)/)?.[1]?.trim()
+  const childRunJson = childRunDir && existsSync(join(childRunDir, 'run.json'))
+    ? join(childRunDir, 'run.json')
+    : findChildRunJson(runInfo.rootDir, stage, childRunId) || readArgValue(args, '--run')
+  return {
+    stage,
+    childRunId,
+    childRunDir: childRunJson ? dirname(childRunJson) : childRunDir,
+    childRunJson,
+    logFile: relativeRunPath(runInfo.rootDir, logFile),
+  }
+}
+
+function readArgValue(args, flag) {
+  const index = args.indexOf(flag)
+  return index >= 0 ? args[index + 1] || '' : ''
+}
+
 async function runPackage(options) {
   const bookId = required(options.bookId, 'package requires --book-id <id>')
   const mainDbPath = expandPath(options.mainDb || options.mainDbPath || defaultMainDbPath)
@@ -258,6 +441,7 @@ async function runPackage(options) {
     console.log(`book: ${bookId} ${book.title}`)
     console.log(`chapters: ${book.chapters.length}`)
     console.log(`package: ${packagePath}`)
+    console.log(`runDir: ${run.rootDir}`)
   } catch (error) {
     const finishedAt = new Date().toISOString()
     await writeRunJson(run.runJsonPath, {
@@ -393,6 +577,7 @@ async function runAudio(options) {
     console.log(`book: ${bookId} ${book.title}`)
     console.log(`audio chapters: ${catalog.chapters.length}`)
     console.log(`audio: ${catalogPath}`)
+    console.log(`runDir: ${run.rootDir}`)
     if (isFlagEnabled(options.dryRun)) console.log('dry-run: audio files were not copied')
   } catch (error) {
     const finishedAt = new Date().toISOString()
@@ -529,6 +714,7 @@ async function runEmbedding(options) {
     console.log(`failed: ${results.failed}`)
     console.log(`chunks: ${results.chunkCompleted}/${results.chunkCompleted + results.chunkFailed}`)
     console.log(`report: ${reportPath}`)
+    console.log(`runDir: ${run.rootDir}`)
     if (isFlagEnabled(options.dryRun)) console.log('dry-run: embeddings were not generated or written')
     if (results.failed || results.chunkFailed) throw new Error('Embedding completed with failures.')
   } catch (error) {
@@ -1227,6 +1413,127 @@ function sameOrderedStrings(actual, expected) {
   return actual.every((value, index) => String(value) === String(expected[index]))
 }
 
+function normalizeJobConfig(job) {
+  if (!job || typeof job !== 'object') throw new Error('Job config must be an object.')
+  const bookId = required(job.bookId, 'job requires bookId')
+  return {
+    ...job,
+    bookId,
+    stages: normalizeStageList(job.stages),
+  }
+}
+
+function normalizeStageList(stages) {
+  if (Array.isArray(stages)) return stages.map((stage) => String(stage).trim()).filter(Boolean)
+  if (typeof stages === 'string') return stages.split(',').map((stage) => stage.trim()).filter(Boolean)
+  return ['package']
+}
+
+function buildStageArgs(stage, job, mainDbPath, runInfo) {
+  const common = ['--book-id', job.bookId, '--main-db', mainDbPath, '--run-root', join(runInfo.rootDir, 'stage-runs', stage)]
+  if (stage === 'import') {
+    const file = job.source?.file || job.source?.path || job.file
+    const title = job.title || job.source?.title
+    const args = ['import', '--file', required(file, 'import stage requires job.source.file'), ...common]
+    if (title) args.push('--title', title)
+    if (isFlagEnabled(job.import?.replace ?? job.replace)) args.push('--replace')
+    return args
+  }
+  if (stage === 'package') return ['package', ...common]
+  if (stage === 'audio') {
+    const sourceRoot = job.audio?.sourceRoot || job.audio?.source_root
+    const args = ['audio', ...common, '--source-root', required(sourceRoot, 'audio stage requires job.audio.sourceRoot')]
+    if (isFlagEnabled(job.audio?.strict)) args.push('--strict')
+    return args
+  }
+  if (stage === 'embedding') {
+    const embedding = job.embedding || {}
+    const args = [
+      'embedding',
+      ...common,
+      '--provider',
+      embedding.provider || 'ollama',
+      '--base-url',
+      required(embedding.baseUrl || embedding.base_url, 'embedding stage requires job.embedding.baseUrl'),
+      '--model',
+      required(embedding.model, 'embedding stage requires job.embedding.model'),
+      '--concurrency',
+      String(embedding.concurrency ?? ''),
+    ]
+    if (embedding.apiKey) args.push('--api-key', embedding.apiKey)
+    if (embedding.timeoutMs) args.push('--timeout-ms', String(embedding.timeoutMs))
+    if (embedding.maxAttempts || embedding.retries) args.push('--max-attempts', String(embedding.maxAttempts || embedding.retries))
+    if (embedding.limit) args.push('--limit', String(embedding.limit))
+    if (isFlagEnabled(embedding.force)) args.push('--force')
+    return args.filter((arg) => arg !== '')
+  }
+  throw new Error(`Unsupported run stage: ${stage}`)
+}
+
+function buildPublishArgs(job, childRunJson) {
+  const publish = job.publish || job.gateway || {}
+  const args = ['publish', '--run', childRunJson]
+  if (publish.gatewayDataDir) args.push('--gateway-data-dir', publish.gatewayDataDir)
+  if (publish.gatewayAudioDir) args.push('--gateway-audio-dir', publish.gatewayAudioDir)
+  if (publish.remoteHost || publish.host) args.push('--remote-host', publish.remoteHost || publish.host)
+  if (publish.remoteUser || publish.user) args.push('--remote-user', publish.remoteUser || publish.user)
+  if (publish.remoteRoot || publish.root) args.push('--remote-root', publish.remoteRoot || publish.root)
+  if (publish.remoteDataDir) args.push('--remote-data-dir', publish.remoteDataDir)
+  if (publish.remoteAudioDir) args.push('--remote-audio-dir', publish.remoteAudioDir)
+  if (publish.sshPort || publish.remoteSshPort) args.push('--ssh-port', String(publish.sshPort || publish.remoteSshPort))
+  if (isFlagEnabled(publish.dryRun ?? job.dryRun)) args.push('--dry-run')
+  return args
+}
+
+function buildVerifyArgs(job, childRunJson) {
+  const verify = job.verify || job.gateway || {}
+  const args = ['verify', '--run', childRunJson]
+  if (verify.gatewayUrl || verify.url) args.push('--gateway-url', verify.gatewayUrl || verify.url)
+  if (verify.gatewayToken || verify.token) args.push('--gateway-token', verify.gatewayToken || verify.token)
+  return args
+}
+
+function findLatestChildRun(stageResult) {
+  if (!stageResult) return ''
+  if (stageResult.childRunJson) return stageResult.childRunJson
+  if (Array.isArray(stageResult.childRuns)) {
+    return stageResult.childRuns.find((child) => child.childRunJson)?.childRunJson || ''
+  }
+  return ''
+}
+
+function findChildRunJson(parentRunDir, stage, childRunId) {
+  if (!childRunId) return ''
+  const stageRoot = join(parentRunDir, 'stage-runs', stage)
+  return findRunJsonUnder(stageRoot, childRunId)
+}
+
+function findRunJsonUnder(root, runId) {
+  if (!existsSync(root)) return ''
+  const direct = join(root, runId, 'run.json')
+  if (existsSync(direct)) return direct
+  const stack = [root]
+  while (stack.length) {
+    const current = stack.pop()
+    const entries = safeReadDirSync(current)
+    for (const entry of entries) {
+      const fullPath = join(current, entry.name)
+      if (!entry.isDirectory()) continue
+      if (entry.name === runId && existsSync(join(fullPath, 'run.json'))) return join(fullPath, 'run.json')
+      stack.push(fullPath)
+    }
+  }
+  return ''
+}
+
+function safeReadDirSync(path) {
+  try {
+    return readdirSync(path, { withFileTypes: true })
+  } catch {
+    return []
+  }
+}
+
 async function readExistingGatewayCatalog(options) {
   if (options.catalogFile) {
     return parseCatalog(await readFile(expandPath(options.catalogFile), 'utf8'))
@@ -1557,6 +1864,18 @@ function redactSensitiveOptions(options) {
   return redacted
 }
 
+function redactSensitiveJob(value) {
+  if (Array.isArray(value)) return value.map(redactSensitiveJob)
+  if (!value || typeof value !== 'object') return value
+  const redacted = {}
+  for (const [key, nestedValue] of Object.entries(value)) {
+    redacted[key] = /token|apiKey|api_key|secret|password/i.test(key)
+      ? '[redacted]'
+      : redactSensitiveJob(nestedValue)
+  }
+  return redacted
+}
+
 function parseArgs(argv) {
   const options = {}
   for (let index = 0; index < argv.length; index += 1) {
@@ -1649,6 +1968,8 @@ function printHelp() {
   console.log(`Production Pipeline v2
 
 Usage:
+  npm run production-pipeline -- run --job <path>
+  npm run production-pipeline -- resume --run <runId|runDir|run.json>
   npm run production-pipeline -- import --file <path> [--book-id <id>] [--title <title>] [--dry-run] [--replace]
   npm run production-pipeline -- package --book-id <id>
   npm run production-pipeline -- audio --book-id <id> --source-root <path>
@@ -1658,6 +1979,7 @@ Usage:
   npm run production-pipeline -- status --run <runId|runDir|run.json>
 
 Options:
+  --job <path>        Job JSON for run.
   --main-db <path>     Main Novel Reader SQLite database.
   --run-root <path>    Run storage root. Default: ${defaultRunRoot}
   --gateway-data-dir   Local Gateway data directory for publish.

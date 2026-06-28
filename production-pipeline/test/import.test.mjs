@@ -247,6 +247,94 @@ describe('production-pipeline import', () => {
     }
   })
 
+  it('runs a job config and resumes by skipping completed stages', async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), 'production-pipeline-run-test-'))
+    try {
+      const txtPath = join(tempDir, 'sample.txt')
+      const dbPath = join(tempDir, 'main.sqlite')
+      const runRoot = join(tempDir, 'runs')
+      const gatewayDataDir = join(tempDir, 'gateway-data')
+      const jobPath = join(tempDir, 'job.json')
+      await writeFile(txtPath, `第一章 开始\n这是第一章内容。\n\n第二章 继续\n这是第二章内容。`, 'utf8')
+      await mkdir(gatewayDataDir, { recursive: true })
+      await writeFile(
+        join(gatewayDataDir, 'books.json'),
+        JSON.stringify({ schemaVersion: 1, books: [] }),
+        'utf8',
+      )
+      await execFileAsync(process.execPath, [
+        cliPath,
+        'import',
+        '--file',
+        txtPath,
+        '--book-id',
+        'sample-book',
+        '--title',
+        '样书',
+        '--main-db',
+        dbPath,
+        '--run-root',
+        runRoot,
+      ])
+      await writeFile(
+        jobPath,
+        JSON.stringify({
+          bookId: 'sample-book',
+          title: '样书',
+          mainDbPath: dbPath,
+          stages: ['package', 'publish'],
+          publish: {
+            gatewayDataDir,
+            dryRun: true,
+          },
+        }),
+        'utf8',
+      )
+
+      const { stdout } = await execFileAsync(process.execPath, [
+        cliPath,
+        'run',
+        '--job',
+        jobPath,
+        '--run-root',
+        runRoot,
+      ])
+
+      assert.match(stdout, /completed: package/)
+      assert.match(stdout, /completed: publish/)
+      assert.match(stdout, /status: completed/)
+      const parentRunDir = stdout.match(/runDir: (.+)/)?.[1]?.trim()
+      assert.ok(parentRunDir)
+      const runJsonPath = join(parentRunDir, 'run.json')
+      const runJson = JSON.parse(await readFile(runJsonPath, 'utf8'))
+      assert.equal(runJson.status, 'completed')
+      assert.equal(runJson.stages.package.status, 'completed')
+      assert.equal(runJson.stages.publish.status, 'completed')
+      assert.ok(runJson.stages.package.childRunJson)
+      assert.ok(runJson.stages.publish.childRuns[0].logFile)
+
+      const packageRun = JSON.parse(await readFile(runJson.stages.package.childRunJson, 'utf8'))
+      const mergedCatalog = JSON.parse(await readFile(
+        join(dirname(runJson.stages.package.childRunJson), packageRun.stages.package.artifacts.gatewayDataDir, 'books.json'),
+        'utf8',
+      ))
+      assert.deepEqual(mergedCatalog.books.map((book) => book.id), ['sample-book'])
+
+      const { stdout: resumeStdout } = await execFileAsync(process.execPath, [
+        cliPath,
+        'resume',
+        '--run',
+        runJsonPath,
+      ])
+
+      assert.match(resumeStdout, /skip: package already completed/)
+      assert.match(resumeStdout, /skip: publish already completed/)
+      assert.match(resumeStdout, /status: completed/)
+    } finally {
+      await rm(tempDir, { recursive: true, force: true })
+    }
+  })
+
   it('maps audio files to canonical main DB chapter ids', async () => {
     const tempDir = await mkdtemp(join(tmpdir(), 'production-pipeline-audio-test-'))
     try {
@@ -435,6 +523,7 @@ describe('production-pipeline import', () => {
       await rm(tempDir, { recursive: true, force: true })
     }
   })
+
 })
 
 function plainRow(row) {

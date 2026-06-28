@@ -10,15 +10,37 @@ Every stage implements the same high-level contract:
 - write stage summary
 - expose verification data
 
+The `run` command reads a job JSON and executes the configured stage list in
+order. The `resume` command reads the existing `run.json`; by default it skips
+stages already marked `completed` and reruns stages that are missing or failed.
+Each orchestrated stage is run as a child stage run under the parent run so the
+single-stage commands remain independently usable.
+
+Current v2 CLI stages:
+
+- `import`
+- `embedding`
+- `audio`
+- `package`
+- `publish`
+- `verify`
+
+Planned but not yet wired into the v2 CLI:
+
+- `summary`
+- `kg`
+
 ## import
 
 Input:
 
 - source file or main database book id
+- optional `job.source.file` for TXT imports
 
 Output:
 
 - normalized `books` and `chapters` rows
+- an import report and chapter preview artifact
 
 Idempotency:
 
@@ -66,6 +88,7 @@ Input:
 - `chapters`
 - summaries
 - embedding provider config
+- `mainDbPath`
 
 Output:
 
@@ -78,6 +101,7 @@ Processing:
 - generate summary embeddings
 - generate chunk embeddings
 - write directly to SQLite
+- call the provider directly; do not call `127.0.0.1:5174`
 
 Resume:
 
@@ -89,18 +113,18 @@ Resume:
 Input:
 
 - `chapters`
-- TTS config
+- existing MP3 artifact directory from `job.audio.sourceRoot`
 
 Output:
 
-- chapter MP3 files
-- chapter timeline manifests
-- local audio catalog candidate
+- Gateway-ready copied `chapter.mp3` files
+- copied timeline manifests when present
+- `audio.json` with canonical main DB chapter ids
 
 Resume:
 
-- skip chapters with valid `chapter.mp3` and `manifest.json`
-- regenerate chapters only when forced
+- rerun safely from the existing source artifact directory
+- strict mode fails when an MP3 chapter number cannot map to a main DB chapter
 
 ## package
 
@@ -112,7 +136,8 @@ Input:
 Output:
 
 - `package.json`
-- optional split package assets
+- `book-summary.json`
+- Gateway data directory under the stage run artifacts
 
 Identity:
 
@@ -133,11 +158,13 @@ Output:
 
 Mechanism:
 
-- `rsync`
+- local or remote `rsync`
+- remote publish uses SSH options from `gateway` / `publish`
 
 Resume:
 
 - rerun rsync safely; it is naturally incremental
+- package publish also merges `books.json` before syncing
 
 ## verify
 
@@ -154,6 +181,11 @@ Checks:
 
 - book exists
 - package chapter count matches
+- package chapter ids match in order
 - audio chapter count matches
-- sampled manifests and downloads return 200
+- audio chapter ids match in order
 
+Mechanism:
+
+- Gateway HTTP only
+- no bulk upload through the Gateway API
