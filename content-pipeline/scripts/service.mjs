@@ -150,7 +150,7 @@ export async function buildContentPipelineService(config = loadServiceConfig()) 
     const kind = readString(body.kind)
     return {
       path: await chooseLocalFile(kind === 'job'
-        ? { prompt: '选择 Production Pipeline v2 Job JSON', types: ['json'] }
+        ? { prompt: '选择 Production Pipeline v2 Job JSON', types: [] }
         : { prompt: '选择要导入 Novel Reader 的电子书', types: ['txt', 'epub', 'mobi', 'azw', 'azw3', 'pdf'] }),
     }
   })
@@ -947,9 +947,11 @@ async function chooseLocalFile({ prompt, types }) {
   if (process.platform !== 'darwin') {
     throw httpError(501, 'file_picker_unavailable', 'File picker is currently implemented for macOS only.')
   }
-  const quotedTypes = types.map((type) => `"${type}"`).join(', ')
+  const typeClause = types.length > 0
+    ? ` of type {${types.map((type) => `"${type}"`).join(', ')}}`
+    : ''
   const script = [
-    `set selectedFile to choose file with prompt "${escapeAppleScriptString(prompt)}" of type {${quotedTypes}}`,
+    `set selectedFile to choose file with prompt "${escapeAppleScriptString(prompt)}"${typeClause}`,
     'POSIX path of selectedFile',
   ].join('\n')
   try {
