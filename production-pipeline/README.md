@@ -20,14 +20,17 @@ for final verification.
 ```bash
 npm run production-pipeline -- import --file <path> --book-id <bookId> --title <title>
 npm run production-pipeline -- package --book-id <bookId>
+npm run production-pipeline -- audio --book-id <bookId> --source-root tmp/tts/<book>
 npm run production-pipeline -- publish --run <runId|runDir|run.json> --remote-host <host> --remote-user <user>
 npm run production-pipeline -- status --run <runId>
 ```
 
 `import` writes canonical `books` and `chapters` rows into the main database.
 `package` reads those rows and writes Gateway-ready artifacts under the run
-directory. `publish` uses `rsync` for the package files and merges `books.json`
-so the Gateway book list can see the published book.
+directory. `audio` maps existing `audio/chapter.mp3` outputs back to canonical
+main database chapter ids and writes Gateway `audio.json`. `publish` uses `rsync`
+for package/audio files and merges `books.json` so the Gateway book list can see
+the published book.
 
 Planned commands still include stage-level `run`, `resume`, and `verify` once
 summary, KG, embedding, and audio workers are added.

@@ -2,7 +2,7 @@ import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { execFile } from 'node:child_process'
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import { dirname, join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { DatabaseSync } from 'node:sqlite'
 import { promisify } from 'node:util'
@@ -241,6 +241,67 @@ describe('production-pipeline import', () => {
         catalog.books.map((book) => book.id).sort(),
         ['old-book', 'sample-book'],
       )
+    } finally {
+      await rm(tempDir, { recursive: true, force: true })
+    }
+  })
+
+  it('maps audio files to canonical main DB chapter ids', async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), 'production-pipeline-audio-test-'))
+    try {
+      const txtPath = join(tempDir, 'sample.txt')
+      const dbPath = join(tempDir, 'main.sqlite')
+      const runRoot = join(tempDir, 'runs')
+      const sourceRoot = join(tempDir, 'tts')
+      await writeFile(txtPath, `第一章 开始\n这是第一章内容。\n\n第二章 继续\n这是第二章内容。`, 'utf8')
+      await mkdir(join(sourceRoot, 'ch001-full', 'audio'), { recursive: true })
+      await mkdir(join(sourceRoot, 'ch002-full', 'audio'), { recursive: true })
+      await writeFile(join(sourceRoot, 'ch001-full', 'audio', 'chapter.mp3'), 'fake-mp3-1')
+      await writeFile(join(sourceRoot, 'ch001-full', 'audio', 'manifest.json'), JSON.stringify({ version: 2, duration: 1.25 }))
+      await writeFile(join(sourceRoot, 'ch002-full', 'audio', 'chapter.mp3'), 'fake-mp3-2')
+      await writeFile(join(sourceRoot, 'ch002-full', 'audio', 'manifest.json'), JSON.stringify({ timelineVersion: 3, durationMs: 2500 }))
+      await execFileAsync(process.execPath, [
+        cliPath,
+        'import',
+        '--file',
+        txtPath,
+        '--book-id',
+        'sample-book',
+        '--title',
+        '样书',
+        '--main-db',
+        dbPath,
+        '--run-root',
+        runRoot,
+      ])
+
+      const { stdout } = await execFileAsync(process.execPath, [
+        cliPath,
+        'audio',
+        '--book-id',
+        'sample-book',
+        '--source-root',
+        sourceRoot,
+        '--main-db',
+        dbPath,
+        '--run-root',
+        runRoot,
+      ])
+
+      assert.match(stdout, /audio chapters: 2/)
+      const catalogPath = stdout.match(/audio: (.+)/)?.[1]?.trim()
+      assert.ok(catalogPath)
+      const catalog = JSON.parse(await readFile(catalogPath, 'utf8'))
+      assert.deepEqual(
+        catalog.chapters.map((chapter) => chapter.chapterId),
+        ['1-第一章 开始', '2-第二章 继续'],
+      )
+      assert.equal(catalog.chapters[0].timelineVersion, 2)
+      assert.equal(catalog.chapters[0].durationMs, 1250)
+      assert.equal(catalog.chapters[1].timelineVersion, 3)
+      assert.equal(catalog.chapters[1].durationMs, 2500)
+      assert.match(catalog.chapters[0].fileName, /^ch001-1\//)
+      assert.equal(await fileExists(join(dirname(catalogPath), catalog.chapters[0].fileName)), true)
     } finally {
       await rm(tempDir, { recursive: true, force: true })
     }

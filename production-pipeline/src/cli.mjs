@@ -2,10 +2,10 @@
 
 import { createHash, randomUUID } from 'node:crypto'
 import { execFile } from 'node:child_process'
-import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises'
+import { copyFile, mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { homedir } from 'node:os'
-import { basename, dirname, join, resolve } from 'node:path'
+import { basename, dirname, join, relative, resolve } from 'node:path'
 import { promisify } from 'node:util'
 
 const defaultRunRoot = 'tmp/production-pipeline/runs'
@@ -34,6 +34,10 @@ async function main() {
   }
   if (command === 'package') {
     await runPackage(options)
+    return
+  }
+  if (command === 'audio') {
+    await runAudio(options)
     return
   }
   if (command === 'publish') {
@@ -268,6 +272,142 @@ async function runPackage(options) {
   }
 }
 
+async function runAudio(options) {
+  const bookId = required(options.bookId, 'audio requires --book-id <id>')
+  const sourceRoot = resolve(required(options.sourceRoot, 'audio requires --source-root <path>'))
+  const mainDbPath = expandPath(options.mainDb || options.mainDbPath || defaultMainDbPath)
+  const run = await createRun({ command: 'audio', options, mainDbPath, bookId })
+  const startedAt = new Date().toISOString()
+
+  try {
+    const book = await readBookFromMainDb(mainDbPath, bookId)
+    const artifacts = await collectAudioArtifacts(sourceRoot)
+    if (!artifacts.length) throw new Error(`No audio/chapter.mp3 files found under ${sourceRoot}`)
+
+    const bookAudioDir = join(run.artifactsDir, 'gateway-audio', 'books', bookId)
+    const catalog = {
+      schemaVersion: 1,
+      generatedAt: new Date().toISOString(),
+      chapters: [],
+    }
+    const chaptersByIndex = new Map(book.chapters.map((chapter, index) => [numberOrDefault(chapter.chapterIndex, index + 1), chapter]))
+    let copiedFiles = 0
+
+    for (const artifact of artifacts) {
+      const chapter = chaptersByIndex.get(artifact.chapterNumber)
+      if (!chapter) {
+        if (options.strict) throw new Error(`No chapter ${artifact.chapterNumber} found in main DB for ${bookId}`)
+        continue
+      }
+      const chapterId = String(chapter.id)
+      const targetSegment = `ch${String(artifact.chapterNumber).padStart(3, '0')}-${safePathSegment(chapterId)}`
+      const targetDir = join(bookAudioDir, targetSegment)
+      const targetMp3 = join(targetDir, 'chapter.mp3')
+      const targetManifest = artifact.manifestPath ? join(targetDir, 'manifest.json') : ''
+      const mp3Stat = await stat(artifact.mp3Path)
+      const manifest = artifact.manifestPath ? await readJsonIfPresent(artifact.manifestPath) : null
+
+      catalog.chapters.push({
+        chapterId,
+        title: String(chapter.title || `第 ${artifact.chapterNumber} 章`),
+        fileName: relative(bookAudioDir, targetMp3),
+        ...(targetManifest
+          ? {
+              manifestFileName: relative(bookAudioDir, targetManifest),
+              timelineVersion: readTimelineVersion(manifest),
+            }
+          : {}),
+        ...durationField(manifest),
+        sizeBytes: mp3Stat.size,
+        updatedAt: mp3Stat.mtime.toISOString(),
+      })
+
+      if (!options.dryRun) {
+        await mkdir(targetDir, { recursive: true })
+        await copyFile(artifact.mp3Path, targetMp3)
+        copiedFiles += 1
+        if (artifact.manifestPath && targetManifest) {
+          await copyFile(artifact.manifestPath, targetManifest)
+          copiedFiles += 1
+        }
+      }
+    }
+
+    catalog.chapters.sort((left, right) => {
+      const leftIndex = chapterIndexForAudio(book.chapters, left.chapterId)
+      const rightIndex = chapterIndexForAudio(book.chapters, right.chapterId)
+      return leftIndex - rightIndex || String(left.title).localeCompare(String(right.title))
+    })
+    if (!catalog.chapters.length) throw new Error('No audio chapters matched the main DB chapters.')
+
+    const catalogPath = join(bookAudioDir, 'audio.json')
+    await writeJson(catalogPath, catalog)
+    const finishedAt = new Date().toISOString()
+    await initializeItemsDb(run.itemsDbPath)
+    await recordStageItem(run.itemsDbPath, {
+      stage: 'audio',
+      itemId: bookId,
+      itemType: 'book',
+      status: options.dryRun ? 'skipped' : 'completed',
+      attempts: 1,
+      startedAt,
+      finishedAt,
+      metadata: {
+        audioChapterCount: catalog.chapters.length,
+        copiedFiles,
+        sourceRoot,
+      },
+    })
+    await writeRunJson(run.runJsonPath, {
+      runId: run.runId,
+      command: 'audio',
+      status: options.dryRun ? 'skipped' : 'completed',
+      createdAt: run.createdAt,
+      updatedAt: finishedAt,
+      mainDbPath,
+      job: { bookId, title: book.title, sourceRoot },
+      stages: {
+        audio: {
+          status: options.dryRun ? 'skipped' : 'completed',
+          startedAt,
+          finishedAt,
+          message: `prepared ${catalog.chapters.length} audio chapters.`,
+          artifacts: {
+            gatewayAudioDir: relativeRunPath(run.rootDir, join(run.artifactsDir, 'gateway-audio')),
+            audioCatalog: relativeRunPath(run.rootDir, catalogPath),
+          },
+        },
+      },
+    })
+
+    console.log(`run: ${run.runId}`)
+    console.log(`book: ${bookId} ${book.title}`)
+    console.log(`audio chapters: ${catalog.chapters.length}`)
+    console.log(`audio: ${catalogPath}`)
+    if (options.dryRun) console.log('dry-run: audio files were not copied')
+  } catch (error) {
+    const finishedAt = new Date().toISOString()
+    await writeRunJson(run.runJsonPath, {
+      runId: run.runId,
+      command: 'audio',
+      status: 'failed',
+      createdAt: run.createdAt,
+      updatedAt: finishedAt,
+      mainDbPath,
+      job: { bookId, sourceRoot },
+      stages: {
+        audio: {
+          status: 'failed',
+          startedAt,
+          finishedAt,
+          error: error.message,
+        },
+      },
+    })
+    throw error
+  }
+}
+
 async function runPublish(options) {
   const runInfo = await loadRunInfo(required(options.run, 'publish requires --run <runId or run path>'))
   const bookId = runInfo.job?.bookId || required(options.bookId, 'publish requires a packaged run with job.bookId or --book-id <id>')
@@ -275,23 +415,43 @@ async function runPublish(options) {
     runInfo.rootDir,
     runInfo.stages?.package?.artifacts?.gatewayDataDir || join('artifacts', 'gateway-data'),
   )
+  const gatewayAudioDir = resolveRunArtifact(
+    runInfo.rootDir,
+    runInfo.stages?.audio?.artifacts?.gatewayAudioDir || join('artifacts', 'gateway-audio'),
+  )
   const packageDir = join(gatewayDataDir, 'books', bookId)
   const packagePath = join(packageDir, 'package.json')
   const bookSummaryPath = join(gatewayDataDir, 'book-summary.json')
-  if (!existsSync(packagePath)) throw new Error(`Package artifact not found: ${packagePath}`)
-  if (!existsSync(bookSummaryPath)) throw new Error(`Book summary artifact not found: ${bookSummaryPath}`)
+  const audioDir = join(gatewayAudioDir, 'books', bookId)
+  const audioCatalogPath = join(audioDir, 'audio.json')
+  const hasPackage = existsSync(packagePath) && existsSync(bookSummaryPath)
+  const hasAudio = existsSync(audioCatalogPath)
+  if (!hasPackage && !hasAudio) {
+    throw new Error(`No package or audio artifacts found for ${bookId} in run ${runInfo.rootDir}`)
+  }
 
-  const bookSummary = JSON.parse(await readFile(bookSummaryPath, 'utf8'))
-  const booksJsonPath = join(gatewayDataDir, 'books.json')
-  const existingCatalog = await readExistingGatewayCatalog(options)
-  await writeJson(booksJsonPath, mergeBookCatalog(existingCatalog, bookSummary))
+  let booksJsonPath = ''
+  if (hasPackage) {
+    const bookSummary = JSON.parse(await readFile(bookSummaryPath, 'utf8'))
+    booksJsonPath = join(gatewayDataDir, 'books.json')
+    const existingCatalog = await readExistingGatewayCatalog(options)
+    await writeJson(booksJsonPath, mergeBookCatalog(existingCatalog, bookSummary))
+  }
 
   const startedAt = new Date().toISOString()
-  const publishPlan = buildPublishPlan(options, gatewayDataDir, packageDir, booksJsonPath, bookId)
+  const publishPlan = buildPublishPlan(options, {
+    bookId,
+    packageDir: hasPackage ? packageDir : '',
+    booksJsonPath,
+    audioDir: hasAudio ? audioDir : '',
+  })
   if (options.dryRun) {
     console.log(`book: ${bookId}`)
-    console.log(`package: ${packagePath}`)
-    console.log(`catalog: ${booksJsonPath}`)
+    if (hasPackage) {
+      console.log(`package: ${packagePath}`)
+      console.log(`catalog: ${booksJsonPath}`)
+    }
+    if (hasAudio) console.log(`audio: ${audioCatalogPath}`)
     for (const command of publishPlan.commands) console.log(`dry-run: ${command.join(' ')}`)
     return
   }
@@ -306,10 +466,10 @@ async function runPublish(options) {
     status: 'completed',
     startedAt,
     finishedAt,
-    message: `published ${bookId} package with rsync.`,
+    message: `published ${bookId} artifacts with rsync.`,
     target: publishPlan.target,
     artifacts: {
-      booksJson: relativeRunPath(runInfo.rootDir, booksJsonPath),
+      ...(booksJsonPath ? { booksJson: relativeRunPath(runInfo.rootDir, booksJsonPath) } : {}),
     },
   }))
 
@@ -627,16 +787,28 @@ function mergeBookCatalog(existingCatalog, bookSummary) {
   }
 }
 
-function buildPublishPlan(options, gatewayDataDir, packageDir, booksJsonPath, bookId) {
+function buildPublishPlan(options, artifacts) {
+  const { bookId, packageDir, booksJsonPath, audioDir } = artifacts
   if (options.gatewayDataDir) {
     const dataDir = expandPath(options.gatewayDataDir)
-    return {
-      target: dataDir,
-      commands: [
+    const commands = []
+    if (packageDir) {
+      commands.push(
         ['mkdir', '-p', join(dataDir, 'books', bookId)],
         ['rsync', '-a', `${packageDir}/`, `${join(dataDir, 'books', bookId)}/`],
         ['rsync', '-a', booksJsonPath, `${join(dataDir, 'books.json')}`],
-      ],
+      )
+    }
+    if (audioDir) {
+      const audioRoot = expandPath(options.gatewayAudioDir || join(dirname(dataDir), 'audio'))
+      commands.push(
+        ['mkdir', '-p', join(audioRoot, 'books', bookId)],
+        ['rsync', '-a', '--delete', `${audioDir}/`, `${join(audioRoot, 'books', bookId)}/`],
+      )
+    }
+    return {
+      target: dataDir,
+      commands,
     }
   }
   if (!options.remoteHost) {
@@ -644,22 +816,38 @@ function buildPublishPlan(options, gatewayDataDir, packageDir, booksJsonPath, bo
   }
 
   const remoteDataDir = remoteDataDirFromOptions(options)
+  const remoteAudioDir = remoteAudioDirFromOptions(options)
   const remoteBookDir = join(remoteDataDir, 'books', bookId)
+  const remoteBookAudioDir = join(remoteAudioDir, 'books', bookId)
   const remoteHost = remoteLogin(options)
   const sshArgs = sshBaseArgs(options)
   const rsyncSsh = rsyncSshCommand(options)
-  return {
-    target: `${remoteHost}:${remoteDataDir}`,
-    commands: [
+  const commands = []
+  if (packageDir) {
+    commands.push(
       ['ssh', ...sshArgs, 'mkdir', '-p', remoteShellQuote(remoteBookDir)],
       ['rsync', '-az', '--delete', '-e', rsyncSsh, `${packageDir}/`, `${remoteHost}:${remoteShellQuote(remoteBookDir)}/`],
       ['rsync', '-az', '-e', rsyncSsh, booksJsonPath, `${remoteHost}:${remoteShellQuote(join(remoteDataDir, 'books.json'))}`],
-    ],
+    )
+  }
+  if (audioDir) {
+    commands.push(
+      ['ssh', ...sshArgs, 'mkdir', '-p', remoteShellQuote(remoteBookAudioDir)],
+      ['rsync', '-az', '--delete', '-e', rsyncSsh, `${audioDir}/`, `${remoteHost}:${remoteShellQuote(remoteBookAudioDir)}/`],
+    )
+  }
+  return {
+    target: `${remoteHost}:${remoteDataDir}`,
+    commands,
   }
 }
 
 function remoteDataDirFromOptions(options) {
   return options.remoteDataDir || join(options.remoteRoot || defaultRemoteRoot, 'data')
+}
+
+function remoteAudioDirFromOptions(options) {
+  return options.remoteAudioDir || join(options.remoteRoot || defaultRemoteRoot, 'audio')
 }
 
 function remoteLogin(options) {
@@ -693,6 +881,81 @@ function mergeRunStage(runJson, stage, stageValue) {
       [stage]: stageValue,
     },
   }
+}
+
+async function collectAudioArtifacts(root) {
+  const artifacts = []
+  await walkFiles(root, 6, async (filePath) => {
+    if (!filePath.replace(/\\/g, '/').endsWith('/audio/chapter.mp3')) return
+    const chapterNumber = inferAudioChapterNumber(filePath)
+    if (!chapterNumber) return
+    const manifestPath = join(dirname(filePath), 'manifest.json')
+    artifacts.push({
+      chapterNumber,
+      mp3Path: filePath,
+      manifestPath: existsSync(manifestPath) ? manifestPath : '',
+    })
+  })
+  artifacts.sort((left, right) => left.chapterNumber - right.chapterNumber)
+  return artifacts
+}
+
+async function walkFiles(dir, depth, onFile) {
+  if (depth < 0) return
+  const entries = await readdir(dir, { withFileTypes: true }).catch(() => [])
+  for (const entry of entries) {
+    if (entry.name === 'node_modules' || entry.name === '.git' || entry.name === 'segments' || entry.name === 'work') continue
+    const fullPath = join(dir, entry.name)
+    if (entry.isDirectory()) {
+      await walkFiles(fullPath, depth - 1, onFile)
+    } else if (entry.isFile()) {
+      await onFile(fullPath)
+    }
+  }
+}
+
+function inferAudioChapterNumber(filePath) {
+  const normalized = filePath.replace(/\\/g, '/')
+  const match =
+    normalized.match(/(?:^|\/)ch(?:apter)?[-_ ]?0*(\d+)[^/]*(?:\/audio\/chapter\.mp3)$/i) ||
+    normalized.match(/(?:^|\/)(?:第)?0*(\d+)(?:章|[-_ ]?chapter)[^/]*(?:\/audio\/chapter\.mp3)$/i)
+  if (!match) return null
+  const number = Number(match[1])
+  return Number.isInteger(number) && number > 0 ? number : null
+}
+
+async function readJsonIfPresent(path) {
+  try {
+    return JSON.parse(await readFile(path, 'utf8'))
+  } catch {
+    return null
+  }
+}
+
+function durationField(manifest) {
+  const seconds = Number(manifest?.duration)
+  if (Number.isFinite(seconds) && seconds >= 0) return { durationMs: Math.round(seconds * 1000) }
+  const durationMs = Number(manifest?.durationMs)
+  if (Number.isFinite(durationMs) && durationMs >= 0) return { durationMs: Math.round(durationMs) }
+  return {}
+}
+
+function readTimelineVersion(manifest) {
+  const version = Number(manifest?.timelineVersion ?? manifest?.version)
+  return Number.isInteger(version) && version >= 0 ? version : undefined
+}
+
+function chapterIndexForAudio(chapters, chapterId) {
+  const index = chapters.findIndex((chapter) => String(chapter.id) === String(chapterId))
+  return index >= 0 ? numberOrDefault(chapters[index].chapterIndex, index + 1) : Number.MAX_SAFE_INTEGER
+}
+
+function safePathSegment(value) {
+  return String(value)
+    .normalize('NFKD')
+    .replace(/[^\w.-]+/g, '-')
+    .replace(/^-+|-+$/g, '')
+    .slice(0, 80) || 'chapter'
 }
 
 function parseArgs(argv) {
@@ -782,6 +1045,7 @@ function printHelp() {
 Usage:
   npm run production-pipeline -- import --file <path> [--book-id <id>] [--title <title>] [--dry-run] [--replace]
   npm run production-pipeline -- package --book-id <id>
+  npm run production-pipeline -- audio --book-id <id> --source-root <path>
   npm run production-pipeline -- publish --run <runId|runDir|run.json> [--dry-run]
   npm run production-pipeline -- status --run <runId|runDir|run.json>
 
@@ -789,6 +1053,7 @@ Options:
   --main-db <path>     Main Novel Reader SQLite database.
   --run-root <path>    Run storage root. Default: ${defaultRunRoot}
   --gateway-data-dir   Local Gateway data directory for publish.
+  --gateway-audio-dir  Local Gateway audio directory for publish.
   --remote-host        Remote Gateway host for rsync publish.
   --remote-user        Remote SSH user.
   --remote-root        Remote Gateway root. Default: ${defaultRemoteRoot}
