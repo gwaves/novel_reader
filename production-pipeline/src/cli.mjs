@@ -51,6 +51,10 @@ async function main() {
     await runSummary(options)
     return
   }
+  if (command === 'kg') {
+    await runKg(options)
+    return
+  }
   if (command === 'audio') {
     await runAudio(options)
     return
@@ -617,6 +621,163 @@ async function runSummary(options) {
   }
 }
 
+async function runKg(options) {
+  const bookId = required(options.bookId, 'kg requires --book-id <id>')
+  const model = required(options.model, 'kg requires --model <name>')
+  const provider = String(options.provider || 'openai-compatible').trim()
+  const baseUrl = required(options.baseUrl, 'kg requires --base-url <url>')
+  const mainDbPath = expandPath(options.mainDb || options.mainDbPath || defaultMainDbPath)
+  const run = await createRun({ command: 'kg', options: redactSensitiveOptions(options), mainDbPath, bookId })
+  const startedAt = new Date().toISOString()
+
+  try {
+    const concurrency = clampInteger(options.concurrency, 3, 1, 16)
+    const limit = clampInteger(options.limit, 0, 0, Number.MAX_SAFE_INTEGER)
+    const timeoutMs = clampInteger(options.timeoutMs, 300_000, 1_000, 900_000)
+    const maxAttempts = clampInteger(options.maxAttempts || options.retries, 3, 1, 10)
+    const force = isFlagEnabled(options.force)
+    const llmConfig = {
+      provider,
+      model,
+      baseUrl,
+      apiKey: options.apiKey || process.env.LLM_API_KEY || process.env.OPENAI_API_KEY || '',
+      temperature: Number.isFinite(Number(options.temperature)) ? Number(options.temperature) : 0,
+      thinkingEnabled: !isFlagEnabled(options.disableThinking),
+      timeoutMs,
+      maxAttempts,
+    }
+
+    const db = await openMainDbForKg(mainDbPath)
+    let targets
+    try {
+      targets = readKgTargets(db, { bookId, force, limit })
+    } finally {
+      db.close()
+    }
+
+    const results = {
+      completed: 0,
+      failed: 0,
+      total: targets.length,
+      entityMentions: 0,
+      relationMentions: 0,
+      errors: [],
+    }
+
+    if (!isFlagEnabled(options.dryRun) && targets.length > 0) {
+      await runPool(targets, concurrency, async (chapter) => {
+        try {
+          const extraction = await generateChapterKnowledgeGraph(chapter, llmConfig)
+          const writeDb = await openMainDbForKg(mainDbPath)
+          try {
+            const writeResult = writeKgExtraction(writeDb, chapter, {
+              ...extraction,
+              model,
+            })
+            results.entityMentions += writeResult.entityMentions
+            results.relationMentions += writeResult.relationMentions
+          } finally {
+            writeDb.close()
+          }
+          results.completed += 1
+        } catch (error) {
+          results.failed += 1
+          pushLimited(results.errors, {
+            chapterId: chapter.id,
+            chapterIndex: chapter.chapterIndex,
+            error: error instanceof Error ? error.message : String(error),
+          })
+          const errorDb = await openMainDbForKg(mainDbPath)
+          try {
+            writeKgExtractionError(errorDb, chapter, model, error)
+          } finally {
+            errorDb.close()
+          }
+        }
+      })
+    }
+
+    const finishedAt = new Date().toISOString()
+    const report = {
+      schemaVersion: 1,
+      generatedAt: finishedAt,
+      bookId,
+      provider,
+      model,
+      concurrency,
+      force,
+      dryRun: isFlagEnabled(options.dryRun),
+      targetChapters: targets.length,
+      ...results,
+    }
+    const reportPath = join(run.artifactsDir, 'kg-report.json')
+    await writeJson(reportPath, report)
+    await initializeItemsDb(run.itemsDbPath)
+    await recordStageItem(run.itemsDbPath, {
+      stage: 'kg',
+      itemId: bookId,
+      itemType: 'book',
+      status: results.failed ? 'failed' : (isFlagEnabled(options.dryRun) ? 'skipped' : 'completed'),
+      attempts: 1,
+      startedAt,
+      finishedAt,
+      metadata: report,
+    })
+    await writeRunJson(run.runJsonPath, {
+      runId: run.runId,
+      command: 'kg',
+      status: results.failed ? 'failed' : (isFlagEnabled(options.dryRun) ? 'skipped' : 'completed'),
+      createdAt: run.createdAt,
+      updatedAt: finishedAt,
+      mainDbPath,
+      job: { bookId, provider, model },
+      stages: {
+        kg: {
+          status: results.failed ? 'failed' : (isFlagEnabled(options.dryRun) ? 'skipped' : 'completed'),
+          startedAt,
+          finishedAt,
+          message: `kg targets ${targets.length}, completed ${results.completed}, failed ${results.failed}.`,
+          artifacts: {
+            kgReport: relativeRunPath(run.rootDir, reportPath),
+          },
+        },
+      },
+    })
+
+    console.log(`run: ${run.runId}`)
+    console.log(`book: ${bookId}`)
+    console.log(`kg targets: ${targets.length}`)
+    console.log(`completed: ${results.completed}`)
+    console.log(`failed: ${results.failed}`)
+    console.log(`entity mentions: ${results.entityMentions}`)
+    console.log(`relation mentions: ${results.relationMentions}`)
+    console.log(`report: ${reportPath}`)
+    console.log(`runDir: ${run.rootDir}`)
+    if (isFlagEnabled(options.dryRun)) console.log('dry-run: knowledge graph was not generated or written')
+    if (results.failed) throw new Error('KG completed with failures.')
+  } catch (error) {
+    const finishedAt = new Date().toISOString()
+    await writeRunJson(run.runJsonPath, {
+      runId: run.runId,
+      command: 'kg',
+      status: 'failed',
+      createdAt: run.createdAt,
+      updatedAt: finishedAt,
+      mainDbPath,
+      job: { bookId, provider, model },
+      stages: {
+        kg: {
+          status: 'failed',
+          startedAt,
+          finishedAt,
+          error: error.message,
+        },
+      },
+    })
+    throw error
+  }
+}
+
 async function runAudio(options) {
   const bookId = required(options.bookId, 'audio requires --book-id <id>')
   const sourceRoot = resolve(required(options.sourceRoot, 'audio requires --source-root <path>'))
@@ -1023,6 +1184,18 @@ async function runVerify(options) {
         },
       ))
     }
+    if (expected.package.knowledgeGraph) {
+      const remoteKg = remotePackage?.knowledgeGraph || {}
+      const expectedKg = expected.package.knowledgeGraph
+      for (const key of ['entities', 'entityMentions', 'relations', 'relationMentions']) {
+        const actualCount = Array.isArray(remoteKg[key]) ? remoteKg[key].length : 0
+        const expectedCount = Array.isArray(expectedKg[key]) ? expectedKg[key].length : 0
+        checks.push(assertCheck(`package.knowledgeGraph.${key}`, actualCount === expectedCount, {
+          actual: actualCount,
+          expected: expectedCount,
+        }))
+      }
+    }
   }
 
   if (expected.audio) {
@@ -1142,12 +1315,14 @@ async function readBookFromMainDb(dbPath, bookId) {
     if (!chapters.length) throw new Error(`Book has no chapters in main DB: ${bookId}`)
     const summaries = readSummariesForPackage(db, bookId)
     const embeddingCoverage = readEmbeddingCoverageForPackage(db, bookId, chapters.length, summaries.length)
+    const knowledgeGraph = readKnowledgeGraphForPackage(db, bookId)
 
     return {
       ...plainObject(book),
       chapters: chapters.map(plainObject),
       summaries,
       embeddingCoverage,
+      knowledgeGraph,
     }
   } finally {
     db.close()
@@ -1173,6 +1348,7 @@ function buildGatewayBookPackage(book, generatedAt) {
     generatedBy: summary.generatedBy,
     updatedAt: summary.updatedAt || generatedAt,
   }))
+  const knowledgeGraph = normalizeKnowledgeGraphForPackage(book.knowledgeGraph)
   const embeddingCoverage = normalizeEmbeddingCoverage(book.embeddingCoverage, chapters.length, summaries.length)
   const wordCount = chapters.reduce((sum, chapter) => sum + chapter.wordCount, 0)
   return {
@@ -1190,6 +1366,7 @@ function buildGatewayBookPackage(book, generatedAt) {
     },
     chapters,
     summaries,
+    knowledgeGraph,
     embeddings: {
       coverage: embeddingCoverage,
       summaries: [],
@@ -1247,6 +1424,98 @@ function readEmbeddingCoverageForPackage(db, bookId, totalChapters, totalSummari
       models: readEmbeddingModelStats(db, 'chapter_chunk_embeddings', bookId),
     },
   }, totalChapters, totalSummaries)
+}
+
+function readKnowledgeGraphForPackage(db, bookId) {
+  if (!sqliteTableExists(db, 'kg_entities')) return emptyKnowledgeGraph()
+  return normalizeKnowledgeGraphForPackage({
+    entities: db.prepare(`
+      SELECT
+        id,
+        book_id AS bookId,
+        type,
+        name,
+        normalized_name AS normalizedName,
+        aliases_json AS aliasesJson,
+        description,
+        confidence,
+        first_chapter_index AS firstChapterIndex,
+        last_chapter_index AS lastChapterIndex,
+        review_status AS reviewStatus,
+        updated_at AS updatedAt
+      FROM kg_entities
+      WHERE book_id = ?
+      ORDER BY type ASC, name ASC
+    `).all(bookId).map(plainObject),
+    entityMentions: sqliteTableExists(db, 'kg_entity_mentions') ? db.prepare(`
+      SELECT
+        id,
+        entity_id AS entityId,
+        book_id AS bookId,
+        chapter_id AS chapterId,
+        chapter_index AS chapterIndex,
+        evidence,
+        confidence
+      FROM kg_entity_mentions
+      WHERE book_id = ?
+      ORDER BY chapter_index ASC
+    `).all(bookId).map(plainObject) : [],
+    relations: sqliteTableExists(db, 'kg_relations') ? db.prepare(`
+      SELECT
+        id,
+        book_id AS bookId,
+        source_entity_id AS sourceEntityId,
+        target_entity_id AS targetEntityId,
+        type,
+        description,
+        confidence,
+        first_chapter_index AS firstChapterIndex,
+        last_chapter_index AS lastChapterIndex,
+        review_status AS reviewStatus,
+        updated_at AS updatedAt
+      FROM kg_relations
+      WHERE book_id = ?
+      ORDER BY type ASC, updated_at DESC
+    `).all(bookId).map(plainObject) : [],
+    relationMentions: sqliteTableExists(db, 'kg_relation_mentions') ? db.prepare(`
+      SELECT
+        id,
+        relation_id AS relationId,
+        book_id AS bookId,
+        chapter_id AS chapterId,
+        chapter_index AS chapterIndex,
+        evidence,
+        confidence
+      FROM kg_relation_mentions
+      WHERE book_id = ?
+      ORDER BY chapter_index ASC
+    `).all(bookId).map(plainObject) : [],
+  })
+}
+
+function normalizeKnowledgeGraphForPackage(knowledgeGraph) {
+  return {
+    entities: safeArray(knowledgeGraph?.entities).map((entity) => ({
+      ...entity,
+      aliases: Array.isArray(entity.aliases)
+        ? entity.aliases
+        : safeJsonParse(entity.aliasesJson ?? entity.aliases_json, []),
+      aliasesJson: undefined,
+      aliases_json: undefined,
+    })),
+    entityMentions: safeArray(knowledgeGraph?.entityMentions),
+    relations: safeArray(knowledgeGraph?.relations),
+    relationMentions: safeArray(knowledgeGraph?.relationMentions),
+  }
+}
+
+function emptyKnowledgeGraph() {
+  return {
+    entities: [],
+    entityMentions: [],
+    relations: [],
+    relationMentions: [],
+  }
 }
 
 function readEmbeddingModelStats(db, tableName, bookId) {
@@ -1346,6 +1615,14 @@ async function openMainDbForSummary(dbPath) {
   return db
 }
 
+async function openMainDbForKg(dbPath) {
+  const DatabaseSync = await loadDatabaseSync()
+  const db = new DatabaseSync(dbPath)
+  db.exec('PRAGMA foreign_keys = ON; PRAGMA journal_mode = WAL;')
+  ensureKgSchema(db)
+  return db
+}
+
 function ensureSummarySchema(db) {
   db.exec(`
     CREATE TABLE IF NOT EXISTS summaries (
@@ -1397,6 +1674,324 @@ function writeSummary(db, chapterId, summary) {
     summary.skippable,
     summary.generatedBy,
   )
+}
+
+function ensureKgSchema(db) {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS kg_chapter_extractions (
+      chapter_id TEXT PRIMARY KEY REFERENCES chapters(id) ON DELETE CASCADE,
+      book_id TEXT NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+      status TEXT NOT NULL,
+      extraction_json TEXT,
+      error TEXT,
+      model TEXT,
+      scanned_at TEXT,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS kg_entities (
+      id TEXT PRIMARY KEY,
+      book_id TEXT NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+      type TEXT NOT NULL,
+      name TEXT NOT NULL,
+      normalized_name TEXT NOT NULL,
+      aliases_json TEXT NOT NULL DEFAULT '[]',
+      description TEXT,
+      confidence REAL NOT NULL DEFAULT 0,
+      first_chapter_index INTEGER,
+      last_chapter_index INTEGER,
+      review_status TEXT,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(book_id, type, normalized_name)
+    );
+
+    CREATE TABLE IF NOT EXISTS kg_entity_mentions (
+      id TEXT PRIMARY KEY,
+      entity_id TEXT NOT NULL REFERENCES kg_entities(id) ON DELETE CASCADE,
+      book_id TEXT NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+      chapter_id TEXT NOT NULL REFERENCES chapters(id) ON DELETE CASCADE,
+      chapter_index INTEGER NOT NULL,
+      evidence TEXT,
+      confidence REAL NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE TABLE IF NOT EXISTS kg_relations (
+      id TEXT PRIMARY KEY,
+      book_id TEXT NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+      source_entity_id TEXT NOT NULL REFERENCES kg_entities(id) ON DELETE CASCADE,
+      target_entity_id TEXT NOT NULL REFERENCES kg_entities(id) ON DELETE CASCADE,
+      type TEXT NOT NULL,
+      description TEXT,
+      confidence REAL NOT NULL DEFAULT 0,
+      first_chapter_index INTEGER,
+      last_chapter_index INTEGER,
+      review_status TEXT,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      UNIQUE(book_id, source_entity_id, target_entity_id, type)
+    );
+
+    CREATE TABLE IF NOT EXISTS kg_relation_mentions (
+      id TEXT PRIMARY KEY,
+      relation_id TEXT NOT NULL REFERENCES kg_relations(id) ON DELETE CASCADE,
+      book_id TEXT NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+      chapter_id TEXT NOT NULL REFERENCES chapters(id) ON DELETE CASCADE,
+      chapter_index INTEGER NOT NULL,
+      evidence TEXT,
+      confidence REAL NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_kg_entities_book_type ON kg_entities(book_id, type);
+    CREATE INDEX IF NOT EXISTS idx_kg_entities_name ON kg_entities(book_id, normalized_name);
+    CREATE INDEX IF NOT EXISTS idx_kg_entity_mentions_entity ON kg_entity_mentions(entity_id, chapter_index);
+    CREATE INDEX IF NOT EXISTS idx_kg_entity_mentions_chapter ON kg_entity_mentions(chapter_id);
+    CREATE INDEX IF NOT EXISTS idx_kg_relations_book_type ON kg_relations(book_id, type);
+    CREATE INDEX IF NOT EXISTS idx_kg_relation_mentions_relation ON kg_relation_mentions(relation_id, chapter_index);
+    CREATE INDEX IF NOT EXISTS idx_kg_relation_mentions_chapter ON kg_relation_mentions(chapter_id);
+    CREATE INDEX IF NOT EXISTS idx_kg_chapter_extractions_book ON kg_chapter_extractions(book_id);
+  `)
+  ensureSqliteColumn(db, 'kg_entities', 'review_status', 'TEXT')
+  ensureSqliteColumn(db, 'kg_relations', 'first_chapter_index', 'INTEGER')
+  ensureSqliteColumn(db, 'kg_relations', 'last_chapter_index', 'INTEGER')
+  ensureSqliteColumn(db, 'kg_relations', 'review_status', 'TEXT')
+}
+
+function readKgTargets(db, { bookId, force, limit }) {
+  const rows = db.prepare(`
+    SELECT
+      c.id,
+      c.book_id AS bookId,
+      c.chapter_index AS chapterIndex,
+      c.title,
+      c.content,
+      c.word_count AS wordCount
+    FROM chapters c
+    LEFT JOIN kg_chapter_extractions kgc ON kgc.chapter_id = c.id AND kgc.status = 'completed'
+    WHERE c.book_id = ?
+      AND (? = 1 OR kgc.chapter_id IS NULL)
+    ORDER BY c.chapter_index, c.title
+  `).all(bookId, force ? 1 : 0).map(plainObject)
+  return limit > 0 ? rows.slice(0, limit) : rows
+}
+
+function writeKgExtraction(db, chapter, extraction) {
+  db.exec('BEGIN')
+  try {
+    db.prepare('DELETE FROM kg_relation_mentions WHERE chapter_id = ?').run(chapter.id)
+    db.prepare('DELETE FROM kg_entity_mentions WHERE chapter_id = ?').run(chapter.id)
+    const entityIdsByKey = new Map()
+    let entityMentions = 0
+    let relationMentions = 0
+
+    for (const entity of extraction.entities) {
+      const normalizedName = normalizeKgName(entity.name)
+      if (!normalizedName) continue
+      const type = normalizeKgType(entity.type, 'entity')
+      const entityId = upsertKgEntity(db, chapter, {
+        ...entity,
+        type,
+        normalizedName,
+      })
+      entityIdsByKey.set(kgEntityKey(type, normalizedName), entityId)
+      upsertKgEntityMention(db, chapter, entityId, entity)
+      entityMentions += 1
+    }
+
+    for (const relation of extraction.relations) {
+      const sourceType = normalizeKgType(relation.sourceType || relation.source_type || relation.sourceEntityType, 'entity')
+      const targetType = normalizeKgType(relation.targetType || relation.target_type || relation.targetEntityType, 'entity')
+      const sourceName = normalizeKgName(relation.source || relation.sourceName || relation.source_entity)
+      const targetName = normalizeKgName(relation.target || relation.targetName || relation.target_entity)
+      if (!sourceName || !targetName) continue
+      const sourceId = entityIdsByKey.get(kgEntityKey(sourceType, sourceName))
+        || upsertKgEntity(db, chapter, { name: relation.source || relation.sourceName, type: sourceType, normalizedName: sourceName, confidence: relation.confidence })
+      const targetId = entityIdsByKey.get(kgEntityKey(targetType, targetName))
+        || upsertKgEntity(db, chapter, { name: relation.target || relation.targetName, type: targetType, normalizedName: targetName, confidence: relation.confidence })
+      entityIdsByKey.set(kgEntityKey(sourceType, sourceName), sourceId)
+      entityIdsByKey.set(kgEntityKey(targetType, targetName), targetId)
+      const relationId = upsertKgRelation(db, chapter, sourceId, targetId, relation)
+      upsertKgRelationMention(db, chapter, relationId, relation)
+      relationMentions += 1
+    }
+
+    db.prepare(`
+      INSERT INTO kg_chapter_extractions (chapter_id, book_id, status, extraction_json, error, model, scanned_at, updated_at)
+      VALUES (?, ?, 'completed', ?, NULL, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+      ON CONFLICT(chapter_id) DO UPDATE SET
+        book_id = excluded.book_id,
+        status = excluded.status,
+        extraction_json = excluded.extraction_json,
+        error = excluded.error,
+        model = excluded.model,
+        scanned_at = excluded.scanned_at,
+        updated_at = excluded.updated_at
+    `).run(chapter.id, chapter.bookId, JSON.stringify({
+      entities: extraction.entities,
+      relations: extraction.relations,
+    }), extraction.model)
+    db.exec('COMMIT')
+    return { entityMentions, relationMentions }
+  } catch (error) {
+    try {
+      db.exec('ROLLBACK')
+    } catch {
+      // No active transaction.
+    }
+    throw error
+  }
+}
+
+function writeKgExtractionError(db, chapter, model, error) {
+  db.prepare(`
+    INSERT INTO kg_chapter_extractions (chapter_id, book_id, status, extraction_json, error, model, scanned_at, updated_at)
+    VALUES (?, ?, 'failed', NULL, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+    ON CONFLICT(chapter_id) DO UPDATE SET
+      book_id = excluded.book_id,
+      status = excluded.status,
+      extraction_json = excluded.extraction_json,
+      error = excluded.error,
+      model = excluded.model,
+      scanned_at = excluded.scanned_at,
+      updated_at = excluded.updated_at
+  `).run(chapter.id, chapter.bookId, error instanceof Error ? error.message : String(error), model)
+}
+
+function upsertKgEntity(db, chapter, entity) {
+  const type = normalizeKgType(entity.type, 'entity')
+  const normalizedName = entity.normalizedName || normalizeKgName(entity.name)
+  const name = String(entity.name || normalizedName)
+  const existing = db.prepare(`
+    SELECT id, aliases_json AS aliasesJson
+    FROM kg_entities
+    WHERE book_id = ? AND type = ? AND normalized_name = ?
+  `).get(chapter.bookId, type, normalizedName)
+  const aliases = uniqueStrings([...(safeArray(entity.aliases)), name])
+  const confidence = clampConfidence(entity.confidence)
+  if (existing) {
+    const mergedAliases = uniqueStrings([...safeJsonParse(existing.aliasesJson, []), ...aliases])
+    db.prepare(`
+      UPDATE kg_entities
+      SET
+        aliases_json = ?,
+        description = COALESCE(NULLIF(?, ''), description),
+        confidence = MAX(confidence, ?),
+        first_chapter_index = CASE WHEN first_chapter_index IS NULL THEN ? ELSE MIN(first_chapter_index, ?) END,
+        last_chapter_index = CASE WHEN last_chapter_index IS NULL THEN ? ELSE MAX(last_chapter_index, ?) END,
+        updated_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+    `).run(
+      JSON.stringify(mergedAliases),
+      String(entity.description || ''),
+      confidence,
+      chapter.chapterIndex,
+      chapter.chapterIndex,
+      chapter.chapterIndex,
+      chapter.chapterIndex,
+      existing.id,
+    )
+    return existing.id
+  }
+  const id = stableKgId('entity', chapter.bookId, type, normalizedName)
+  db.prepare(`
+    INSERT INTO kg_entities (
+      id, book_id, type, name, normalized_name, aliases_json, description, confidence,
+      first_chapter_index, last_chapter_index, created_at, updated_at
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+  `).run(
+    id,
+    chapter.bookId,
+    type,
+    name,
+    normalizedName,
+    JSON.stringify(aliases),
+    String(entity.description || ''),
+    confidence,
+    chapter.chapterIndex,
+    chapter.chapterIndex,
+  )
+  return id
+}
+
+function upsertKgEntityMention(db, chapter, entityId, entity) {
+  const id = stableKgId('entity-mention', chapter.id, entityId)
+  const existing = db.prepare('SELECT id FROM kg_entity_mentions WHERE id = ?').get(id)
+  if (existing) {
+    db.prepare('UPDATE kg_entity_mentions SET evidence = ?, confidence = MAX(confidence, ?) WHERE id = ?')
+      .run(String(entity.evidence || ''), clampConfidence(entity.confidence), id)
+    return
+  }
+  db.prepare(`
+    INSERT INTO kg_entity_mentions (id, entity_id, book_id, chapter_id, chapter_index, evidence, confidence, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+  `).run(id, entityId, chapter.bookId, chapter.id, chapter.chapterIndex, String(entity.evidence || ''), clampConfidence(entity.confidence))
+}
+
+function upsertKgRelation(db, chapter, sourceId, targetId, relation) {
+  const type = normalizeKgType(relation.type, 'related_to')
+  const existing = db.prepare(`
+    SELECT id
+    FROM kg_relations
+    WHERE book_id = ? AND source_entity_id = ? AND target_entity_id = ? AND type = ?
+  `).get(chapter.bookId, sourceId, targetId, type)
+  const confidence = clampConfidence(relation.confidence)
+  if (existing) {
+    db.prepare(`
+      UPDATE kg_relations
+      SET
+        description = COALESCE(NULLIF(?, ''), description),
+        confidence = MAX(confidence, ?),
+        first_chapter_index = CASE WHEN first_chapter_index IS NULL THEN ? ELSE MIN(first_chapter_index, ?) END,
+        last_chapter_index = CASE WHEN last_chapter_index IS NULL THEN ? ELSE MAX(last_chapter_index, ?) END,
+        updated_at = CURRENT_TIMESTAMP
+      WHERE id = ?
+    `).run(
+      String(relation.description || ''),
+      confidence,
+      chapter.chapterIndex,
+      chapter.chapterIndex,
+      chapter.chapterIndex,
+      chapter.chapterIndex,
+      existing.id,
+    )
+    return existing.id
+  }
+  const id = stableKgId('relation', chapter.bookId, sourceId, targetId, type)
+  db.prepare(`
+    INSERT INTO kg_relations (
+      id, book_id, source_entity_id, target_entity_id, type, description, confidence,
+      first_chapter_index, last_chapter_index, created_at, updated_at
+    )
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+  `).run(
+    id,
+    chapter.bookId,
+    sourceId,
+    targetId,
+    type,
+    String(relation.description || ''),
+    confidence,
+    chapter.chapterIndex,
+    chapter.chapterIndex,
+  )
+  return id
+}
+
+function upsertKgRelationMention(db, chapter, relationId, relation) {
+  const id = stableKgId('relation-mention', chapter.id, relationId)
+  const existing = db.prepare('SELECT id FROM kg_relation_mentions WHERE id = ?').get(id)
+  if (existing) {
+    db.prepare('UPDATE kg_relation_mentions SET evidence = ?, confidence = MAX(confidence, ?) WHERE id = ?')
+      .run(String(relation.evidence || ''), clampConfidence(relation.confidence), id)
+    return
+  }
+  db.prepare(`
+    INSERT INTO kg_relation_mentions (id, relation_id, book_id, chapter_id, chapter_index, evidence, confidence, created_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+  `).run(id, relationId, chapter.bookId, chapter.id, chapter.chapterIndex, String(relation.evidence || ''), clampConfidence(relation.confidence))
 }
 
 function ensureEmbeddingSchema(db) {
@@ -1818,6 +2413,29 @@ function buildStageArgs(stage, job, mainDbPath, runInfo) {
     if (summary.thinkingEnabled === false || isFlagEnabled(summary.disableThinking)) args.push('--disable-thinking')
     return args.filter((arg) => arg !== '')
   }
+  if (stage === 'kg') {
+    const kg = { ...(job.llm || {}), ...(job.kg || {}) }
+    const args = [
+      'kg',
+      ...common,
+      '--provider',
+      kg.provider || 'openai-compatible',
+      '--base-url',
+      required(kg.baseUrl || kg.base_url, 'kg stage requires job.llm.baseUrl or job.kg.baseUrl'),
+      '--model',
+      required(kg.model, 'kg stage requires job.llm.model or job.kg.model'),
+      '--concurrency',
+      String(kg.concurrency ?? 3),
+    ]
+    if (kg.apiKey) args.push('--api-key', kg.apiKey)
+    if (kg.temperature !== undefined) args.push('--temperature', String(kg.temperature))
+    if (kg.timeoutMs) args.push('--timeout-ms', String(kg.timeoutMs))
+    if (kg.maxAttempts || kg.retries) args.push('--max-attempts', String(kg.maxAttempts || kg.retries))
+    if (kg.limit) args.push('--limit', String(kg.limit))
+    if (isFlagEnabled(kg.force)) args.push('--force')
+    if (kg.thinkingEnabled === false || isFlagEnabled(kg.disableThinking)) args.push('--disable-thinking')
+    return args.filter((arg) => arg !== '')
+  }
   if (stage === 'audio') {
     const sourceRoot = job.audio?.sourceRoot || job.audio?.source_root
     const args = ['audio', ...common, '--source-root', required(sourceRoot, 'audio stage requires job.audio.sourceRoot')]
@@ -2103,6 +2721,51 @@ async function generateChapterSummary(chapter, config) {
   }
 }
 
+async function generateChapterKnowledgeGraph(chapter, config) {
+  const prompt = buildKgPrompt(chapter, config.thinkingEnabled)
+  const raw = await retryTransientRequest(async () => {
+    if (String(config.provider || '').toLowerCase() === 'ollama') {
+      return callOllamaGenerate(prompt, config)
+    }
+    return callOpenAICompatibleChat(
+      [
+        { role: 'system', content: '你是长篇小说知识图谱抽取器。你必须只输出符合要求的 JSON。' },
+        { role: 'user', content: prompt },
+      ],
+      config,
+    )
+  }, config)
+  return parseKgResponse(raw)
+}
+
+function buildKgPrompt(chapter, thinkingEnabled) {
+  const thinkingInstruction = thinkingEnabled
+    ? '请先用 /think 判断核心人物、地点、势力和关系，但最终输出必须是 JSON，不要输出任何其他内容。'
+    : '请直接输出 JSON，不要输出任何推理过程。'
+
+  return `${thinkingInstruction}
+
+请从下面章节中抽取适合小说检索和移动端阅读的知识图谱。只保留本章明确出现或强烈指向的信息，不要编造。
+
+JSON 字段：
+- entities: 数组，每项包含 name, type, aliases, description, evidence, confidence。
+  - type 建议使用 person, place, organization, object, event, concept。
+  - aliases 是字符串数组，没有则 []。
+  - evidence 是本章中能支持该实体的一小段原文或概括。
+  - confidence 是 0 到 1。
+- relations: 数组，每项包含 source, sourceType, target, targetType, type, description, evidence, confidence。
+  - source/target 必须能对应 entities 中的实体，若关系端点未列入 entities，也请补入 entities。
+  - type 使用短英文或拼音式关系名，例如 sworn_brother, located_in, member_of, enemy_of, helps, owns。
+
+最多输出 20 个实体、30 条关系。只返回 JSON，不要 markdown 代码块，不要解释。
+
+章节标题：${chapter.title}
+章节字数：${chapter.wordCount ?? countWords(chapter.content)}
+
+正文：
+${String(chapter.content || '').slice(0, 14000)}`
+}
+
 function buildSummaryPrompt(chapter, thinkingEnabled) {
   const thinkingInstruction = thinkingEnabled
     ? '请先用 /think 进行推理，但最终输出必须是 JSON，不要输出任何其他内容。'
@@ -2199,6 +2862,51 @@ function parseSummaryResponse(raw) {
       keyPoints: [],
       skippable: '请重试，或换一个更擅长中文指令的模型。',
     }
+  }
+}
+
+function parseKgResponse(raw) {
+  const jsonText = String(raw || '')
+    .trim()
+    .replace(/^```json\s*/i, '')
+    .replace(/^```\s*/i, '')
+    .replace(/```$/i, '')
+    .trim()
+  try {
+    const parsed = JSON.parse(jsonText)
+    return {
+      entities: safeArray(parsed.entities).slice(0, 20).map(normalizeKgEntity).filter((entity) => entity.name),
+      relations: safeArray(parsed.relations).slice(0, 30).map(normalizeKgRelation).filter((relation) => relation.source && relation.target),
+    }
+  } catch {
+    return {
+      entities: [],
+      relations: [],
+    }
+  }
+}
+
+function normalizeKgEntity(entity) {
+  return {
+    name: String(entity?.name || '').trim(),
+    type: normalizeKgType(entity?.type, 'entity'),
+    aliases: uniqueStrings(safeArray(entity?.aliases).map(String)),
+    description: String(entity?.description || '').trim(),
+    evidence: String(entity?.evidence || '').trim(),
+    confidence: clampConfidence(entity?.confidence),
+  }
+}
+
+function normalizeKgRelation(relation) {
+  return {
+    source: String(relation?.source || relation?.sourceName || relation?.source_entity || '').trim(),
+    sourceType: normalizeKgType(relation?.sourceType || relation?.source_type || relation?.sourceEntityType, 'entity'),
+    target: String(relation?.target || relation?.targetName || relation?.target_entity || '').trim(),
+    targetType: normalizeKgType(relation?.targetType || relation?.target_type || relation?.targetEntityType, 'entity'),
+    type: normalizeKgType(relation?.type, 'related_to'),
+    description: String(relation?.description || '').trim(),
+    evidence: String(relation?.evidence || '').trim(),
+    confidence: clampConfidence(relation?.confidence),
   }
 }
 
@@ -2448,6 +3156,46 @@ function coverageRatio(done, total) {
   return Number((numberOrDefault(done, 0) / denominator).toFixed(4))
 }
 
+function stableKgId(...parts) {
+  return createHash('sha256')
+    .update(parts.map((part) => String(part ?? '')).join('\u001f'))
+    .digest('hex')
+    .slice(0, 32)
+}
+
+function kgEntityKey(type, normalizedName) {
+  return `${type}\u001f${normalizedName}`
+}
+
+function normalizeKgName(value) {
+  return String(value || '')
+    .trim()
+    .replace(/\s+/g, '')
+    .toLowerCase()
+}
+
+function normalizeKgType(value, fallback) {
+  return String(value || fallback)
+    .trim()
+    .toLowerCase()
+    .replace(/[^\w-]+/g, '_')
+    .replace(/^_+|_+$/g, '') || fallback
+}
+
+function clampConfidence(value) {
+  const number = Number(value)
+  if (!Number.isFinite(number)) return 0.7
+  return Math.max(0, Math.min(1, number))
+}
+
+function safeArray(value) {
+  return Array.isArray(value) ? value : []
+}
+
+function uniqueStrings(values) {
+  return [...new Set(values.map((value) => String(value || '').trim()).filter(Boolean))]
+}
+
 function safeJsonParse(value, fallback) {
   try {
     return JSON.parse(value)
@@ -2458,6 +3206,16 @@ function safeJsonParse(value, fallback) {
 
 function sqliteTableExists(db, tableName) {
   return Boolean(db.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?").get(tableName))
+}
+
+function sqliteColumnExists(db, tableName, columnName) {
+  if (!sqliteTableExists(db, tableName)) return false
+  return db.prepare(`PRAGMA table_info(${tableName})`).all().some((row) => row.name === columnName)
+}
+
+function ensureSqliteColumn(db, tableName, columnName, columnType) {
+  if (sqliteColumnExists(db, tableName, columnName)) return
+  db.exec(`ALTER TABLE ${tableName} ADD COLUMN ${columnName} ${columnType}`)
 }
 
 async function loadDatabaseSync() {
@@ -2503,6 +3261,7 @@ Usage:
   npm run production-pipeline -- import --file <path> [--book-id <id>] [--title <title>] [--dry-run] [--replace]
   npm run production-pipeline -- package --book-id <id>
   npm run production-pipeline -- summary --book-id <id> --provider <openai|ollama> --base-url <url> --model <name>
+  npm run production-pipeline -- kg --book-id <id> --provider <openai|ollama> --base-url <url> --model <name>
   npm run production-pipeline -- audio --book-id <id> --source-root <path>
   npm run production-pipeline -- embedding --book-id <id> --provider <ollama|openai> --base-url <url> --model <name>
   npm run production-pipeline -- publish --run <runId|runDir|run.json> [--dry-run]
@@ -2517,7 +3276,7 @@ Options:
   --gateway-audio-dir  Local Gateway audio directory for publish.
   --gateway-url        Gateway base URL for verify.
   --gateway-token      Gateway bearer token for verify.
-  --concurrency        Embedding request concurrency.
+  --concurrency        Summary/KG/embedding request concurrency.
   --force              Regenerate existing embedding rows.
   --remote-host        Remote Gateway host for rsync publish.
   --remote-user        Remote SSH user.

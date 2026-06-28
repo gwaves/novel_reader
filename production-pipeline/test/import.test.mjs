@@ -152,6 +152,7 @@ describe('production-pipeline import', () => {
       ])
       seedSummaries(dbPath)
       seedEmbeddings(dbPath)
+      seedKnowledgeGraph(dbPath)
 
       const { stdout } = await execFileAsync(process.execPath, [
         cliPath,
@@ -193,6 +194,14 @@ describe('production-pipeline import', () => {
       })
       assert.equal(bookPackage.embeddings.coverage.chunks.embeddedChunks, 2)
       assert.equal(bookPackage.embeddings.coverage.chunks.embeddedChapters, 2)
+      assert.equal(bookPackage.knowledgeGraph.entities.length, 2)
+      assert.equal(bookPackage.knowledgeGraph.entityMentions.length, 2)
+      assert.equal(bookPackage.knowledgeGraph.relations.length, 1)
+      assert.equal(bookPackage.knowledgeGraph.relationMentions.length, 1)
+      assert.deepEqual(
+        bookPackage.knowledgeGraph.entities.find((entity) => entity.name === '阿甲')?.aliases,
+        ['阿甲'],
+      )
 
       const runId = stdout.match(/run: (.+)/)?.[1]?.trim()
       assert.ok(runId)
@@ -471,7 +480,7 @@ describe('production-pipeline import', () => {
         'dev-token',
       ])
 
-      assert.match(stdout, /checks: 8\/8/)
+      assert.match(stdout, /checks: 12\/12/)
       const runJson = JSON.parse(await readFile(join(runRoot, 'sample-book', runId, 'run.json'), 'utf8'))
       assert.equal(runJson.stages.verify.status, 'completed')
       const report = JSON.parse(await readFile(join(runRoot, 'sample-book', runId, 'artifacts', 'verify-report.json'), 'utf8'))
@@ -541,6 +550,69 @@ describe('production-pipeline import', () => {
       }
     } finally {
       if (embeddingServer) await embeddingServer.close()
+      await rm(tempDir, { recursive: true, force: true })
+    }
+  })
+
+  it('generates knowledge graph rows directly into the main DB without a local API service', async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), 'production-pipeline-kg-test-'))
+    let chatServer
+    try {
+      const txtPath = join(tempDir, 'sample.txt')
+      const dbPath = join(tempDir, 'main.sqlite')
+      const runRoot = join(tempDir, 'runs')
+      await writeFile(txtPath, `第一章 开始\n阿甲在长安帮助乙门。\n\n第二章 继续\n阿甲再次来到长安。`, 'utf8')
+      await execFileAsync(process.execPath, [
+        cliPath,
+        'import',
+        '--file',
+        txtPath,
+        '--book-id',
+        'sample-book',
+        '--title',
+        '样书',
+        '--main-db',
+        dbPath,
+        '--run-root',
+        runRoot,
+      ])
+      chatServer = await startFakeChatServer()
+
+      const { stdout } = await execFileAsync(process.execPath, [
+        cliPath,
+        'kg',
+        '--book-id',
+        'sample-book',
+        '--provider',
+        'openai-compatible',
+        '--base-url',
+        chatServer.url,
+        '--model',
+        'fake-chat',
+        '--concurrency',
+        '2',
+        '--main-db',
+        dbPath,
+        '--run-root',
+        runRoot,
+      ])
+
+      assert.match(stdout, /kg targets: 2/)
+      assert.match(stdout, /completed: 2/)
+      const db = new DatabaseSync(dbPath, { readOnly: true })
+      try {
+        const extractionCount = db.prepare('SELECT COUNT(*) AS count FROM kg_chapter_extractions WHERE book_id = ? AND status = ?')
+          .get('sample-book', 'completed').count
+        const entityCount = db.prepare('SELECT COUNT(*) AS count FROM kg_entities WHERE book_id = ?').get('sample-book').count
+        const relationCount = db.prepare('SELECT COUNT(*) AS count FROM kg_relations WHERE book_id = ?').get('sample-book').count
+        assert.equal(extractionCount, 2)
+        assert.equal(entityCount, 2)
+        assert.equal(relationCount, 1)
+      } finally {
+        db.close()
+      }
+    } finally {
+      if (chatServer) await chatServer.close()
       await rm(tempDir, { recursive: true, force: true })
     }
   })
@@ -685,6 +757,100 @@ function seedEmbeddings(dbPath) {
   }
 }
 
+function seedKnowledgeGraph(dbPath) {
+  const db = new DatabaseSync(dbPath)
+  try {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS kg_entities (
+        id TEXT PRIMARY KEY,
+        book_id TEXT NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+        type TEXT NOT NULL,
+        name TEXT NOT NULL,
+        normalized_name TEXT NOT NULL,
+        aliases_json TEXT NOT NULL DEFAULT '[]',
+        description TEXT,
+        confidence REAL NOT NULL DEFAULT 0,
+        first_chapter_index INTEGER,
+        last_chapter_index INTEGER,
+        review_status TEXT,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(book_id, type, normalized_name)
+      );
+      CREATE TABLE IF NOT EXISTS kg_entity_mentions (
+        id TEXT PRIMARY KEY,
+        entity_id TEXT NOT NULL REFERENCES kg_entities(id) ON DELETE CASCADE,
+        book_id TEXT NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+        chapter_id TEXT NOT NULL REFERENCES chapters(id) ON DELETE CASCADE,
+        chapter_index INTEGER NOT NULL,
+        evidence TEXT,
+        confidence REAL NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      );
+      CREATE TABLE IF NOT EXISTS kg_relations (
+        id TEXT PRIMARY KEY,
+        book_id TEXT NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+        source_entity_id TEXT NOT NULL REFERENCES kg_entities(id) ON DELETE CASCADE,
+        target_entity_id TEXT NOT NULL REFERENCES kg_entities(id) ON DELETE CASCADE,
+        type TEXT NOT NULL,
+        description TEXT,
+        confidence REAL NOT NULL DEFAULT 0,
+        first_chapter_index INTEGER,
+        last_chapter_index INTEGER,
+        review_status TEXT,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        UNIQUE(book_id, source_entity_id, target_entity_id, type)
+      );
+      CREATE TABLE IF NOT EXISTS kg_relation_mentions (
+        id TEXT PRIMARY KEY,
+        relation_id TEXT NOT NULL REFERENCES kg_relations(id) ON DELETE CASCADE,
+        book_id TEXT NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+        chapter_id TEXT NOT NULL REFERENCES chapters(id) ON DELETE CASCADE,
+        chapter_index INTEGER NOT NULL,
+        evidence TEXT,
+        confidence REAL NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      );
+    `)
+    db.prepare(`
+      INSERT INTO kg_entities (
+        id, book_id, type, name, normalized_name, aliases_json, description, confidence,
+        first_chapter_index, last_chapter_index, updated_at
+      )
+      VALUES (?, 'sample-book', ?, ?, ?, ?, ?, 0.9, 1, 2, CURRENT_TIMESTAMP)
+    `).run('entity-a', 'person', '阿甲', '阿甲', JSON.stringify(['阿甲']), '主角')
+    db.prepare(`
+      INSERT INTO kg_entities (
+        id, book_id, type, name, normalized_name, aliases_json, description, confidence,
+        first_chapter_index, last_chapter_index, updated_at
+      )
+      VALUES (?, 'sample-book', ?, ?, ?, ?, ?, 0.8, 1, 1, CURRENT_TIMESTAMP)
+    `).run('entity-b', 'organization', '乙门', '乙门', JSON.stringify(['乙门']), '门派')
+    db.prepare(`
+      INSERT INTO kg_entity_mentions (id, entity_id, book_id, chapter_id, chapter_index, evidence, confidence)
+      VALUES (?, ?, 'sample-book', ?, ?, ?, 0.9)
+    `).run('mention-a', 'entity-a', '1-第一章 开始', 1, '阿甲出现')
+    db.prepare(`
+      INSERT INTO kg_entity_mentions (id, entity_id, book_id, chapter_id, chapter_index, evidence, confidence)
+      VALUES (?, ?, 'sample-book', ?, ?, ?, 0.8)
+    `).run('mention-b', 'entity-b', '1-第一章 开始', 1, '乙门出现')
+    db.prepare(`
+      INSERT INTO kg_relations (
+        id, book_id, source_entity_id, target_entity_id, type, description, confidence,
+        first_chapter_index, last_chapter_index, updated_at
+      )
+      VALUES ('relation-a-b', 'sample-book', 'entity-a', 'entity-b', 'helps', '阿甲帮助乙门', 0.85, 1, 1, CURRENT_TIMESTAMP)
+    `).run()
+    db.prepare(`
+      INSERT INTO kg_relation_mentions (id, relation_id, book_id, chapter_id, chapter_index, evidence, confidence)
+      VALUES ('relation-mention-a-b', 'relation-a-b', 'sample-book', '1-第一章 开始', 1, '阿甲在长安帮助乙门', 0.85)
+    `).run()
+  } finally {
+    db.close()
+  }
+}
+
 async function fileExists(path) {
   try {
     await readFile(path)
@@ -726,7 +892,51 @@ async function startFakeChatServer() {
       sendJson(response, { error: { code: 'not_found' } }, 404)
       return
     }
-    await readRequestJson(request)
+    const body = await readRequestJson(request)
+    const prompt = body.messages?.map((message) => message.content).join('\n') || ''
+    if (prompt.includes('知识图谱')) {
+      sendJson(response, {
+        choices: [
+          {
+            message: {
+              content: JSON.stringify({
+                entities: [
+                  {
+                    name: '阿甲',
+                    type: 'person',
+                    aliases: ['甲兄'],
+                    description: '在本章行动的人物。',
+                    evidence: '阿甲在长安帮助乙门',
+                    confidence: 0.9,
+                  },
+                  {
+                    name: '乙门',
+                    type: 'organization',
+                    aliases: [],
+                    description: '被帮助的门派。',
+                    evidence: '阿甲在长安帮助乙门',
+                    confidence: 0.85,
+                  },
+                ],
+                relations: [
+                  {
+                    source: '阿甲',
+                    sourceType: 'person',
+                    target: '乙门',
+                    targetType: 'organization',
+                    type: 'helps',
+                    description: '阿甲帮助乙门。',
+                    evidence: '阿甲在长安帮助乙门',
+                    confidence: 0.86,
+                  },
+                ],
+              }),
+            },
+          },
+        ],
+      })
+      return
+    }
     sendJson(response, {
       choices: [
         {
