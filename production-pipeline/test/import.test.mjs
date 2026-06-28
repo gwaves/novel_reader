@@ -519,6 +519,64 @@ describe('production-pipeline import', () => {
     }
   })
 
+  it('expands embedding stage into chunk and summary embedding stages', async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), 'production-pipeline-run-embedding-split-test-'))
+    let embeddingServer
+    try {
+      const txtPath = join(tempDir, 'sample.txt')
+      const dbPath = join(tempDir, 'main.sqlite')
+      const runRoot = join(tempDir, 'runs')
+      const jobPath = join(tempDir, 'job.json')
+      await writeFile(txtPath, `第一章 开始\n这是第一章内容。`, 'utf8')
+      embeddingServer = await startFakeEmbeddingServer()
+      await writeFile(
+        jobPath,
+        JSON.stringify({
+          bookId: 'sample-book',
+          title: '样书',
+          mainDbPath: dbPath,
+          source: { file: txtPath },
+          stages: ['import', 'embedding', 'package'],
+          embedding: {
+            provider: 'openai',
+            baseUrl: embeddingServer.url,
+            model: 'fake-embedding',
+            concurrency: 2,
+          },
+        }),
+        'utf8',
+      )
+
+      const { stdout } = await execFileAsync(process.execPath, [
+        cliPath,
+        'run',
+        '--job',
+        jobPath,
+        '--run-root',
+        runRoot,
+      ])
+
+      assert.match(stdout, /completed: chunkEmbedding/)
+      assert.match(stdout, /completed: summaryEmbedding/)
+      const parentRunDir = stdout.match(/runDir: (.+)/)?.[1]?.trim()
+      assert.ok(parentRunDir)
+      const runJson = JSON.parse(await readFile(join(parentRunDir, 'run.json'), 'utf8'))
+      assert.equal(runJson.stages.chunkEmbedding.status, 'completed')
+      assert.equal(runJson.stages.summaryEmbedding.status, 'completed')
+      assert.equal(runJson.stages.package.status, 'completed')
+      const db = new DatabaseSync(dbPath, { readOnly: true })
+      try {
+        assert.equal(db.prepare('SELECT COUNT(*) AS count FROM chapter_chunk_embeddings WHERE book_id = ?').get('sample-book').count, 1)
+        assert.equal(db.prepare('SELECT COUNT(*) AS count FROM summary_embeddings WHERE book_id = ?').get('sample-book').count, 0)
+      } finally {
+        db.close()
+      }
+    } finally {
+      if (embeddingServer) await embeddingServer.close()
+      await rm(tempDir, { recursive: true, force: true })
+    }
+  })
+
   it('records child log metadata while a child stage is still running', async () => {
     const tempDir = await mkdtemp(join(tmpdir(), 'production-pipeline-running-child-test-'))
     let chatServer
@@ -1133,6 +1191,68 @@ describe('production-pipeline import', () => {
         assert.equal(chunkCount, 2)
         const dimension = db.prepare('SELECT dimension FROM summary_embeddings LIMIT 1').get().dimension
         assert.equal(dimension, 3)
+      } finally {
+        db.close()
+      }
+    } finally {
+      if (embeddingServer) await embeddingServer.close()
+      await rm(tempDir, { recursive: true, force: true })
+    }
+  })
+
+  it('generates chunk embeddings without waiting for summaries', async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), 'production-pipeline-chunk-embedding-test-'))
+    let embeddingServer
+    try {
+      const txtPath = join(tempDir, 'sample.txt')
+      const dbPath = join(tempDir, 'main.sqlite')
+      const runRoot = join(tempDir, 'runs')
+      await writeFile(txtPath, `第一章 开始\n这是第一章内容。\n\n第二章 继续\n这是第二章内容。`, 'utf8')
+      await execFileAsync(process.execPath, [
+        cliPath,
+        'import',
+        '--file',
+        txtPath,
+        '--book-id',
+        'sample-book',
+        '--title',
+        '样书',
+        '--main-db',
+        dbPath,
+        '--run-root',
+        runRoot,
+      ])
+      embeddingServer = await startFakeEmbeddingServer()
+
+      const { stdout } = await execFileAsync(process.execPath, [
+        cliPath,
+        'embedding',
+        '--mode',
+        'chunks',
+        '--book-id',
+        'sample-book',
+        '--provider',
+        'openai',
+        '--base-url',
+        embeddingServer.url,
+        '--model',
+        'fake-embedding',
+        '--concurrency',
+        '2',
+        '--main-db',
+        dbPath,
+        '--run-root',
+        runRoot,
+      ])
+
+      assert.match(stdout, /mode: chunks/)
+      assert.match(stdout, /embedding targets: 2/)
+      const db = new DatabaseSync(dbPath, { readOnly: true })
+      try {
+        const summaryCount = db.prepare('SELECT COUNT(*) AS count FROM summary_embeddings WHERE book_id = ?').get('sample-book').count
+        const chunkCount = db.prepare('SELECT COUNT(*) AS count FROM chapter_chunk_embeddings WHERE book_id = ?').get('sample-book').count
+        assert.equal(summaryCount, 0)
+        assert.equal(chunkCount, 2)
       } finally {
         db.close()
       }

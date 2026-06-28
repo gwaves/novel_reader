@@ -290,82 +290,33 @@ async function runResume(options) {
 }
 
 async function executeJobStages({ runInfo, job, mainDbPath, resume }) {
-  const stages = normalizeStageList(job.stages)
+  const stages = expandEmbeddingStages(normalizeStageList(job.stages))
+  const stageGroups = buildStageExecutionGroups(stages)
   const stageResults = { ...(runInfo.runJson.stages || {}) }
   const context = {
     packageRunJson: findLatestChildRun(stageResults.package),
     audioRunJson: findLatestChildRun(stageResults.audio),
   }
 
-  for (const stage of stages) {
-    if (resume && stageResults[stage]?.status === 'completed') {
-      console.log(`skip: ${stage} already completed`)
-      continue
-    }
-
-    const startedAt = new Date().toISOString()
-    stageResults[stage] = {
-      status: 'running',
-      startedAt,
-    }
-    await writeRunJson(runInfo.runJsonPath, {
-      ...runInfo.runJson,
-      status: 'running',
-      updatedAt: startedAt,
-      stages: stageResults,
+  for (const group of stageGroups) {
+    const runnableStages = group.filter((stage) => {
+      if (resume && stageResults[stage]?.status === 'completed') {
+        console.log(`skip: ${stage} already completed`)
+        return false
+      }
+      return true
     })
-
-    try {
-      const result = await executePipelineStage({
-        stage,
-        runInfo,
-        job,
-        mainDbPath,
-        context,
-        onChildStart: async (child) => {
-          const runningStage = stageResults[stage] || { status: 'running', startedAt }
-          stageResults[stage] = mergeRunningChildStage(runningStage, child)
-          await writeRunJson(runInfo.runJsonPath, {
-            ...runInfo.runJson,
-            status: 'running',
-            updatedAt: new Date().toISOString(),
-            stages: stageResults,
-          })
-        },
-      })
-      const finishedAt = new Date().toISOString()
-      stageResults[stage] = {
-        status: 'completed',
-        startedAt,
-        finishedAt,
-        ...result,
-      }
-      if (stage === 'package') context.packageRunJson = result.childRunJson
-      if (stage === 'audio') context.audioRunJson = result.childRunJson
-      await writeRunJson(runInfo.runJsonPath, {
-        ...runInfo.runJson,
-        status: 'running',
-        updatedAt: finishedAt,
-        stages: stageResults,
-      })
-      console.log(`completed: ${stage}`)
-    } catch (error) {
-      const finishedAt = new Date().toISOString()
-      stageResults[stage] = {
-        status: 'failed',
-        startedAt,
-        finishedAt,
-        error: error.message,
-        ...childFailureMetadata(error),
-      }
-      await writeRunJson(runInfo.runJsonPath, {
-        ...runInfo.runJson,
-        status: 'failed',
-        updatedAt: finishedAt,
-        stages: stageResults,
-      })
-      throw error
-    }
+    if (!runnableStages.length) continue
+    const settled = await Promise.allSettled(runnableStages.map((stage) => executeJobStageWithTracking({
+      stage,
+      runInfo,
+      job,
+      mainDbPath,
+      context,
+      stageResults,
+    })))
+    const rejected = settled.find((result) => result.status === 'rejected')
+    if (rejected) throw rejected.reason
   }
 
   const finishedAt = new Date().toISOString()
@@ -378,6 +329,72 @@ async function executeJobStages({ runInfo, job, mainDbPath, resume }) {
   console.log(`run: ${runInfo.runJson.runId}`)
   console.log(`runDir: ${runInfo.rootDir}`)
   console.log('status: completed')
+}
+
+async function executeJobStageWithTracking({ stage, runInfo, job, mainDbPath, context, stageResults }) {
+  const startedAt = new Date().toISOString()
+  stageResults[stage] = {
+    status: 'running',
+    startedAt,
+  }
+  await writeRunJson(runInfo.runJsonPath, {
+    ...runInfo.runJson,
+    status: 'running',
+    updatedAt: startedAt,
+    stages: stageResults,
+  })
+
+  try {
+    const result = await executePipelineStage({
+      stage,
+      runInfo,
+      job,
+      mainDbPath,
+      context,
+      onChildStart: async (child) => {
+        const runningStage = stageResults[stage] || { status: 'running', startedAt }
+        stageResults[stage] = mergeRunningChildStage(runningStage, child)
+        await writeRunJson(runInfo.runJsonPath, {
+          ...runInfo.runJson,
+          status: 'running',
+          updatedAt: new Date().toISOString(),
+          stages: stageResults,
+        })
+      },
+    })
+    const finishedAt = new Date().toISOString()
+    stageResults[stage] = {
+      status: 'completed',
+      startedAt,
+      finishedAt,
+      ...result,
+    }
+    if (stage === 'package') context.packageRunJson = result.childRunJson
+    if (stage === 'audio') context.audioRunJson = result.childRunJson
+    await writeRunJson(runInfo.runJsonPath, {
+      ...runInfo.runJson,
+      status: 'running',
+      updatedAt: finishedAt,
+      stages: stageResults,
+    })
+    console.log(`completed: ${stage}`)
+  } catch (error) {
+    const finishedAt = new Date().toISOString()
+    stageResults[stage] = {
+      status: 'failed',
+      startedAt,
+      finishedAt,
+      error: error.message,
+      ...childFailureMetadata(error),
+    }
+    await writeRunJson(runInfo.runJsonPath, {
+      ...runInfo.runJson,
+      status: 'failed',
+      updatedAt: finishedAt,
+      stages: stageResults,
+    })
+    throw error
+  }
 }
 
 async function executePipelineStage({ stage, runInfo, job, mainDbPath, context, onChildStart }) {
@@ -1079,6 +1096,7 @@ async function runEmbedding(options) {
   const model = required(options.model, 'embedding requires --model <name>')
   const provider = String(options.provider || 'ollama').trim()
   const baseUrl = required(options.baseUrl, 'embedding requires --base-url <url>')
+  const mode = normalizeEmbeddingMode(options.mode || options.embeddingMode || 'all')
   const mainDbPath = expandPath(options.mainDb || options.mainDbPath || defaultMainDbPath)
   const run = await createRun({ command: 'embedding', options: redactSensitiveOptions(options), mainDbPath, bookId })
   const startedAt = new Date().toISOString()
@@ -1101,7 +1119,7 @@ async function runEmbedding(options) {
     const db = await openMainDbForEmbedding(mainDbPath)
     let targets
     try {
-      targets = readEmbeddingTargets(db, { bookId, model, force, limit, utils })
+      targets = readEmbeddingTargets(db, { bookId, model, force, limit, utils, mode })
     } finally {
       db.close()
     }
@@ -1135,6 +1153,7 @@ async function runEmbedding(options) {
           bookId,
           model,
           force,
+          mode,
           target,
           embeddingConfig,
           utils,
@@ -1152,6 +1171,7 @@ async function runEmbedding(options) {
       bookId,
       provider,
       model,
+      mode,
       concurrency,
       force,
       dryRun: isFlagEnabled(options.dryRun),
@@ -1184,7 +1204,7 @@ async function runEmbedding(options) {
           status: results.failed || results.chunkFailed ? 'failed' : (isFlagEnabled(options.dryRun) ? 'skipped' : 'completed'),
           startedAt,
           finishedAt,
-          message: `embedding targets ${targets.length}, completed ${results.completed}, failed ${results.failed}.`,
+          message: `${mode} embedding targets ${targets.length}, completed ${results.completed}, failed ${results.failed}.`,
           artifacts: {
             embeddingReport: relativeRunPath(run.rootDir, reportPath),
           },
@@ -1194,6 +1214,7 @@ async function runEmbedding(options) {
 
     console.log(`run: ${run.runId}`)
     console.log(`book: ${bookId}`)
+    console.log(`mode: ${mode}`)
     console.log(`embedding targets: ${targets.length}`)
     console.log(`completed: ${results.completed}`)
     console.log(`failed: ${results.failed}`)
@@ -1521,6 +1542,12 @@ function normalizeParsedChapters(parsedChapters, bookId) {
 
 function buildChapterId(bookId, chapterIndex) {
   return `${bookId}:ch${String(chapterIndex).padStart(5, '0')}`
+}
+
+function normalizeEmbeddingMode(value) {
+  const mode = String(value || 'all').trim()
+  if (['all', 'chunks', 'summaries'].includes(mode)) return mode
+  throw new Error(`Unsupported embedding mode: ${mode}. Use all, chunks, or summaries.`)
 }
 
 async function readBookFromMainDb(dbPath, bookId) {
@@ -2259,18 +2286,20 @@ function ensureEmbeddingSchema(db) {
   `)
 }
 
-function readEmbeddingTargets(db, { bookId, model, force, limit, utils }) {
-  const summaries = db.prepare(`
-    SELECT
-      s.chapter_id AS chapterId,
-      s.short,
-      s.detail,
-      s.key_points_json AS keyPointsJson
-    FROM summaries s
-    JOIN chapters c ON c.id = s.chapter_id
-    WHERE c.book_id = ?
-    ORDER BY c.chapter_index
-  `).all(bookId).map(plainObject)
+function readEmbeddingTargets(db, { bookId, model, force, limit, utils, mode }) {
+  const summaries = mode === 'chunks' || !sqliteTableExists(db, 'summaries')
+    ? []
+    : db.prepare(`
+      SELECT
+        s.chapter_id AS chapterId,
+        s.short,
+        s.detail,
+        s.key_points_json AS keyPointsJson
+      FROM summaries s
+      JOIN chapters c ON c.id = s.chapter_id
+      WHERE c.book_id = ?
+      ORDER BY c.chapter_index
+    `).all(bookId).map(plainObject)
   const summaryByChapterId = new Map(summaries.map((summary) => [summary.chapterId, summary]))
   const chapters = db.prepare(`
     SELECT
@@ -2290,20 +2319,23 @@ function readEmbeddingTargets(db, { bookId, model, force, limit, utils }) {
 
   for (const chapter of chapters) {
     const summary = summaryByChapterId.get(chapter.id)
-    if (!summary) continue
     const chunks = utils.splitChapterIntoChunks(chapter)
     const existingSummary = getSummaryEmbedding.get(chapter.id, model)
     const existingChunks = countChunks.get(chapter.id, model)?.count ?? 0
-    if (!force && existingSummary && existingChunks >= chunks.length) continue
+    const needsSummary = mode !== 'chunks' && summary && (force || !existingSummary)
+    const needsChunks = mode !== 'summaries' && (force || existingChunks < chunks.length)
+    if (!needsSummary && !needsChunks) continue
     targets.push({ chapter, summary, chunks })
     if (limit > 0 && targets.length >= limit) break
   }
   return targets
 }
 
-async function embedChapterTarget({ dbPath, bookId, model, force, target, embeddingConfig, utils, results }) {
-  const summaryText = utils.buildSummaryText(target.summary)
-  if (!summaryText) {
+async function embedChapterTarget({ dbPath, bookId, model, force, mode, target, embeddingConfig, utils, results }) {
+  const needsSummaryMode = mode !== 'chunks'
+  const needsChunkMode = mode !== 'summaries'
+  const summaryText = needsSummaryMode ? utils.buildSummaryText(target.summary) : ''
+  if (needsSummaryMode && !summaryText) {
     results.failed += 1
     pushLimited(results.errors, {
       chapterId: target.chapter.id,
@@ -2318,7 +2350,7 @@ async function embedChapterTarget({ dbPath, bookId, model, force, target, embedd
     try {
       const existingSummary = db.prepare('SELECT chapter_id AS chapterId FROM summary_embeddings WHERE chapter_id = ? AND model = ?')
         .get(target.chapter.id, model)
-      if (force || !existingSummary) {
+      if (needsSummaryMode && (force || !existingSummary)) {
         const summaryEmbedding = utils.l2Normalize(await callEmbeddingProvider(summaryText, embeddingConfig, utils))
         writeSummaryEmbedding(db, {
           chapterId: target.chapter.id,
@@ -2331,7 +2363,7 @@ async function embedChapterTarget({ dbPath, bookId, model, force, target, embedd
 
       const existingChunks = db.prepare('SELECT COUNT(*) AS count FROM chapter_chunk_embeddings WHERE chapter_id = ? AND model = ?')
         .get(target.chapter.id, model)?.count ?? 0
-      if (force || existingChunks < target.chunks.length) {
+      if (needsChunkMode && (force || existingChunks < target.chunks.length)) {
         db.prepare('DELETE FROM chapter_chunk_embeddings WHERE chapter_id = ? AND model = ?').run(target.chapter.id, model)
         for (const chunk of target.chunks) {
           try {
@@ -2798,6 +2830,39 @@ function normalizeStageList(stages) {
   return ['package']
 }
 
+function expandEmbeddingStages(stages) {
+  const expanded = []
+  for (const stage of stages) {
+    if (stage === 'embedding') {
+      expanded.push('chunkEmbedding', 'summaryEmbedding')
+    } else {
+      expanded.push(stage)
+    }
+  }
+  return [...new Set(expanded)]
+}
+
+function buildStageExecutionGroups(stages) {
+  const groups = []
+  const parallelAfterImport = new Set(['summary', 'kg', 'chunkEmbedding'])
+  let index = 0
+  while (index < stages.length) {
+    const stage = stages[index]
+    if (parallelAfterImport.has(stage)) {
+      const group = []
+      while (index < stages.length && parallelAfterImport.has(stages[index])) {
+        group.push(stages[index])
+        index += 1
+      }
+      groups.push(group)
+      continue
+    }
+    groups.push([stage])
+    index += 1
+  }
+  return groups
+}
+
 function buildStageArgs(stage, job, mainDbPath, runInfo) {
   const common = ['--book-id', job.bookId, '--main-db', mainDbPath, '--run-root', join(runInfo.rootDir, 'stage-runs', stage)]
   if (stage === 'import') {
@@ -2881,10 +2946,24 @@ function buildStageArgs(stage, job, mainDbPath, runInfo) {
     return args
   }
   if (stage === 'embedding') {
+    return buildEmbeddingStageArgs(job, common, 'all')
+  }
+  if (stage === 'chunkEmbedding') {
+    return buildEmbeddingStageArgs(job, common, 'chunks')
+  }
+  if (stage === 'summaryEmbedding') {
+    return buildEmbeddingStageArgs(job, common, 'summaries')
+  }
+  throw new Error(`Unsupported run stage: ${stage}`)
+}
+
+function buildEmbeddingStageArgs(job, common, mode) {
     const embedding = job.embedding || {}
     const args = [
       'embedding',
       ...common,
+      '--mode',
+      mode,
       '--provider',
       embedding.provider || 'ollama',
       '--base-url',
@@ -2900,8 +2979,6 @@ function buildStageArgs(stage, job, mainDbPath, runInfo) {
     if (embedding.limit) args.push('--limit', String(embedding.limit))
     if (isFlagEnabled(embedding.force)) args.push('--force')
     return args.filter((arg) => arg !== '')
-  }
-  throw new Error(`Unsupported run stage: ${stage}`)
 }
 
 function buildPublishArgs(job, childRunJson) {
@@ -3819,7 +3896,7 @@ Usage:
   npm run production-pipeline -- kg --book-id <id> --provider <openai|ollama> --base-url <url> --model <name>
   npm run production-pipeline -- audio --book-id <id> --source-root <path>
   npm run production-pipeline -- audio --book-id <id> --tts-config <path> [--chapters 1-10]
-  npm run production-pipeline -- embedding --book-id <id> --provider <ollama|openai> --base-url <url> --model <name>
+  npm run production-pipeline -- embedding --book-id <id> --provider <ollama|openai> --base-url <url> --model <name> [--mode all|chunks|summaries]
   npm run production-pipeline -- publish --run <runId|runDir|run.json> [--dry-run]
   npm run production-pipeline -- verify --run <runId|runDir|run.json> --gateway-url <url>
   npm run production-pipeline -- status --run <runId|runDir|run.json>
@@ -3834,6 +3911,7 @@ Options:
   --gateway-token      Gateway bearer token for verify.
   --audio-samples      Number of audio chapters whose manifest/download should be sampled in verify. Default: 1.
   --concurrency        Summary/KG/embedding request concurrency.
+  --mode               Embedding mode: all, chunks, or summaries. Default: all.
   --json               Print raw run JSON for status.
   --log-lines          Include this many child log tail lines in status. Default: 8.
   --tts-config         Generate MP3 first with offline-tts batch-pipeline, then package it.

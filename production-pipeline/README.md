@@ -25,7 +25,7 @@ npm run production-pipeline -- import --file <path> --book-id <bookId> --title <
 npm run production-pipeline -- summary --book-id <bookId> --provider openai-compatible --base-url <url> --model <model>
 npm run production-pipeline -- kg --book-id <bookId> --provider openai-compatible --base-url <url> --model <model>
 npm run production-pipeline -- package --book-id <bookId>
-npm run production-pipeline -- embedding --book-id <bookId> --provider ollama --base-url http://192.168.88.100:11434 --model qwen3-embedding:8b --concurrency 16
+npm run production-pipeline -- embedding --book-id <bookId> --provider ollama --base-url http://192.168.88.100:11434 --model qwen3-embedding:8b --concurrency 16 --mode all
 npm run production-pipeline -- audio --book-id <bookId> --source-root tmp/tts/<book>
 npm run production-pipeline -- audio --book-id <bookId> --tts-config ~/.novel_reader/tts-director.config.json --chapters 1-10
 npm run production-pipeline -- publish --run <runId|runDir|run.json> --remote-host <host> --remote-user <user>
@@ -41,10 +41,12 @@ configured stages in order. `resume` loads an existing `run.json` and skips stag
 `summary` reads chapters directly from SQLite, calls the configured chat model,
 and writes the `summaries` table without requiring the old `127.0.0.1:5174` API
 service. `kg` reads chapters directly from SQLite, calls the configured chat
-model, and writes the `kg_*` tables. `embedding` reads `summaries` and
-`chapters` directly from SQLite, calls the configured embedding provider, and
-writes `summary_embeddings` plus `chapter_chunk_embeddings` without requiring
-the old `127.0.0.1:5174` API service. `audio` can either map an existing
+model, and writes the `kg_*` tables. `embedding` reads SQLite directly, calls
+the configured embedding provider, and writes `summary_embeddings` plus
+`chapter_chunk_embeddings` without requiring the old `127.0.0.1:5174` API
+service. Use `--mode chunks` to embed chapter text immediately after import,
+`--mode summaries` to embed generated summaries, or `--mode all` for both.
+`audio` can either map an existing
 `audio/chapter.mp3` tree or invoke `offline-tts/scripts/tts-director.mjs
 batch-pipeline` first via `--tts-config`, then package the generated MP3 files.
 `package` reads durable rows and writes Gateway-ready artifacts under the run
@@ -55,7 +57,10 @@ visibility, package chapter ids, KG counts, embedding coverage metadata, and
 audio chapter ids/counts when audio artifacts are present.
 
 The current full-flow runner can orchestrate `import`, `summary`, `kg`,
-`embedding`, `audio`, `package`, `publish`, and `verify`.
+`embedding`, `audio`, `package`, `publish`, and `verify`. In a job config,
+`embedding` is automatically split into `chunkEmbedding` and `summaryEmbedding`;
+after `import`, `summary`, `kg`, and `chunkEmbedding` may run in parallel, then
+`summaryEmbedding` runs before final packaging.
 
 ## Job Config
 
