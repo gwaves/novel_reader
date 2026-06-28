@@ -192,6 +192,8 @@ Checks:
 - package embedding coverage metadata matches when embeddings are present
 - audio chapter count matches
 - audio chapter ids match in order
+- sampled audio manifests are readable when `manifestFileName` is present
+- sampled audio downloads return non-empty MP3 responses
 
 Mechanism:
 

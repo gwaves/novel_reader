@@ -756,10 +756,29 @@ describe('production-pipeline import', () => {
       assert.ok(packagePath)
       assert.ok(runId)
       const bookPackage = JSON.parse(await readFile(packagePath, 'utf8'))
+      const audioCatalog = {
+        schemaVersion: 1,
+        chapters: [
+          {
+            chapterId: '1-第一章 开始',
+            title: '第一章 开始',
+            fileName: 'ch001-1/chapter.mp3',
+            manifestFileName: 'ch001-1/manifest.json',
+            timelineVersion: 2,
+            durationMs: 1000,
+          },
+        ],
+      }
+      await mkdir(join(runRoot, 'sample-book', runId, 'artifacts', 'gateway-audio', 'books', 'sample-book'), { recursive: true })
+      await writeFile(
+        join(runRoot, 'sample-book', runId, 'artifacts', 'gateway-audio', 'books', 'sample-book', 'audio.json'),
+        JSON.stringify(audioCatalog),
+        'utf8',
+      )
       gateway = await startFakeGateway({
         token: 'dev-token',
         bookPackage,
-        audioCatalog: { schemaVersion: 1, chapters: [] },
+        audioCatalog,
       })
 
       const { stdout } = await execFileAsync(process.execPath, [
@@ -773,7 +792,7 @@ describe('production-pipeline import', () => {
         'dev-token',
       ])
 
-      assert.match(stdout, /checks: 12\/12/)
+      assert.match(stdout, /checks: 17\/17/)
       const runJson = JSON.parse(await readFile(join(runRoot, 'sample-book', runId, 'run.json'), 'utf8'))
       assert.equal(runJson.stages.verify.status, 'completed')
       const report = JSON.parse(await readFile(join(runRoot, 'sample-book', runId, 'artifacts', 'verify-report.json'), 'utf8'))
@@ -1354,6 +1373,33 @@ async function startFakeGateway({ token, bookPackage, audioCatalog }) {
     }
     if (url.pathname === `/mobile/books/${bookPackage.book.id}/audio`) {
       sendJson(response, audioCatalog)
+      return
+    }
+    const audioDownloadMatch = url.pathname.match(new RegExp(`^/mobile/books/${bookPackage.book.id}/audio/([^/]+)/download$`))
+    if (audioDownloadMatch) {
+      const chapterId = decodeURIComponent(audioDownloadMatch[1])
+      if (!audioCatalog.chapters.some((chapter) => chapter.chapterId === chapterId)) {
+        sendJson(response, { error: { code: 'not_found' } }, 404)
+        return
+      }
+      response.writeHead(200, { 'content-type': 'audio/mpeg' })
+      response.end('fake mp3 data')
+      return
+    }
+    const audioManifestMatch = url.pathname.match(new RegExp(`^/mobile/books/${bookPackage.book.id}/audio/([^/]+)/manifest$`))
+    if (audioManifestMatch) {
+      const chapterId = decodeURIComponent(audioManifestMatch[1])
+      const chapter = audioCatalog.chapters.find((candidate) => candidate.chapterId === chapterId)
+      if (!chapter?.manifestFileName) {
+        sendJson(response, { error: { code: 'not_found' } }, 404)
+        return
+      }
+      sendJson(response, {
+        kind: 'novel-reader-tts-audio-manifest',
+        version: chapter.timelineVersion,
+        durationMs: chapter.durationMs,
+        timeline: [],
+      })
       return
     }
     sendJson(response, { error: { code: 'not_found' } }, 404)

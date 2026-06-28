@@ -1259,6 +1259,51 @@ async function runVerify(options) {
       actual: remoteAudioChapters.map((chapter) => chapter.chapterId),
       expected: expectedAudioChapters.map((chapter) => chapter.chapterId),
     }))
+    const audioSampleCount = clampInteger(options.audioSampleCount || options.audioSamples, 1, 0, 20)
+    for (const chapter of expectedAudioChapters.slice(0, audioSampleCount)) {
+      const encodedChapterId = encodeURIComponent(chapter.chapterId)
+      if (chapter.manifestFileName) {
+        try {
+          const manifest = await fetchGatewayJson(
+            gatewayUrl,
+            `/mobile/books/${encodeURIComponent(bookId)}/audio/${encodedChapterId}/manifest`,
+            gatewayToken,
+          )
+          const actualTimelineVersion = readTimelineVersion(manifest)
+          const expectedTimelineVersion = chapter.timelineVersion
+          checks.push(assertCheck(`audio.manifest.${chapter.chapterId}`, Boolean(manifest && typeof manifest === 'object'), {
+            chapterId: chapter.chapterId,
+          }))
+          if (expectedTimelineVersion !== undefined) {
+            checks.push(assertCheck(`audio.manifestTimelineVersion.${chapter.chapterId}`, actualTimelineVersion === expectedTimelineVersion, {
+              actual: actualTimelineVersion,
+              expected: expectedTimelineVersion,
+            }))
+          }
+        } catch (error) {
+          checks.push(assertCheck(`audio.manifest.${chapter.chapterId}`, false, {
+            error: error instanceof Error ? error.message : String(error),
+          }))
+        }
+      }
+      try {
+        const download = await fetchGatewayResponse(
+          gatewayUrl,
+          `/mobile/books/${encodeURIComponent(bookId)}/audio/${encodedChapterId}/download`,
+          gatewayToken,
+        )
+        const bytes = await download.arrayBuffer()
+        checks.push(assertCheck(`audio.download.${chapter.chapterId}`, bytes.byteLength > 0, {
+          chapterId: chapter.chapterId,
+          contentType: download.headers.get('content-type') || '',
+          bytes: bytes.byteLength,
+        }))
+      } catch (error) {
+        checks.push(assertCheck(`audio.download.${chapter.chapterId}`, false, {
+          error: error instanceof Error ? error.message : String(error),
+        }))
+      }
+    }
   }
 
   const failedChecks = checks.filter((check) => !check.ok)
@@ -2482,6 +2527,11 @@ function resolveRunArtifact(runDir, artifactPath) {
 }
 
 async function fetchGatewayJson(gatewayUrl, path, token = '') {
+  const response = await fetchGatewayResponse(gatewayUrl, path, token)
+  return response.json()
+}
+
+async function fetchGatewayResponse(gatewayUrl, path, token = '') {
   const response = await fetch(`${gatewayUrl}${path}`, {
     headers: token ? { authorization: `Bearer ${token}` } : {},
     signal: AbortSignal.timeout(30_000),
@@ -2489,7 +2539,7 @@ async function fetchGatewayJson(gatewayUrl, path, token = '') {
   if (!response.ok) {
     throw new Error(`Gateway ${path} returned ${response.status}: ${await response.text()}`)
   }
-  return response.json()
+  return response
 }
 
 function assertCheck(name, ok, detail = {}) {
@@ -3561,6 +3611,7 @@ Options:
   --gateway-audio-dir  Local Gateway audio directory for publish.
   --gateway-url        Gateway base URL for verify.
   --gateway-token      Gateway bearer token for verify.
+  --audio-samples      Number of audio chapters whose manifest/download should be sampled in verify. Default: 1.
   --concurrency        Summary/KG/embedding request concurrency.
   --json               Print raw run JSON for status.
   --log-lines          Include this many child log tail lines in status. Default: 8.
