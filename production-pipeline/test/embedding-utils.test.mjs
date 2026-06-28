@@ -80,6 +80,7 @@ describe('embedding utils', () => {
     assert.equal(isRetryableEmbeddingError({ statusCode: 429 }), true)
     assert.equal(isRetryableEmbeddingError(Object.assign(new Error('Bad Gateway'), { status: 502 })), true)
     assert.equal(isRetryableEmbeddingError(Object.assign(new Error('aborted'), { name: 'AbortError' })), true)
+    assert.equal(isRetryableEmbeddingError(new Error('fetch failed')), true)
     assert.equal(isRetryableEmbeddingError(new Error('connect ECONNRESET')), true)
     assert.equal(isRetryableEmbeddingError(new Error('request timeout')), true)
     assert.equal(isRetryableEmbeddingError({ status: 404 }), false)

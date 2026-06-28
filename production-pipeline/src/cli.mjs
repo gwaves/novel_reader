@@ -3708,7 +3708,7 @@ function isRetryableEmbeddingError(error) {
   if (error?.name === 'AbortError') return true
   if ([408, 429, 500, 502, 503, 504].includes(Number(error?.status))) return true
   const message = error instanceof Error ? error.message : String(error || '')
-  return /\b(408|429|500|502|503|504)\b|Bad Gateway|ECONNRESET|ETIMEDOUT|timeout/i.test(message)
+  return /\b(408|429|500|502|503|504)\b|Bad Gateway|fetch failed|ECONNRESET|ETIMEDOUT|EPIPE|timeout/i.test(message)
 }
 
 async function runPool(items, concurrency, worker) {

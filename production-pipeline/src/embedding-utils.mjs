@@ -134,7 +134,7 @@ export function isRetryableEmbeddingError(error) {
   if (typeof error?.status === 'number') return EMBEDDING_TRANSIENT_RETRY_STATUSES.has(error.status)
   if (typeof error?.statusCode === 'number') return EMBEDDING_TRANSIENT_RETRY_STATUSES.has(error.statusCode)
   const message = error instanceof Error ? error.message : String(error || '')
-  return /\b(408|429|500|502|503|504)\b|Bad Gateway|ECONNRESET|ETIMEDOUT|timeout/i.test(message)
+  return /\b(408|429|500|502|503|504)\b|Bad Gateway|fetch failed|ECONNRESET|ETIMEDOUT|EPIPE|timeout/i.test(message)
 }
 
 export function embeddingRetryDelay(attempt) {
