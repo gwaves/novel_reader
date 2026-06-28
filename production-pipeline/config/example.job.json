@@ -5,7 +5,7 @@
   "source": {
     "type": "main-db"
   },
-  "stages": ["summary", "embedding", "audio", "package", "publish", "verify"],
+  "stages": ["summary", "kg", "embedding", "audio", "package", "publish", "verify"],
   "llm": {
     "provider": "openai-compatible",
     "baseUrl": "http://llm-provider.example/v1",
@@ -14,6 +14,12 @@
     "concurrency": 4,
     "retries": 3,
     "timeoutMs": 300000
+  },
+  "summary": {
+    "concurrency": 4
+  },
+  "kg": {
+    "concurrency": 3
   },
   "embedding": {
     "provider": "openai-compatible",
@@ -24,9 +30,10 @@
     "timeoutMs": 300000
   },
   "audio": {
-    "chapters": "all",
-    "sourceRoot": "tmp/tts/datang",
-    "concurrency": 16,
+    "ttsConfig": "~/.novel_reader/tts-director.config.json",
+    "ttsConcurrency": 16,
+    "ttsChapters": 2,
+    "resume": true,
     "strict": true
   },
   "publish": {

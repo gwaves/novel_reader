@@ -113,17 +113,22 @@ Resume:
 Input:
 
 - `chapters`
-- existing MP3 artifact directory from `job.audio.sourceRoot`
+- existing MP3 artifact directory from `job.audio.sourceRoot`, or
+- TTS director config from `job.audio.ttsConfig`
+- optional `job.audio.chapters`; when omitted, v2 generates `1-<chapterCount>`
 
 Output:
 
+- optional TTS source tree from `offline-tts/scripts/tts-director.mjs batch-pipeline`
 - Gateway-ready copied `chapter.mp3` files
 - copied timeline manifests when present
 - `audio.json` with canonical main DB chapter ids
+- `tts-director.log` when v2 invokes the TTS director
 
 Resume:
 
 - rerun safely from the existing source artifact directory
+- generated TTS runs can pass `resume: true` through to the TTS director
 - strict mode fails when an MP3 chapter number cannot map to a main DB chapter
 
 ## package
@@ -182,6 +187,9 @@ Checks:
 - book exists
 - package chapter count matches
 - package chapter ids match in order
+- package summary chapter ids match when summaries are present
+- package knowledge graph counts match when KG is present
+- package embedding coverage metadata matches when embeddings are present
 - audio chapter count matches
 - audio chapter ids match in order
 

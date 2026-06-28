@@ -190,6 +190,7 @@ describe('production-pipeline import', () => {
         totalSummaries: 2,
         totalChapters: 2,
         coverage: 1,
+        availableSummaryCoverage: 1,
         models: [{ model: 'fake-embedding', dimension: 3, count: 2 }],
       })
       assert.equal(bookPackage.embeddings.coverage.chunks.embeddedChunks, 2)
@@ -207,6 +208,55 @@ describe('production-pipeline import', () => {
       assert.ok(runId)
       const runJson = JSON.parse(await readFile(join(runRoot, 'sample-book', runId, 'run.json'), 'utf8'))
       assert.equal(runJson.stages.package.status, 'completed')
+    } finally {
+      await rm(tempDir, { recursive: true, force: true })
+    }
+  })
+
+  it('reports book-level embedding coverage against all chapters', async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), 'production-pipeline-package-coverage-test-'))
+    try {
+      const txtPath = join(tempDir, 'sample.txt')
+      const dbPath = join(tempDir, 'main.sqlite')
+      const runRoot = join(tempDir, 'runs')
+      await writeFile(txtPath, `第一章 开始\n这是第一章内容。\n\n第二章 继续\n这是第二章内容。`, 'utf8')
+      await execFileAsync(process.execPath, [
+        cliPath,
+        'import',
+        '--file',
+        txtPath,
+        '--book-id',
+        'sample-book',
+        '--title',
+        '样书',
+        '--main-db',
+        dbPath,
+        '--run-root',
+        runRoot,
+      ])
+      seedSummaries(dbPath)
+      seedEmbeddings(dbPath)
+      pruneSecondChapterGeneratedData(dbPath)
+
+      const { stdout } = await execFileAsync(process.execPath, [
+        cliPath,
+        'package',
+        '--book-id',
+        'sample-book',
+        '--main-db',
+        dbPath,
+        '--run-root',
+        runRoot,
+      ])
+
+      const packagePath = stdout.match(/package: (.+)/)?.[1]?.trim()
+      assert.ok(packagePath)
+      const bookPackage = JSON.parse(await readFile(packagePath, 'utf8'))
+      assert.equal(bookPackage.book.summaryCoverage, 0.5)
+      assert.equal(bookPackage.book.embeddingCoverage, 0.5)
+      assert.equal(bookPackage.embeddings.coverage.summary.coverage, 0.5)
+      assert.equal(bookPackage.embeddings.coverage.summary.availableSummaryCoverage, 1)
+      assert.equal(bookPackage.embeddings.coverage.chunks.coverage, 0.5)
     } finally {
       await rm(tempDir, { recursive: true, force: true })
     }
@@ -846,6 +896,17 @@ function seedEmbeddings(dbPath) {
     `)
     insertChunk.run('sample-book:1-第一章 开始:0:fake-embedding', '1-第一章 开始', 1, '这是第一章内容。')
     insertChunk.run('sample-book:2-第二章 继续:0:fake-embedding', '2-第二章 继续', 2, '这是第二章内容。')
+  } finally {
+    db.close()
+  }
+}
+
+function pruneSecondChapterGeneratedData(dbPath) {
+  const db = new DatabaseSync(dbPath)
+  try {
+    db.prepare('DELETE FROM summaries WHERE chapter_id = ?').run('2-第二章 继续')
+    db.prepare('DELETE FROM summary_embeddings WHERE chapter_id = ?').run('2-第二章 继续')
+    db.prepare('DELETE FROM chapter_chunk_embeddings WHERE chapter_id = ?').run('2-第二章 继续')
   } finally {
     db.close()
   }

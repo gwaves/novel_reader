@@ -1560,7 +1560,8 @@ function normalizeEmbeddingCoverage(coverage, totalChapters, totalSummaries) {
       embeddedChapters: embeddedSummaryChapters,
       totalSummaries,
       totalChapters,
-      coverage: coverageRatio(embeddedSummaryChapters, totalSummaries || totalChapters),
+      coverage: coverageRatio(embeddedSummaryChapters, totalChapters),
+      availableSummaryCoverage: coverageRatio(embeddedSummaries, totalSummaries),
       models: Array.isArray(summary.models) ? summary.models : [],
     },
     chunks: {

@@ -22,12 +22,14 @@ npm run production-pipeline -- run --job production-pipeline/config/example.job.
 npm run production-pipeline -- resume --run <runId|runDir|run.json>
 npm run production-pipeline -- import --file <path> --book-id <bookId> --title <title>
 npm run production-pipeline -- summary --book-id <bookId> --provider openai-compatible --base-url <url> --model <model>
+npm run production-pipeline -- kg --book-id <bookId> --provider openai-compatible --base-url <url> --model <model>
 npm run production-pipeline -- package --book-id <bookId>
 npm run production-pipeline -- embedding --book-id <bookId> --provider openai --base-url <url> --model <model> --concurrency 16
 npm run production-pipeline -- audio --book-id <bookId> --source-root tmp/tts/<book>
+npm run production-pipeline -- audio --book-id <bookId> --tts-config ~/.novel_reader/tts-director.config.json --chapters 1-10
 npm run production-pipeline -- publish --run <runId|runDir|run.json> --remote-host <host> --remote-user <user>
 npm run production-pipeline -- verify --run <runId|runDir|run.json> --gateway-url <url> --gateway-token <token>
-npm run production-pipeline -- status --run <runId>
+npm run production-pipeline -- status --run <runId|runDir|run.json>
 ```
 
 `run` reads a job JSON and executes the configured stages in order. `resume`
@@ -35,20 +37,22 @@ loads an existing `run.json` and skips stages whose status is already
 `completed`. `import` writes canonical `books` and `chapters` rows into the main database.
 `summary` reads chapters directly from SQLite, calls the configured chat model,
 and writes the `summaries` table without requiring the old `127.0.0.1:5174` API
-service. `package` reads those rows and writes Gateway-ready artifacts under the
-run directory. `embedding` reads `summaries` and `chapters` directly from SQLite,
-calls the configured embedding provider, and writes `summary_embeddings` plus
-`chapter_chunk_embeddings` without requiring the old `127.0.0.1:5174` API
-service. `audio` maps existing `audio/chapter.mp3` outputs back to canonical main
-database chapter ids and writes Gateway `audio.json`. `publish` uses `rsync` for
-package/audio files and merges `books.json` so the Gateway book list can see the
-published book. `verify` checks the live Gateway HTTP APIs against the run
-artifacts, including library visibility, package chapter ids, and audio chapter
-ids/counts when audio artifacts are present.
+service. `kg` reads chapters directly from SQLite, calls the configured chat
+model, and writes the `kg_*` tables. `embedding` reads `summaries` and
+`chapters` directly from SQLite, calls the configured embedding provider, and
+writes `summary_embeddings` plus `chapter_chunk_embeddings` without requiring
+the old `127.0.0.1:5174` API service. `audio` can either map an existing
+`audio/chapter.mp3` tree or invoke `offline-tts/scripts/tts-director.mjs
+batch-pipeline` first via `--tts-config`, then package the generated MP3 files.
+`package` reads durable rows and writes Gateway-ready artifacts under the run
+directory. `publish` uses `rsync` for package/audio files and merges
+`books.json` so the Gateway book list can see the published book. `verify`
+checks the live Gateway HTTP APIs against the run artifacts, including library
+visibility, package chapter ids, KG counts, embedding coverage metadata, and
+audio chapter ids/counts when audio artifacts are present.
 
-The current full-flow runner can orchestrate `import`, `summary`, `package`,
-`embedding`, `audio`, `publish`, and `verify`. `kg` remains a planned stage name
-until its worker is moved into v2.
+The current full-flow runner can orchestrate `import`, `summary`, `kg`,
+`embedding`, `audio`, `package`, `publish`, and `verify`.
 
 ## Job Config
 
@@ -56,16 +60,17 @@ The job JSON is the repeatable production contract. It should include:
 
 - `bookId`: canonical id shared by the main DB, Gateway package, and audio catalog.
 - `mainDbPath`: Novel Reader SQLite database path.
-- `stages`: ordered stage list, for example `["embedding", "audio", "package", "publish", "verify"]`.
+- `stages`: ordered stage list, for example `["summary", "kg", "embedding", "audio", "package", "publish", "verify"]`.
+- `llm` / `summary` / `kg`: chat provider settings and optional stage limits.
 - `embedding`: provider, base URL, model, concurrency, retries, and timeout.
-- `audio`: source directory for existing MP3 artifacts and optional strictness.
+- `audio`: either `sourceRoot` for existing MP3 artifacts or `ttsConfig` for generating MP3 first; optional `chapters`, `ttsConcurrency`, `ttsChapters`, and strictness.
 - `gateway` / `publish` / `verify`: rsync target and Gateway HTTP verification settings.
 
 Embedding does not call `127.0.0.1:5174`; it opens SQLite directly. Publish uses
 `rsync` for data/audio files. Verify uses the live Gateway HTTP APIs after
 publish.
 
-Example for a 大唐双龙传-style main-DB book:
+Example for a 大唐双龙传-style TXT import:
 
 ```bash
 cat > tmp/production-pipeline-datang.job.json <<'JSON'
@@ -73,8 +78,19 @@ cat > tmp/production-pipeline-datang.job.json <<'JSON'
   "bookId": "mqxe7ya6-yiulrd3l",
   "title": "大唐双龙传",
   "mainDbPath": "~/.novel_reader/novel_reader.sqlite",
-  "source": { "type": "main-db" },
-  "stages": ["embedding", "audio", "package", "publish", "verify"],
+  "source": { "type": "txt", "file": "/Users/gwaves/Downloads/shuanglongzhuan.txt" },
+  "stages": ["import", "summary", "kg", "embedding", "audio", "package", "publish", "verify"],
+  "import": { "replace": false },
+  "llm": {
+    "provider": "openai-compatible",
+    "baseUrl": "http://llm-provider.example/v1",
+    "apiKey": "LLM_API_KEY_PLACEHOLDER",
+    "model": "qwen3.6-27b",
+    "concurrency": 4,
+    "timeoutMs": 300000
+  },
+  "summary": { "concurrency": 4 },
+  "kg": { "concurrency": 3 },
   "embedding": {
     "provider": "openai-compatible",
     "baseUrl": "https://embedding-provider.example/v1",
@@ -83,8 +99,10 @@ cat > tmp/production-pipeline-datang.job.json <<'JSON'
     "retries": 5
   },
   "audio": {
-    "sourceRoot": "tmp/tts/datang",
-    "chapters": "all"
+    "ttsConfig": "~/.novel_reader/tts-director.config.json",
+    "ttsConcurrency": 16,
+    "ttsChapters": 2,
+    "resume": true
   },
   "gateway": {
     "host": "gateway.example.lan",
@@ -99,6 +117,10 @@ JSON
 npm run production-pipeline -- run --job tmp/production-pipeline-datang.job.json
 ```
 
+For a smoke test, set `summary.limit`, `kg.limit`, and `embedding.limit` to a
+small number and use a temporary `mainDbPath`. For a full audio run, omit
+`audio.chapters`; v2 will pass `1-<chapterCount>` to the TTS director.
+
 ## Run Layout
 
 ```text
@@ -111,15 +133,17 @@ tmp/production-pipeline/runs/<bookId>/<runId>/
   stage-runs/
 ```
 
-`run.json` is the human-readable run summary. `items.sqlite` stores item-level
-progress and retry state. This keeps production history removable and portable
-without polluting the main app database.
+`run.json` is the durable run summary. `status` prints a readable view with
+stage status, child run paths, artifacts, and log tails; use `--json` to print
+the raw `run.json`. `items.sqlite` stores item-level progress and retry state.
+This keeps production history removable and portable without polluting the main
+app database.
 
 ## Stage Model
 
 Each stage must be idempotent, resumable, observable, and independently runnable.
 
-Planned stages:
+Stages:
 
 - `import`
 - `summary`
