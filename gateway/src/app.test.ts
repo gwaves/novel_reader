@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { buildGatewayApp } from './app.js'
@@ -47,7 +47,7 @@ describe('gateway app', () => {
       status: 'ok',
       service: 'novel-reader-gateway',
     })
-  })
+  }, 15000)
 
   it('reports unavailable optional capabilities when upstreams are not configured', async () => {
     const app = buildTestApp()
@@ -258,10 +258,113 @@ describe('gateway app', () => {
       schemaVersion: 1,
       devices: [
         {
+          id: 'legacy:android-phone',
           name: 'Android Phone',
+          role: 'default',
         },
       ],
     })
+  })
+
+  it('records stable device metadata and returns role-scoped session auth', async () => {
+    const dataDir = await makeDataDir()
+    await writeFile(
+      join(dataDir, 'devices.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        devices: [
+          {
+            id: 'device-1',
+            name: '客厅平板',
+            model: 'Xiaomi Pad',
+            platform: 'android',
+            appVersion: '0.1.0',
+            pairingCode: '428193',
+            role: 'trusted',
+            firstSeenAt: '2026-06-29T00:00:00.000Z',
+            lastSeenAt: '2026-06-29T00:00:00.000Z',
+            lastIp: '192.168.1.2',
+          },
+        ],
+      }),
+      'utf8',
+    )
+    const app = buildTestApp({
+      GATEWAY_DEV_ACCESS_TOKEN: 'dev-token',
+      GATEWAY_DATA_DIR: dataDir,
+    })
+    const response = await app.inject({
+      method: 'GET',
+      url: '/auth/session',
+      remoteAddress: '192.168.1.9',
+      headers: {
+        authorization: 'Bearer dev-token',
+        'x-device-id': 'device-1',
+        'x-device-name': '客厅平板新名',
+        'x-device-model': 'Xiaomi Pad 6',
+        'x-device-platform': 'android',
+        'x-app-version': '0.2.0',
+      },
+    })
+    const devices = JSON.parse(await readFile(join(dataDir, 'devices.json'), 'utf8')) as {
+      devices: Array<Record<string, unknown>>
+    }
+
+    expect(response.statusCode).toBe(200)
+    expect(response.json()).toMatchObject({
+      authenticated: true,
+      auth: {
+        mode: 'development-static-token',
+        deviceId: 'device-1',
+        deviceName: '客厅平板新名',
+        role: 'trusted',
+        allowedVisibilities: ['default', 'trusted'],
+        pairingCode: '428193',
+      },
+    })
+    expect(devices.devices[0]).toMatchObject({
+      id: 'device-1',
+      name: '客厅平板新名',
+      model: 'Xiaomi Pad 6',
+      platform: 'android',
+      appVersion: '0.2.0',
+      pairingCode: '428193',
+      role: 'trusted',
+      firstSeenAt: '2026-06-29T00:00:00.000Z',
+      lastIp: '192.168.1.9',
+    })
+    expect(Date.parse(String(devices.devices[0].lastSeenAt))).not.toBeNaN()
+  })
+
+  it('normalizes legacy name-only device records for admin listing', async () => {
+    const dataDir = await makeDataDir()
+    await writeFile(
+      join(dataDir, 'devices.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        devices: [{ name: 'Old Tablet' }],
+      }),
+      'utf8',
+    )
+    const app = buildTestApp({
+      GATEWAY_DEV_ACCESS_TOKEN: 'dev-token',
+      GATEWAY_DATA_DIR: dataDir,
+    })
+    const response = await app.inject({
+      method: 'GET',
+      url: '/admin/devices',
+      headers: {
+        authorization: 'Bearer dev-token',
+      },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect(response.json().devices[0]).toMatchObject({
+      id: 'legacy:old-tablet',
+      name: 'Old Tablet',
+      role: 'default',
+    })
+    expect(response.json().devices[0].pairingCode).toMatch(/^\d{6}$/)
   })
 
   it('returns an empty protected book catalog when no catalog file exists', async () => {
@@ -345,14 +448,262 @@ describe('gateway app', () => {
           kgCoverage: 0.25,
           embeddingCoverage: 0.75,
           audioChapterCount: 0,
+          visibility: 'default',
+          labels: [],
         },
         {
           id: 'book-old',
           title: '旧书',
           author: '作者乙',
           chapterCount: 8,
+          visibility: 'default',
+          labels: [],
         },
       ],
+    })
+  })
+
+  it('filters mobile book APIs by device role and hides unauthorized books as not found', async () => {
+    const dataDir = await makeDataDir()
+    await writeFile(
+      join(dataDir, 'books.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        books: [
+          {
+            id: 'default-book',
+            title: '默认书',
+            chapterCount: 1,
+            updatedAt: '2026-06-25T00:00:00.000Z',
+            visibility: 'default',
+          },
+          {
+            id: 'trusted-book',
+            title: '受信书',
+            chapterCount: 1,
+            updatedAt: '2026-06-26T00:00:00.000Z',
+            visibility: 'trusted',
+            labels: ['private'],
+          },
+          {
+            id: 'hidden-book',
+            title: '隐藏书',
+            chapterCount: 1,
+            updatedAt: '2026-06-27T00:00:00.000Z',
+            visibility: 'hidden',
+          },
+        ],
+      }),
+      'utf8',
+    )
+    await mkdir(join(dataDir, 'books', 'trusted-book'), { recursive: true })
+    await writeFile(
+      join(dataDir, 'books', 'trusted-book', 'package.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        book: {
+          id: 'trusted-book',
+          title: '受信书',
+          chapterCount: 1,
+          updatedAt: '2026-06-26T00:00:00.000Z',
+        },
+        chapters: [{ id: 'chapter-1', title: '第一章' }],
+      }),
+      'utf8',
+    )
+    await writeFile(
+      join(dataDir, 'devices.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        devices: [
+          {
+            id: 'trusted-device',
+            name: 'Trusted',
+            pairingCode: '111111',
+            role: 'trusted',
+            firstSeenAt: '2026-06-29T00:00:00.000Z',
+            lastSeenAt: '2026-06-29T00:00:00.000Z',
+          },
+          {
+            id: 'disabled-device',
+            name: 'Disabled',
+            pairingCode: '222222',
+            role: 'disabled',
+            firstSeenAt: '2026-06-29T00:00:00.000Z',
+            lastSeenAt: '2026-06-29T00:00:00.000Z',
+          },
+        ],
+      }),
+      'utf8',
+    )
+    const app = buildTestApp({
+      GATEWAY_DEV_ACCESS_TOKEN: 'dev-token',
+      GATEWAY_DATA_DIR: dataDir,
+    })
+    const defaultCatalog = await app.inject({
+      method: 'GET',
+      url: '/mobile/books',
+      headers: {
+        authorization: 'Bearer dev-token',
+        'x-device-id': 'default-device',
+        'x-device-name': 'Default',
+      },
+    })
+    const defaultTrustedBook = await app.inject({
+      method: 'GET',
+      url: '/mobile/books/trusted-book',
+      headers: {
+        authorization: 'Bearer dev-token',
+        'x-device-id': 'default-device',
+      },
+    })
+    const trustedCatalog = await app.inject({
+      method: 'GET',
+      url: '/mobile/books',
+      headers: {
+        authorization: 'Bearer dev-token',
+        'x-device-id': 'trusted-device',
+      },
+    })
+    const trustedPackage = await app.inject({
+      method: 'GET',
+      url: '/mobile/books/trusted-book/package',
+      headers: {
+        authorization: 'Bearer dev-token',
+        'x-device-id': 'trusted-device',
+      },
+    })
+    const hiddenBook = await app.inject({
+      method: 'GET',
+      url: '/mobile/books/hidden-book',
+      headers: {
+        authorization: 'Bearer dev-token',
+        'x-device-id': 'trusted-device',
+      },
+    })
+    const disabledCatalog = await app.inject({
+      method: 'GET',
+      url: '/mobile/books',
+      headers: {
+        authorization: 'Bearer dev-token',
+        'x-device-id': 'disabled-device',
+      },
+    })
+
+    expect(defaultCatalog.statusCode).toBe(200)
+    expect(defaultCatalog.json().books.map((book: { id: string }) => book.id)).toEqual(['default-book'])
+    expect(defaultTrustedBook.statusCode).toBe(404)
+    expect(defaultTrustedBook.json().error).toMatchObject({ code: 'book_not_found' })
+    expect(trustedCatalog.statusCode).toBe(200)
+    expect(trustedCatalog.json().books.map((book: { id: string }) => book.id)).toEqual(['trusted-book', 'default-book'])
+    expect(trustedPackage.statusCode).toBe(200)
+    expect(trustedPackage.json().package.book.id).toBe('trusted-book')
+    expect(hiddenBook.statusCode).toBe(404)
+    expect(hiddenBook.json().error).toMatchObject({ code: 'book_not_found' })
+    expect(disabledCatalog.statusCode).toBe(403)
+    expect(disabledCatalog.json().error).toMatchObject({ code: 'device_disabled', statusCode: 403 })
+  })
+
+  it('manages all book visibility, labels, and device roles through admin APIs', async () => {
+    const dataDir = await makeDataDir()
+    await writeFile(
+      join(dataDir, 'books.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        books: [
+          {
+            id: 'book-a',
+            title: '后台书',
+            chapterCount: 1,
+            updatedAt: '2026-06-25T00:00:00.000Z',
+            visibility: 'hidden',
+            labels: ['test'],
+          },
+        ],
+      }),
+      'utf8',
+    )
+    await writeFile(
+      join(dataDir, 'devices.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        devices: [
+          {
+            id: 'device-a',
+            name: '旧设备',
+            pairingCode: '333333',
+            role: 'default',
+            firstSeenAt: '2026-06-29T00:00:00.000Z',
+            lastSeenAt: '2026-06-29T00:00:00.000Z',
+          },
+        ],
+      }),
+      'utf8',
+    )
+    const app = buildTestApp({
+      GATEWAY_DEV_ACCESS_TOKEN: 'dev-token',
+      GATEWAY_DATA_DIR: dataDir,
+    })
+    const authHeaders = { authorization: 'Bearer dev-token' }
+    const booksBefore = await app.inject({
+      method: 'GET',
+      url: '/admin/books',
+      headers: authHeaders,
+    })
+    const visibilityResponse = await app.inject({
+      method: 'PATCH',
+      url: '/admin/books/book-a/visibility',
+      headers: authHeaders,
+      payload: { visibility: 'trusted' },
+    })
+    const labelsResponse = await app.inject({
+      method: 'PATCH',
+      url: '/admin/books/book-a/labels',
+      headers: authHeaders,
+      payload: { labels: ['private', 'adult', 'private', '  '] },
+    })
+    const devicesBefore = await app.inject({
+      method: 'GET',
+      url: '/admin/devices',
+      headers: authHeaders,
+    })
+    const deviceResponse = await app.inject({
+      method: 'PATCH',
+      url: '/admin/devices/device-a',
+      headers: authHeaders,
+      payload: { name: '客厅平板', role: 'trusted' },
+    })
+
+    expect(booksBefore.statusCode).toBe(200)
+    expect(booksBefore.json().books).toEqual([
+      expect.objectContaining({
+        id: 'book-a',
+        visibility: 'hidden',
+        labels: ['test'],
+      }),
+    ])
+    expect(visibilityResponse.statusCode).toBe(200)
+    expect(visibilityResponse.json().book).toMatchObject({
+      id: 'book-a',
+      visibility: 'trusted',
+      labels: ['test'],
+    })
+    expect(labelsResponse.statusCode).toBe(200)
+    expect(labelsResponse.json().book).toMatchObject({
+      id: 'book-a',
+      visibility: 'trusted',
+      labels: ['adult', 'private'],
+    })
+    expect(devicesBefore.statusCode).toBe(200)
+    expect(devicesBefore.json().devices[0]).toMatchObject({
+      id: 'device-a',
+      role: 'default',
+    })
+    expect(deviceResponse.statusCode).toBe(200)
+    expect(deviceResponse.json().device).toMatchObject({
+      id: 'device-a',
+      name: '客厅平板',
+      role: 'trusted',
     })
   })
 
@@ -767,6 +1118,55 @@ describe('gateway app', () => {
     })
   })
 
+  it('preserves existing book visibility and labels when importing replacement packages', async () => {
+    const dataDir = await makeDataDir()
+    await writeFile(
+      join(dataDir, 'books.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        books: [
+          {
+            id: 'book-imported',
+            title: '旧标题',
+            chapterCount: 1,
+            updatedAt: '2026-06-20T00:00:00.000Z',
+            visibility: 'trusted',
+            labels: ['private'],
+          },
+        ],
+      }),
+      'utf8',
+    )
+    const app = buildTestApp({
+      GATEWAY_DEV_ACCESS_TOKEN: 'dev-token',
+      GATEWAY_DATA_DIR: dataDir,
+    })
+    const response = await app.inject({
+      method: 'PUT',
+      url: '/admin/books/book-imported/package',
+      headers: {
+        authorization: 'Bearer dev-token',
+      },
+      payload: {
+        schemaVersion: 1,
+        book: {
+          id: 'book-imported',
+          title: '新标题',
+          chapterCount: 2,
+          updatedAt: '2026-06-25T00:00:00.000Z',
+        },
+      },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect(response.json().book).toMatchObject({
+      id: 'book-imported',
+      title: '新标题',
+      visibility: 'trusted',
+      labels: ['private'],
+    })
+  })
+
   it('rejects imported mobile book packages with mismatched ids', async () => {
     const dataDir = await makeDataDir()
     const app = buildTestApp({
@@ -956,8 +1356,24 @@ describe('gateway app', () => {
 
   it('returns an empty protected audio catalog when no audio catalog exists', async () => {
     const dataDir = await makeDataDir()
+    await writeFile(
+      join(dataDir, 'books.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        books: [
+          {
+            id: 'book-a',
+            title: '音频书',
+            chapterCount: 1,
+            updatedAt: '2026-06-25T00:00:00.000Z',
+          },
+        ],
+      }),
+      'utf8',
+    )
     const app = buildTestApp({
       GATEWAY_DEV_ACCESS_TOKEN: 'dev-token',
+      GATEWAY_DATA_DIR: dataDir,
       GATEWAY_AUDIO_DIR: dataDir,
     })
     const unauthorizedResponse = await app.inject({
@@ -981,9 +1397,25 @@ describe('gateway app', () => {
   })
 
   it('returns a protected audio catalog and downloads audio files', async () => {
+    const dataDir = await makeDataDir()
     const audioDir = await makeDataDir()
     const bookAudioDir = join(audioDir, 'books', 'book-a')
     await mkdir(bookAudioDir, { recursive: true })
+    await writeFile(
+      join(dataDir, 'books.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        books: [
+          {
+            id: 'book-a',
+            title: '音频书',
+            chapterCount: 1,
+            updatedAt: '2026-06-25T00:00:00.000Z',
+          },
+        ],
+      }),
+      'utf8',
+    )
     await writeFile(join(bookAudioDir, 'chapter-1.mp3'), 'fake mp3 data')
     await writeFile(
       join(bookAudioDir, 'chapter-1.manifest.json'),
@@ -1015,6 +1447,7 @@ describe('gateway app', () => {
     )
     const app = buildTestApp({
       GATEWAY_DEV_ACCESS_TOKEN: 'dev-token',
+      GATEWAY_DATA_DIR: dataDir,
       GATEWAY_AUDIO_DIR: audioDir,
     })
     const catalogResponse = await app.inject({
@@ -1063,9 +1496,25 @@ describe('gateway app', () => {
   })
 
   it('rejects unsafe protected audio catalog paths', async () => {
+    const dataDir = await makeDataDir()
     const audioDir = await makeDataDir()
     const bookAudioDir = join(audioDir, 'books', 'book-a')
     await mkdir(bookAudioDir, { recursive: true })
+    await writeFile(
+      join(dataDir, 'books.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        books: [
+          {
+            id: 'book-a',
+            title: '音频书',
+            chapterCount: 1,
+            updatedAt: '2026-06-25T00:00:00.000Z',
+          },
+        ],
+      }),
+      'utf8',
+    )
     await writeFile(
       join(bookAudioDir, 'audio.json'),
       JSON.stringify({
@@ -1081,6 +1530,7 @@ describe('gateway app', () => {
     )
     const app = buildTestApp({
       GATEWAY_DEV_ACCESS_TOKEN: 'dev-token',
+      GATEWAY_DATA_DIR: dataDir,
       GATEWAY_AUDIO_DIR: audioDir,
     })
     const response = await app.inject({

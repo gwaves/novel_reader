@@ -4,7 +4,11 @@ import { GatewayHttpError } from './errors.js'
 
 export type GatewayAuthContext = {
   mode: 'development-static-token'
+  deviceId?: string
   deviceName?: string
+  deviceModel?: string
+  devicePlatform?: string
+  appVersion?: string
 }
 
 export function requireGatewayAuth(config: GatewayConfig, request: FastifyRequest): GatewayAuthContext {
@@ -27,7 +31,11 @@ export function requireGatewayAuth(config: GatewayConfig, request: FastifyReques
 
   return {
     mode: 'development-static-token',
-    deviceName: parseDeviceName(request.headers['x-device-name']),
+    deviceId: parseHeaderValue(request.headers['x-device-id'], 120),
+    deviceName: parseHeaderValue(request.headers['x-device-name'], 80),
+    deviceModel: parseHeaderValue(request.headers['x-device-model'], 120),
+    devicePlatform: parseHeaderValue(request.headers['x-device-platform'], 40),
+    appVersion: parseHeaderValue(request.headers['x-app-version'], 40),
   }
 }
 
@@ -42,8 +50,8 @@ function parseBearerToken(authorization: string | undefined) {
   return token
 }
 
-function parseDeviceName(value: string | string[] | undefined) {
+function parseHeaderValue(value: string | string[] | undefined, maxLength: number) {
   const rawValue = Array.isArray(value) ? value[0] : value
-  const deviceName = rawValue?.trim()
-  return deviceName ? deviceName.slice(0, 80) : undefined
+  const normalized = rawValue?.trim()
+  return normalized ? normalized.slice(0, maxLength) : undefined
 }

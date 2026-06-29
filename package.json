@@ -29,12 +29,10 @@
     "gateway:test": "npm --prefix gateway run test",
     "gateway:publish-audio": "node gateway/scripts/publish-audio.mjs",
     "gateway:publish-package": "node gateway/scripts/publish-package.mjs",
-    "content:pipeline": "node content-pipeline/scripts/content-pipeline.mjs",
-    "content:pipeline:service": "npm --prefix content-pipeline run start",
-    "content:pipeline:service:dev": "npm --prefix content-pipeline run dev",
-    "content:pipeline:service:test": "npm --prefix content-pipeline run test",
-    "content:pipeline:smoke": "node content-pipeline/scripts/smoke-test.mjs",
     "production-pipeline": "node production-pipeline/src/cli.mjs",
+    "production-pipeline:console": "node production-pipeline/src/service.mjs",
+    "production-pipeline:console:dev": "node --watch production-pipeline/src/service.mjs",
+    "production-pipeline:console:test": "node --test production-pipeline/test/service.test.mjs",
     "production-pipeline:test": "node --test production-pipeline/test/*.test.mjs",
     "gateway-android:dev": "npm --prefix gateway-android-app run dev",
     "gateway-android:build": "npm --prefix gateway-android-app run build",
@@ -54,6 +52,7 @@
   },
   "dependencies": {
     "@xyflow/react": "^12.11.0",
+    "fastify": "^5.9.0",
     "react": "^19.2.6",
     "react-dom": "^19.2.6"
   },

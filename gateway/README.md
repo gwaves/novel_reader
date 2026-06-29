@@ -146,7 +146,7 @@ npm run gateway:publish-audio -- \
 ```bash
 npm run gateway:publish-audio -- \
   --book-id <bookId> \
-  --source-root tmp/content-pipeline/<bookId>/audio \
+  --source-root tmp/production-pipeline/runs/<bookId>/<runId>/artifacts/audio \
   --gateway-audio-dir ~/.novel_reader_gateway/audio \
   --remote-host 192.168.88.100 \
   --remote-audio-dir '~/novel-reader-gateway/audio'

@@ -1,9 +1,10 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { execFile, spawn } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { createServer } from 'node:http'
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
-import { dirname, join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { DatabaseSync } from 'node:sqlite'
 import { promisify } from 'node:util'
@@ -519,6 +520,64 @@ describe('production-pipeline import', () => {
     }
   })
 
+  it('ignores configured bookId for import jobs and persists the imported file book id', async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), 'production-pipeline-derived-book-test-'))
+    try {
+      const txtPath = join(tempDir, 'sample.txt')
+      const dbPath = join(tempDir, 'main.sqlite')
+      const runRoot = join(tempDir, 'runs')
+      const jobPath = join(tempDir, 'job.json')
+      const sourceText = '第一章 开始\n这是第一章内容。\n\n第二章 继续\n这是第二章内容。'
+      await writeFile(txtPath, sourceText, 'utf8')
+      const expectedBookId = `file-${createHash('sha256').update(Buffer.from(sourceText)).digest('hex').slice(0, 24)}`
+      await writeFile(
+        jobPath,
+        JSON.stringify({
+          bookId: 'stale-config-book-id',
+          title: '样书',
+          mainDbPath: dbPath,
+          source: { type: 'txt', file: txtPath },
+          stages: ['import', 'package'],
+          import: { replace: true },
+        }),
+        'utf8',
+      )
+
+      const { stdout } = await execFileAsync(process.execPath, [
+        cliPath,
+        'run',
+        '--job',
+        jobPath,
+        '--run-root',
+        runRoot,
+      ])
+
+      assert.match(stdout, /completed: import/)
+      assert.match(stdout, /completed: package/)
+      const parentRunDir = stdout.match(/runDir: (.+)/)?.[1]?.trim()
+      assert.ok(parentRunDir)
+      assert.equal(parentRunDir, join(runRoot, expectedBookId, basename(parentRunDir)))
+      const runJson = JSON.parse(await readFile(join(parentRunDir, 'run.json'), 'utf8'))
+      assert.equal(runJson.job.bookId, expectedBookId)
+      assert.equal(runJson.stages.import.status, 'completed')
+      assert.equal(runJson.stages.package.status, 'completed')
+      const persistedJob = JSON.parse(await readFile(jobPath, 'utf8'))
+      assert.equal(persistedJob.bookId, expectedBookId)
+
+      const db = new DatabaseSync(dbPath, { readOnly: true })
+      try {
+        const book = db.prepare('SELECT id, title, chapter_count FROM books WHERE id = ?').get(expectedBookId)
+        assert.equal(book.id, expectedBookId)
+        assert.equal(book.title, '样书')
+        assert.equal(book.chapter_count, 2)
+      } finally {
+        db.close()
+      }
+    } finally {
+      await rm(tempDir, { recursive: true, force: true })
+    }
+  })
+
   it('expands embedding stage into chunk and summary embedding stages', async () => {
     const tempDir = await mkdtemp(join(tmpdir(), 'production-pipeline-run-embedding-split-test-'))
     let embeddingServer
@@ -527,7 +586,9 @@ describe('production-pipeline import', () => {
       const dbPath = join(tempDir, 'main.sqlite')
       const runRoot = join(tempDir, 'runs')
       const jobPath = join(tempDir, 'job.json')
-      await writeFile(txtPath, `第一章 开始\n这是第一章内容。`, 'utf8')
+      const sourceText = `第一章 开始\n这是第一章内容。`
+      const expectedBookId = `file-${createHash('sha256').update(Buffer.from(sourceText)).digest('hex').slice(0, 24)}`
+      await writeFile(txtPath, sourceText, 'utf8')
       embeddingServer = await startFakeEmbeddingServer()
       await writeFile(
         jobPath,
@@ -561,13 +622,14 @@ describe('production-pipeline import', () => {
       const parentRunDir = stdout.match(/runDir: (.+)/)?.[1]?.trim()
       assert.ok(parentRunDir)
       const runJson = JSON.parse(await readFile(join(parentRunDir, 'run.json'), 'utf8'))
+      assert.equal(runJson.job.bookId, expectedBookId)
       assert.equal(runJson.stages.chunkEmbedding.status, 'completed')
       assert.equal(runJson.stages.summaryEmbedding.status, 'completed')
       assert.equal(runJson.stages.package.status, 'completed')
       const db = new DatabaseSync(dbPath, { readOnly: true })
       try {
-        assert.equal(db.prepare('SELECT COUNT(*) AS count FROM chapter_chunk_embeddings WHERE book_id = ?').get('sample-book').count, 1)
-        assert.equal(db.prepare('SELECT COUNT(*) AS count FROM summary_embeddings WHERE book_id = ?').get('sample-book').count, 0)
+        assert.equal(db.prepare('SELECT COUNT(*) AS count FROM chapter_chunk_embeddings WHERE book_id = ?').get(expectedBookId).count, 1)
+        assert.equal(db.prepare('SELECT COUNT(*) AS count FROM summary_embeddings WHERE book_id = ?').get(expectedBookId).count, 0)
       } finally {
         db.close()
       }
@@ -814,7 +876,7 @@ describe('production-pipeline import', () => {
       const fakeConfigPath = join(tempDir, 'fake-tts-config.json')
       const jobPath = join(tempDir, 'job.json')
       await writeFile(txtPath, `第一章 开始\n这是第一章内容。`, 'utf8')
-      await writeFile(fakeConfigPath, JSON.stringify({ ok: true }), 'utf8')
+      await writeFile(fakeConfigPath, JSON.stringify({ ok: true, fakeDelayMs: 500 }), 'utf8')
       await writeFile(fakeDirectorPath, fakeTtsDirectorSource(), 'utf8')
       chatServer = await startFakeChatServer()
       embeddingServer = await startFakeEmbeddingServer()
@@ -852,6 +914,7 @@ describe('production-pipeline import', () => {
             ttsDirectorScript: fakeDirectorPath,
             ttsOutRoot,
             chapters: '1',
+            llmChapters: 2,
             resume: true,
           },
         }),
@@ -880,10 +943,14 @@ describe('production-pipeline import', () => {
       const kgReport = JSON.parse(await readFile(join(dirname(runJson.stages.kg.childRunJson), 'artifacts', 'kg-report.json'), 'utf8'))
       const audioRunJson = JSON.parse(await readFile(runJson.stages.audio.childRunJson, 'utf8'))
       const ttsArgs = JSON.parse(await readFile(join(audioRunJson.stages.audio.artifacts.ttsSourceRoot, 'args.json'), 'utf8'))
+      const finalAudioControl = JSON.parse(await readFile(join(audioRunJson.stages.audio.artifacts.ttsSourceRoot, 'control-final.json'), 'utf8'))
       assert.equal(summaryReport.concurrency, 3)
       assert.equal(kgReport.concurrency, 3)
-      assert.equal(ttsArgs['director-concurrency'], '4')
-      assert.equal(ttsArgs['llm-chapters'], '1')
+      assert.equal(ttsArgs['director-concurrency'], '2')
+      assert.equal(ttsArgs['llm-chapters'], '2')
+      assert.ok(ttsArgs['control-file'])
+      assert.equal(finalAudioControl.directorConcurrency, 5)
+      assert.equal(finalAudioControl.llmChapters, 2)
     } finally {
       if (chatServer) await chatServer.close()
       if (embeddingServer) await embeddingServer.close()
@@ -2044,7 +2111,7 @@ function seedKnowledgeGraph(dbPath) {
 
 function fakeTtsDirectorSource() {
   return `
-import { mkdir, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 
 function parseArgs(argv) {
@@ -2084,7 +2151,14 @@ const args = parseArgs(process.argv.slice(2))
 if (args._[0] !== 'batch-pipeline') throw new Error('fake director only supports batch-pipeline')
 await mkdir(args['out-root'], { recursive: true })
 await writeFile(join(args['out-root'], 'args.json'), JSON.stringify(args))
+const config = args.config ? JSON.parse(await readFile(args.config, 'utf8')) : {}
 console.log('fake director start')
+if (config.fakeDelayMs) {
+  await new Promise(resolve => setTimeout(resolve, Number(config.fakeDelayMs)))
+}
+if (args['control-file']) {
+  await writeFile(join(args['out-root'], 'control-final.json'), await readFile(args['control-file'], 'utf8'))
+}
 const chapters = parseChapters(args.chapters)
 for (const chapter of chapters) {
   console.log('fake director chapter ' + chapter)

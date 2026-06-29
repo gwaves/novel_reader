@@ -186,15 +186,14 @@ app database.
 
 ## Local Console
 
-The legacy Content Pipeline console at `http://127.0.0.1:6290` can also launch
-and monitor v2 jobs. Start it with:
+The production pipeline includes a local console at `http://127.0.0.1:6290`
+for launching and monitoring v2 jobs. Start it with:
 
 ```bash
-npm run content:pipeline:service
+npm run production-pipeline:console
 ```
 
-Then choose `Production v2` in the mode selector and fill `V2 Job JSON` with a
-job file path. The console reads the v2 `run.json` from
+Fill `V2 Job JSON` with a job file path. The console reads the v2 `run.json` from
 `tmp/production-pipeline/runs/<bookId>/<runId>/run.json` and shows the stage
 status, child run paths, and child log files while the job is still running.
 

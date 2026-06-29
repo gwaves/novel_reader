@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { inferSourceType, parseBookFile } from '../lib/book-ingest.mjs'
+import { inferSourceType, parseBookFile } from '../src/book-ingest.mjs'
 
 describe('book ingest', () => {
   it('recognizes MOBI-family source types', () => {
@@ -51,6 +51,43 @@ describe('book ingest', () => {
       assert.equal(parsed.chapters[0].title, '第二十五回　镇元仙赶捉取经僧　孙行者大闹五庄观')
       assert.match(parsed.chapters[0].content, /^却说他兄弟三众，到了殿上/)
       assert.doesNotMatch(parsed.chapters[0].content, /第二十五回/)
+    } finally {
+      await rm(tempDir, { recursive: true, force: true })
+    }
+  })
+
+  it('drops a leading table-of-contents fragment before the real first chapter', async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), 'book-ingest-test-'))
+    try {
+      const txtPath = join(tempDir, '金麟外传.txt')
+      await writeFile(
+        txtPath,
+        `
+金鳞岂是池中物
+第一章·龙回故乡
+第二章·走马上任
+第二百三十章·扩展结局
+
+ÁÁÁÁÁÁÁÁÁÁ：example.com 1，2，3
+
+第一章·龙回故乡
+二十三岁的主角坐在飞机上，故事由此开始。
+
+第二章·走马上任
+新的职务带来新的局面。
+`,
+        'utf8',
+      )
+
+      const parsed = await parseBookFile(txtPath)
+
+      assert.equal(parsed.chapters.length, 2)
+      assert.deepEqual(parsed.chapters.map((chapter) => chapter.title), [
+        '第一章·龙回故乡',
+        '第二章·走马上任',
+      ])
+      assert.doesNotMatch(parsed.chapters[0].content, /example\.com/)
+      assert.match(parsed.chapters[0].content, /^二十三岁/)
     } finally {
       await rm(tempDir, { recursive: true, force: true })
     }

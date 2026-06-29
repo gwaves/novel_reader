@@ -4,6 +4,8 @@ import { join } from 'node:path'
 import type { GatewayConfig } from './config.js'
 import { GatewayHttpError } from './errors.js'
 
+export type GatewayBookVisibility = 'default' | 'trusted' | 'admin' | 'hidden'
+
 export type GatewayBookSummary = {
   id: string
   title: string
@@ -15,6 +17,8 @@ export type GatewayBookSummary = {
   embeddingCoverage?: number
   audioChapterCount?: number
   updatedAt: string
+  visibility: GatewayBookVisibility
+  labels: string[]
 }
 
 export type GatewayBookCatalog = {
@@ -123,15 +127,65 @@ export async function upsertBookPackage(
 
   await mkdir(bookDir, { recursive: true })
   await writeJsonFile(join(bookDir, 'package.json'), bookPackage)
-  await upsertBookSummary(config, book)
+  return upsertBookSummary(config, book, {
+    hasExplicitVisibility: isRecord(bookPackage.book) && isBookVisibility(bookPackage.book.visibility),
+    hasExplicitLabels: isRecord(bookPackage.book) && Array.isArray(bookPackage.book.labels),
+  })
+}
 
+export async function updateBookVisibility(
+  config: GatewayConfig,
+  bookId: string,
+  visibility: unknown,
+): Promise<GatewayBookSummary> {
+  if (!isBookVisibility(visibility)) {
+    throw new GatewayHttpError(400, 'invalid_book_visibility', 'Book visibility is invalid.')
+  }
+
+  const catalog = await readBookCatalog(config)
+  const book = catalog.books.find((candidate) => candidate.id === bookId)
+  if (!book) {
+    throw new GatewayHttpError(404, 'book_not_found', `Gateway book ${bookId} was not found.`)
+  }
+  book.visibility = visibility
+  await writeBookCatalog(config, catalog.books)
   return book
 }
 
-async function upsertBookSummary(config: GatewayConfig, book: GatewayBookSummary) {
+export async function updateBookLabels(config: GatewayConfig, bookId: string, labels: unknown): Promise<GatewayBookSummary> {
+  if (!Array.isArray(labels) || labels.some((label) => typeof label !== 'string')) {
+    throw new GatewayHttpError(400, 'invalid_book_labels', 'Book labels must be an array of strings.')
+  }
+
   const catalog = await readBookCatalog(config)
+  const book = catalog.books.find((candidate) => candidate.id === bookId)
+  if (!book) {
+    throw new GatewayHttpError(404, 'book_not_found', `Gateway book ${bookId} was not found.`)
+  }
+  book.labels = normalizeLabels(labels)
+  await writeBookCatalog(config, catalog.books)
+  return book
+}
+
+async function upsertBookSummary(
+  config: GatewayConfig,
+  book: GatewayBookSummary,
+  options: { hasExplicitVisibility?: boolean; hasExplicitLabels?: boolean } = {},
+) {
+  const catalog = await readBookCatalog(config)
+  const existing = catalog.books.find((candidate) => candidate.id === book.id)
   const books = catalog.books.filter((candidate) => candidate.id !== book.id)
-  books.push(book)
+  const savedBook = {
+    ...book,
+    visibility: options.hasExplicitVisibility ? book.visibility : existing?.visibility ?? book.visibility,
+    labels: options.hasExplicitLabels ? book.labels : existing?.labels ?? book.labels,
+  }
+  books.push(savedBook)
+  await writeBookCatalog(config, books)
+  return savedBook
+}
+
+async function writeBookCatalog(config: GatewayConfig, books: GatewayBookSummary[]) {
   books.sort((left, right) => {
     const updatedDiff = Date.parse(right.updatedAt) - Date.parse(left.updatedAt)
     return updatedDiff || left.title.localeCompare(right.title)
@@ -240,7 +294,29 @@ function normalizeBook(
     embeddingCoverage: readOptionalRatio(book, 'embeddingCoverage'),
     audioChapterCount: readOptionalNonNegativeInteger(book, 'audioChapterCount'),
     updatedAt,
+    visibility: normalizeVisibility(book.visibility),
+    labels: normalizeLabels(book.labels),
   }
+}
+
+function normalizeVisibility(value: unknown): GatewayBookVisibility {
+  return isBookVisibility(value) ? value : 'default'
+}
+
+function isBookVisibility(value: unknown): value is GatewayBookVisibility {
+  return value === 'default' || value === 'trusted' || value === 'admin' || value === 'hidden'
+}
+
+function normalizeLabels(value: unknown) {
+  if (!Array.isArray(value)) return []
+  return Array.from(
+    new Set(
+      value
+        .filter((label): label is string => typeof label === 'string')
+        .map((label) => label.trim())
+        .filter(Boolean),
+    ),
+  ).sort((left, right) => left.localeCompare(right))
 }
 
 function readRequiredString(record: Record<string, unknown>, key: string) {

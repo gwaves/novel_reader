@@ -1,0 +1,50 @@
+{
+  "title": "金麟外传",
+  "bookId": "file-e7de397b25a4635230c2c062",
+  "mainDbPath": "~/.novel_reader/novel_reader.sqlite",
+  "source": {
+    "type": "txt",
+    "file": "/Users/gwaves/Downloads/jinlinwaizhuan.txt"
+  },
+  "stages": [
+    "summary",
+    "kg",
+    "embedding",
+    "audio",
+    "package"
+  ],
+  "llm": {
+    "provider": "openai-compatible",
+    "baseUrl": "http://192.168.88.24:30000/v1",
+    "apiKey": "dummy",
+    "model": "qwen3.6-27b",
+    "concurrency": 10,
+    "scheduler": {
+      "borrowIdle": true,
+      "weights": {
+        "summary": 4,
+        "kg": 3,
+        "audio": 3
+      }
+    }
+  },
+  "summary": {},
+  "kg": {},
+  "embedding": {
+    "provider": "ollama",
+    "baseUrl": "http://192.168.88.100:11434",
+    "model": "qwen3-embedding:8b",
+    "concurrency": 8,
+    "retries": 5,
+    "timeoutMs": 300000
+  },
+  "audio": {
+    "ttsConfig": "~/.novel_reader/tts-director.config.json",
+    "chapters": "11-231",
+    "ttsConcurrency": 16,
+    "ttsChapters": 2,
+    "llmChapters": 2,
+    "resume": true,
+    "strict": true
+  }
+}

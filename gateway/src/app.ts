@@ -1,7 +1,7 @@
 import cors from '@fastify/cors'
 import helmet from '@fastify/helmet'
 import rateLimit from '@fastify/rate-limit'
-import Fastify, { type FastifyError } from 'fastify'
+import Fastify, { type FastifyError, type FastifyRequest } from 'fastify'
 import { randomUUID } from 'node:crypto'
 import { basename } from 'node:path'
 import { requireGatewayAuth } from './auth.js'
@@ -14,9 +14,16 @@ import {
   readBookCatalog,
   readBookPackage,
   readBookSummary,
+  updateBookLabels,
+  updateBookVisibility,
   upsertBookPackage,
 } from './data-store.js'
-import { readDeviceRegistry, touchGatewayDevice } from './device-store.js'
+import {
+  type GatewayDeviceRecord,
+  readDeviceRegistry,
+  touchGatewayDevice,
+  updateGatewayDevice,
+} from './device-store.js'
 import { GatewayHttpError, isGatewayHttpError } from './errors.js'
 import { createEmbedding, forwardChatCompletion, forwardEmbeddings } from './openai-client.js'
 
@@ -100,16 +107,16 @@ export function buildGatewayApp(config: GatewayConfig = loadConfig()) {
 
   app.get('/auth/session', async (request) => {
     const auth = requireGatewayAuth(config, request)
-    await touchGatewayDevice(config, auth)
+    const device = await touchGatewayDevice(config, auth, request.ip)
     return {
       authenticated: true,
-      auth,
+      auth: buildSessionAuth(auth, device),
     }
   })
 
   app.get('/auth/devices', async (request) => {
     const auth = requireGatewayAuth(config, request)
-    await touchGatewayDevice(config, auth)
+    await touchGatewayDevice(config, auth, request.ip)
     return {
       generatedAt: new Date().toISOString(),
       ...(await readDeviceRegistry(config)),
@@ -117,26 +124,29 @@ export function buildGatewayApp(config: GatewayConfig = loadConfig()) {
   })
 
   app.get('/mobile/books', async (request) => {
-    requireGatewayAuth(config, request)
+    const mobileAuth = await requireMobileDevice(config, request)
     const catalog = await readBookCatalog(config)
+    const visibleBooks = catalog.books.filter((book) => canReadBook(mobileAuth.allowedVisibilities, book))
     return {
       schemaVersion: catalog.schemaVersion,
       generatedAt: new Date().toISOString(),
-      books: await withAudioChapterCounts(config, catalog.books),
+      books: await withAudioChapterCounts(config, visibleBooks),
     }
   })
 
   app.get<{ Params: { bookId: string } }>('/mobile/books/:bookId', async (request) => {
-    requireGatewayAuth(config, request)
+    const mobileAuth = await requireMobileDevice(config, request)
+    const book = await readVisibleBookSummary(config, request.params.bookId, mobileAuth.allowedVisibilities)
     return {
       schemaVersion: 1,
       generatedAt: new Date().toISOString(),
-      book: await withAudioChapterCount(config, await readBookSummary(config, request.params.bookId)),
+      book: await withAudioChapterCount(config, book),
     }
   })
 
   app.get<{ Params: { bookId: string }; Querystring: { include?: string } }>('/mobile/books/:bookId/package', async (request) => {
-    requireGatewayAuth(config, request)
+    const mobileAuth = await requireMobileDevice(config, request)
+    await readVisibleBookSummary(config, request.params.bookId, mobileAuth.allowedVisibilities)
     const bookPackage = await readBookPackage(config, request.params.bookId)
     const includeFullPackage = request.query.include === 'all' || request.query.include === 'full'
     return {
@@ -146,7 +156,8 @@ export function buildGatewayApp(config: GatewayConfig = loadConfig()) {
   })
 
   app.get<{ Params: { bookId: string } }>('/mobile/books/:bookId/package/download', async (request, reply) => {
-    requireGatewayAuth(config, request)
+    const mobileAuth = await requireMobileDevice(config, request)
+    await readVisibleBookSummary(config, request.params.bookId, mobileAuth.allowedVisibilities)
     const packageFile = await openBookPackageFile(config, request.params.bookId)
     return reply
       .header('content-type', 'application/json; charset=utf-8')
@@ -161,6 +172,69 @@ export function buildGatewayApp(config: GatewayConfig = loadConfig()) {
       schemaVersion: 1,
       importedAt: new Date().toISOString(),
       book: await upsertBookPackage(config, request.params.bookId, request.body),
+    }
+  })
+
+  app.get('/admin/books', async (request) => {
+    requireGatewayAuth(config, request)
+    const catalog = await readBookCatalog(config)
+    return {
+      schemaVersion: catalog.schemaVersion,
+      generatedAt: new Date().toISOString(),
+      books: await withAudioChapterCounts(config, catalog.books),
+    }
+  })
+
+  app.get<{ Params: { bookId: string } }>('/admin/books/:bookId', async (request) => {
+    requireGatewayAuth(config, request)
+    return {
+      schemaVersion: 1,
+      generatedAt: new Date().toISOString(),
+      book: await withAudioChapterCount(config, await readBookSummary(config, request.params.bookId)),
+    }
+  })
+
+  app.patch<{ Body: unknown; Params: { bookId: string } }>('/admin/books/:bookId/visibility', async (request) => {
+    requireGatewayAuth(config, request)
+    if (!isRecord(request.body)) {
+      throw new GatewayHttpError(400, 'invalid_book_visibility', 'Book visibility patch body must be an object.')
+    }
+    return {
+      schemaVersion: 1,
+      updatedAt: new Date().toISOString(),
+      book: await updateBookVisibility(config, request.params.bookId, request.body.visibility),
+    }
+  })
+
+  app.patch<{ Body: unknown; Params: { bookId: string } }>('/admin/books/:bookId/labels', async (request) => {
+    requireGatewayAuth(config, request)
+    if (!isRecord(request.body)) {
+      throw new GatewayHttpError(400, 'invalid_book_labels', 'Book labels patch body must be an object.')
+    }
+    return {
+      schemaVersion: 1,
+      updatedAt: new Date().toISOString(),
+      book: await updateBookLabels(config, request.params.bookId, request.body.labels),
+    }
+  })
+
+  app.get('/admin/devices', async (request) => {
+    requireGatewayAuth(config, request)
+    return {
+      generatedAt: new Date().toISOString(),
+      ...(await readDeviceRegistry(config)),
+    }
+  })
+
+  app.patch<{ Body: unknown; Params: { deviceId: string } }>('/admin/devices/:deviceId', async (request) => {
+    requireGatewayAuth(config, request)
+    if (!isRecord(request.body)) {
+      throw new GatewayHttpError(400, 'invalid_device_update', 'Device patch body must be an object.')
+    }
+    return {
+      schemaVersion: 1,
+      updatedAt: new Date().toISOString(),
+      device: await updateGatewayDevice(config, request.params.deviceId, request.body),
     }
   })
 
@@ -230,7 +304,8 @@ export function buildGatewayApp(config: GatewayConfig = loadConfig()) {
   })
 
   app.get<{ Params: { bookId: string } }>('/mobile/books/:bookId/audio', async (request) => {
-    requireGatewayAuth(config, request)
+    const mobileAuth = await requireMobileDevice(config, request)
+    await readVisibleBookSummary(config, request.params.bookId, mobileAuth.allowedVisibilities)
     const catalog = await readAudioCatalog(config, request.params.bookId)
     return {
       schemaVersion: catalog.schemaVersion,
@@ -242,7 +317,8 @@ export function buildGatewayApp(config: GatewayConfig = loadConfig()) {
   app.get<{ Params: { bookId: string; chapterId: string } }>(
     '/mobile/books/:bookId/audio/:chapterId/download',
     async (request, reply) => {
-      requireGatewayAuth(config, request)
+      const mobileAuth = await requireMobileDevice(config, request)
+      await readVisibleBookSummary(config, request.params.bookId, mobileAuth.allowedVisibilities)
       const audio = await openAudioFile(config, request.params.bookId, request.params.chapterId)
       return reply
         .header('content-type', 'audio/mpeg')
@@ -255,12 +331,63 @@ export function buildGatewayApp(config: GatewayConfig = loadConfig()) {
   app.get<{ Params: { bookId: string; chapterId: string } }>(
     '/mobile/books/:bookId/audio/:chapterId/manifest',
     async (request) => {
-      requireGatewayAuth(config, request)
+      const mobileAuth = await requireMobileDevice(config, request)
+      await readVisibleBookSummary(config, request.params.bookId, mobileAuth.allowedVisibilities)
       return readAudioManifest(config, request.params.bookId, request.params.chapterId)
     },
   )
 
   return app
+}
+
+type MobileDeviceContext = {
+  allowedVisibilities: Array<GatewayBookSummary['visibility']>
+}
+
+async function requireMobileDevice(config: GatewayConfig, request: FastifyRequest): Promise<MobileDeviceContext> {
+  const auth = requireGatewayAuth(config, request)
+  const device = await touchGatewayDevice(config, auth, request.ip)
+  const role = device?.role ?? 'default'
+  if (role === 'disabled') {
+    throw new GatewayHttpError(403, 'device_disabled', 'This device is disabled.')
+  }
+  return {
+    allowedVisibilities: allowedVisibilitiesForRole(role),
+  }
+}
+
+function buildSessionAuth(auth: ReturnType<typeof requireGatewayAuth>, device?: GatewayDeviceRecord) {
+  const role = device?.role ?? 'default'
+  return {
+    mode: auth.mode,
+    deviceId: device?.id ?? auth.deviceId,
+    deviceName: device?.name ?? auth.deviceName,
+    role,
+    allowedVisibilities: allowedVisibilitiesForRole(role),
+    pairingCode: device?.pairingCode,
+  }
+}
+
+function allowedVisibilitiesForRole(role: GatewayDeviceRecord['role']): Array<GatewayBookSummary['visibility']> {
+  if (role === 'trusted') return ['default', 'trusted']
+  if (role === 'disabled') return []
+  return ['default']
+}
+
+async function readVisibleBookSummary(
+  config: GatewayConfig,
+  bookId: string,
+  allowedVisibilities: Array<GatewayBookSummary['visibility']>,
+) {
+  const book = await readBookSummary(config, bookId)
+  if (!canReadBook(allowedVisibilities, book)) {
+    throw new GatewayHttpError(404, 'book_not_found', `Gateway book ${bookId} was not found.`)
+  }
+  return book
+}
+
+function canReadBook(allowedVisibilities: Array<GatewayBookSummary['visibility']>, book: GatewayBookSummary) {
+  return allowedVisibilities.includes(book.visibility)
 }
 
 async function withAudioChapterCounts(config: GatewayConfig, books: GatewayBookSummary[]) {

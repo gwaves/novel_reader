@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc -p tsconfig.json --noEmit && vite build",
+    "test": "vitest run src/deviceIdentity.test.ts",
     "preview": "vite preview",
     "android:add": "npx cap add android",
     "android:sync": "npm run build && npx cap sync android",
@@ -26,6 +27,7 @@
     "@capacitor/cli": "^8.4.1",
     "@capacitor/core": "^8.4.1",
     "@types/react": "^19.2.14",
-    "@types/react-dom": "^19.2.3"
+    "@types/react-dom": "^19.2.3",
+    "vitest": "^4.0.0"
   }
 }
