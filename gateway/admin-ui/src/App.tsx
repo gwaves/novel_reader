@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import {
+  adminTokenStorageKey,
   loadAdminDashboardData,
   patchBookLabels,
   patchBookVisibility,
@@ -45,6 +46,8 @@ function App() {
   const [loadMessage, setLoadMessage] = useState('正在连接 Gateway 管理 API')
   const [selectedBookId, setSelectedBookId] = useState<string | null>(null)
   const [selectedDeviceId, setSelectedDeviceId] = useState<string | null>(null)
+  const [adminToken, setAdminToken] = useState(readStoredAdminToken)
+  const [isRefreshing, setIsRefreshing] = useState(false)
 
   const selectedBook = useMemo(
     () => books.find((book) => book.id === selectedBookId) ?? null,
@@ -55,16 +58,27 @@ function App() {
     [devices, selectedDeviceId],
   )
 
+  const applyDashboardData = (data: AdminDashboardData) => {
+    setBooks(data.books)
+    setDevices(data.devices)
+    setMetrics(data.overviewMetrics)
+    setEvents(data.recentEvents)
+    setDataSource(data.source)
+    setLoadMessage(data.source === 'api' ? '已连接 Gateway 管理 API' : 'API 不可用，正在显示 mock 数据')
+  }
+
+  const refreshDashboardData = async () => {
+    setIsRefreshing(true)
+    setLoadMessage('正在连接 Gateway 管理 API')
+    const data = await loadAdminDashboardData()
+    applyDashboardData(data)
+    setIsRefreshing(false)
+  }
+
   useEffect(() => {
     let cancelled = false
     void loadAdminDashboardData().then((data) => {
-      if (cancelled) return
-      setBooks(data.books)
-      setDevices(data.devices)
-      setMetrics(data.overviewMetrics)
-      setEvents(data.recentEvents)
-      setDataSource(data.source)
-      setLoadMessage(data.source === 'api' ? '已连接 Gateway 管理 API' : 'API 不可用，正在显示 mock 数据')
+      if (!cancelled) applyDashboardData(data)
     })
     return () => {
       cancelled = true
@@ -88,6 +102,22 @@ function App() {
     setActiveView(view)
     setSelectedBookId(null)
     setSelectedDeviceId(null)
+  }
+
+  const saveAdminToken = (nextToken: string) => {
+    const trimmedToken = nextToken.trim()
+    setAdminToken(trimmedToken)
+    try {
+      if (trimmedToken) {
+        window.localStorage.setItem(adminTokenStorageKey, trimmedToken)
+        setLoadMessage('管理员 Token 已保存，刷新后验证连接')
+      } else {
+        window.localStorage.removeItem(adminTokenStorageKey)
+        setLoadMessage('管理员 Token 已清除，刷新后使用匿名请求')
+      }
+    } catch {
+      setLoadMessage('浏览器本地存储不可用，Token 未保存')
+    }
   }
 
   return (
@@ -145,7 +175,16 @@ function App() {
           {activeView === 'packages' && <Placeholder title="数据包" subtitle="上传、预校验、差异确认和导入历史预留区" />}
           {activeView === 'audio' && <Placeholder title="音频" subtitle="按书统计音频覆盖率、缺失章节和热门下载" />}
           {activeView === 'logs' && <Placeholder title="请求日志" subtitle="展示元数据、错误、慢请求、下载筛选和设备过滤" />}
-          {activeView === 'settings' && <Placeholder title="设置" subtitle="管理刷新频率、后台访问提示和后续鉴权配置" />}
+          {activeView === 'settings' && (
+            <SettingsPage
+              adminToken={adminToken}
+              dataSource={dataSource}
+              isRefreshing={isRefreshing}
+              loadMessage={loadMessage}
+              onRefresh={() => void refreshDashboardData()}
+              onSaveToken={saveAdminToken}
+            />
+          )}
         </main>
       </div>
     </div>
@@ -496,6 +535,91 @@ function Placeholder({ title, subtitle }: { title: string; subtitle: string }) {
       <p>{subtitle}</p>
     </section>
   )
+}
+
+function SettingsPage({
+  adminToken,
+  dataSource,
+  isRefreshing,
+  loadMessage,
+  onRefresh,
+  onSaveToken,
+}: {
+  adminToken: string
+  dataSource: AdminDashboardData['source']
+  isRefreshing: boolean
+  loadMessage: string
+  onRefresh: () => void
+  onSaveToken: (token: string) => void
+}) {
+  const [draftToken, setDraftToken] = useState(adminToken)
+
+  useEffect(() => {
+    setDraftToken(adminToken)
+  }, [adminToken])
+
+  return (
+    <section className="settings-grid" aria-label="设置">
+      <form
+        className="panel settings-panel"
+        onSubmit={(event) => {
+          event.preventDefault()
+          onSaveToken(draftToken)
+        }}
+      >
+        <div className="panel-header">
+          <h2>后台访问</h2>
+          <span>{dataSource === 'api' ? '实时数据' : 'Mock 数据'}</span>
+        </div>
+
+        <label className="field">
+          <span>管理员 Token</span>
+          <input
+            aria-label="管理员 Token"
+            autoComplete="off"
+            placeholder="粘贴内网后台 Token"
+            type="password"
+            value={draftToken}
+            onChange={(event) => setDraftToken(event.target.value)}
+          />
+        </label>
+
+        <p className="setting-note">Token 仅保存在本机浏览器，后续请求会自动携带 Authorization Bearer。</p>
+
+        <div className="action-row">
+          <button type="submit">保存 Token</button>
+          <button type="button" onClick={() => onSaveToken('')}>清除 Token</button>
+        </div>
+      </form>
+
+      <section className="panel settings-panel">
+        <div className="panel-header">
+          <h2>数据连接</h2>
+          <span>{loadMessage}</span>
+        </div>
+
+        <dl className="detail-list">
+          <div><dt>数据来源</dt><dd>{dataSource === 'api' ? 'Gateway 管理 API' : '本地 mock 数据'}</dd></div>
+          <div><dt>Token 状态</dt><dd>{adminToken ? '已保存' : '未设置'}</dd></div>
+          <div><dt>存储键</dt><dd><code>{adminTokenStorageKey}</code></dd></div>
+        </dl>
+
+        <div className="action-row">
+          <button type="button" disabled={isRefreshing} onClick={onRefresh}>
+            {isRefreshing ? '刷新中' : '刷新后台数据'}
+          </button>
+        </div>
+      </section>
+    </section>
+  )
+}
+
+function readStoredAdminToken() {
+  try {
+    return window.localStorage.getItem(adminTokenStorageKey)?.trim() || ''
+  } catch {
+    return ''
+  }
 }
 
 export default App

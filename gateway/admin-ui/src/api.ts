@@ -66,6 +66,8 @@ export type AdminDashboardData = {
   source: 'api' | 'mock'
 }
 
+export const adminTokenStorageKey = 'novel-reader-gateway-admin-token'
+
 export async function loadAdminDashboardData(fetcher: typeof fetch = fetch): Promise<AdminDashboardData> {
   try {
     const [booksResponse, devicesResponse, metricsResponse, eventsResponse] = await Promise.all([
@@ -132,7 +134,7 @@ async function adminFetch<T = unknown>(path: string, fetcher: typeof fetch, init
 
 function readAdminToken() {
   try {
-    return window.localStorage.getItem('novel-reader-gateway-admin-token')?.trim() || ''
+    return window.localStorage.getItem(adminTokenStorageKey)?.trim() || ''
   } catch {
     return ''
   }
