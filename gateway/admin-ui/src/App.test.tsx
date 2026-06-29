@@ -87,6 +87,55 @@ describe('Gateway 管理后台 UI', () => {
           ],
         })
       }
+      if (url === '/admin/packages') {
+        return jsonResponse({
+          packages: [
+            {
+              bookId: 'api-book',
+              title: '接口书籍',
+              importStatus: 'imported',
+              sizeBytes: 13_107_200,
+              updatedAt: '2026-06-29T12:10:00.000Z',
+              importedAt: '2026-06-29T12:10:00.000Z',
+              chapterCount: 10,
+              packageChapterCount: 10,
+              summaryCoverage: 80,
+              kgCoverage: 70,
+              embeddingCoverage: 60,
+            },
+          ],
+        })
+      }
+      if (url === '/admin/audio') {
+        return jsonResponse({
+          audio: [
+            {
+              bookId: 'api-book',
+              title: '接口书籍',
+              chapterCount: 10,
+              audioChapterCount: 6,
+              coverage: 0.6,
+              missingChapterIds: ['chapter-7', 'chapter-8', 'chapter-9', 'chapter-10'],
+              totalSizeBytes: 93_113_549,
+              updatedAt: '2026-06-29T12:11:00.000Z',
+            },
+          ],
+        })
+      }
+      if (url === '/admin/requests') {
+        return jsonResponse({
+          requests: [
+            {
+              requestId: 'api-request',
+              time: '2026-06-29T12:12:00.000Z',
+              method: 'GET',
+              url: '/mobile/books/api-book/package',
+              statusCode: 503,
+              durationMs: 777,
+            },
+          ],
+        })
+      }
       return jsonResponse({}, false, 404)
     })
 
@@ -104,6 +153,37 @@ describe('Gateway 管理后台 UI', () => {
 
     await user.click(screen.getByRole('button', { name: '设备' }))
     expect(screen.getByRole('row', { name: /接口平板 112233 受信 192\.168\.88\.66/ })).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: '数据包' }))
+    expect(screen.getByRole('row', { name: /接口书籍 2026-06-29 12:10 可发布 12\.5 MB/ })).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: '音频' }))
+    expect(screen.getByRole('row', { name: /接口书籍 部分缺失 60% 6\/10/ })).toBeInTheDocument()
+    expect(screen.getByText('chapter-7、chapter-8、chapter-9、chapter-10')).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: '请求日志' }))
+    expect(screen.getByRole('row', { name: /GET .*\/mobile\/books\/api-book\/package 503 777ms 未知设备/ })).toBeInTheDocument()
+  })
+
+  it('API 不可用时用 mock 数据展示数据包、音频和请求日志页面', async () => {
+    const user = userEvent.setup()
+    render(<App />)
+
+    expect(await screen.findByText(/API 不可用，正在显示 mock 数据/)).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: '数据包' }))
+    expect(screen.getByRole('heading', { name: '数据包' })).toBeInTheDocument()
+    expect(screen.getByRole('row', { name: /夜航档案 2026\.06\.27-1820 需复查 18\.6 MB/ })).toBeInTheDocument()
+    expect(screen.getByText('第 7 章、第 19 章、第 33 章')).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: '音频' }))
+    expect(screen.getByRole('heading', { name: '音频' })).toBeInTheDocument()
+    expect(screen.getByRole('row', { name: /烬鳞纪 部分缺失 72% 134\/186/ })).toBeInTheDocument()
+    expect(screen.getByText('茉莉')).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: '请求日志' }))
+    expect(screen.getByRole('heading', { name: '请求日志' })).toBeInTheDocument()
+    expect(screen.getByRole('row', { name: /GET .*\/mobile\/books\/jinlin\/audio\/088\.mp3 404 42ms 客厅小米平板/ })).toBeInTheDocument()
   })
 
   it('书籍列表展示可见范围和标签，并在详情抽屉同步编辑状态', async () => {
@@ -182,6 +262,65 @@ describe('Gateway 管理后台 UI', () => {
         })
       }
       if (url === '/admin/events') return jsonResponse({ events: [] })
+      if (url === '/admin/packages') {
+        return jsonResponse({
+          packages: [
+            {
+              id: 'token-package',
+              bookId: 'token-book',
+              bookTitle: 'Token 书籍',
+              version: 'token-package-v1',
+              status: 'ready',
+              sizeMb: 9,
+              updatedAt: '2026-06-29T12:01:00.000Z',
+              chapterCount: 3,
+              summaryCoverage: 1,
+              kgCoverage: 1,
+              embeddingCoverage: 1,
+              missingChapters: [],
+              checksum: 'sha256:token',
+            },
+          ],
+        })
+      }
+      if (url === '/admin/audio') {
+        return jsonResponse({
+          audio: [
+            {
+              id: 'token-audio',
+              bookId: 'token-book',
+              bookTitle: 'Token 书籍',
+              status: 'ready',
+              chapterCount: 3,
+              availableChapters: 3,
+              coverage: 1,
+              missingChapters: [],
+              totalDuration: '00:30:00',
+              sizeMb: 20,
+              lastGeneratedAt: '2026-06-29T12:02:00.000Z',
+              voice: 'Token 音色',
+              downloads24h: 2,
+            },
+          ],
+        })
+      }
+      if (url === '/admin/requests') {
+        return jsonResponse({
+          requests: [
+            {
+              id: 'token-request',
+              time: '2026-06-29T12:03:00.000Z',
+              method: 'GET',
+              path: '/admin/packages',
+              statusCode: 200,
+              durationMs: 33,
+              deviceName: 'Gateway Admin',
+              deviceId: 'admin-ui',
+              ip: '127.0.0.1',
+            },
+          ],
+        })
+      }
       return jsonResponse({}, false, 404)
     })
 
@@ -201,6 +340,9 @@ describe('Gateway 管理后台 UI', () => {
     expect((await screen.findAllByText(/已连接 Gateway 管理 API/)).length).toBeGreaterThan(0)
     expect(screen.getByText('Gateway 管理 API')).toBeInTheDocument()
     expect(authHeaders).toContain('/admin/books:Bearer saved-token')
+    expect(authHeaders).toContain('/admin/packages:Bearer saved-token')
+    expect(authHeaders).toContain('/admin/audio:Bearer saved-token')
+    expect(authHeaders).toContain('/admin/requests:Bearer saved-token')
 
     await user.click(screen.getByRole('button', { name: '书籍' }))
     expect(screen.getByRole('row', { name: /Token 书籍 后台 admin/ })).toBeInTheDocument()

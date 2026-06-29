@@ -214,6 +214,79 @@ GET /admin/books/:bookId/package/download
 
 管理端接口返回全量书籍，不按移动端可见性过滤。
 
+### 管理端数据包、音频和请求日志接口
+
+```text
+GET /admin/packages
+GET /admin/audio
+GET /admin/requests
+```
+
+`GET /admin/packages` 返回每本书的数据包状态，用于后台判断哪些书可以发布、哪些缺包或包损坏：
+
+```json
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-06-29T12:00:00.000Z",
+  "packages": [
+    {
+      "bookId": "book-id",
+      "title": "书名",
+      "chapterCount": 120,
+      "packageChapterCount": 120,
+      "status": "imported",
+      "importStatus": "imported",
+      "sizeBytes": 42949672,
+      "updatedAt": "2026-06-29T11:58:00.000Z",
+      "importedAt": "2026-06-29T11:50:00.000Z"
+    }
+  ]
+}
+```
+
+`GET /admin/audio` 返回每本书的 MP3 覆盖率、缺失章节和总大小：
+
+```json
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-06-29T12:00:00.000Z",
+  "audio": [
+    {
+      "bookId": "book-id",
+      "title": "书名",
+      "chapterCount": 120,
+      "audioChapterCount": 96,
+      "missingChapterCount": 24,
+      "missingChapterIds": ["chapter-097"],
+      "coverage": 0.8,
+      "totalSizeBytes": 1887436800,
+      "updatedAt": "2026-06-29T11:40:00.000Z"
+    }
+  ]
+}
+```
+
+`GET /admin/requests` 返回进程内最近请求窗口，供后台请求日志页展示方法、路径、状态码、耗时和下载类型：
+
+```json
+{
+  "schemaVersion": 1,
+  "generatedAt": "2026-06-29T12:00:00.000Z",
+  "requests": [
+    {
+      "requestId": "req-id",
+      "time": "2026-06-29T11:59:30.000Z",
+      "method": "GET",
+      "url": "/mobile/books/book-id/package",
+      "statusCode": 200,
+      "durationMs": 138,
+      "bookId": "book-id",
+      "downloadKind": "package"
+    }
+  ]
+}
+```
+
 ### 管理端设备接口
 
 ```text
@@ -235,6 +308,7 @@ PATCH /admin/devices/:deviceId
 ```text
 GET /admin/metrics
 GET /admin/events
+GET /admin/requests
 ```
 
 `GET /admin/metrics` 返回滚动窗口统计：

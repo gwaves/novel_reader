@@ -39,6 +39,20 @@ export type GatewayBookPackageFile = {
   fileName: string
 }
 
+export type GatewayBookPackageStatus = {
+  bookId: string
+  title: string
+  author?: string
+  chapterCount: number
+  packageChapterCount: number
+  status: 'imported' | 'missing' | 'invalid'
+  importStatus: 'imported' | 'missing' | 'invalid'
+  sizeBytes: number
+  updatedAt?: string
+  importedAt?: string
+  errorCode?: string
+}
+
 export async function readBookCatalog(config: GatewayConfig): Promise<GatewayBookCatalog> {
   await mkdir(config.dataDir, { recursive: true })
 
@@ -105,6 +119,11 @@ export async function openBookPackageFile(config: GatewayConfig, bookId: string)
   }
 }
 
+export async function readBookPackageStatuses(config: GatewayConfig): Promise<GatewayBookPackageStatus[]> {
+  const catalog = await readBookCatalog(config)
+  return Promise.all(catalog.books.map((book) => readBookPackageStatus(config, book)))
+}
+
 export async function upsertBookPackage(
   config: GatewayConfig,
   bookId: string,
@@ -131,6 +150,58 @@ export async function upsertBookPackage(
     hasExplicitVisibility: isRecord(bookPackage.book) && isBookVisibility(bookPackage.book.visibility),
     hasExplicitLabels: isRecord(bookPackage.book) && Array.isArray(bookPackage.book.labels),
   })
+}
+
+async function readBookPackageStatus(config: GatewayConfig, book: GatewayBookSummary): Promise<GatewayBookPackageStatus> {
+  const packagePath = join(config.dataDir, 'books', book.id, 'package.json')
+  try {
+    const [packageStat, rawPackage] = await Promise.all([stat(packagePath), readFile(packagePath, 'utf8')])
+    const bookPackage = normalizeBookPackage(parseBookPackage(rawPackage), book.id, {
+      code: 'book_package_invalid',
+      statusCode: 500,
+    })
+    const chapterCount = Array.isArray(bookPackage.chapters) ? bookPackage.chapters.length : 0
+    const importedAt = readOptionalIsoDate(bookPackage, 'generatedAt') ?? readOptionalIsoDate(bookPackage.book, 'updatedAt')
+    return {
+      bookId: book.id,
+      title: book.title,
+      author: book.author,
+      chapterCount: book.chapterCount,
+      packageChapterCount: chapterCount,
+      status: 'imported',
+      importStatus: 'imported',
+      sizeBytes: packageStat.size,
+      updatedAt: packageStat.mtime.toISOString(),
+      importedAt,
+    }
+  } catch (error) {
+    if (isNodeError(error) && error.code === 'ENOENT') {
+      return {
+        bookId: book.id,
+        title: book.title,
+        author: book.author,
+        chapterCount: book.chapterCount,
+        packageChapterCount: 0,
+        status: 'missing',
+        importStatus: 'missing',
+        sizeBytes: 0,
+      }
+    }
+    if (error instanceof GatewayHttpError) {
+      return {
+        bookId: book.id,
+        title: book.title,
+        author: book.author,
+        chapterCount: book.chapterCount,
+        packageChapterCount: 0,
+        status: 'invalid',
+        importStatus: 'invalid',
+        sizeBytes: 0,
+        errorCode: error.code,
+      }
+    }
+    throw error
+  }
 }
 
 export async function updateBookVisibility(

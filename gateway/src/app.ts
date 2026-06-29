@@ -8,7 +8,7 @@ import { stat } from 'node:fs/promises'
 import { extname, join, normalize, relative, basename } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { requireGatewayAuth } from './auth.js'
-import { openAudioFile, readAudioCatalog, readAudioManifest } from './audio-store.js'
+import { openAudioFile, readAudioCatalog, readAudioManifest, summarizeBookAudio } from './audio-store.js'
 import { buildCapabilities } from './capabilities.js'
 import { type GatewayConfig, loadConfig } from './config.js'
 import {
@@ -16,6 +16,7 @@ import {
   openBookPackageFile,
   readBookCatalog,
   readBookPackage,
+  readBookPackageStatuses,
   readBookSummary,
   updateBookLabels,
   updateBookVisibility,
@@ -204,6 +205,27 @@ export function buildGatewayApp(config: GatewayConfig = loadConfig()) {
     }
   })
 
+  app.get('/admin/packages', async (request) => {
+    requireGatewayAuth(config, request)
+    return {
+      schemaVersion: 1,
+      generatedAt: new Date().toISOString(),
+      packages: await readBookPackageStatuses(config),
+    }
+  })
+
+  app.get('/admin/audio', async (request) => {
+    requireGatewayAuth(config, request)
+    const catalog = await readBookCatalog(config)
+    return {
+      schemaVersion: 1,
+      generatedAt: new Date().toISOString(),
+      audio: await Promise.all(
+        catalog.books.map(async (book) => summarizeBookAudio(config, book, await readPackageChapterIds(config, book.id))),
+      ),
+    }
+  })
+
   app.get<{ Params: { bookId: string } }>('/admin/books/:bookId', async (request) => {
     requireGatewayAuth(config, request)
     return {
@@ -253,6 +275,11 @@ export function buildGatewayApp(config: GatewayConfig = loadConfig()) {
   app.get('/admin/events', async (request) => {
     requireGatewayAuth(config, request)
     return metrics.recentEvents()
+  })
+
+  app.get('/admin/requests', async (request) => {
+    requireGatewayAuth(config, request)
+    return metrics.recentRequests()
   })
 
   app.patch<{ Body: unknown; Params: { deviceId: string } }>('/admin/devices/:deviceId', async (request) => {
@@ -493,6 +520,20 @@ async function withAudioChapterCount(config: GatewayConfig, book: GatewayBookSum
   return {
     ...book,
     audioChapterCount: audioCatalog.chapters.length,
+  }
+}
+
+async function readPackageChapterIds(config: GatewayConfig, bookId: string) {
+  try {
+    const bookPackage = await readBookPackage(config, bookId)
+    const chapters = Array.isArray(bookPackage.chapters) ? bookPackage.chapters : []
+    return chapters
+      .filter(isRecord)
+      .map((chapter) => readNonEmptyString(chapter.id) ?? readNonEmptyString(chapter.chapterId))
+      .filter((chapterId): chapterId is string => Boolean(chapterId))
+  } catch (error) {
+    if (isGatewayHttpError(error)) return []
+    throw error
   }
 }
 

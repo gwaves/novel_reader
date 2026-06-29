@@ -7,6 +7,7 @@ import {
   deviceRoleLabel,
   errorMessage,
   getDeviceMetadata,
+  isDeviceAccessBlockedError,
   isDeviceDisabledError,
   loadGatewaySettings,
   normalizeGatewaySession,
@@ -216,6 +217,13 @@ type PackageSyncProgress = {
 
 type FullPackageStatus = 'idle' | 'downloading' | 'downloaded' | 'importing' | 'imported' | 'error'
 
+export type GatewayLibrarySyncState =
+  | { status: 'never' }
+  | { status: 'syncing' }
+  | { status: 'synced'; at: string; bookCount: number }
+  | { status: 'blocked'; message: string }
+  | { status: 'error'; message: string }
+
 type BookCacheSummary = {
   bookId: string
   title: string
@@ -299,6 +307,7 @@ function App() {
   const [connectionState, setConnectionState] = useState<ConnectionState>('idle')
   const [message, setMessage] = useState('')
   const [gatewaySession, setGatewaySession] = useState<GatewaySession | null>(null)
+  const [librarySyncState, setLibrarySyncState] = useState<GatewayLibrarySyncState>({ status: 'never' })
   const [books, setBooks] = useState<BookSummary[]>([])
   const [localBooks, setLocalBooks] = useState<BookSummary[]>([])
   const [selectedBookId, setSelectedBookId] = useState<string | null>(() => loadReadingProgress()?.bookId ?? loadFullPackageCache()?.bookId ?? null)
@@ -404,6 +413,8 @@ function App() {
     () => (searchMode === 'graph' && submittedSearchQuery ? searchGraphPackage(bookPackage, submittedSearchQuery) : []),
     [bookPackage, searchMode, submittedSearchQuery],
   )
+  const visibilityNotice = libraryVisibilityNotice(gatewaySession, books.length)
+  const syncBlockedReason = gatewaySyncBlockedReason(gatewaySession)
   const visibleStatusMessage = shouldShowGlobalStatusMessage(message) ? message : ''
   const previousChapter = currentChapterPosition > 0 ? chapters[currentChapterPosition - 1] : null
   const nextChapter =
@@ -613,7 +624,15 @@ function App() {
   }, [audioUrl])
 
   async function refreshBooks() {
+    const blockedReason = gatewaySyncBlockedReason(gatewaySession)
+    if (blockedReason) {
+      setConnectionState('error')
+      setLibrarySyncState({ status: 'blocked', message: blockedReason })
+      setMessage(blockedReason)
+      return
+    }
     setLoadingBooks(true)
+    setLibrarySyncState({ status: 'syncing' })
     setMessage('')
     try {
       const response = await gatewayFetch(settings, '/mobile/books')
@@ -624,15 +643,20 @@ function App() {
       void refreshCachedAudioIds(selectedBookId)
       refreshCacheSummaries()
       setConnectionState('connected')
+      setLibrarySyncState({ status: 'synced', at: new Date().toISOString(), bookCount: nextBooks.length })
       setMessage(`云端书库 ${nextBooks.length} 本`)
     } catch (error) {
-      if (isDeviceDisabledError(error)) {
+      const blockedMessage = blockedGatewaySyncMessage(error)
+      if (blockedMessage) {
         setConnectionState('error')
-        setMessage(errorMessage(error))
+        setLibrarySyncState({ status: 'blocked', message: blockedMessage })
+        setMessage(blockedMessage)
         return
       }
+      const message = errorMessage(error)
       setConnectionState('error')
-      setMessage(errorMessage(error))
+      setLibrarySyncState({ status: 'error', message })
+      setMessage(message)
     } finally {
       setLoadingBooks(false)
     }
@@ -662,12 +686,14 @@ function App() {
     try {
       const session = normalizeGatewaySession(await gatewayFetch(settings, '/auth/session'))
       if (!session?.authenticated) {
-        throw new Error('Gateway session is not authenticated.')
+        throw createGatewayError({ error: { code: 'device_unauthorized', statusCode: 403 } })
       }
       setGatewaySession(session)
       if (session.auth.role === 'disabled') {
         setConnectionState('error')
-        setMessage(errorMessage(createGatewayError({ error: { code: 'device_disabled', statusCode: 403 } })))
+        const blockedMessage = errorMessage(createGatewayError({ error: { code: 'device_disabled', statusCode: 403 } }))
+        setLibrarySyncState({ status: 'blocked', message: blockedMessage })
+        setMessage(blockedMessage)
         return
       }
       setConnectionState('connected')
@@ -783,6 +809,12 @@ function App() {
   async function syncFullPackage(bookId: string) {
     if (!Capacitor.isNativePlatform()) return
     if (fullPackageStatus === 'downloading' || fullPackageStatus === 'importing') return
+    const blockedReason = gatewaySyncBlockedReason(gatewaySession)
+    if (blockedReason) {
+      setConnectionState('error')
+      setMessage(blockedReason)
+      return
+    }
     const sourceBook = books.find((book) => book.id === bookId) ?? localBooks.find((book) => book.id === bookId)
     setFullPackageStatus('downloading')
     setFullPackageProgress({ bookId, phase: 'download', status: 'downloading', done: 0, total: 0 })
@@ -834,6 +866,12 @@ function App() {
 
   async function addCloudBookToShelf(bookId: string) {
     if (addingBookId) return
+    const blockedReason = gatewaySyncBlockedReason(gatewaySession)
+    if (blockedReason) {
+      setConnectionState('error')
+      setMessage(blockedReason)
+      return
+    }
     setAddingBookId(bookId)
     setMessage('')
     try {
@@ -857,7 +895,7 @@ function App() {
       refreshCacheSummaries()
       setMessage('已加入书架')
     } catch (error) {
-      if (isDeviceDisabledError(error)) {
+      if (isDeviceAccessBlockedError(error)) {
         setConnectionState('error')
       }
       setMessage(errorMessage(error))
@@ -2081,6 +2119,7 @@ function App() {
               <h2>书库</h2>
               <span>{`${displayLocalBooks.length} 本`}</span>
             </div>
+            <div className={`visibility-notice role-${gatewaySession?.auth.role ?? 'unknown'}`}>{visibilityNotice}</div>
             {displayLocalBooks.length === 0 ? (
               <div className="empty-state">
                 <p>还没有本地书</p>
@@ -2154,7 +2193,7 @@ function App() {
                   className="secondary-button full-width-button"
                   type="button"
                   onClick={() => void syncCurrentFullPackage()}
-                  disabled={!selectedBookId || fullPackageStatus === 'downloading' || fullPackageStatus === 'importing'}
+                  disabled={!selectedBookId || Boolean(syncBlockedReason) || fullPackageStatus === 'downloading' || fullPackageStatus === 'importing'}
                 >
                   {fullPackageStatus === 'downloading'
                     ? '下载数据包中'
@@ -2178,7 +2217,7 @@ function App() {
                   className="secondary-button full-width-button"
                   type="button"
                   onClick={openMp3Manager}
-                  disabled={!selectedBookId || loadingAudio}
+                  disabled={!selectedBookId || Boolean(syncBlockedReason) || loadingAudio}
                 >
                   {visibleAudioSyncProgress ? `同步音频 ${visibleAudioSyncProgress.done}/${visibleAudioSyncProgress.total}` : 'MP3 管理'}
                 </button>
@@ -2427,6 +2466,22 @@ function App() {
               </div>
               <dl>
                 <div>
+                  <dt>设备 ID</dt>
+                  <dd>{settings.deviceId}</dd>
+                </div>
+                <div>
+                  <dt>设备名</dt>
+                  <dd>{settings.deviceName || '未命名设备'}</dd>
+                </div>
+                <div>
+                  <dt>Pairing Code</dt>
+                  <dd>{gatewaySession?.auth.pairingCode || '未获取'}</dd>
+                </div>
+                <div>
+                  <dt>当前角色 / 授权</dt>
+                  <dd>{gatewaySession ? `${deviceRoleLabel(gatewaySession.auth.role)} / 已授权` : '未知 / 未刷新'}</dd>
+                </div>
+                <div>
                   <dt>授权说明</dt>
                   <dd>{gatewaySession ? deviceRoleDescription(gatewaySession.auth.role) : '点击刷新授权状态获取当前设备身份'}</dd>
                 </div>
@@ -2442,13 +2497,17 @@ function App() {
                   <dt>平台 / 版本</dt>
                   <dd>{`${deviceMetadata.platform} / ${deviceMetadata.appVersion}`}</dd>
                 </div>
+                <div>
+                  <dt>最近同步</dt>
+                  <dd>{syncStatusLabel(librarySyncState)}</dd>
+                </div>
               </dl>
             </div>
             <div className="settings-actions">
               <button className="primary-button" type="button" onClick={() => void checkSession()} disabled={connectionState === 'checking'}>
                 {connectionState === 'checking' ? '刷新中' : '刷新授权状态'}
               </button>
-              <button className="secondary-button" type="button" onClick={() => void refreshBooks()} disabled={loadingBooks || gatewaySession?.auth.role === 'disabled'}>
+              <button className="secondary-button" type="button" onClick={() => void refreshBooks()} disabled={loadingBooks || Boolean(syncBlockedReason)}>
                 {loadingBooks ? '同步中' : '刷新云端书库'}
               </button>
             </div>
@@ -2474,7 +2533,7 @@ function App() {
                       <button
                         className={isLocal ? 'secondary-button compact-button' : 'primary-button compact-button'}
                         type="button"
-                        disabled={isBusy}
+                        disabled={isBusy || Boolean(syncBlockedReason)}
                         onClick={() => {
                           if (localMatch) {
                             selectBook(localMatch.id)
@@ -2493,7 +2552,7 @@ function App() {
             ) : (
               <div className="empty-state">
                 <p>尚未刷新云端书库</p>
-                <button type="button" onClick={() => void refreshBooks()} disabled={loadingBooks}>
+                <button type="button" onClick={() => void refreshBooks()} disabled={loadingBooks || Boolean(syncBlockedReason)}>
                   {loadingBooks ? '同步中' : '刷新云端书库'}
                 </button>
               </div>
@@ -4283,6 +4342,33 @@ function fullPackageLabel(cache: FullPackageCache | null, status: FullPackageSta
   if (cache) return `已下载 ${formatBytes(cache.sizeBytes)}`
   if (status === 'error') return '下载失败'
   return '未下载'
+}
+
+export function libraryVisibilityNotice(session: GatewaySession | null, bookCount: number) {
+  if (!session) return '刷新授权状态后会显示当前设备可见范围。'
+  if (session.auth.role === 'disabled') return '设备已禁用，不能同步云端书库。请在管理后台启用后再刷新授权状态。'
+  if (session.auth.role === 'trusted') {
+    return `受信设备可看到默认书库和受信书库，当前云端可见 ${bookCount} 本。`
+  }
+  return `普通设备仅显示默认书库，当前云端可见 ${bookCount} 本；后台可将设备设为受信后显示更多书。`
+}
+
+export function gatewaySyncBlockedReason(session: GatewaySession | null) {
+  if (session?.auth.role === 'disabled') return '设备已禁用，不能同步云端书库。'
+  return null
+}
+
+export function blockedGatewaySyncMessage(error: unknown) {
+  if (isDeviceAccessBlockedError(error)) return errorMessage(error)
+  return null
+}
+
+export function syncStatusLabel(syncState: GatewayLibrarySyncState) {
+  if (syncState.status === 'syncing') return '正在同步'
+  if (syncState.status === 'synced') return `${formatDate(syncState.at)}，云端可见 ${syncState.bookCount} 本`
+  if (syncState.status === 'blocked') return `同步被阻止：${syncState.message}`
+  if (syncState.status === 'error') return `同步失败：${syncState.message}`
+  return '尚未同步'
 }
 
 function formatDuration(durationMs?: number) {

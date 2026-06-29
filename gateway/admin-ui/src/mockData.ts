@@ -21,6 +21,38 @@ export type AdminBook = {
   missingAudioChapters: number
 }
 
+export type AdminPackage = {
+  id: string
+  bookId: string
+  bookTitle: string
+  version: string
+  status: 'ready' | 'warning' | 'failed'
+  sizeMb: number
+  updatedAt: string
+  chapterCount: number
+  summaryCoverage: number
+  kgCoverage: number
+  embeddingCoverage: number
+  missingChapters: Array<number | string>
+  checksum: string
+}
+
+export type AdminAudio = {
+  id: string
+  bookId: string
+  bookTitle: string
+  status: 'ready' | 'partial' | 'missing'
+  chapterCount: number
+  availableChapters: number
+  coverage: number
+  missingChapters: Array<number | string>
+  totalDuration: string
+  sizeMb: number
+  lastGeneratedAt: string
+  voice: string
+  downloads24h: number
+}
+
 export type AdminDevice = {
   id: string
   name: string
@@ -34,6 +66,18 @@ export type AdminDevice = {
   lastIp: string
   recentRequests: number
   recentDownloads: number
+}
+
+export type AdminRequestLog = {
+  id: string
+  time: string
+  method: string
+  path: string
+  statusCode: number
+  durationMs: number
+  deviceName: string
+  deviceId: string
+  ip: string
 }
 
 export const visibilityOptions: Visibility[] = ['default', 'trusted', 'admin', 'hidden']
@@ -74,6 +118,149 @@ export const recentEvents = [
   { time: '10:18', level: 'warn', text: '/mobile/books/jinlin/audio 返回 404' },
   { time: '10:10', level: 'info', text: '设备“客厅小米平板”连接，验证码 428193' },
   { time: '09:56', level: 'error', text: '《夜航档案》embedding 覆盖率低于 70%' },
+]
+
+export const initialPackages: AdminPackage[] = [
+  {
+    id: 'pkg-jinlin-20260629',
+    bookId: 'jinlin',
+    bookTitle: '烬鳞纪',
+    version: '2026.06.29-1208',
+    status: 'ready',
+    sizeMb: 42.8,
+    updatedAt: '2026-06-29 12:08',
+    chapterCount: 186,
+    summaryCoverage: 96,
+    kgCoverage: 88,
+    embeddingCoverage: 94,
+    missingChapters: [],
+    checksum: 'sha256:8f2c1a',
+  },
+  {
+    id: 'pkg-night-archive-20260627',
+    bookId: 'night-archive',
+    bookTitle: '夜航档案',
+    version: '2026.06.27-1820',
+    status: 'warning',
+    sizeMb: 18.6,
+    updatedAt: '2026-06-27 18:20',
+    chapterCount: 41,
+    summaryCoverage: 82,
+    kgCoverage: 56,
+    embeddingCoverage: 68,
+    missingChapters: [7, 19, 33],
+    checksum: 'sha256:91bb03',
+  },
+  {
+    id: 'pkg-archive-sample-20260620',
+    bookId: 'archive-sample',
+    bookTitle: '归档样本集',
+    version: '2026.06.20-0900',
+    status: 'failed',
+    sizeMb: 7.4,
+    updatedAt: '2026-06-20 09:00',
+    chapterCount: 18,
+    summaryCoverage: 60,
+    kgCoverage: 40,
+    embeddingCoverage: 55,
+    missingChapters: [3, 4, 5, 6],
+    checksum: 'sha256:pending',
+  },
+]
+
+export const initialAudio: AdminAudio[] = [
+  {
+    id: 'audio-jinlin',
+    bookId: 'jinlin',
+    bookTitle: '烬鳞纪',
+    status: 'partial',
+    chapterCount: 186,
+    availableChapters: 134,
+    coverage: 72,
+    missingChapters: [12, 13, 14, 88, 121],
+    totalDuration: '46:20:18',
+    sizeMb: 1840,
+    lastGeneratedAt: '2026-06-29 11:40',
+    voice: '茉莉',
+    downloads24h: 412,
+  },
+  {
+    id: 'audio-yaodao',
+    bookId: 'yaodao',
+    bookTitle: '妖刀记',
+    status: 'ready',
+    chapterCount: 92,
+    availableChapters: 92,
+    coverage: 100,
+    missingChapters: [],
+    totalDuration: '31:08:02',
+    sizeMb: 1216,
+    lastGeneratedAt: '2026-06-28 22:10',
+    voice: '冰糖',
+    downloads24h: 289,
+  },
+  {
+    id: 'audio-night-archive',
+    bookId: 'night-archive',
+    bookTitle: '夜航档案',
+    status: 'missing',
+    chapterCount: 41,
+    availableChapters: 14,
+    coverage: 34,
+    missingChapters: [1, 2, 3, 4, 5, 6],
+    totalDuration: '04:12:31',
+    sizeMb: 166,
+    lastGeneratedAt: '2026-06-27 08:30',
+    voice: 'mimo_default',
+    downloads24h: 18,
+  },
+]
+
+export const initialRequestLogs: AdminRequestLog[] = [
+  {
+    id: 'req-1022-audio-404',
+    time: '10:22:18',
+    method: 'GET',
+    path: '/mobile/books/jinlin/audio/088.mp3',
+    statusCode: 404,
+    durationMs: 42,
+    deviceName: '客厅小米平板',
+    deviceId: 'device-living-room-pad',
+    ip: '192.168.88.23',
+  },
+  {
+    id: 'req-1021-package',
+    time: '10:21:55',
+    method: 'GET',
+    path: '/mobile/books/yaodao/package',
+    statusCode: 200,
+    durationMs: 138,
+    deviceName: '书房阅读器',
+    deviceId: 'device-trusted-tablet',
+    ip: '10.0.0.42',
+  },
+  {
+    id: 'req-1019-admin',
+    time: '10:19:04',
+    method: 'POST',
+    path: '/admin/books/night-archive/visibility',
+    statusCode: 204,
+    durationMs: 27,
+    deviceName: 'Gateway Admin',
+    deviceId: 'admin-ui',
+    ip: '127.0.0.1',
+  },
+  {
+    id: 'req-1018-slow',
+    time: '10:18:11',
+    method: 'GET',
+    path: '/mobile/books/jinlin/package',
+    statusCode: 200,
+    durationMs: 914,
+    deviceName: '客厅小米平板',
+    deviceId: 'device-living-room-pad',
+    ip: '192.168.88.23',
+  },
 ]
 
 export const initialBooks: AdminBook[] = [

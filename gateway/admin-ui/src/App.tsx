@@ -8,14 +8,20 @@ import {
   type AdminDashboardData,
 } from './api'
 import {
+  AdminAudio,
   AdminBook,
   AdminDevice,
+  AdminPackage,
+  AdminRequestLog,
   ContentLabel,
   DeviceRole,
   Visibility,
   contentHealth,
+  initialAudio,
   initialBooks,
   initialDevices,
+  initialPackages,
+  initialRequestLogs,
   labelNames,
   labelOptions,
   overviewMetrics as mockOverviewMetrics,
@@ -40,6 +46,9 @@ function App() {
   const [activeView, setActiveView] = useState<ViewKey>('overview')
   const [books, setBooks] = useState(initialBooks)
   const [devices, setDevices] = useState(initialDevices)
+  const [packages, setPackages] = useState(initialPackages)
+  const [audio, setAudio] = useState(initialAudio)
+  const [requestLogs, setRequestLogs] = useState(initialRequestLogs)
   const [metrics, setMetrics] = useState(mockOverviewMetrics)
   const [events, setEvents] = useState(mockRecentEvents)
   const [dataSource, setDataSource] = useState<AdminDashboardData['source']>('mock')
@@ -61,6 +70,9 @@ function App() {
   const applyDashboardData = (data: AdminDashboardData) => {
     setBooks(data.books)
     setDevices(data.devices)
+    setPackages(data.packages)
+    setAudio(data.audio)
+    setRequestLogs(data.requestLogs)
     setMetrics(data.overviewMetrics)
     setEvents(data.recentEvents)
     setDataSource(data.source)
@@ -172,9 +184,9 @@ function App() {
               onUpdate={updateDevice}
             />
           )}
-          {activeView === 'packages' && <Placeholder title="数据包" subtitle="上传、预校验、差异确认和导入历史预留区" />}
-          {activeView === 'audio' && <Placeholder title="音频" subtitle="按书统计音频覆盖率、缺失章节和热门下载" />}
-          {activeView === 'logs' && <Placeholder title="请求日志" subtitle="展示元数据、错误、慢请求、下载筛选和设备过滤" />}
+          {activeView === 'packages' && <PackagesPage packages={packages} />}
+          {activeView === 'audio' && <AudioPage audio={audio} />}
+          {activeView === 'logs' && <RequestLogsPage requestLogs={requestLogs} />}
           {activeView === 'settings' && (
             <SettingsPage
               adminToken={adminToken}
@@ -462,6 +474,170 @@ function DevicesPage({
   )
 }
 
+function PackagesPage({ packages }: { packages: AdminPackage[] }) {
+  const totalMissing = packages.reduce((sum, item) => sum + item.missingChapters.length, 0)
+  const readyCount = packages.filter((item) => item.status === 'ready').length
+
+  return (
+    <section className="view-stack" aria-label="数据包">
+      <div className="operation-summary">
+        <SummaryTile label="数据包" value={`${packages.length} 个`} note={`${readyCount} 个可发布`} />
+        <SummaryTile label="缺失章节" value={`${totalMissing} 章`} note="按 package 校验结果" />
+        <SummaryTile label="异常状态" value={`${packages.length - readyCount} 个`} note="warning / failed" />
+      </div>
+
+      <section className="panel table-panel">
+        <div className="panel-header">
+          <h2>数据包</h2>
+          <span>导入版本、覆盖率和缺失章节</span>
+        </div>
+        <table className="data-table">
+          <thead>
+            <tr>
+              <th>书籍</th>
+              <th>版本</th>
+              <th>状态</th>
+              <th>大小</th>
+              <th>更新时间</th>
+              <th>覆盖率</th>
+              <th>缺失章节</th>
+              <th>校验</th>
+            </tr>
+          </thead>
+          <tbody>
+            {packages.map((item) => (
+              <tr key={item.id}>
+                <td><strong>{item.bookTitle}</strong></td>
+                <td><code>{item.version}</code></td>
+                <td><Badge>{packageStatusNames[item.status]}</Badge></td>
+                <td>{formatSizeMb(item.sizeMb)}</td>
+                <td>{item.updatedAt}</td>
+                <td>
+                  <span className="coverage">
+                    S {item.summaryCoverage}% · KG {item.kgCoverage}% · E {item.embeddingCoverage}%
+                  </span>
+                </td>
+                <td><ChapterList chapters={item.missingChapters} /></td>
+                <td><code>{item.checksum}</code></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </section>
+    </section>
+  )
+}
+
+function AudioPage({ audio }: { audio: AdminAudio[] }) {
+  const missingTotal = audio.reduce((sum, item) => sum + Math.max(0, item.chapterCount - item.availableChapters), 0)
+  const downloads = audio.reduce((sum, item) => sum + item.downloads24h, 0)
+  const averageCoverage = audio.length > 0
+    ? Math.round(audio.reduce((sum, item) => sum + item.coverage, 0) / audio.length)
+    : 0
+
+  return (
+    <section className="view-stack" aria-label="音频">
+      <div className="operation-summary">
+        <SummaryTile label="平均覆盖率" value={`${averageCoverage}%`} note="按书籍平均" />
+        <SummaryTile label="缺音频章节" value={`${missingTotal} 章`} note="章节数 - 已生成" />
+        <SummaryTile label="24h 下载" value={formatCount(downloads)} note="音频文件请求" />
+      </div>
+
+      <section className="panel table-panel">
+        <div className="panel-header">
+          <h2>音频</h2>
+          <span>覆盖率、缺失章节和生成信息</span>
+        </div>
+        <table className="data-table">
+          <thead>
+            <tr>
+              <th>书籍</th>
+              <th>状态</th>
+              <th>覆盖率</th>
+              <th>章节</th>
+              <th>缺失章节</th>
+              <th>总时长</th>
+              <th>大小</th>
+              <th>声音</th>
+              <th>最近生成</th>
+              <th>24h 下载</th>
+            </tr>
+          </thead>
+          <tbody>
+            {audio.map((item) => (
+              <tr key={item.id}>
+                <td><strong>{item.bookTitle}</strong></td>
+                <td><Badge>{audioStatusNames[item.status]}</Badge></td>
+                <td>{item.coverage}%</td>
+                <td>{item.availableChapters}/{item.chapterCount}</td>
+                <td><ChapterList chapters={item.missingChapters} /></td>
+                <td>{item.totalDuration}</td>
+                <td>{formatSizeMb(item.sizeMb)}</td>
+                <td>{item.voice}</td>
+                <td>{item.lastGeneratedAt}</td>
+                <td>{formatCount(item.downloads24h)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </section>
+    </section>
+  )
+}
+
+function RequestLogsPage({ requestLogs }: { requestLogs: AdminRequestLog[] }) {
+  const errors = requestLogs.filter((log) => log.statusCode >= 400).length
+  const slowRequests = requestLogs.filter((log) => log.durationMs >= 500).length
+  const p95 = requestLogs.length > 0
+    ? [...requestLogs].sort((a, b) => a.durationMs - b.durationMs)[Math.max(0, Math.ceil(requestLogs.length * 0.95) - 1)].durationMs
+    : 0
+
+  return (
+    <section className="view-stack" aria-label="请求日志">
+      <div className="operation-summary">
+        <SummaryTile label="请求数" value={`${requestLogs.length} 条`} note="最近窗口" />
+        <SummaryTile label="错误请求" value={`${errors} 条`} note="HTTP 4xx / 5xx" />
+        <SummaryTile label="慢请求" value={`${slowRequests} 条`} note={`P95 ${p95}ms`} />
+      </div>
+
+      <section className="panel table-panel">
+        <div className="panel-header">
+          <h2>请求日志</h2>
+          <span>方法、路径、状态码、耗时和设备</span>
+        </div>
+        <table className="data-table">
+          <thead>
+            <tr>
+              <th>时间</th>
+              <th>方法</th>
+              <th>路径</th>
+              <th>状态码</th>
+              <th>耗时</th>
+              <th>设备</th>
+              <th>设备 ID</th>
+              <th>IP</th>
+            </tr>
+          </thead>
+          <tbody>
+            {requestLogs.map((log) => (
+              <tr key={log.id}>
+                <td>{log.time}</td>
+                <td><Badge>{log.method}</Badge></td>
+                <td><code>{log.path}</code></td>
+                <td><StatusCode code={log.statusCode} /></td>
+                <td>{log.durationMs}ms</td>
+                <td>{log.deviceName}</td>
+                <td><code>{log.deviceId}</code></td>
+                <td>{log.ip}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </section>
+    </section>
+  )
+}
+
 function DeviceDrawer({
   device,
   onUpdate,
@@ -525,16 +701,47 @@ function Badge({ children }: { children: React.ReactNode }) {
   return <span className="badge">{children}</span>
 }
 
-function Placeholder({ title, subtitle }: { title: string; subtitle: string }) {
+function SummaryTile({ label, value, note }: { label: string; value: string; note: string }) {
   return (
-    <section className="panel placeholder">
-      <div className="panel-header">
-        <h2>{title}</h2>
-        <span>第一版骨架</span>
-      </div>
-      <p>{subtitle}</p>
-    </section>
+    <div className="system-summary">
+      <strong>{label}</strong>
+      <span>{value} · {note}</span>
+    </div>
   )
+}
+
+function ChapterList({ chapters }: { chapters: Array<number | string> }) {
+  if (chapters.length === 0) return <span className="muted">无</span>
+  const visible = chapters.slice(0, 5).map((chapter) => (
+    typeof chapter === 'number' ? `第 ${chapter} 章` : chapter
+  )).join('、')
+  const suffix = chapters.length > 5 ? ` 等 ${chapters.length} 章` : ''
+  return <span>{visible}{suffix}</span>
+}
+
+function StatusCode({ code }: { code: number }) {
+  const tone = code >= 500 ? 'error' : code >= 400 ? 'warn' : 'ok'
+  return <span className={`status-code ${tone}`}>{code}</span>
+}
+
+function formatSizeMb(sizeMb: number) {
+  return sizeMb >= 1024 ? `${(sizeMb / 1024).toFixed(1)} GB` : `${sizeMb.toFixed(1)} MB`
+}
+
+function formatCount(value: number) {
+  return new Intl.NumberFormat('en-US').format(value)
+}
+
+const packageStatusNames: Record<AdminPackage['status'], string> = {
+  ready: '可发布',
+  warning: '需复查',
+  failed: '失败',
+}
+
+const audioStatusNames: Record<AdminAudio['status'], string> = {
+  ready: '完整',
+  partial: '部分缺失',
+  missing: '缺失',
 }
 
 function SettingsPage({

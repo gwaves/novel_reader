@@ -8,6 +8,7 @@
 - 管理后台继续推进：Gateway 现在从 `/admin/ui` 服务 `gateway/admin-ui/dist`，避免覆盖 `/admin/books` JSON API；后台 UI 已接入 `/admin/books` 和 `/admin/devices`，API 不可用时回退 mock 数据。
 - Gateway 总览指标继续推进：新增进程内 `/admin/metrics` 和 `/admin/events`，统计最近请求数、错误率、P95、package/audio 下载次数、热门书籍和最近下载/错误事件；后台总览页已接入这些真实 API。
 - Gateway Android 修正 MP3 计数串书：本机缓存章节数与云端音频总数已分离，下载三国演义时不会再把进度/缓存数显示到妖刀记；MP3 批量同步新增停止按钮，停止后当前章节完成即不再继续后续章节。
+- 本轮按 TDD 多 Agent 并行推进：Gateway 后端新增 `/admin/packages`、`/admin/audio`、`/admin/requests` 并补测试；admin-ui 的数据包、音频、请求日志页已从占位改为真实表格视图并兼容真实后端字段；Gateway Android 设置/书库页补强设备 ID、Pairing Code、角色/授权、可见范围和禁用态阻断提示。
 
 2026-06-29 更新：内容生产方向已收束到 `production-pipeline/`。
 - `production-pipeline/` 是当前唯一的正式生产流水线目录；旧的内容生产目录已删除，避免 v1 manifest 编排和 v2 生产模型并存造成混淆。

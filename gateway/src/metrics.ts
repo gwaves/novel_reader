@@ -6,6 +6,7 @@ type GatewayRequest = FastifyRequest & {
 }
 
 type RequestSample = {
+  requestId: string
   method: string
   url: string
   statusCode: number
@@ -44,6 +45,7 @@ export function createGatewayMetrics() {
     const durationMs = Math.max(0, now - started)
     const download = classifyDownload(request.url)
     const sample: RequestSample = {
+      requestId: request.id,
       method: request.method,
       url: request.url,
       statusCode,
@@ -103,11 +105,33 @@ export function createGatewayMetrics() {
     }
   }
 
+  function recentRequests() {
+    return {
+      schemaVersion: 1,
+      generatedAt: new Date().toISOString(),
+      requests: samples.slice(-100).reverse().map(formatRequestSample),
+    }
+  }
+
   return {
     markStart,
     record,
     snapshot,
     recentEvents,
+    recentRequests,
+  }
+}
+
+function formatRequestSample(sample: RequestSample) {
+  return {
+    requestId: sample.requestId,
+    time: new Date(sample.time).toISOString(),
+    method: sample.method,
+    url: sample.url,
+    statusCode: sample.statusCode,
+    durationMs: sample.durationMs,
+    bookId: sample.bookId,
+    downloadKind: sample.downloadKind,
   }
 }
 

@@ -148,9 +148,23 @@ export function isDeviceDisabledError(error: unknown) {
   return error instanceof GatewayError && error.code === 'device_disabled'
 }
 
+export function isDeviceUnauthorizedError(error: unknown) {
+  return (
+    error instanceof GatewayError &&
+    (error.code === 'device_unauthorized' || error.code === 'device_not_authorized' || error.code === 'unauthorized_device')
+  )
+}
+
+export function isDeviceAccessBlockedError(error: unknown) {
+  return isDeviceDisabledError(error) || isDeviceUnauthorizedError(error)
+}
+
 export function errorMessage(error: unknown) {
   if (isDeviceDisabledError(error)) {
     return '设备已被禁用，不能访问 Gateway。请在管理后台启用后再刷新授权状态。'
+  }
+  if (isDeviceUnauthorizedError(error)) {
+    return '设备未授权，不能同步云端书库。请在管理后台确认设备角色后再刷新授权状态。'
   }
   return error instanceof Error ? error.message : '请求失败'
 }

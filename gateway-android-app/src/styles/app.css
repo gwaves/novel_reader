@@ -504,6 +504,38 @@ button:disabled {
   color: #506070;
 }
 
+.visibility-notice {
+  margin: 12px 14px 0;
+  border: 1px solid #d9e1e8;
+  border-left: 4px solid #8794a2;
+  border-radius: 8px;
+  background: #fbfdff;
+  color: #53616f;
+  padding: 10px 12px;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.5;
+}
+
+.visibility-notice.role-default {
+  border-left-color: #4f7d91;
+  background: #f2f8fb;
+  color: #31596b;
+}
+
+.visibility-notice.role-trusted {
+  border-left-color: #2f6f73;
+  background: #f2faf7;
+  color: #1f5457;
+}
+
+.visibility-notice.role-disabled {
+  border-color: #f0b8ae;
+  border-left-color: #c94635;
+  background: #fff8f6;
+  color: #9a3324;
+}
+
 .library-page {
   display: grid;
   gap: 14px;

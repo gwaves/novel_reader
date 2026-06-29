@@ -857,6 +857,215 @@ describe('gateway app', () => {
     )
   })
 
+  it('returns admin package import status for every catalog book', async () => {
+    const dataDir = await makeDataDir()
+    await writeFile(
+      join(dataDir, 'books.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        books: [
+          {
+            id: 'book-ready',
+            title: '已有包',
+            chapterCount: 2,
+            updatedAt: '2026-06-25T00:00:00.000Z',
+          },
+          {
+            id: 'book-missing',
+            title: '缺包',
+            chapterCount: 3,
+            updatedAt: '2026-06-24T00:00:00.000Z',
+          },
+        ],
+      }),
+      'utf8',
+    )
+    await mkdir(join(dataDir, 'books', 'book-ready'), { recursive: true })
+    await writeFile(
+      join(dataDir, 'books', 'book-ready', 'package.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        generatedAt: '2026-06-26T00:00:00.000Z',
+        book: {
+          id: 'book-ready',
+          title: '已有包',
+          chapterCount: 2,
+          updatedAt: '2026-06-25T00:00:00.000Z',
+        },
+        chapters: [{ id: 'chapter-1' }, { id: 'chapter-2' }],
+      }),
+      'utf8',
+    )
+    const app = buildTestApp({
+      GATEWAY_DEV_ACCESS_TOKEN: 'dev-token',
+      GATEWAY_DATA_DIR: dataDir,
+    })
+    const response = await app.inject({
+      method: 'GET',
+      url: '/admin/packages',
+      headers: {
+        authorization: 'Bearer dev-token',
+      },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect(response.json()).toMatchObject({
+      schemaVersion: 1,
+      packages: [
+        {
+          bookId: 'book-ready',
+          title: '已有包',
+          status: 'imported',
+          importStatus: 'imported',
+          chapterCount: 2,
+          packageChapterCount: 2,
+          importedAt: '2026-06-26T00:00:00.000Z',
+          sizeBytes: expect.any(Number),
+          updatedAt: expect.any(String),
+        },
+        {
+          bookId: 'book-missing',
+          title: '缺包',
+          status: 'missing',
+          importStatus: 'missing',
+          chapterCount: 3,
+          packageChapterCount: 0,
+          sizeBytes: 0,
+        },
+      ],
+    })
+    expect(response.json().packages[0].sizeBytes).toBeGreaterThan(0)
+  })
+
+  it('returns admin audio coverage, missing chapters, and total size for every catalog book', async () => {
+    const dataDir = await makeDataDir()
+    const audioDir = await makeDataDir()
+    await writeFile(
+      join(dataDir, 'books.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        books: [
+          {
+            id: 'book-audio',
+            title: '音频书',
+            chapterCount: 3,
+            updatedAt: '2026-06-25T00:00:00.000Z',
+          },
+        ],
+      }),
+      'utf8',
+    )
+    await mkdir(join(dataDir, 'books', 'book-audio'), { recursive: true })
+    await writeFile(
+      join(dataDir, 'books', 'book-audio', 'package.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        book: {
+          id: 'book-audio',
+          title: '音频书',
+          chapterCount: 3,
+          updatedAt: '2026-06-25T00:00:00.000Z',
+        },
+        chapters: [
+          { id: 'chapter-1', title: '第一章' },
+          { id: 'chapter-2', title: '第二章' },
+          { id: 'chapter-3', title: '第三章' },
+        ],
+      }),
+      'utf8',
+    )
+    await mkdir(join(audioDir, 'books', 'book-audio'), { recursive: true })
+    await writeFile(join(audioDir, 'books', 'book-audio', 'chapter-1.mp3'), 'audio-one', 'utf8')
+    await writeFile(join(audioDir, 'books', 'book-audio', 'chapter-3.mp3'), 'audio-three', 'utf8')
+    await writeFile(
+      join(audioDir, 'books', 'book-audio', 'audio.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        chapters: [
+          {
+            chapterId: 'chapter-1',
+            fileName: 'chapter-1.mp3',
+            updatedAt: '2026-06-27T00:00:00.000Z',
+          },
+          {
+            chapterId: 'chapter-3',
+            fileName: 'chapter-3.mp3',
+            sizeBytes: 11,
+          },
+        ],
+      }),
+      'utf8',
+    )
+    const app = buildTestApp({
+      GATEWAY_DEV_ACCESS_TOKEN: 'dev-token',
+      GATEWAY_DATA_DIR: dataDir,
+      GATEWAY_AUDIO_DIR: audioDir,
+    })
+    const response = await app.inject({
+      method: 'GET',
+      url: '/admin/audio',
+      headers: {
+        authorization: 'Bearer dev-token',
+      },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect(response.json()).toMatchObject({
+      schemaVersion: 1,
+      audio: [
+        {
+          bookId: 'book-audio',
+          title: '音频书',
+          chapterCount: 3,
+          audioChapterCount: 2,
+          missingChapterCount: 1,
+          missingChapterIds: ['chapter-2'],
+          coverage: 2 / 3,
+          totalSizeBytes: 20,
+          updatedAt: expect.any(String),
+        },
+      ],
+    })
+    expect(Date.parse(response.json().audio[0].updatedAt)).not.toBeNaN()
+  })
+
+  it('returns recent request logs with fields needed by the admin requests view', async () => {
+    const dataDir = await makeDataDir()
+    const app = buildTestApp({
+      GATEWAY_DEV_ACCESS_TOKEN: 'dev-token',
+      GATEWAY_DATA_DIR: dataDir,
+    })
+    const authHeaders = { authorization: 'Bearer dev-token' }
+
+    const missingResponse = await app.inject({
+      method: 'GET',
+      url: '/mobile/books/missing-book/package',
+      headers: authHeaders,
+    })
+    const requestsResponse = await app.inject({
+      method: 'GET',
+      url: '/admin/requests',
+      headers: authHeaders,
+    })
+
+    expect(missingResponse.statusCode).toBe(404)
+    expect(requestsResponse.statusCode).toBe(200)
+    expect(requestsResponse.json()).toMatchObject({
+      schemaVersion: 1,
+      requests: [
+        expect.objectContaining({
+          requestId: expect.any(String),
+          time: expect.any(String),
+          method: 'GET',
+          url: '/mobile/books/missing-book/package',
+          statusCode: 404,
+          durationMs: expect.any(Number),
+          bookId: 'missing-book',
+        }),
+      ],
+    })
+  })
+
   it('reports book catalog audio counts from the current audio manifests', async () => {
     const dataDir = await makeDataDir()
     const audioDir = await makeDataDir()

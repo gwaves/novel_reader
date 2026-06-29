@@ -1,11 +1,17 @@
 import {
   type AdminBook,
   type AdminDevice,
+  type AdminAudio,
+  type AdminPackage,
+  type AdminRequestLog,
   type ContentLabel,
   type DeviceRole,
   type Visibility,
+  initialAudio,
   initialBooks,
   initialDevices,
+  initialPackages,
+  initialRequestLogs,
   overviewMetrics,
   recentEvents,
 } from './mockData'
@@ -58,9 +64,69 @@ type GatewayEvents = {
   }>
 }
 
+type GatewayPackage = {
+  id?: string
+  bookId?: string
+  bookTitle?: string
+  title?: string
+  version?: string
+  status?: string
+  importStatus?: string
+  sizeMb?: number
+  sizeBytes?: number
+  updatedAt?: string
+  importedAt?: string
+  chapterCount?: number
+  packageChapterCount?: number
+  summaryCoverage?: number
+  kgCoverage?: number
+  embeddingCoverage?: number
+  missingChapters?: unknown[]
+  checksum?: string
+  errorCode?: string
+}
+
+type GatewayAudio = {
+  id?: string
+  bookId?: string
+  bookTitle?: string
+  title?: string
+  status?: string
+  chapterCount?: number
+  availableChapters?: number
+  audioChapterCount?: number
+  coverage?: number
+  missingChapters?: unknown[]
+  missingChapterIds?: unknown[]
+  totalDuration?: string
+  sizeMb?: number
+  totalSizeBytes?: number
+  lastGeneratedAt?: string
+  updatedAt?: string
+  voice?: string
+  downloads24h?: number
+}
+
+type GatewayRequestLog = {
+  id?: string
+  requestId?: string
+  time?: string
+  method?: string
+  path?: string
+  url?: string
+  statusCode?: number
+  durationMs?: number
+  deviceName?: string
+  deviceId?: string
+  ip?: string
+}
+
 export type AdminDashboardData = {
   books: AdminBook[]
   devices: AdminDevice[]
+  packages: AdminPackage[]
+  audio: AdminAudio[]
+  requestLogs: AdminRequestLog[]
   overviewMetrics: typeof overviewMetrics
   recentEvents: typeof recentEvents
   source: 'api' | 'mock'
@@ -70,15 +136,29 @@ export const adminTokenStorageKey = 'novel-reader-gateway-admin-token'
 
 export async function loadAdminDashboardData(fetcher: typeof fetch = fetch): Promise<AdminDashboardData> {
   try {
-    const [booksResponse, devicesResponse, metricsResponse, eventsResponse] = await Promise.all([
+    const [
+      booksResponse,
+      devicesResponse,
+      metricsResponse,
+      eventsResponse,
+      packagesResponse,
+      audioResponse,
+      requestsResponse,
+    ] = await Promise.all([
       adminFetch<{ books?: GatewayBook[] }>('/admin/books', fetcher),
       adminFetch<{ devices?: GatewayDevice[] }>('/admin/devices', fetcher),
       adminFetch<GatewayMetrics>('/admin/metrics', fetcher),
       adminFetch<GatewayEvents>('/admin/events', fetcher),
+      adminFetch<{ packages?: GatewayPackage[] }>('/admin/packages', fetcher),
+      adminFetch<{ audio?: GatewayAudio[] }>('/admin/audio', fetcher),
+      adminFetch<{ requests?: GatewayRequestLog[] }>('/admin/requests', fetcher),
     ])
     return {
       books: Array.isArray(booksResponse.books) ? booksResponse.books.map(mapBook) : [],
       devices: Array.isArray(devicesResponse.devices) ? devicesResponse.devices.map(mapDevice) : [],
+      packages: Array.isArray(packagesResponse.packages) ? packagesResponse.packages.map(mapPackage) : [],
+      audio: Array.isArray(audioResponse.audio) ? audioResponse.audio.map(mapAudio) : [],
+      requestLogs: Array.isArray(requestsResponse.requests) ? requestsResponse.requests.map(mapRequestLog) : [],
       overviewMetrics: mapMetrics(metricsResponse),
       recentEvents: mapEvents(eventsResponse),
       source: 'api',
@@ -87,6 +167,9 @@ export async function loadAdminDashboardData(fetcher: typeof fetch = fetch): Pro
     return {
       books: initialBooks,
       devices: initialDevices,
+      packages: initialPackages,
+      audio: initialAudio,
+      requestLogs: initialRequestLogs,
       overviewMetrics,
       recentEvents,
       source: 'mock',
@@ -180,6 +263,65 @@ function mapDevice(device: GatewayDevice): AdminDevice {
   }
 }
 
+function mapPackage(item: GatewayPackage): AdminPackage {
+  const importedAt = readString(item.importedAt, '')
+  const updatedAt = readString(item.updatedAt, '')
+  const version = readString(item.version, importedAt || updatedAt || 'latest')
+  return {
+    id: readString(item.id, `${readString(item.bookId, 'package')}-${version}`),
+    bookId: readString(item.bookId, 'unknown-book'),
+    bookTitle: readString(item.bookTitle, readString(item.title, '未命名书籍')),
+    version: formatDate(version),
+    status: normalizePackageStatus(item.status ?? item.importStatus),
+    sizeMb: readNumber(item.sizeMb) || bytesToMb(item.sizeBytes),
+    updatedAt: formatDate(updatedAt || importedAt),
+    chapterCount: readNumber(item.chapterCount),
+    summaryCoverage: ratioToPercent(item.summaryCoverage),
+    kgCoverage: ratioToPercent(item.kgCoverage),
+    embeddingCoverage: ratioToPercent(item.embeddingCoverage),
+    missingChapters: normalizeChapterList(item.missingChapters),
+    checksum: readString(item.checksum, readString(item.errorCode, '-')),
+  }
+}
+
+function mapAudio(item: GatewayAudio): AdminAudio {
+  const chapterCount = readNumber(item.chapterCount)
+  const availableChapters = readNumber(item.availableChapters ?? item.audioChapterCount)
+  const missingChapters = normalizeChapterList(item.missingChapters ?? item.missingChapterIds)
+  return {
+    id: readString(item.id, `audio-${readString(item.bookId, 'unknown-book')}`),
+    bookId: readString(item.bookId, 'unknown-book'),
+    bookTitle: readString(item.bookTitle, readString(item.title, '未命名书籍')),
+    status: normalizeAudioStatus(item.status, chapterCount, availableChapters),
+    chapterCount,
+    availableChapters,
+    coverage: item.coverage === undefined
+      ? chapterCount > 0 ? Math.round((availableChapters / chapterCount) * 100) : 0
+      : ratioToPercent(item.coverage),
+    missingChapters,
+    totalDuration: readString(item.totalDuration, '-'),
+    sizeMb: readNumber(item.sizeMb) || bytesToMb(item.totalSizeBytes),
+    lastGeneratedAt: formatDate(item.lastGeneratedAt ?? item.updatedAt),
+    voice: readString(item.voice, '默认'),
+    downloads24h: readNumber(item.downloads24h),
+  }
+}
+
+function mapRequestLog(log: GatewayRequestLog): AdminRequestLog {
+  const path = readString(log.path, readString(log.url, '/'))
+  return {
+    id: readString(log.id, readString(log.requestId, `${readString(log.method, 'GET')}-${path}-${readString(log.time, '')}`)),
+    time: formatTime(log.time),
+    method: readString(log.method, 'GET').toUpperCase(),
+    path,
+    statusCode: readNumber(log.statusCode),
+    durationMs: readNumber(log.durationMs),
+    deviceName: readString(log.deviceName, '未知设备'),
+    deviceId: readString(log.deviceId, '-'),
+    ip: readString(log.ip, '-'),
+  }
+}
+
 function mapMetrics(metrics: GatewayMetrics): typeof overviewMetrics {
   const last24Hours = readNumber(metrics.requests?.last24Hours)
   const last15Minutes = readNumber(metrics.requests?.last15Minutes)
@@ -204,6 +346,20 @@ function mapEvents(payload: GatewayEvents): typeof recentEvents {
   }))
 }
 
+function normalizePackageStatus(value: unknown): AdminPackage['status'] {
+  if (value === 'imported') return 'ready'
+  if (value === 'missing' || value === 'invalid') return 'failed'
+  return value === 'warning' || value === 'failed' ? value : 'ready'
+}
+
+function normalizeAudioStatus(value: unknown, chapterCount = 0, availableChapters = 0): AdminAudio['status'] {
+  if (value === undefined && chapterCount > 0) {
+    if (availableChapters <= 0) return 'missing'
+    if (availableChapters < chapterCount) return 'partial'
+  }
+  return value === 'partial' || value === 'missing' ? value : 'ready'
+}
+
 function normalizeVisibility(value: unknown): Visibility {
   return value === 'trusted' || value === 'admin' || value === 'hidden' ? value : 'default'
 }
@@ -219,11 +375,20 @@ function normalizeLabels(value: unknown): ContentLabel[] {
 }
 
 function ratioToPercent(value: unknown) {
-  return Math.round(readNumber(value) * 100)
+  const number = readNumber(value)
+  return number <= 1 ? Math.round(number * 100) : Math.round(number)
 }
 
 function readNumber(value: unknown) {
   return typeof value === 'number' && Number.isFinite(value) ? value : 0
+}
+
+function normalizeChapterList(value: unknown): Array<number | string> {
+  if (!Array.isArray(value)) return []
+  return value.filter((chapter): chapter is number | string => {
+    if (Number.isInteger(chapter) && chapter > 0) return true
+    return typeof chapter === 'string' && Boolean(chapter.trim())
+  })
 }
 
 function readString(value: unknown, fallback: string) {
@@ -248,4 +413,8 @@ function formatTime(value: unknown) {
 
 function formatCount(value: number) {
   return new Intl.NumberFormat('en-US').format(value)
+}
+
+function bytesToMb(value: unknown) {
+  return readNumber(value) / 1024 / 1024
 }
