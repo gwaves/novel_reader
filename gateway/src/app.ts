@@ -53,7 +53,13 @@ export function buildGatewayApp(config: GatewayConfig = loadConfig()) {
     },
   })
 
-  app.register(helmet)
+  app.register(helmet, {
+    contentSecurityPolicy: {
+      directives: {
+        'upgrade-insecure-requests': null,
+      },
+    },
+  })
   app.register(rateLimit, {
     max: config.rateLimit.max,
     timeWindow: config.rateLimit.timeWindow,
