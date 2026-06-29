@@ -28,9 +28,11 @@ import {
   updateGatewayDevice,
 } from './device-store.js'
 import { GatewayHttpError, isGatewayHttpError } from './errors.js'
+import { createGatewayMetrics } from './metrics.js'
 import { createEmbedding, forwardChatCompletion, forwardEmbeddings } from './openai-client.js'
 
 export function buildGatewayApp(config: GatewayConfig = loadConfig()) {
+  const metrics = createGatewayMetrics()
   const app = Fastify({
     logger:
       config.environment === 'test'
@@ -61,6 +63,14 @@ export function buildGatewayApp(config: GatewayConfig = loadConfig()) {
       origin: config.cors.origins,
     })
   }
+
+  app.addHook('onRequest', async (request) => {
+    metrics.markStart(request)
+  })
+
+  app.addHook('onResponse', async (request, reply) => {
+    metrics.record(request, reply.statusCode)
+  })
 
   app.setErrorHandler((error, request, reply) => {
     const normalized = normalizeError(error as FastifyError | Error)
@@ -233,6 +243,16 @@ export function buildGatewayApp(config: GatewayConfig = loadConfig()) {
       generatedAt: new Date().toISOString(),
       ...(await readDeviceRegistry(config)),
     }
+  })
+
+  app.get('/admin/metrics', async (request) => {
+    requireGatewayAuth(config, request)
+    return metrics.snapshot(await readBookCatalog(config))
+  })
+
+  app.get('/admin/events', async (request) => {
+    requireGatewayAuth(config, request)
+    return metrics.recentEvents()
   })
 
   app.patch<{ Body: unknown; Params: { deviceId: string } }>('/admin/devices/:deviceId', async (request) => {

@@ -6,6 +6,7 @@
 - 开发策略确定为测试驱动：先补 Gateway 接口测试、移动端设备身份测试和后台 UI 测试，再实现功能；可并发拆分为 Gateway API、Gateway Mobile App 设备身份、管理后台 UI 三条线。
 - 当前已完成第一轮落地并提交：Gateway 管理 API、移动端设备身份、管理后台 UI 骨架和生产流水线 v2 收束已合并到 `b2843545`。
 - 管理后台继续推进：Gateway 现在从 `/admin/ui` 服务 `gateway/admin-ui/dist`，避免覆盖 `/admin/books` JSON API；后台 UI 已接入 `/admin/books` 和 `/admin/devices`，API 不可用时回退 mock 数据。
+- Gateway 总览指标继续推进：新增进程内 `/admin/metrics` 和 `/admin/events`，统计最近请求数、错误率、P95、package/audio 下载次数、热门书籍和最近下载/错误事件；后台总览页已接入这些真实 API。
 
 2026-06-29 更新：内容生产方向已收束到 `production-pipeline/`。
 - `production-pipeline/` 是当前唯一的正式生产流水线目录；旧的内容生产目录已删除，避免 v1 manifest 编排和 v2 生产模型并存造成混淆。

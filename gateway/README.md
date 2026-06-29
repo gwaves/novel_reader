@@ -66,6 +66,8 @@ localStorage.setItem('novel-reader-gateway-admin-token', '<GATEWAY_DEV_ACCESS_TO
 - `PATCH /admin/books/:bookId/labels`（受保护，更新书籍内容标签）
 - `GET /admin/devices`（受保护，返回已登记设备）
 - `PATCH /admin/devices/:deviceId`（受保护，更新设备名称或角色）
+- `GET /admin/metrics`（受保护，返回请求量、错误率、P95 和下载统计）
+- `GET /admin/events`（受保护，返回最近下载、错误和告警事件）
 - `GET /admin/ui`（内网管理后台静态入口）
 - `POST /ai/chat`（受保护，转发 OpenAI-compatible chat completions）
 - `POST /ai/embeddings`（受保护，转发 OpenAI-compatible embeddings）

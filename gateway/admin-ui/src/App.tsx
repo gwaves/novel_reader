@@ -17,8 +17,8 @@ import {
   initialDevices,
   labelNames,
   labelOptions,
-  overviewMetrics,
-  recentEvents,
+  overviewMetrics as mockOverviewMetrics,
+  recentEvents as mockRecentEvents,
   roleNames,
   visibilityOptions,
 } from './mockData'
@@ -39,6 +39,8 @@ function App() {
   const [activeView, setActiveView] = useState<ViewKey>('overview')
   const [books, setBooks] = useState(initialBooks)
   const [devices, setDevices] = useState(initialDevices)
+  const [metrics, setMetrics] = useState(mockOverviewMetrics)
+  const [events, setEvents] = useState(mockRecentEvents)
   const [dataSource, setDataSource] = useState<AdminDashboardData['source']>('mock')
   const [loadMessage, setLoadMessage] = useState('正在连接 Gateway 管理 API')
   const [selectedBookId, setSelectedBookId] = useState<string | null>(null)
@@ -59,6 +61,8 @@ function App() {
       if (cancelled) return
       setBooks(data.books)
       setDevices(data.devices)
+      setMetrics(data.overviewMetrics)
+      setEvents(data.recentEvents)
       setDataSource(data.source)
       setLoadMessage(data.source === 'api' ? '已连接 Gateway 管理 API' : 'API 不可用，正在显示 mock 数据')
     })
@@ -126,7 +130,7 @@ function App() {
         </header>
 
         <main className="content">
-          {activeView === 'overview' && <Overview />}
+          {activeView === 'overview' && <Overview metrics={metrics} events={events} />}
           {activeView === 'books' && (
             <BooksPage books={books} selectedBook={selectedBook} onSelect={setSelectedBookId} onUpdate={updateBook} />
           )}
@@ -157,11 +161,11 @@ function StatusPill({ label, value, tone }: { label: string; value: string; tone
   )
 }
 
-function Overview() {
+function Overview({ metrics, events }: { metrics: typeof mockOverviewMetrics; events: typeof mockRecentEvents }) {
   return (
     <section className="view-stack" aria-label="总览">
       <div className="metric-grid">
-        {overviewMetrics.map((metric) => (
+        {metrics.map((metric) => (
           <article className="metric-card" key={metric.label}>
             <span>{metric.label}</span>
             <strong>{metric.value}</strong>
@@ -207,7 +211,7 @@ function Overview() {
           <span>最近 30 分钟</span>
         </div>
         <ol className="event-list">
-          {recentEvents.map((event) => (
+          {events.map((event) => (
             <li key={`${event.time}-${event.text}`} className={event.level}>
               <time>{event.time}</time>
               <span>{event.text}</span>

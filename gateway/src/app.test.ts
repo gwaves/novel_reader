@@ -760,6 +760,103 @@ describe('gateway app', () => {
     })
   })
 
+  it('reports request metrics, download counts, and recent events for admin overview', async () => {
+    const dataDir = await makeDataDir()
+    await writeFile(
+      join(dataDir, 'books.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        books: [
+          {
+            id: 'book-a',
+            title: '指标书',
+            chapterCount: 1,
+            updatedAt: '2026-06-25T00:00:00.000Z',
+          },
+        ],
+      }),
+      'utf8',
+    )
+    await mkdir(join(dataDir, 'books', 'book-a'), { recursive: true })
+    await writeFile(
+      join(dataDir, 'books', 'book-a', 'package.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        book: {
+          id: 'book-a',
+          title: '指标书',
+          chapterCount: 1,
+          updatedAt: '2026-06-25T00:00:00.000Z',
+        },
+      }),
+      'utf8',
+    )
+    const app = buildTestApp({
+      GATEWAY_DEV_ACCESS_TOKEN: 'dev-token',
+      GATEWAY_DATA_DIR: dataDir,
+    })
+    const authHeaders = { authorization: 'Bearer dev-token' }
+
+    const downloadResponse = await app.inject({
+      method: 'GET',
+      url: '/mobile/books/book-a/package/download',
+      headers: authHeaders,
+    })
+    const missingResponse = await app.inject({
+      method: 'GET',
+      url: '/missing-metrics-route',
+    })
+    const metricsResponse = await app.inject({
+      method: 'GET',
+      url: '/admin/metrics',
+      headers: authHeaders,
+    })
+    const eventsResponse = await app.inject({
+      method: 'GET',
+      url: '/admin/events',
+      headers: authHeaders,
+    })
+
+    expect(downloadResponse.statusCode).toBe(200)
+    expect(missingResponse.statusCode).toBe(404)
+    expect(metricsResponse.statusCode).toBe(200)
+    expect(metricsResponse.json()).toMatchObject({
+      schemaVersion: 1,
+      requests: {
+        last24Hours: expect.any(Number),
+        errorRate: expect.any(Number),
+        p95Ms: expect.any(Number),
+      },
+      downloads: {
+        packageLast24Hours: 1,
+        audioLast24Hours: 0,
+        topBooks: [
+          {
+            bookId: 'book-a',
+            title: '指标书',
+            packageDownloads: 1,
+          },
+        ],
+      },
+    })
+    expect(metricsResponse.json().requests.last24Hours).toBeGreaterThanOrEqual(2)
+    expect(metricsResponse.json().requests.errorRate).toBeGreaterThan(0)
+    expect(eventsResponse.statusCode).toBe(200)
+    expect(eventsResponse.json().events).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          level: 'info',
+          text: '下载 book-a 数据包',
+          bookId: 'book-a',
+        }),
+        expect.objectContaining({
+          level: 'warn',
+          statusCode: 404,
+        }),
+      ]),
+    )
+  })
+
   it('reports book catalog audio counts from the current audio manifests', async () => {
     const dataDir = await makeDataDir()
     const audioDir = await makeDataDir()

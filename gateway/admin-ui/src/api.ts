@@ -6,6 +6,8 @@ import {
   type Visibility,
   initialBooks,
   initialDevices,
+  overviewMetrics,
+  recentEvents,
 } from './mockData'
 
 type GatewayBook = {
@@ -35,27 +37,56 @@ type GatewayDevice = {
   lastIp?: string
 }
 
+type GatewayMetrics = {
+  requests?: {
+    last15Minutes?: number
+    last24Hours?: number
+    errorRate?: number
+    p95Ms?: number
+  }
+  downloads?: {
+    packageLast24Hours?: number
+    audioLast24Hours?: number
+  }
+}
+
+type GatewayEvents = {
+  events?: Array<{
+    time?: string
+    level?: 'info' | 'warn' | 'error'
+    text?: string
+  }>
+}
+
 export type AdminDashboardData = {
   books: AdminBook[]
   devices: AdminDevice[]
+  overviewMetrics: typeof overviewMetrics
+  recentEvents: typeof recentEvents
   source: 'api' | 'mock'
 }
 
 export async function loadAdminDashboardData(fetcher: typeof fetch = fetch): Promise<AdminDashboardData> {
   try {
-    const [booksResponse, devicesResponse] = await Promise.all([
+    const [booksResponse, devicesResponse, metricsResponse, eventsResponse] = await Promise.all([
       adminFetch<{ books?: GatewayBook[] }>('/admin/books', fetcher),
       adminFetch<{ devices?: GatewayDevice[] }>('/admin/devices', fetcher),
+      adminFetch<GatewayMetrics>('/admin/metrics', fetcher),
+      adminFetch<GatewayEvents>('/admin/events', fetcher),
     ])
     return {
       books: Array.isArray(booksResponse.books) ? booksResponse.books.map(mapBook) : [],
       devices: Array.isArray(devicesResponse.devices) ? devicesResponse.devices.map(mapDevice) : [],
+      overviewMetrics: mapMetrics(metricsResponse),
+      recentEvents: mapEvents(eventsResponse),
       source: 'api',
     }
   } catch {
     return {
       books: initialBooks,
       devices: initialDevices,
+      overviewMetrics,
+      recentEvents,
       source: 'mock',
     }
   }
@@ -147,6 +178,30 @@ function mapDevice(device: GatewayDevice): AdminDevice {
   }
 }
 
+function mapMetrics(metrics: GatewayMetrics): typeof overviewMetrics {
+  const last24Hours = readNumber(metrics.requests?.last24Hours)
+  const last15Minutes = readNumber(metrics.requests?.last15Minutes)
+  const errorRate = readNumber(metrics.requests?.errorRate)
+  const p95Ms = readNumber(metrics.requests?.p95Ms)
+  const audioDownloads = readNumber(metrics.downloads?.audioLast24Hours)
+  const packageDownloads = readNumber(metrics.downloads?.packageLast24Hours)
+  return [
+    { label: '今日请求', value: formatCount(last24Hours), note: `近 15 分钟 ${formatCount(last15Minutes)}` },
+    { label: '错误率', value: `${(errorRate * 100).toFixed(1)}%`, note: '最近 24 小时' },
+    { label: 'P95 响应', value: `${Math.round(p95Ms)}ms`, note: '最近 24 小时' },
+    { label: '下载次数', value: formatCount(audioDownloads + packageDownloads), note: `音频 ${formatCount(audioDownloads)} / 数据包 ${formatCount(packageDownloads)}` },
+  ]
+}
+
+function mapEvents(payload: GatewayEvents): typeof recentEvents {
+  if (!Array.isArray(payload.events) || payload.events.length === 0) return recentEvents
+  return payload.events.slice(0, 8).map((event) => ({
+    time: formatTime(event.time),
+    level: event.level ?? 'info',
+    text: readString(event.text, 'Gateway 事件'),
+  }))
+}
+
 function normalizeVisibility(value: unknown): Visibility {
   return value === 'trusted' || value === 'admin' || value === 'hidden' ? value : 'default'
 }
@@ -179,4 +234,16 @@ function formatDate(value: unknown) {
   const date = new Date(raw)
   if (Number.isNaN(date.getTime())) return raw
   return date.toISOString().slice(0, 16).replace('T', ' ')
+}
+
+function formatTime(value: unknown) {
+  const raw = readString(value, '')
+  if (!raw) return '--:--'
+  const date = new Date(raw)
+  if (Number.isNaN(date.getTime())) return raw
+  return date.toISOString().slice(11, 16)
+}
+
+function formatCount(value: number) {
+  return new Intl.NumberFormat('en-US').format(value)
 }

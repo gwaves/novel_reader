@@ -60,6 +60,31 @@ describe('Gateway 管理后台 UI', () => {
           ],
         })
       }
+      if (url === '/admin/metrics') {
+        return jsonResponse({
+          requests: {
+            last15Minutes: 7,
+            last24Hours: 42,
+            errorRate: 0.125,
+            p95Ms: 321,
+          },
+          downloads: {
+            packageLast24Hours: 2,
+            audioLast24Hours: 9,
+          },
+        })
+      }
+      if (url === '/admin/events') {
+        return jsonResponse({
+          events: [
+            {
+              time: '2026-06-29T12:34:00.000Z',
+              level: 'warn',
+              text: '接口事件',
+            },
+          ],
+        })
+      }
       return jsonResponse({}, false, 404)
     })
 
@@ -68,6 +93,9 @@ describe('Gateway 管理后台 UI', () => {
 
     expect(await screen.findByText(/已连接 Gateway 管理 API/)).toBeInTheDocument()
     expect(screen.getByText('实时')).toBeInTheDocument()
+    expect(screen.getByText('42')).toBeInTheDocument()
+    expect(screen.getByText('12.5%')).toBeInTheDocument()
+    expect(screen.getByText('接口事件')).toBeInTheDocument()
 
     await user.click(screen.getByRole('button', { name: '书籍' }))
     expect(screen.getByRole('row', { name: /接口书籍 接口作者 trusted/ })).toBeInTheDocument()
