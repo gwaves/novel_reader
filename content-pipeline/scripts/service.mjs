@@ -52,6 +52,7 @@ const runOptionFlags = new Map([
   ['minBatchSize', '--min-batch-size'],
   ['ttsConcurrency', '--tts-concurrency'],
   ['ttsChapters', '--tts-chapters'],
+  ['controlFile', '--control-file'],
 ])
 const runBooleanFlags = new Map([
   ['dryRun', '--dry-run'],

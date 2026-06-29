@@ -52,6 +52,7 @@ Novel Reader 离线多角色 TTS 导演脚本工具
   --min-batch-size <number>    batch-pipeline LLM 失败降级后的最小批大小，默认 6
   --tts-concurrency <number>   batch-pipeline 单章 TTS 片段并发，默认取 tts.concurrency
   --tts-chapters <number>      batch-pipeline 同时进行 TTS 的章节数，默认 2
+  --control-file <path>        batch-pipeline 运行中轮询 JSON 文件，动态调整并发
   --no-adaptive-tts            batch-pipeline 禁用基于重试率的 TTS 自适应并发
 
 示例:
@@ -1358,6 +1359,95 @@ async function runConcurrent(items, workerCount, worker) {
   await Promise.all(workers)
 }
 
+async function runDynamicConcurrent(items, getWorkerCount, worker, { pollMs = 1000 } = {}) {
+  let nextIndex = 0
+  const active = new Set()
+  const failures = []
+
+  const launchAvailable = () => {
+    const workerCount = Math.max(1, Math.floor(Number(getWorkerCount()) || 1))
+    while (!failures.length && nextIndex < items.length && active.size < workerCount) {
+      const currentIndex = nextIndex
+      nextIndex += 1
+      const task = Promise.resolve()
+        .then(() => worker(items[currentIndex], currentIndex))
+        .catch(error => {
+          failures.push(error)
+        })
+        .finally(() => {
+          active.delete(task)
+        })
+      active.add(task)
+    }
+  }
+
+  while (nextIndex < items.length || active.size) {
+    launchAvailable()
+    if (failures.length) {
+      await Promise.allSettled(active)
+      throw failures[0]
+    }
+    if (!active.size) continue
+    await Promise.race([...active, sleep(pollMs)])
+  }
+}
+
+function readPositiveInteger(record, keys, fallback) {
+  for (const key of keys) {
+    if (record[key] === undefined || record[key] === null || record[key] === '') continue
+    const parsed = Math.floor(Number(record[key]))
+    if (Number.isFinite(parsed) && parsed >= 1) return parsed
+    throw new Error(`${key} 必须是大于等于 1 的整数。`)
+  }
+  return fallback
+}
+
+function createBatchPipelineControl(args, defaults) {
+  const controlPath = args['control-file'] ? resolve(expandHome(args['control-file'])) : ''
+  let values = { ...defaults }
+  let lastMtimeMs = -1
+  let lastSignature = JSON.stringify(values)
+
+  const refresh = () => {
+    if (!controlPath) return values
+    let stat = null
+    try {
+      stat = statSync(controlPath)
+    } catch {
+      return values
+    }
+    if (stat.mtimeMs === lastMtimeMs) return values
+    lastMtimeMs = stat.mtimeMs
+
+    try {
+      const control = JSON.parse(readFileSync(controlPath, 'utf8'))
+      if (!control || typeof control !== 'object' || Array.isArray(control)) {
+        throw new Error('控制文件必须是 JSON object。')
+      }
+      const next = {
+        directorConcurrency: readPositiveInteger(control, ['directorConcurrency', 'director_concurrency'], values.directorConcurrency),
+        llmChapters: readPositiveInteger(control, ['llmChapters', 'llm_chapters'], values.llmChapters),
+        ttsConcurrency: readPositiveInteger(control, ['ttsConcurrency', 'tts_concurrency'], values.ttsConcurrency),
+        ttsChapters: readPositiveInteger(control, ['ttsChapters', 'tts_chapters'], values.ttsChapters),
+      }
+      const signature = JSON.stringify(next)
+      if (signature !== lastSignature) {
+        console.log(`🎛️  并发控制更新：directorConcurrency=${next.directorConcurrency}, llmChapters=${next.llmChapters}, ttsConcurrency=${next.ttsConcurrency}, ttsChapters=${next.ttsChapters}`)
+        lastSignature = signature
+      }
+      values = next
+    } catch (error) {
+      console.warn(`⚠️  忽略并发控制文件 ${controlPath}：${error.message}`)
+    }
+    return values
+  }
+
+  return {
+    path: controlPath,
+    current: refresh,
+  }
+}
+
 function percentile(values, p) {
   const sorted = values.filter(value => Number.isFinite(value)).slice().sort((a, b) => a - b)
   if (!sorted.length) return null
@@ -1704,9 +1794,9 @@ async function runBatchPipeline(config, args) {
     ? Math.max(1, Math.floor(Number(args['llm-chapters'])))
     : 1
   const adaptiveTts = args['no-adaptive-tts'] !== true
-  const minAdaptiveTtsConcurrency = Math.min(ttsConcurrency, Math.max(1, Math.min(4, ttsConcurrency)))
-  const maxAdaptiveTtsConcurrency = ttsConcurrency
   let currentTtsConcurrency = ttsConcurrency
+  let lastConfiguredTtsConcurrency = ttsConcurrency
+  let lastConfiguredDirectorConcurrency = initialDirectorConcurrency
 
   const resume = args.resume === true
   if (!Number.isFinite(initialBatchSize) || initialBatchSize < 1) throw new Error('--batch-size 必须是大于等于 1 的整数。')
@@ -1725,34 +1815,45 @@ async function runBatchPipeline(config, args) {
   const audits = []
   const synthPromises = []
   let activeSynthCount = 0
-  const synthQueue = []
   let adaptiveBatchSize = initialBatchSize
   let adaptiveDirectorConcurrency = initialDirectorConcurrency
+  const runtimeControl = createBatchPipelineControl(args, {
+    directorConcurrency: initialDirectorConcurrency,
+    llmChapters: llmChapterConcurrency,
+    ttsConcurrency,
+    ttsChapters: ttsChapterConcurrency,
+  })
 
   console.log(`🚂 批量流水线启动：章节 ${chapters.join(', ')}`)
   console.log(`   LLM 阶段：章节并发 ${llmChapterConcurrency}，单章批次并发 ${initialDirectorConcurrency}，batchSize ${initialBatchSize}`)
   console.log(`   TTS 阶段：章节并发 ${ttsChapterConcurrency}，单章片段并发 ${ttsConcurrency}${adaptiveTts ? `，自适应起始 ${currentTtsConcurrency}` : ''}`)
+  if (runtimeControl.path) console.log(`   并发控制文件：${runtimeControl.path}`)
   if (resume) console.log('   断点续跑：已完成 MP3 会跳过，已通过校验脚本会复用。')
 
   const acquireSynthSlot = async () => {
-    if (activeSynthCount < ttsChapterConcurrency) {
-      activeSynthCount += 1
-      return
+    while (true) {
+      const { ttsChapters } = runtimeControl.current()
+      if (activeSynthCount < ttsChapters) {
+        activeSynthCount += 1
+        return
+      }
+      await sleep(1000)
     }
-    await new Promise(resolve => synthQueue.push(resolve))
-    activeSynthCount += 1
   }
 
   const releaseSynthSlot = () => {
-    activeSynthCount -= 1
-    const next = synthQueue.shift()
-    if (next) next()
+    activeSynthCount = Math.max(0, activeSynthCount - 1)
   }
 
   const launchSynth = (chapterIndex, scriptPath, audioDir) => {
     const started = Date.now()
     const synthPromise = (async () => {
       await acquireSynthSlot()
+      const control = runtimeControl.current()
+      if (control.ttsConcurrency !== lastConfiguredTtsConcurrency) {
+        currentTtsConcurrency = control.ttsConcurrency
+        lastConfiguredTtsConcurrency = control.ttsConcurrency
+      }
       const chapterTtsConcurrency = currentTtsConcurrency
       console.log(`🎧 第 ${chapterIndex} 章进入 TTS 阶段`)
       const synthResult = await runSynth(config, {
@@ -1773,6 +1874,8 @@ async function runBatchPipeline(config, args) {
         metricsSummary: synthResult.summary,
       })
       if (adaptiveTts) {
+        const maxAdaptiveTtsConcurrency = runtimeControl.current().ttsConcurrency
+        const minAdaptiveTtsConcurrency = Math.min(maxAdaptiveTtsConcurrency, Math.max(1, Math.min(4, maxAdaptiveTtsConcurrency)))
         const next = nextAdaptiveTtsConcurrency(currentTtsConcurrency, synthResult.summary, {
           minConcurrency: minAdaptiveTtsConcurrency,
           maxConcurrency: maxAdaptiveTtsConcurrency,
@@ -1797,6 +1900,11 @@ async function runBatchPipeline(config, args) {
     let lastError = null
     for (let attempt = 1; attempt <= config.batchPipeline.maxDraftAttempts; attempt += 1) {
       try {
+        const control = runtimeControl.current()
+        if (control.directorConcurrency !== lastConfiguredDirectorConcurrency) {
+          adaptiveDirectorConcurrency = control.directorConcurrency
+          lastConfiguredDirectorConcurrency = control.directorConcurrency
+        }
         const result = await runDraftScript(config, makeChapterArgs({
           'book-id': bookId,
           ...(requestedLimit == null ? {} : { limit: String(requestedLimit) }),
@@ -1820,7 +1928,7 @@ async function runBatchPipeline(config, args) {
     throw lastError
   }
 
-  await runConcurrent(chapters, llmChapterConcurrency, async (chapterIndex) => {
+  await runDynamicConcurrent(chapters, () => runtimeControl.current().llmChapters, async (chapterIndex) => {
     const { scriptPath, audioDir, finalAudioPath } = getChapterOutputPaths(outRoot, chapterIndex, config.tts.finalFormat)
     if (resume && existsSync(finalAudioPath)) {
       console.log(`⏭️  第 ${chapterIndex} 章已存在 MP3，跳过：${finalAudioPath}`)
@@ -1865,10 +1973,9 @@ async function runBatchPipeline(config, args) {
       segmentConcurrency: ttsConcurrency,
       chapterConcurrency: ttsChapterConcurrency,
       adaptive: adaptiveTts,
-      minAdaptiveConcurrency: minAdaptiveTtsConcurrency,
-      maxAdaptiveConcurrency: maxAdaptiveTtsConcurrency,
       finalAdaptiveConcurrency: currentTtsConcurrency,
     },
+    control: runtimeControl.path ? { path: runtimeControl.path, final: runtimeControl.current() } : null,
     results,
     audits,
     metricsSummary: batchMetricsSummary,

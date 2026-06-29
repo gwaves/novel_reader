@@ -1381,8 +1381,10 @@ describe('production-pipeline import', () => {
       const ttsOutRoot = join(tempDir, 'generated-tts')
       const fakeDirectorPath = join(tempDir, 'fake-tts-director.mjs')
       const fakeConfigPath = join(tempDir, 'fake-tts-config.json')
+      const controlPath = join(tempDir, 'audio-control.json')
       await writeFile(txtPath, `第一章 开始\n这是第一章内容。\n\n第二章 继续\n这是第二章内容。`, 'utf8')
       await writeFile(fakeConfigPath, JSON.stringify({ ok: true }), 'utf8')
+      await writeFile(controlPath, JSON.stringify({ ttsChapters: 4 }), 'utf8')
       await writeFile(fakeDirectorPath, fakeTtsDirectorSource(), 'utf8')
       await execFileAsync(process.execPath, [
         cliPath,
@@ -1412,6 +1414,8 @@ describe('production-pipeline import', () => {
         ttsOutRoot,
         '--chapters',
         '1-2',
+        '--control-file',
+        controlPath,
         '--resume',
         '--main-db',
         dbPath,
@@ -1435,6 +1439,8 @@ describe('production-pipeline import', () => {
       assert.equal(runJson.stages.audio.artifacts.ttsSourceRoot, ttsOutRoot)
       assert.equal(runJson.stages.audio.status, 'completed')
       assert.match(await readFile(join(runRoot, 'sample-book', runId, 'artifacts', 'tts-director.log'), 'utf8'), /fake director start/)
+      const directorArgs = JSON.parse(await readFile(join(ttsOutRoot, 'args.json'), 'utf8'))
+      assert.equal(directorArgs['control-file'], controlPath)
     } finally {
       await rm(tempDir, { recursive: true, force: true })
     }

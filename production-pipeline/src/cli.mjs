@@ -3057,6 +3057,7 @@ function buildStageArgs(stage, job, mainDbPath, runInfo, stageOptions = {}) {
     if (audio.minBatchSize || audio.min_batch_size) args.push('--min-batch-size', String(audio.minBatchSize || audio.min_batch_size))
     if (audio.ttsConcurrency || audio.tts_concurrency) args.push('--tts-concurrency', String(audio.ttsConcurrency || audio.tts_concurrency))
     if (audio.ttsChapters || audio.tts_chapters) args.push('--tts-chapters', String(audio.ttsChapters || audio.tts_chapters))
+    if (audio.controlFile || audio.control_file) args.push('--control-file', audio.controlFile || audio.control_file)
     if (isFlagEnabled(audio.strict)) args.push('--strict')
     if (isFlagEnabled(audio.resume)) args.push('--resume')
     if (isFlagEnabled(audio.allowPartial || audio.allow_partial)) args.push('--allow-partial')
@@ -3344,6 +3345,7 @@ async function prepareAudioSourceRoot({ options, run, book }) {
   if (options.minBatchSize) args.push('--min-batch-size', String(options.minBatchSize))
   if (options.ttsConcurrency) args.push('--tts-concurrency', String(options.ttsConcurrency))
   if (options.ttsChapters) args.push('--tts-chapters', String(options.ttsChapters))
+  if (options.controlFile) args.push('--control-file', options.controlFile)
   if (isFlagEnabled(options.noAdaptiveTts)) args.push('--no-adaptive-tts')
 
   const logPath = join(run.artifactsDir, 'tts-director.log')
@@ -4070,6 +4072,7 @@ Options:
   --chapters           Chapter list/range for TTS generation. Default: full book.
   --tts-concurrency    TTS segment concurrency passed to offline-tts.
   --tts-chapters       TTS chapter concurrency passed to offline-tts.
+  --control-file       JSON file polled by offline-tts for live audio concurrency changes.
   --force              Regenerate existing embedding rows.
   --remote-host        Remote Gateway host for rsync publish.
   --remote-user        Remote SSH user.
