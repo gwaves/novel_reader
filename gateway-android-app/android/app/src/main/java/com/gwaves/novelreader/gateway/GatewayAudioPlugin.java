@@ -19,7 +19,11 @@ public class GatewayAudioPlugin extends Plugin {
   public void downloadAudio(PluginCall call) {
     String url = call.getString("url");
     String token = call.getString("token");
+    String deviceId = call.getString("deviceId", "");
     String deviceName = call.getString("deviceName", "Android Phone");
+    String deviceModel = call.getString("deviceModel", "");
+    String devicePlatform = call.getString("devicePlatform", "");
+    String appVersion = call.getString("appVersion", "");
     String bookId = call.getString("bookId");
     String chapterId = call.getString("chapterId");
 
@@ -45,7 +49,7 @@ public class GatewayAudioPlugin extends Plugin {
           connection.setConnectTimeout(15000);
           connection.setReadTimeout(180000);
           connection.setRequestProperty("Authorization", "Bearer " + token);
-          connection.setRequestProperty("X-Device-Name", deviceName);
+          setDeviceHeaders(connection, deviceId, deviceName, deviceModel, devicePlatform, appVersion);
 
           int status = connection.getResponseCode();
           if (status < 200 || status >= 300) {
@@ -91,7 +95,11 @@ public class GatewayAudioPlugin extends Plugin {
   public void downloadPackage(PluginCall call) {
     String url = call.getString("url");
     String token = call.getString("token");
+    String deviceId = call.getString("deviceId", "");
     String deviceName = call.getString("deviceName", "Android Phone");
+    String deviceModel = call.getString("deviceModel", "");
+    String devicePlatform = call.getString("devicePlatform", "");
+    String appVersion = call.getString("appVersion", "");
     String bookId = call.getString("bookId");
 
     if (url == null || token == null || bookId == null) {
@@ -116,7 +124,7 @@ public class GatewayAudioPlugin extends Plugin {
           connection.setConnectTimeout(15000);
           connection.setReadTimeout(600000);
           connection.setRequestProperty("Authorization", "Bearer " + token);
-          connection.setRequestProperty("X-Device-Name", deviceName);
+          setDeviceHeaders(connection, deviceId, deviceName, deviceModel, devicePlatform, appVersion);
 
           int status = connection.getResponseCode();
           if (status < 200 || status >= 300) {
@@ -163,6 +171,27 @@ public class GatewayAudioPlugin extends Plugin {
         }
       }
     );
+  }
+
+  private void setDeviceHeaders(
+    HttpURLConnection connection,
+    String deviceId,
+    String deviceName,
+    String deviceModel,
+    String devicePlatform,
+    String appVersion
+  ) {
+    setHeaderIfPresent(connection, "X-Device-Id", deviceId);
+    setHeaderIfPresent(connection, "X-Device-Name", deviceName);
+    setHeaderIfPresent(connection, "X-Device-Model", deviceModel);
+    setHeaderIfPresent(connection, "X-Device-Platform", devicePlatform);
+    setHeaderIfPresent(connection, "X-App-Version", appVersion);
+  }
+
+  private void setHeaderIfPresent(HttpURLConnection connection, String name, String value) {
+    if (value != null && !value.trim().isEmpty()) {
+      connection.setRequestProperty(name, value.trim());
+    }
   }
 
   @PluginMethod

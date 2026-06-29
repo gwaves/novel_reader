@@ -1,17 +1,24 @@
-2026-06-26 更新：内容生产流水线方向已在独立 worktree 启动。
-- 新增独立 worktree `/Users/gwaves/Documents/novel_reader-content-pipeline`，分支 `codex/content-production-pipeline`，用于隔离开发内容生产系统。
-- 新增 `content-pipeline/` 规划目录，目标是把 TXT/EPUB/PDF 或主数据库已有书籍生产为移动 APP 和 Gateway 可消费的完整资产：章节、概要、embedding、知识图谱、MP3、timeline、Gateway package/audio 发布记录。
-- 第一版定位为编排层：复用 `scripts/offline-scanner.mjs`、`offline-tts/scripts/tts-director.mjs`、`gateway/scripts/publish-package.mjs` 和 `gateway/scripts/publish-audio.mjs`，用 `production-manifest.json` 记录阶段状态、产物路径、失败原因和运行历史；根 `package.json` 新增 `npm run content:pipeline` 入口。
-- Phase 2 导入层开始落地：新增 Node 侧 `content-pipeline/lib/book-ingest.mjs`，支持 TXT/EPUB 解析、按文件 sha256 稳定生成默认 `bookId`、写入主 SQLite；CLI 新增 `ingest --file`，导入成功后会创建/更新 manifest 的 `ingest` 阶段和 source hash。PDF 仍按计划后续只先接文本型 PDF。
-- Phase 2 基础验收已通过临时样本验证：TXT 和最小 EPUB 均可 `ingest --file` 写入临时主库，并继续跑通 `run --steps import` 进入离线扫描源库；重复导入同一 TXT 会复用同一 `bookId`；当前不支持的 PDF 会把失败原因写入 manifest。
-- Phase 3 embedding 独立生产已接入 pipeline：新增 `run --steps embedding`，从 PC 主数据库 `app_state.embeddingConfig` 读取配置，经本地 API 复用 `/api/rag/embeddings/*` 批量生成 summary/chunk embedding，并把 provider、model、baseUrl、维度和覆盖率写入 manifest；已用外部 `qwen3-embedding-8b` 配置验证成功，返回维度 4096，并对《西游记》低成本重算 1 章、8 个正文片段。
-- 发布前硬化继续推进：`status` 现在会展示 ingest、scan、embedding 等阶段的关键 artifacts；`embedding` 会先检查本地 API 是否可达，未启动时提示先运行 `npm run api` 或指定 `--source-api`；`scan` 新增 `--scan-type summary|kg|all`，便于低成本真实模型验证。
-- 新增 `npm run content:pipeline:smoke`，自动创建临时 TXT/EPUB/PDF 与 SQLite，验证 TXT/EPUB ingest、PDF failed manifest、离线 import、scan/embedding dry-run，不调用模型、不发布 Gateway。
-- 已用临时 2 章 TXT 小书跑通真实闭环：`ingest -> import -> scan --scan-type summary -> export -> embedding --limit 1 -> publish-package`。其中 summary 真实调用内网模型成功生成 2 章概要，embedding 调用外部 `qwen3-embedding-8b` 成功生成 1 章 summary/chunk embedding，package 已发布到临时 Gateway 并可从 `/mobile/books/:bookId/package` 读取。
-- 已补充中文设计文档、开发计划、示例配置和第一版 CLI；`help`、`init`、`status`、`import/scan/export/publish-package dry-run`、`audio/publish-audio dry-run` 已完成基础验证；CLI 继续补齐 `--config` 默认值读取、真实命令失败时的 manifest 落盘、`status` 错误展示，以及 `scan` 前默认同步 PC 端当前大模型配置。
-- 已用《西游记》真实验证已有书籍生产闭环：`import` 从主 SQLite 导入 100 章；`scan` 检测到 Summary 100/100、KG 100/100 后跳过模型扫描；`export` 导回 100 个 Summary、100 个 KG 提取、898 个实体和 1471 个关系；临时启动本地 API 后，`publish-package` 已发布到 `http://127.0.0.1:6180` Gateway。
-- 已用《妖刀记》现有 TTS 产物真实验证 `publish-audio`：从 `/Users/gwaves/Documents/novel_reader/tmp/tts/yaodao` 发布 27 章 MP3 和 timeline manifest 到 Gateway 实际音频目录 `/Users/gwaves/.novel_reader_gateway/audio`；Gateway 受保护音频接口已能读取 27 章音频清单。
-- 后续优先在确认成本和模型服务状态后跑真实 `scan` 或 `audio`，然后补 TXT/EPUB/PDF 上传导入与 Gateway 异步任务化。
+2026-06-29 更新：Gateway 管理后台与书库可见性大 feature 已开分支设计。
+- 新增分支 `codex/gateway-admin-visibility`，用于集中开发 Gateway 管理后台、设备角色授权、书籍标签/可见范围和移动端设备识别。
+- 新增设计文档 `gateway/docs/admin-visibility-design.md`，明确普通/受信/禁用设备角色，默认/受信/管理员/隐藏书籍可见范围，以及书籍内容标签和可见范围分离的原则。
+- 接口设计已约定：移动端继续走 `/mobile/books` 等原 API，由 Gateway 按设备角色过滤；管理端新增 `/admin/books`、`/admin/devices`、`/admin/metrics`、`/admin/events` 等接口。
+- 交互设计已约定：后台包含总览、书籍、数据包、音频、设备、请求日志和设置；移动端设置页显示设备 ID、配对验证码、角色和刷新授权状态。
+- 开发策略确定为测试驱动：先补 Gateway 接口测试、移动端设备身份测试和后台 UI 测试，再实现功能；可并发拆分为 Gateway API、Gateway Mobile App 设备身份、管理后台 UI 三条线。
+- 当前已完成第一轮落地并提交：Gateway 管理 API、移动端设备身份、管理后台 UI 骨架和生产流水线 v2 收束已合并到 `b2843545`。
+- 管理后台继续推进：Gateway 现在从 `/admin/ui` 服务 `gateway/admin-ui/dist`，避免覆盖 `/admin/books` JSON API；后台 UI 已接入 `/admin/books` 和 `/admin/devices`，API 不可用时回退 mock 数据。
+- Gateway 总览指标继续推进：新增进程内 `/admin/metrics` 和 `/admin/events`，统计最近请求数、错误率、P95、package/audio 下载次数、热门书籍和最近下载/错误事件；后台总览页已接入这些真实 API。
+- Gateway Android 修正 MP3 计数串书：本机缓存章节数与云端音频总数已分离，下载三国演义时不会再把进度/缓存数显示到妖刀记；MP3 批量同步新增停止按钮，停止后当前章节完成即不再继续后续章节。
+- 本轮按 TDD 多 Agent 并行推进：Gateway 后端新增 `/admin/packages`、`/admin/audio`、`/admin/requests` 并补测试；admin-ui 的数据包、音频、请求日志页已从占位改为真实表格视图并兼容真实后端字段；Gateway Android 设置/书库页补强设备 ID、Pairing Code、角色/授权、可见范围和禁用态阻断提示。
+- 下一轮开发计划：继续采用测试驱动和多 Agent 并行，目标做到真实验证前的三步闭环。第一步补后台操作闭环，包含 package 下载/重新导入状态、音频清理/刷新状态、书籍/设备操作的保存中/失败回滚/确认提示；第二步补真实安全边界，将 admin 与 mobile 鉴权语义分开，并让 admin-ui 区分未授权、服务不可用和单接口失败，避免误回退 mock；第三步补移动端角色变化体验，明确 default/trusted/disabled 变化后的书库刷新、缓存可读策略和禁用态错误提示。最终真机和真实部署验证由用户执行。
+- 三步开发已按测试驱动完成：Gateway 后端新增后台 package 下载、音频刷新和音频清单清理接口，并引入 `GATEWAY_ADMIN_ACCESS_TOKEN` / `GATEWAY_MOBILE_ACCESS_TOKEN` 与 dev token fallback；admin-ui 增加数据包下载、音频刷新/清理、书籍/设备保存中/失败回滚/重试，以及未授权/不可用/部分失败状态；Gateway Android 增加角色变化提示，禁用后阻断云端操作但保留本地缓存阅读和清理能力。代码层面已通过 Gateway、admin-ui、Gateway Android 测试和构建，剩余真实部署/真机验证由用户执行。
+
+2026-06-29 更新：内容生产方向已收束到 `production-pipeline/`。
+- `production-pipeline/` 是当前唯一的正式生产流水线目录；旧的内容生产目录已删除，避免 v1 manifest 编排和 v2 生产模型并存造成混淆。
+- 有用能力已迁入 v2：TXT/EPUB/MOBI/AZW/AZW3 导入解析器现在位于 `production-pipeline/src/book-ingest.mjs`，`production-pipeline import/run` 会直接复用它写入主 SQLite。
+- 本地控制台也已迁入 v2：`npm run production-pipeline:console` 启动 `production-pipeline/src/service.mjs`，用于选择 job JSON、启动 v2 run、查看 `run.json`、阶段状态、子 run 和日志。
+- 根脚本保留 `npm run production-pipeline`、`npm run production-pipeline:test`、`npm run production-pipeline:console`、`npm run production-pipeline:console:test`；旧 manifest CLI、smoke 脚本和旧服务入口不再作为当前工作流维护。
+- 当前生产闭环仍以 job JSON 为事实合同：`import -> summary -> kg -> embedding -> audio -> package -> publish -> verify`，运行状态写入 `tmp/production-pipeline/runs/<bookId>/<runId>/run.json`。
+- 后续优先在 `production-pipeline/` 内继续补强真实整书生产、远端发布、失败恢复和 Gateway 上传任务化，不再开新的平行内容生产目录。
 
 2026-06-26 更新：Gateway Android 真机连接与大数据包缓存继续修复。
 - Gateway Android 客户端的单书 package 缓存从 `localStorage` 改为优先写入 IndexedDB，避免 Android WebView 在《妖刀记》这类大包上触发 `Storage exceeded the quota` 后中断打开书籍。

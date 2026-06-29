@@ -21,6 +21,11 @@ Gateway 第一版面向两种部署方式：
 ```bash
 GATEWAY_PUBLIC_BASE_URL=https://reader.example.com
 GATEWAY_DEV_ACCESS_TOKEN=replace-with-a-long-random-token
+# 源码支持 admin/mobile token 分离；未设置时分别回退到 GATEWAY_DEV_ACCESS_TOKEN。
+# 当前 compose 模板只透传 GATEWAY_DEV_ACCESS_TOKEN。如需容器内强制分离，
+# 需要在 compose environment 中一并透传下面两个变量。
+GATEWAY_ADMIN_ACCESS_TOKEN=replace-with-a-long-random-admin-token
+GATEWAY_MOBILE_ACCESS_TOKEN=replace-with-a-long-random-mobile-token
 GATEWAY_CORS_ORIGINS=
 GATEWAY_AI_BASE_URL=https://api.openai.com/v1
 GATEWAY_AI_API_KEY=
@@ -97,6 +102,10 @@ server {
 
     client_max_body_size 50m;
 
+    location ^~ /admin/ui {
+        return 403;
+    }
+
     location / {
         proxy_pass http://127.0.0.1:6180;
         proxy_http_version 1.1;
@@ -124,6 +133,10 @@ server {
     proxy_buffering off;
     proxy_request_buffering off;
 
+    location ^~ /admin/ui {
+        return 403;
+    }
+
     location / {
         proxy_pass http://gateway:6180;
         proxy_http_version 1.1;
@@ -134,6 +147,8 @@ server {
     }
 }
 ```
+
+`/admin/ui` 是管理后台静态入口。如果公网入口经过家庭路由器 DNAT/SNAT，Nginx 看到的来源地址可能已经变成内网地址，基于 `allow`/`deny` 的内网 ACL 可能失效。推荐在公网 Nginx 入口直接禁止 `/admin/ui`，管理后台改走家里内网直连 `http://192.168.88.100:6180/admin/ui`。上面的 `location ^~ /admin/ui` 必须放在通用 `location /` 前面；管理 API 仍由 Gateway 的 admin bearer token 保护。
 
 对应端口关系：
 
@@ -152,12 +167,15 @@ server {
 
 ```bash
 curl https://reader.example.com/health
-curl -H "Authorization: Bearer $GATEWAY_DEV_ACCESS_TOKEN" \
+curl -H "Authorization: Bearer $GATEWAY_MOBILE_ACCESS_TOKEN" \
   https://reader.example.com/auth/session
 
 curl http://192.168.88.100:6180/health
-curl -H "Authorization: Bearer $GATEWAY_DEV_ACCESS_TOKEN" \
+curl -H "Authorization: Bearer $GATEWAY_ADMIN_ACCESS_TOKEN" \
   http://192.168.88.100:6180/capabilities
+
+curl -kI https://novel.gwaves.net:8888/admin/ui
+curl -I http://192.168.88.100:6180/admin/ui
 ```
 
-`/health` 可公开访问；移动数据、AI、embedding 和 MP3 接口都需要 bearer token。
+`/health` 可公开访问；公网 Nginx 入口的 `/admin/ui` 应返回 403；内网直连 `6180` 可访问管理后台；`/admin/*` 和后台 AI/RAG 接口使用 admin bearer token，`/auth/*`、`/mobile/*` 和 MP3 接口使用 mobile bearer token。未设置 `GATEWAY_ADMIN_ACCESS_TOKEN` 或 `GATEWAY_MOBILE_ACCESS_TOKEN` 时，会分别回退到 `GATEWAY_DEV_ACCESS_TOKEN`，方便开发期沿用旧配置。

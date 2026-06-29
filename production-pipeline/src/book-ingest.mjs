@@ -300,7 +300,7 @@ function splitChapters(rawText) {
   const matches = Array.from(rawText.matchAll(chapterPattern))
   if (matches.length < 2) return chunkFallback(rawText)
 
-  return matches.map((match, index) => {
+  const chapters = matches.map((match, index) => {
     const start = match.index ?? 0
     const end = index < matches.length - 1 ? (matches[index + 1].index ?? rawText.length) : rawText.length
     const block = rawText.slice(start, end).trim()
@@ -312,6 +312,51 @@ function splitChapters(rawText) {
       content: contentLines.join('\n').trim(),
     }
   }).filter((chapter) => chapter.content)
+  return dropLeadingTocFragments(chapters)
+}
+
+function dropLeadingTocFragments(chapters) {
+  if (chapters.length < 2) return chapters
+  const firstNumber = parseChapterNumber(chapters[0].title)
+  if (!firstNumber || firstNumber <= 1) return chapters
+  const firstRealIndex = chapters.findIndex((chapter, index) => index > 0 && parseChapterNumber(chapter.title) === 1)
+  return firstRealIndex > 0 ? chapters.slice(firstRealIndex) : chapters
+}
+
+function parseChapterNumber(title) {
+  const match = String(title || '').match(/第\s*([0-9零一二三四五六七八九十百千万亿〇○]+)\s*[章卷节回]/)
+  if (!match) return 0
+  if (/^\d+$/.test(match[1])) return Number(match[1])
+  return parseChineseNumber(match[1])
+}
+
+function parseChineseNumber(value) {
+  const digits = new Map([
+    ['零', 0], ['〇', 0], ['○', 0],
+    ['一', 1], ['二', 2], ['两', 2], ['三', 3], ['四', 4], ['五', 5],
+    ['六', 6], ['七', 7], ['八', 8], ['九', 9],
+  ])
+  const units = new Map([['十', 10], ['百', 100], ['千', 1000], ['万', 10000], ['亿', 100000000]])
+  let total = 0
+  let section = 0
+  let number = 0
+  for (const char of String(value || '')) {
+    if (digits.has(char)) {
+      number = digits.get(char)
+      continue
+    }
+    const unit = units.get(char)
+    if (!unit) continue
+    if (unit >= 10000) {
+      section = (section + number) * unit
+      total += section
+      section = 0
+    } else {
+      section += (number || 1) * unit
+    }
+    number = 0
+  }
+  return total + section + number
 }
 
 function chunkFallback(text) {

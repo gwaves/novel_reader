@@ -55,7 +55,7 @@
     "maxSilenceSeconds": 8,
     "maxSecondsPerCharacter": 0.8,
     "maxCharactersPerRequest": 120,
-    "concurrency": 8,
+    "concurrency": 16,
     "keepIntermediateWav": false,
     "apiKeyEnv": "MIMO_API_KEY"
   }

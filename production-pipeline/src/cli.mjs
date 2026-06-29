@@ -3,7 +3,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { execFile, spawn } from 'node:child_process'
 import { copyFile, mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises'
-import { createWriteStream, existsSync, readdirSync } from 'node:fs'
+import { createWriteStream, existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, dirname, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -225,7 +225,7 @@ async function runImport(options) {
 
 async function runJob(options) {
   const jobPath = resolve(required(options.job, 'run requires --job <path>'))
-  const job = normalizeJobConfig(JSON.parse(await readFile(jobPath, 'utf8')))
+  const job = await hydrateJobConfig(JSON.parse(await readFile(jobPath, 'utf8')))
   const mainDbPath = expandPath(options.mainDb || options.mainDbPath || job.mainDbPath || job.source?.mainDbPath || defaultMainDbPath)
   const run = await createRun({
     command: 'run',
@@ -253,7 +253,7 @@ async function runDoctor(options) {
   const checks = []
   let job = null
   try {
-    job = normalizeJobConfig(rawJob)
+    job = await hydrateJobConfig(rawJob)
     addDoctorCheck(checks, 'job.parse', true, `loaded ${jobPath}`)
   } catch (error) {
     addDoctorCheck(checks, 'job.parse', false, error.message)
@@ -308,23 +308,44 @@ async function executeJobStages({ runInfo, job, mainDbPath, resume }) {
     })
     if (!runnableStages.length) continue
     const pendingStages = [...runnableStages]
-    while (pendingStages.length) {
-      const plan = buildStageExecutionPlan(job, pendingStages)
-      const settled = await Promise.allSettled(plan.stages.map((stage) => executeJobStageWithTracking({
-        stage,
-        runInfo,
-        job,
-        mainDbPath,
-        context,
-        stageResults,
-        stageOptions: plan.stageOptions[stage] || {},
-      })))
-      const rejected = settled.find((result) => result.status === 'rejected')
-      if (rejected) throw rejected.reason
-      for (const stage of plan.stages) {
-        const index = pendingStages.indexOf(stage)
-        if (index >= 0) pendingStages.splice(index, 1)
+    const runningStages = new Map()
+    while (pendingStages.length || runningStages.size) {
+      const readyStages = pendingStages.filter((stage) => stageDependencies(stage).every((dependency) => !runnableStages.includes(dependency) || stageResults[dependency]?.status === 'completed'))
+      if (readyStages.length) {
+        const plan = buildStageExecutionPlan(job, readyStages, { usedLlmSlots: activeLlmSchedulerSlots(runningStages, stageResults) })
+        if (!plan.stages.length) {
+          if (!runningStages.size) throw new Error(`No runnable stages remain: ${pendingStages.join(', ')}`)
+          const settled = await Promise.race(runningStages.values())
+          runningStages.delete(settled.stage)
+          if (settled.status === 'rejected') throw settled.reason
+          continue
+        }
+        await initializeRuntimeControls({ job, runInfo, stages: plan.stages, stageOptions: plan.stageOptions, stageResults })
+        for (const stage of plan.stages) {
+          const index = pendingStages.indexOf(stage)
+          if (index >= 0) pendingStages.splice(index, 1)
+          const promise = executeJobStageWithTracking({
+            stage,
+            runInfo,
+            job,
+            mainDbPath,
+            context,
+            stageResults,
+            stageOptions: plan.stageOptions[stage] || {},
+          }).then(
+            () => ({ stage, status: 'fulfilled' }),
+            (reason) => ({ stage, status: 'rejected', reason }),
+          )
+          runningStages.set(stage, promise)
+        }
+        continue
       }
+      if (!runningStages.size) {
+        throw new Error(`No runnable stages remain: ${pendingStages.join(', ')}`)
+      }
+      const settled = await Promise.race(runningStages.values())
+      runningStages.delete(settled.stage)
+      if (settled.status === 'rejected') throw settled.reason
     }
   }
 
@@ -340,11 +361,28 @@ async function executeJobStages({ runInfo, job, mainDbPath, resume }) {
   console.log('status: completed')
 }
 
+function stageDependencies(stage) {
+  if (stage === 'summaryEmbedding') return ['summary']
+  return []
+}
+
+function activeLlmSchedulerSlots(runningStages, stageResults) {
+  let total = 0
+  for (const stage of runningStages.keys()) {
+    if (stage === 'summary' || stage === 'kg' || stage === 'audio') {
+      total += Math.max(1, Number(stageResults[stage]?.schedulerConcurrency || 1))
+    }
+  }
+  return total
+}
+
 async function executeJobStageWithTracking({ stage, runInfo, job, mainDbPath, context, stageResults, stageOptions = {} }) {
   const startedAt = new Date().toISOString()
   stageResults[stage] = {
     status: 'running',
     startedAt,
+    ...(stageOptions.concurrency ? { schedulerConcurrency: stageOptions.concurrency } : {}),
+    ...(stageOptions.directorConcurrency ? { schedulerConcurrency: stageOptions.directorConcurrency * Math.max(1, Number(stageOptions.llmChapters || 1)) } : {}),
   }
   await writeRunJson(runInfo.runJsonPath, {
     ...runInfo.runJson,
@@ -387,6 +425,10 @@ async function executeJobStageWithTracking({ stage, runInfo, job, mainDbPath, co
       updatedAt: finishedAt,
       stages: stageResults,
     })
+    if (stage === 'import') {
+      await persistImportedBookId({ job, runInfo, mainDbPath, stageResult: stageResults[stage], stageResults })
+    }
+    await updateRuntimeControls({ job, runInfo, stageResults })
     console.log(`completed: ${stage}`)
   } catch (error) {
     const finishedAt = new Date().toISOString()
@@ -405,6 +447,107 @@ async function executeJobStageWithTracking({ stage, runInfo, job, mainDbPath, co
     })
     throw error
   }
+}
+
+async function initializeRuntimeControls({ job, runInfo, stages, stageOptions, stageResults }) {
+  const scheduler = normalizeLlmScheduler(job)
+  if (!scheduler || !scheduler.borrowIdle) return
+  await initializeKgRuntimeControl({ job, runInfo, stages, stageOptions, stageResults, scheduler })
+  await initializeAudioRuntimeControl({ job, runInfo, stages, stageOptions, stageResults, scheduler })
+}
+
+async function initializeAudioRuntimeControl({ job, runInfo, stages, stageOptions, stageResults, scheduler }) {
+  if (!stages.includes('audio')) return
+  const audio = job.audio || {}
+  if (audio.controlFile || audio.control_file) return
+  const controlFile = join(runInfo.rootDir, 'artifacts', 'runtime', 'audio-control.json')
+  audio.controlFile = controlFile
+  job.audio = audio
+  await writeAudioControlFile(controlFile, buildAudioRuntimeControl({ job, scheduler, stageResults, stageOptions }))
+}
+
+async function initializeKgRuntimeControl({ job, runInfo, stages, stageOptions, stageResults, scheduler }) {
+  if (!stages.includes('kg')) return
+  const kg = job.kg || {}
+  if (kg.controlFile || kg.control_file) return
+  const controlFile = join(runInfo.rootDir, 'artifacts', 'runtime', 'kg-control.json')
+  kg.controlFile = controlFile
+  job.kg = kg
+  await writeKgControlFile(controlFile, buildKgRuntimeControl({ job, scheduler, stageResults, stageOptions }))
+}
+
+async function updateRuntimeControls({ job, runInfo, stageResults }) {
+  const scheduler = normalizeLlmScheduler(job)
+  if (!scheduler || !scheduler.borrowIdle) return
+  await updateAudioRuntimeControl({ job, scheduler, stageResults })
+  await updateKgRuntimeControl({ job, scheduler, stageResults })
+}
+
+async function updateAudioRuntimeControl({ job, scheduler, stageResults }) {
+  const audio = job.audio || {}
+  const controlFile = audio.controlFile || audio.control_file
+  if (!controlFile || stageResults.audio?.status !== 'running') return
+  await writeAudioControlFile(controlFile, buildAudioRuntimeControl({ job, scheduler, stageResults }))
+}
+
+async function updateKgRuntimeControl({ job, scheduler, stageResults }) {
+  const kg = job.kg || {}
+  const controlFile = kg.controlFile || kg.control_file
+  if (!controlFile || stageResults.kg?.status !== 'running') return
+  await writeKgControlFile(controlFile, buildKgRuntimeControl({ job, scheduler, stageResults }))
+}
+
+function buildAudioRuntimeControl({ job, scheduler, stageResults, stageOptions = {} }) {
+  const audio = job.audio || {}
+  const audioOptions = stageOptions.audio || {}
+  const llmChapters = clampInteger(audioOptions.llmChapters ?? audio.llmChapters ?? audio.llm_chapters, 1, 1, 32)
+  return {
+    directorConcurrency: computeAudioRuntimeDirectorConcurrency({ scheduler, stageResults, stageOptions, audioOptions, llmChapters }),
+    llmChapters,
+    ttsConcurrency: clampInteger(audio.ttsConcurrency ?? audio.tts_concurrency, 16, 1, 128),
+    ttsChapters: clampInteger(audio.ttsChapters ?? audio.tts_chapters, 2, 1, 32),
+    updatedAt: new Date().toISOString(),
+  }
+}
+
+function computeAudioRuntimeDirectorConcurrency({ scheduler, stageResults, stageOptions = {}, audioOptions = {}, llmChapters = 1 }) {
+  if (stageResults.audio?.status !== 'running') {
+    return clampInteger(audioOptions.directorConcurrency, 1, 1, scheduler.concurrency)
+  }
+  const fixedLlmSlots = ['summary', 'kg']
+    .filter((stage) => stageResults[stage]?.status === 'running')
+    .reduce((sum, stage) => sum + Math.max(1, Number(stageOptions[stage]?.concurrency || stageResults[stage]?.schedulerConcurrency || 1)), 0)
+  const available = Math.max(1, scheduler.concurrency - fixedLlmSlots)
+  return Math.min(scheduler.concurrency, Math.max(1, Math.ceil(available / Math.max(1, llmChapters))))
+}
+
+async function writeAudioControlFile(controlFile, control) {
+  await writeJson(controlFile, control)
+}
+
+function buildKgRuntimeControl({ job, scheduler, stageResults, stageOptions = {} }) {
+  const kg = job.kg || {}
+  const kgOptions = stageOptions.kg || {}
+  return {
+    concurrency: computeKgRuntimeConcurrency({ scheduler, stageResults, stageOptions, kgOptions }),
+    updatedAt: new Date().toISOString(),
+    ...(kg.maxConcurrency || kg.max_concurrency ? { maxConcurrency: clampInteger(kg.maxConcurrency ?? kg.max_concurrency, scheduler.concurrency, 1, scheduler.concurrency) } : {}),
+  }
+}
+
+function computeKgRuntimeConcurrency({ scheduler, stageResults, stageOptions = {}, kgOptions = {} }) {
+  if (stageResults.kg?.status !== 'running') {
+    return clampInteger(kgOptions.concurrency, 1, 1, scheduler.concurrency)
+  }
+  const fixedAudioSlots = stageResults.audio?.status === 'running'
+    ? Math.max(1, Number(stageResults.audio?.schedulerConcurrency || stageOptions.audio?.directorConcurrency || 1))
+    : 0
+  const available = Math.max(1, scheduler.concurrency - fixedAudioSlots)
+  return Math.min(scheduler.concurrency, available)
+}
+
+async function writeKgControlFile(controlFile, control) {
+  await writeJson(controlFile, control)
 }
 
 async function executePipelineStage({ stage, runInfo, job, mainDbPath, context, stageOptions = {}, onChildStart }) {
@@ -484,6 +627,51 @@ async function executeChildStage(stage, args, runInfo, { onStart } = {}) {
     childRunJson,
     logFile: relativeRunPath(runInfo.rootDir, logFile),
   }
+}
+
+async function persistImportedBookId({ job, runInfo, mainDbPath, stageResult, stageResults }) {
+  const importedBookId = await readImportedBookId(stageResult)
+  if (!importedBookId) return
+  await readBookFromMainDb(mainDbPath, importedBookId)
+  job.bookId = importedBookId
+  const updatedAt = new Date().toISOString()
+  runInfo.runJson = {
+    ...runInfo.runJson,
+    updatedAt,
+    job: {
+      ...(runInfo.runJson.job || {}),
+      bookId: importedBookId,
+    },
+  }
+  await writeRunJson(runInfo.runJsonPath, {
+    ...runInfo.runJson,
+    status: 'running',
+    stages: stageResults,
+  })
+  if (runInfo.runJson.jobPath) {
+    await updateJobConfigBookId(runInfo.runJson.jobPath, importedBookId)
+  }
+}
+
+async function readImportedBookId(stageResult) {
+  const childRunJsonPath = stageResult?.childRunJson
+  if (!childRunJsonPath) return ''
+  try {
+    const childRunJson = JSON.parse(await readFile(childRunJsonPath, 'utf8'))
+    return String(childRunJson.job?.bookId || '').trim()
+  } catch (error) {
+    if (error.code === 'ENOENT') return ''
+    throw error
+  }
+}
+
+async function updateJobConfigBookId(jobPath, bookId) {
+  const config = JSON.parse(await readFile(jobPath, 'utf8'))
+  if (String(config.bookId || '').trim() === bookId) return
+  await writeJson(jobPath, {
+    ...config,
+    bookId,
+  })
 }
 
 async function execFileStreaming(command, args, logFile) {
@@ -848,8 +1036,9 @@ async function runKg(options) {
     })
     progress.start()
 
+    const runtimeControl = createConcurrencyControl(options.controlFile, { concurrency })
     if (!isFlagEnabled(options.dryRun) && targets.length > 0) {
-      await runPool(targets, concurrency, async (chapter) => {
+      await runDynamicPool(targets, () => runtimeControl.current().concurrency, async (chapter) => {
         try {
           const extraction = await generateChapterKnowledgeGraph(chapter, llmConfig)
           const writeDb = await openMainDbForKg(mainDbPath)
@@ -892,6 +1081,7 @@ async function runKg(options) {
       provider,
       model,
       concurrency,
+      controlFile: runtimeControl.path || '',
       force,
       dryRun: isFlagEnabled(options.dryRun),
       targetChapters: targets.length,
@@ -2834,12 +3024,31 @@ function addDoctorCheck(checks, name, ok, message = '') {
 
 function normalizeJobConfig(job) {
   if (!job || typeof job !== 'object') throw new Error('Job config must be an object.')
-  const bookId = required(job.bookId, 'job requires bookId')
+  const bookId = String(job.bookId || '').trim()
   return {
     ...job,
     bookId,
     stages: normalizeStageList(job.stages),
   }
+}
+
+async function hydrateJobConfig(rawJob) {
+  const job = normalizeJobConfig(rawJob)
+  if (job.stages.includes('import')) {
+    return {
+      ...job,
+      bookId: await deriveFileBookId(job),
+    }
+  }
+  if (job.bookId) return job
+  throw new Error('job requires bookId unless an import stage with job.source.file is present.')
+}
+
+async function deriveFileBookId(job) {
+  const file = job.source?.file || job.source?.path || job.file
+  if (!file) throw new Error('job requires bookId unless import stage has job.source.file.')
+  const sourceBuffer = await readFile(expandPath(file))
+  return `file-${hashBuffer(sourceBuffer).slice(0, 24)}`
 }
 
 function normalizeStageList(stages) {
@@ -2863,7 +3072,7 @@ function expandEmbeddingStages(stages) {
 function buildStageExecutionGroups(stages) {
   const groups = []
   const remaining = [...stages]
-  const parallelAfterImport = new Set(['summary', 'kg', 'chunkEmbedding', 'audio'])
+  const parallelAfterImport = new Set(['summary', 'kg', 'chunkEmbedding', 'summaryEmbedding', 'audio'])
   const barriers = new Set(['package', 'publish', 'verify'])
   let index = 0
   while (index < remaining.length) {
@@ -2892,7 +3101,7 @@ function buildStageExecutionGroups(stages) {
   return groups
 }
 
-function buildStageExecutionPlan(job, stages) {
+function buildStageExecutionPlan(job, stages, { usedLlmSlots = 0 } = {}) {
   const scheduler = normalizeLlmScheduler(job)
   if (!scheduler) return { stages, stageOptions: {} }
 
@@ -2900,8 +3109,10 @@ function buildStageExecutionPlan(job, stages) {
   if (!llmStages.length) return { stages, stageOptions: {} }
 
   const nonLlmStages = stages.filter((stage) => !llmStages.includes(stage))
+  const availableConcurrency = Math.max(0, scheduler.concurrency - Math.max(0, Number(usedLlmSlots) || 0))
+  if (!availableConcurrency) return { stages: nonLlmStages, stageOptions: {} }
   const allocationStages = scheduler.borrowIdle ? llmStages : scheduler.weightedStages
-  const rawAllocations = allocateWeightedSlots(allocationStages, scheduler.concurrency, scheduler.weights)
+  const rawAllocations = allocateWeightedSlots(allocationStages, availableConcurrency, scheduler.weights)
   const allocations = Object.fromEntries(llmStages.map((stage) => [stage, rawAllocations[stage] || 0]))
   if (!Object.values(allocations).some((concurrency) => concurrency > 0)) {
     const fallbackStage = llmStages
@@ -2918,12 +3129,21 @@ function buildStageExecutionPlan(job, stages) {
   for (const stage of scheduledLlmStages) {
     const concurrency = allocations[stage]
     stageOptions[stage] = stage === 'audio'
-      ? { directorConcurrency: concurrency, llmChapters: 1 }
+      ? buildScheduledAudioOptions(job, concurrency)
       : { concurrency }
   }
   return {
     stages: [...nonLlmStages, ...scheduledLlmStages],
     stageOptions,
+  }
+}
+
+function buildScheduledAudioOptions(job, concurrency) {
+  const audio = job.audio || {}
+  const llmChapters = clampInteger(audio.llmChapters ?? audio.llm_chapters, 1, 1, Math.max(1, concurrency))
+  return {
+    directorConcurrency: Math.max(1, Math.ceil(concurrency / llmChapters)),
+    llmChapters,
   }
 }
 
@@ -3036,6 +3256,7 @@ function buildStageArgs(stage, job, mainDbPath, runInfo, stageOptions = {}) {
     if (kg.maxAttempts || kg.retries) args.push('--max-attempts', String(kg.maxAttempts || kg.retries))
     if (kg.limit) args.push('--limit', String(kg.limit))
     if (isFlagEnabled(kg.force)) args.push('--force')
+    if (kg.controlFile || kg.control_file) args.push('--control-file', kg.controlFile || kg.control_file)
     if (kg.thinkingEnabled === false || isFlagEnabled(kg.disableThinking)) args.push('--disable-thinking')
     return args.filter((arg) => arg !== '')
   }
@@ -3725,6 +3946,80 @@ async function runPool(items, concurrency, worker) {
   await Promise.all(workers)
 }
 
+async function runDynamicPool(items, getConcurrency, worker, { pollMs = 500 } = {}) {
+  let nextIndex = 0
+  const active = new Set()
+  const launchNext = () => {
+    if (nextIndex >= items.length) return false
+    const item = items[nextIndex]
+    nextIndex += 1
+    let task
+    task = Promise.resolve()
+      .then(() => worker(item))
+      .finally(() => active.delete(task))
+    active.add(task)
+    return true
+  }
+
+  while (nextIndex < items.length || active.size) {
+    const desired = Math.max(1, Math.floor(Number(getConcurrency()) || 1))
+    while (active.size < desired && nextIndex < items.length) {
+      launchNext()
+    }
+    if (!active.size) continue
+    await Promise.race([...active, sleep(pollMs)])
+  }
+}
+
+function createConcurrencyControl(controlFile, defaults) {
+  const controlPath = controlFile ? resolve(expandPath(controlFile)) : ''
+  let values = { ...defaults }
+  let lastMtimeMs = -1
+  let lastSignature = JSON.stringify(values)
+
+  const current = () => {
+    if (!controlPath) return values
+    let fileStat
+    try {
+      fileStat = statSync(controlPath)
+    } catch {
+      return values
+    }
+    if (fileStat.mtimeMs === lastMtimeMs) return values
+    lastMtimeMs = fileStat.mtimeMs
+    try {
+      const control = JSON.parse(readFileSync(controlPath, 'utf8'))
+      if (!control || typeof control !== 'object' || Array.isArray(control)) {
+        throw new Error('control file must be a JSON object.')
+      }
+      const next = {
+        concurrency: readPositiveIntegerOption(control.concurrency, values.concurrency, 'concurrency'),
+      }
+      const signature = JSON.stringify(next)
+      if (signature !== lastSignature) {
+        console.log(`[${new Date().toISOString()}] concurrency control update: concurrency=${next.concurrency}`)
+        lastSignature = signature
+      }
+      values = next
+    } catch (error) {
+      console.warn(`[${new Date().toISOString()}] ignoring concurrency control file ${controlPath}: ${error instanceof Error ? error.message : String(error)}`)
+    }
+    return values
+  }
+
+  return {
+    path: controlPath,
+    current,
+  }
+}
+
+function readPositiveIntegerOption(value, fallback, name) {
+  if (value === undefined || value === null || value === '') return fallback
+  const parsed = Math.floor(Number(value))
+  if (Number.isFinite(parsed) && parsed >= 1) return parsed
+  throw new Error(`${name} must be an integer >= 1.`)
+}
+
 function sleep(ms) {
   return new Promise((resolvePromise) => setTimeout(resolvePromise, ms))
 }
@@ -4012,7 +4307,7 @@ async function loadDatabaseSync() {
 
 async function loadBookIngest() {
   if (!bookIngestModule) {
-    bookIngestModule = await import('../../content-pipeline/lib/book-ingest.mjs')
+    bookIngestModule = await import('./book-ingest.mjs')
   }
   return bookIngestModule
 }

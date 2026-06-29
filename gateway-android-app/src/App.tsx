@@ -1,26 +1,34 @@
 import { type CSSProperties, type MouseEvent, useEffect, useMemo, useRef, useState } from 'react'
 import { Capacitor, CapacitorHttp, registerPlugin, type PluginListenerHandle } from '@capacitor/core'
+import {
+  buildGatewayHeaders,
+  createGatewayError,
+  deviceRoleDescription,
+  deviceRoleLabel,
+  errorMessage,
+  getDeviceMetadata,
+  isDeviceAccessBlockedError,
+  isDeviceDisabledError,
+  loadGatewaySettings,
+  normalizeGatewaySession,
+  type GatewaySession,
+  type GatewaySettings,
+} from './deviceIdentity'
+import {
+  blockedGatewaySyncMessage,
+  bookCachedAudioCount,
+  cloudActionBlockedReason,
+  gatewaySyncBlockedReason,
+  libraryVisibilityNotice,
+  localCacheReadableWhenDisabled,
+  mergeLocalBooksWithCloudMetadata,
+  roleChangeNotice,
+  syncStatusLabel,
+  type BookSummary,
+  type GatewayLibrarySyncState,
+} from './libraryState'
 import { createSpeechChapter, type SpeechSegment } from './speechSegments'
 import { NovelReaderTts, type TtsVoice } from './ttsPlugin'
-
-type GatewaySettings = {
-  baseUrl: string
-  token: string
-  deviceName: string
-}
-
-type BookSummary = {
-  id: string
-  title: string
-  author?: string
-  chapterCount: number
-  wordCount?: number
-  summaryCoverage?: number
-  kgCoverage?: number
-  embeddingCoverage?: number
-  audioChapterCount?: number
-  updatedAt: string
-}
 
 type BookPackage = {
   schemaVersion: 1
@@ -90,14 +98,22 @@ type NativeAudioPlugin = {
   downloadAudio(options: {
     url: string
     token: string
+    deviceId: string
     deviceName: string
+    deviceModel: string
+    devicePlatform: string
+    appVersion: string
     bookId: string
     chapterId: string
   }): Promise<{ filePath: string; sizeBytes: number }>
   downloadPackage(options: {
     url: string
     token: string
+    deviceId: string
     deviceName: string
+    deviceModel: string
+    devicePlatform: string
+    appVersion: string
     bookId: string
   }): Promise<{ filePath: string; sizeBytes: number }>
   importPackage(options: {
@@ -162,6 +178,11 @@ type ReadingProgress = {
 
 type FullPackageCache = {
   bookId: string
+  title?: string
+  author?: string
+  chapterCount?: number
+  wordCount?: number
+  updatedAt?: string
   filePath: string
   sizeBytes: number
   cachedAt: string
@@ -240,6 +261,7 @@ const packageCacheStoreName = 'book-packages'
 const legacyAudioCacheStoreName = 'chapter-audio'
 const defaultGatewayBaseUrl = import.meta.env.VITE_GATEWAY_DEFAULT_BASE_URL ?? 'https://novel.gwaves.net:8888'
 const defaultGatewayToken = import.meta.env.VITE_GATEWAY_DEFAULT_TOKEN ?? '123456'
+const appVersion = import.meta.env.VITE_APP_VERSION ?? '0.1.0'
 const NativeAudio = registerPlugin<NativeAudioPlugin>('GatewayAudio')
 const TTS_RATE_PRESETS = [0.75, 1, 1.25, 1.5, 2, 3] as const
 const MIN_TTS_RATE = 0.5
@@ -251,6 +273,7 @@ const TTS_PREFETCH_WINDOW = 8
 const defaultSettings: GatewaySettings = {
   baseUrl: defaultGatewayBaseUrl,
   token: defaultGatewayToken,
+  deviceId: '',
   deviceName: 'Android Phone',
 }
 
@@ -275,7 +298,10 @@ function App() {
   const [ttsSettings, setTtsSettings] = useState<TtsSettings>(() => loadTtsSettings())
   const [connectionState, setConnectionState] = useState<ConnectionState>('idle')
   const [message, setMessage] = useState('')
+  const [gatewaySession, setGatewaySession] = useState<GatewaySession | null>(null)
+  const [librarySyncState, setLibrarySyncState] = useState<GatewayLibrarySyncState>({ status: 'never' })
   const [books, setBooks] = useState<BookSummary[]>([])
+  const [localBooks, setLocalBooks] = useState<BookSummary[]>([])
   const [selectedBookId, setSelectedBookId] = useState<string | null>(() => loadReadingProgress()?.bookId ?? loadFullPackageCache()?.bookId ?? null)
   const [bookPackage, setBookPackage] = useState<BookPackage | null>(null)
   const [currentChapterId, setCurrentChapterId] = useState<string | null>(null)
@@ -286,9 +312,11 @@ function App() {
   const [chapterAudioPlaying, setChapterAudioPlaying] = useState(false)
   const [loadingAudio, setLoadingAudio] = useState(false)
   const [audioCatalogBookId, setAudioCatalogBookId] = useState<string | null>(null)
+  const [addingBookId, setAddingBookId] = useState<string | null>(null)
   const [loadingBooks, setLoadingBooks] = useState(false)
   const [loadingPackage, setLoadingPackage] = useState(false)
   const [chapterPickerOpen, setChapterPickerOpen] = useState(false)
+  const [mp3ManagerOpen, setMp3ManagerOpen] = useState(false)
   const [searchMode, setSearchMode] = useState<SearchMode>('rag')
   const [ragUseSemantic, setRagUseSemantic] = useState(true)
   const [searchInput, setSearchInput] = useState('')
@@ -318,9 +346,17 @@ function App() {
   const [cacheVersion, setCacheVersion] = useState(0)
   const [clearingCacheKey, setClearingCacheKey] = useState<string | null>(null)
 
+  const displayLocalBooks = useMemo(
+    () => mergeLocalBooksWithCloudMetadata(localBooks, books),
+    [books, localBooks],
+  )
   const selectedBook = useMemo(
-    () => books.find((book) => book.id === selectedBookId) ?? null,
-    [books, selectedBookId],
+    () => displayLocalBooks.find((book) => book.id === selectedBookId) ?? books.find((book) => book.id === selectedBookId) ?? null,
+    [books, displayLocalBooks, selectedBookId],
+  )
+  const selectedLocalBook = useMemo(
+    () => displayLocalBooks.find((book) => book.id === selectedBookId) ?? null,
+    [displayLocalBooks, selectedBookId],
   )
   const chapters = useMemo(() => packageChapters(bookPackage), [bookPackage])
   const currentChapter = useMemo(
@@ -342,7 +378,8 @@ function App() {
   const displayKgCoverage = inferredKgCoverage(selectedBook, bookPackage, visibleFullPackageCache)
   const displayEmbeddingCoverage = inferredEmbeddingCoverage(selectedBook, bookPackage, visibleFullPackageCache)
   const displayCloudAudioChapterCount = visibleAudioChapters.length || selectedBook?.audioChapterCount || 0
-  const cacheSummaries = useMemo(() => buildBookCacheSummaries(books, cacheVersion), [books, cacheVersion])
+  const displayCachedAudioChapterCount = visibleCachedAudioIds.size || bookCachedAudioCount(selectedLocalBook ?? selectedBook)
+  const cacheSummaries = useMemo(() => buildBookCacheSummaries([...displayLocalBooks, ...books], cacheVersion), [books, displayLocalBooks, cacheVersion])
   const currentAudio = useMemo(
     () => visibleAudioChapters.find((chapter) => chapter.chapterId === currentChapter?.id) ?? null,
     [currentChapter, visibleAudioChapters],
@@ -368,6 +405,9 @@ function App() {
     () => (searchMode === 'graph' && submittedSearchQuery ? searchGraphPackage(bookPackage, submittedSearchQuery) : []),
     [bookPackage, searchMode, submittedSearchQuery],
   )
+  const visibilityNotice = libraryVisibilityNotice(gatewaySession, books.length)
+  const syncBlockedReason = gatewaySyncBlockedReason(gatewaySession)
+  const cloudSyncBlocked = Boolean(syncBlockedReason)
   const visibleStatusMessage = shouldShowGlobalStatusMessage(message) ? message : ''
   const previousChapter = currentChapterPosition > 0 ? chapters[currentChapterPosition - 1] : null
   const nextChapter =
@@ -394,10 +434,22 @@ function App() {
   const speechFollowTimerRef = useRef<number | null>(null)
   const isSpeechAutoScrollingRef = useRef(false)
   const playbackEngineTouchedRef = useRef(false)
+  const deviceMetadata = useMemo(() => getDeviceMetadata(appVersion), [])
+  const audioSyncCancelRequestedRef = useRef(false)
+  const gatewaySessionRef = useRef<GatewaySession | null>(gatewaySession)
+  const cloudBookCountRef = useRef(books.length)
 
   useEffect(() => {
     localStorage.setItem(settingsKey, JSON.stringify(settings))
   }, [settings])
+
+  useEffect(() => {
+    gatewaySessionRef.current = gatewaySession
+  }, [gatewaySession])
+
+  useEffect(() => {
+    cloudBookCountRef.current = books.length
+  }, [books.length])
 
   useEffect(() => {
     localStorage.setItem(readerSettingsKey, JSON.stringify(readerSettings))
@@ -438,6 +490,11 @@ function App() {
 
   useEffect(() => {
     void clearLegacyAudioIndexedDbCache()
+    void refreshLocalLibrary()
+  }, [])
+
+  useEffect(() => {
+    void restoreLastReadingFromCache()
   }, [])
 
   useEffect(() => {
@@ -569,48 +626,82 @@ function App() {
     }
   }, [audioUrl])
 
-  async function refreshBooks() {
+  async function refreshBooks(
+    options: {
+      session?: GatewaySession
+      roleNotice?: string | null
+      previousSession?: GatewaySession | null
+      previousBookCount?: number
+    } = {},
+  ) {
+    const previousSession = options.previousSession ?? gatewaySessionRef.current
+    const previousBookCount = options.previousBookCount ?? cloudBookCountRef.current
+    let activeSession = options.session ?? gatewaySessionRef.current
+    let activeRoleNotice = options.roleNotice ?? null
     setLoadingBooks(true)
+    setLibrarySyncState({ status: 'syncing' })
     setMessage('')
     try {
+      if (!options.session) {
+        const refreshedSession = await fetchAuthenticatedSession()
+        activeSession = refreshedSession
+        if (refreshedSession.auth.role === 'disabled') {
+          activeRoleNotice = applyGatewaySession(refreshedSession, previousBookCount, previousBookCount)
+        }
+      }
+      const blockedReason = gatewaySyncBlockedReason(activeSession)
+      if (blockedReason) {
+        setConnectionState('error')
+        setLibrarySyncState({ status: 'blocked', message: blockedReason })
+        setMessage(activeRoleNotice ? `${activeRoleNotice} ${blockedReason}` : blockedReason)
+        return
+      }
       const response = await gatewayFetch(settings, '/mobile/books')
       const nextBooks = Array.isArray(response.books) ? (response.books as BookSummary[]) : []
-      const cachedFullPackage = loadFullPackageCache()
-      if (cachedFullPackage && nextBooks.some((book) => book.id === cachedFullPackage.bookId)) {
-        setFullPackageCache(cachedFullPackage)
-        setFullPackageStatus(cachedFullPackage.importStats ? 'imported' : 'downloaded')
+      if (activeSession) {
+        activeRoleNotice = roleChangeNotice(previousSession, activeSession, previousBookCount, nextBooks.length)
+        if (!options.session) applyGatewaySession(activeSession, previousBookCount, nextBooks.length)
       }
       setBooks(nextBooks)
       void refreshBookAudioCounts(nextBooks)
-      const nextSelectedBookId = nextBooks.some((book) => book.id === selectedBookId) ? selectedBookId : nextBooks[0]?.id
-      const cachedForSelectedBook = nextSelectedBookId ? loadFullPackageCache(nextSelectedBookId) : null
-      setFullPackageCache(cachedForSelectedBook)
-      setFullPackageStatus(cachedForSelectedBook?.importStats ? 'imported' : cachedForSelectedBook ? 'downloaded' : 'idle')
-      if (nextBooks.length > 0 && !nextBooks.some((book) => book.id === selectedBookId)) {
-        setSelectedBookId(nextBooks[0].id)
-      }
-      if (nextBooks.length === 0) {
-        setSelectedBookId(null)
-        setBookPackage(null)
-        setCurrentChapterId(null)
-        setAudioChapters([])
-        setAudioCatalogBookId(null)
-        setCachedAudioBookId(null)
-        clearAudioUrl()
-      }
-      void refreshCachedAudioIds(nextSelectedBookId ?? null)
+      await refreshLocalLibrary()
+      void refreshCachedAudioIds(selectedBookId)
       refreshCacheSummaries()
       setConnectionState('connected')
-      setMessage(`书库 ${nextBooks.length} 本`)
-      if (!autoRestoreAttemptedRef.current) {
-        autoRestoreAttemptedRef.current = true
-        void restoreLastReading(nextBooks)
-      }
+      setLibrarySyncState({ status: 'synced', at: new Date().toISOString(), bookCount: nextBooks.length })
+      setMessage(activeRoleNotice ?? `云端书库 ${nextBooks.length} 本`)
     } catch (error) {
+      const blockedMessage = blockedGatewaySyncMessage(error)
+      if (blockedMessage) {
+        setConnectionState('error')
+        setLibrarySyncState({ status: 'blocked', message: blockedMessage })
+        setMessage(blockedMessage)
+        return
+      }
+      const message = errorMessage(error)
       setConnectionState('error')
-      setMessage(errorMessage(error))
+      setLibrarySyncState({ status: 'error', message })
+      setMessage(message)
     } finally {
       setLoadingBooks(false)
+    }
+  }
+
+  async function refreshLocalLibrary() {
+    const nextLocalBooks = await listLocalBookSummaries()
+    setLocalBooks(nextLocalBooks)
+    if (selectedBookId && !nextLocalBooks.some((book) => book.id === selectedBookId)) {
+      setSelectedBookId(null)
+      setBookPackage(null)
+      setCurrentChapterId(null)
+      setFullPackageCache(null)
+      setFullPackageStatus('idle')
+      setFullPackageProgress(null)
+      setAudioChapters([])
+      setAudioCatalogBookId(null)
+      setCachedAudioBookId(null)
+      setCachedAudioIds(new Set())
+      clearAudioUrl()
     }
   }
 
@@ -618,13 +709,20 @@ function App() {
     setConnectionState('checking')
     setMessage('')
     try {
-      const session = await gatewayFetch(settings, '/auth/session')
-      if (!session.authenticated) {
-        throw new Error('Gateway session is not authenticated.')
+      const previousSession = gatewaySessionRef.current
+      const previousBookCount = cloudBookCountRef.current
+      const session = await fetchAuthenticatedSession()
+      const roleNotice = applyGatewaySession(session, previousBookCount, previousBookCount)
+      if (session.auth.role === 'disabled') {
+        setConnectionState('error')
+        const blockedMessage = gatewaySyncBlockedReason(session) ?? errorMessage(createGatewayError({ error: { code: 'device_disabled', statusCode: 403 } }))
+        setLibrarySyncState({ status: 'blocked', message: blockedMessage })
+        setMessage(roleNotice ? `${roleNotice} ${blockedMessage}` : blockedMessage)
+        return
       }
       setConnectionState('connected')
-      setMessage('已连接')
-      await refreshBooks()
+      setMessage(roleNotice ?? `授权状态：${deviceRoleLabel(session.auth.role)}`)
+      await refreshBooks({ session, roleNotice, previousSession, previousBookCount })
     } catch (error) {
       setConnectionState('error')
       setMessage(errorMessage(error))
@@ -653,6 +751,31 @@ function App() {
     setAudioSyncBookId(null)
     clearAudioUrl()
     try {
+      const cachedPackage = await loadCachedBookPackage(bookId)
+      if (cachedPackage) {
+        const cachedChapters = packageChapters(cachedPackage)
+        const restoredChapterId =
+          options.restoreProgress?.bookId === bookId && cachedChapters.some((chapter) => chapter.id === options.restoreProgress?.chapterId)
+            ? options.restoreProgress.chapterId
+            : null
+        setBookPackage(cachedPackage)
+        setCurrentChapterId(restoredChapterId ?? cachedChapters[0]?.id ?? null)
+        setMessage('已打开本地书')
+        await refreshCachedAudioIds(bookId)
+        pendingRestoreScrollRef.current = restoredChapterId ? options.restoreProgress?.scrollY ?? 0 : 0
+        setTab('reader')
+        restorePendingScroll()
+        setLoadingPackage(false)
+        void refreshAudio(bookId, false)
+        return
+      }
+
+      if (!localCacheReadableWhenDisabled(gatewaySessionRef.current, Boolean(cachedPackage)) && gatewaySessionRef.current?.auth.role === 'disabled') {
+        setConnectionState('error')
+        setMessage('设备已禁用，本地没有可读缓存。本地缓存仍可读，云端同步已禁用。')
+        return
+      }
+
       const response = await gatewayFetch(settings, `/mobile/books/${encodeURIComponent(bookId)}/package`)
       const nextPackage = normalizeBookPackage(response.package)
       const nextChapters = packageChapters(nextPackage)
@@ -669,8 +792,11 @@ function App() {
       pendingRestoreScrollRef.current = restoredChapterId ? options.restoreProgress?.scrollY ?? 0 : 0
       setTab('reader')
       restorePendingScroll()
-      syncFullPackageIfNeeded(bookId)
     } catch (error) {
+      if (isDeviceDisabledError(error)) {
+        setMessage(errorMessage(error))
+        return
+      }
       const cachedPackage = await loadCachedBookPackage(bookId)
       const cachedChapters = packageChapters(cachedPackage)
       const restoredChapterId =
@@ -713,12 +839,24 @@ function App() {
   async function syncFullPackage(bookId: string) {
     if (!Capacitor.isNativePlatform()) return
     if (fullPackageStatus === 'downloading' || fullPackageStatus === 'importing') return
+    const blockedReason = cloudActionBlockedReason(gatewaySessionRef.current, '下载完整包')
+    if (blockedReason) {
+      setConnectionState('error')
+      setMessage(blockedReason)
+      return
+    }
+    const sourceBook = books.find((book) => book.id === bookId) ?? localBooks.find((book) => book.id === bookId)
     setFullPackageStatus('downloading')
     setFullPackageProgress({ bookId, phase: 'download', status: 'downloading', done: 0, total: 0 })
     try {
       const downloaded = await downloadPackageToNativeFile(settings, bookId)
       const downloadedCache: FullPackageCache = {
         bookId,
+        title: sourceBook?.title,
+        author: sourceBook?.author,
+        chapterCount: sourceBook?.chapterCount,
+        wordCount: sourceBook?.wordCount,
+        updatedAt: sourceBook?.updatedAt,
         filePath: downloaded.filePath,
         sizeBytes: downloaded.sizeBytes,
         cachedAt: new Date().toISOString(),
@@ -727,9 +865,14 @@ function App() {
       setFullPackageCache(downloadedCache)
       setFullPackageStatus('importing')
       setFullPackageProgress({ bookId, phase: 'import', status: 'parsing', done: 0, total: 4 })
-      const importStats = await importPackageToNativeStore(bookId, downloaded.filePath, selectedBook?.chapterCount)
+      const importStats = await importPackageToNativeStore(bookId, downloaded.filePath, sourceBook?.chapterCount)
       const importedCache: FullPackageCache = {
         ...downloadedCache,
+        title: sourceBook?.title,
+        author: sourceBook?.author,
+        chapterCount: sourceBook?.chapterCount,
+        wordCount: sourceBook?.wordCount,
+        updatedAt: sourceBook?.updatedAt,
         importedAt: new Date().toISOString(),
         importStats,
         metadataPath: importStats.metadataPath,
@@ -738,6 +881,7 @@ function App() {
       setFullPackageCache(importedCache)
       setFullPackageStatus('imported')
       setFullPackageProgress({ bookId, phase: 'import', status: 'imported', done: 4, total: 4 })
+      await refreshLocalLibrary()
       setMessage('完整数据包已导入')
     } catch (error) {
       setFullPackageStatus('error')
@@ -745,25 +889,60 @@ function App() {
     }
   }
 
-  function syncFullPackageIfNeeded(bookId: string) {
-    if (!Capacitor.isNativePlatform()) return
-    const cached = loadFullPackageCache(bookId)
-    if (cached?.bookId === bookId && cached.importStats) {
-      setFullPackageCache(cached)
-      setFullPackageStatus('imported')
-      setFullPackageProgress(null)
-      return
-    }
-    void syncFullPackage(bookId)
-  }
-
   async function syncCurrentFullPackage() {
     if (!selectedBookId) return
     await syncFullPackage(selectedBookId)
   }
 
+  async function addCloudBookToShelf(bookId: string) {
+    if (addingBookId) return
+    const blockedReason = cloudActionBlockedReason(gatewaySessionRef.current, '加入书架')
+    if (blockedReason) {
+      setConnectionState('error')
+      setMessage(blockedReason)
+      return
+    }
+    setAddingBookId(bookId)
+    setMessage('')
+    try {
+      const response = await gatewayFetch(settings, `/mobile/books/${encodeURIComponent(bookId)}/package`)
+      const nextPackage = normalizeBookPackage(response.package)
+      const cached = await cacheBookPackage(bookId, nextPackage)
+      if (!cached) {
+        setMessage('基础包已下载，但本机缓存空间不足')
+        return
+      }
+      const nextChapters = packageChapters(nextPackage)
+      setSelectedBookId(bookId)
+      setBookPackage(nextPackage)
+      setCurrentChapterId(nextChapters[0]?.id ?? null)
+      const cachedFullPackage = loadFullPackageCache(bookId)
+      setFullPackageCache(cachedFullPackage)
+      setFullPackageStatus(cachedFullPackage?.importStats ? 'imported' : cachedFullPackage ? 'downloaded' : 'idle')
+      setFullPackageProgress(null)
+      await refreshLocalLibrary()
+      await refreshCachedAudioIds(bookId)
+      refreshCacheSummaries()
+      setMessage('已加入书架')
+    } catch (error) {
+      if (isDeviceAccessBlockedError(error)) {
+        setConnectionState('error')
+      }
+      setMessage(errorMessage(error))
+    } finally {
+      setAddingBookId(null)
+    }
+  }
+
   async function refreshAudio(bookId = selectedBookId, showMessage = true) {
     if (!bookId) return
+    const blockedReason = cloudActionBlockedReason(gatewaySessionRef.current, '刷新 MP3')
+    if (blockedReason) {
+      setConnectionState('error')
+      if (showMessage) setMessage(blockedReason)
+      await refreshCachedAudioIds(bookId)
+      return
+    }
     setLoadingAudio(true)
     try {
       const response = await gatewayFetch(settings, `/mobile/books/${encodeURIComponent(bookId)}/audio`)
@@ -773,6 +952,9 @@ function App() {
       await refreshCachedAudioIds(bookId)
       if (showMessage) setMessage(`音频 ${nextAudioChapters.length} 章`)
     } catch (error) {
+      if (isDeviceDisabledError(error)) {
+        setConnectionState('error')
+      }
       if (showMessage) setMessage(errorMessage(error))
     } finally {
       setLoadingAudio(false)
@@ -864,27 +1046,70 @@ function App() {
     setCachedAudioBookId(bookId)
   }
 
-  async function syncCurrentBookAudio() {
+  async function ensureAudioCatalog(bookId: string) {
+    if (audioCatalogBookId === bookId && audioChapters.length > 0) return audioChapters
+    const nextAudioChapters = await fetchAudioCatalog(bookId)
+    setAudioChapters(nextAudioChapters)
+    setAudioCatalogBookId(bookId)
+    await refreshCachedAudioIds(bookId)
+    return nextAudioChapters
+  }
+
+  async function syncCurrentBookAudioRange(limit: number | 'current' | 'all') {
     if (!selectedBookId) return
     const bookId = selectedBookId
-    let chaptersToSync = audioCatalogBookId === bookId ? audioChapters : []
-    if (chaptersToSync.length === 0) {
-      chaptersToSync = await fetchAudioCatalog(bookId)
-      setAudioChapters(chaptersToSync)
-      setAudioCatalogBookId(bookId)
-      await refreshCachedAudioIds(bookId)
-    }
-    if (chaptersToSync.length === 0) {
-      setMessage('当前书籍暂无音频')
+    const blockedReason = cloudActionBlockedReason(gatewaySessionRef.current, '下载 MP3')
+    if (blockedReason) {
+      setConnectionState('error')
+      setMessage(blockedReason)
       return
     }
+    try {
+      const catalog = await ensureAudioCatalog(bookId)
+      if (catalog.length === 0) {
+        setMessage('当前书籍暂无音频')
+        return
+      }
+      const startIndex = Math.max(
+        0,
+        currentChapterId ? catalog.findIndex((chapter) => chapter.chapterId === currentChapterId) : 0,
+      )
+      const safeStartIndex = startIndex >= 0 ? startIndex : 0
+      const targetChapters =
+        limit === 'all'
+          ? catalog.filter((chapter) => !readCachedAudio(bookId, chapter.chapterId))
+          : catalog.slice(safeStartIndex, safeStartIndex + (limit === 'current' ? 1 : limit))
+      if (targetChapters.length === 0) {
+        setMessage(limit === 'all' ? '所有云端 MP3 都已缓存' : '选中范围暂无可下载 MP3')
+        return
+      }
+      const label = limit === 'all' ? '未缓存音频' : limit === 'current' ? '当前章节 MP3' : `后续 ${limit} 章 MP3`
+      await syncBookAudioChapters(bookId, targetChapters, label)
+    } catch (error) {
+      if (isDeviceDisabledError(error)) {
+        setConnectionState('error')
+      }
+      setMessage(errorMessage(error))
+    }
+  }
 
+  async function syncBookAudioChapters(bookId: string, chaptersToSync: AudioChapter[], label: string) {
+    const blockedReason = cloudActionBlockedReason(gatewaySessionRef.current, '下载 MP3')
+    if (blockedReason) {
+      setConnectionState('error')
+      setMessage(blockedReason)
+      return
+    }
     setLoadingAudio(true)
+    audioSyncCancelRequestedRef.current = false
     setAudioSyncBookId(bookId)
+    setCachedAudioBookId(bookId)
+    setCachedAudioIds(new Set(await listCachedAudioChapterIds(bookId)))
     setAudioSyncProgress({ done: 0, total: chaptersToSync.length })
     try {
       let done = 0
       for (const audioChapter of chaptersToSync) {
+        if (audioSyncCancelRequestedRef.current) break
         const cached = readCachedAudio(bookId, audioChapter.chapterId)
         if (!cached) {
           await cacheAudioChapter(bookId, audioChapter)
@@ -894,14 +1119,50 @@ function App() {
         setCachedAudioIds((current) => new Set(current).add(audioChapter.chapterId))
       }
       await refreshCachedAudioIds(bookId)
-      setMessage(`音频已缓存 ${chaptersToSync.length}/${chaptersToSync.length} 章`)
+      await refreshLocalLibrary()
+      setMessage(
+        audioSyncCancelRequestedRef.current
+          ? `${label} 已停止，已缓存 ${done}/${chaptersToSync.length} 章`
+          : `${label} 已缓存 ${chaptersToSync.length}/${chaptersToSync.length} 章`,
+      )
     } catch (error) {
+      if (isDeviceDisabledError(error)) {
+        setConnectionState('error')
+      }
       setMessage(errorMessage(error))
     } finally {
       setLoadingAudio(false)
       setAudioSyncProgress(null)
       setAudioSyncBookId(null)
+      audioSyncCancelRequestedRef.current = false
     }
+  }
+
+  function stopAudioSync() {
+    audioSyncCancelRequestedRef.current = true
+    setMessage('正在停止 MP3 同步，当前章节完成后停止')
+  }
+
+  function openMp3Manager() {
+    setMp3ManagerOpen(true)
+    if (selectedBookId && audioCatalogBookId !== selectedBookId && !cloudSyncBlocked) {
+      void refreshAudio(selectedBookId, false)
+    }
+  }
+
+  async function fetchAuthenticatedSession() {
+    const session = normalizeGatewaySession(await gatewayFetch(settings, '/auth/session'))
+    if (!session?.authenticated) {
+      throw createGatewayError({ error: { code: 'device_unauthorized', statusCode: 403 } })
+    }
+    return session
+  }
+
+  function applyGatewaySession(session: GatewaySession, previousBookCount: number, nextBookCount: number) {
+    const notice = roleChangeNotice(gatewaySessionRef.current, session, previousBookCount, nextBookCount)
+    gatewaySessionRef.current = session
+    setGatewaySession(session)
+    return notice
   }
 
   function refreshCacheSummaries() {
@@ -949,10 +1210,55 @@ function App() {
         setFullPackageStatus('idle')
         setFullPackageProgress(null)
       }
+      await refreshLocalLibrary()
       refreshCacheSummaries()
       setMessage('完整数据包缓存已清除')
     } catch (error) {
       setMessage(`清除完整包缓存失败：${errorMessage(error)}`)
+    } finally {
+      setClearingCacheKey(null)
+    }
+  }
+
+  async function deleteLocalBook(bookId: string) {
+    const key = `${bookId}:book`
+    setClearingCacheKey(key)
+    try {
+      if (bookId === selectedBookId) clearAudioUrl()
+      if (Capacitor.isNativePlatform()) {
+        await NativeAudio.clearAudioCache({ bookId }).catch(() => undefined)
+        await NativeAudio.clearPackageCache({ bookId }).catch(() => undefined)
+      }
+      const audioIndex = loadAudioCacheIndex()
+      for (const cacheKey of Object.keys(audioIndex)) {
+        if (audioIndex[cacheKey]?.bookId === bookId) delete audioIndex[cacheKey]
+      }
+      saveAudioCacheIndex(audioIndex)
+      removeFullPackageCache(bookId)
+      await deleteBookPackageFromIndexedDb(bookId)
+      localStorage.removeItem(`${packageCachePrefix}${bookId}`)
+      const progress = loadReadingProgress()
+      if (progress?.bookId === bookId) localStorage.removeItem(readingProgressKey)
+      if (bookId === selectedBookId) {
+        setSelectedBookId(null)
+        setBookPackage(null)
+        setCurrentChapterId(null)
+        setFullPackageCache(null)
+        setFullPackageStatus('idle')
+        setFullPackageProgress(null)
+        setAudioChapters([])
+        setAudioCatalogBookId(null)
+        setCachedAudioBookId(null)
+        setCachedAudioIds(new Set())
+        setAudioSyncProgress(null)
+        setAudioSyncBookId(null)
+        if (tab === 'reader') setTab('library')
+      }
+      await refreshLocalLibrary()
+      refreshCacheSummaries()
+      setMessage('本地书已删除')
+    } catch (error) {
+      setMessage(`删除本地书失败：${errorMessage(error)}`)
     } finally {
       setClearingCacheKey(null)
     }
@@ -1220,6 +1526,41 @@ function App() {
     }
   }
 
+  async function restoreLastReadingFromCache() {
+    if (autoRestoreAttemptedRef.current) return
+    const progress = loadReadingProgress()
+    if (!progress) return
+
+    const cachedPackage = await loadCachedBookPackage(progress.bookId)
+    if (!cachedPackage) return
+
+    const cachedChapters = packageChapters(cachedPackage)
+    if (!cachedChapters.length) return
+
+    const restoredChapterId = cachedChapters.some((chapter) => chapter.id === progress.chapterId)
+      ? progress.chapterId
+      : cachedChapters[0].id
+    const cachedFullPackage = loadFullPackageCache(progress.bookId)
+
+    autoRestoreAttemptedRef.current = true
+    setSelectedBookId(progress.bookId)
+    setBookPackage(cachedPackage)
+    setCurrentChapterId(restoredChapterId)
+    setFullPackageCache(cachedFullPackage)
+    setFullPackageStatus(cachedFullPackage?.importStats ? 'imported' : cachedFullPackage ? 'downloaded' : 'idle')
+    setFullPackageProgress(null)
+    setAudioChapters([])
+    setAudioCatalogBookId(null)
+    setAudioSyncProgress(null)
+    setAudioSyncBookId(null)
+    clearAudioUrl()
+    await refreshCachedAudioIds(progress.bookId)
+    pendingRestoreScrollRef.current = restoredChapterId === progress.chapterId ? progress.scrollY : 0
+    lastReaderScrollYRef.current = pendingRestoreScrollRef.current
+    setTab('reader')
+    restorePendingScroll()
+  }
+
   function switchTab(nextTab: GatewayTab) {
     if (tab === 'reader' && selectedBookId && currentChapterId) {
       const scrollY = Math.max(0, window.scrollY)
@@ -1250,12 +1591,6 @@ function App() {
       pendingRestoreScrollRef.current = progress.scrollY
       lastReaderScrollYRef.current = progress.scrollY
     }
-  }
-
-  async function restoreLastReading(nextBooks: BookSummary[]) {
-    const progress = loadReadingProgress()
-    if (!progress || !nextBooks.some((book) => book.id === progress.bookId)) return
-    await openBook(progress.bookId, { restoreProgress: progress })
   }
 
   function restorePendingScroll() {
@@ -1819,9 +2154,9 @@ function App() {
         <header className="top-bar">
           <div>
             <h1>{tab === 'library' ? '书库' : tab === 'search' ? '搜索' : '设置'}</h1>
-            <p>{tab === 'library' ? `${books.length} 本 · ${connectionLabel(connectionState)}` : tab === 'search' ? (selectedBook?.title ?? '未选择书籍') : connectionLabel(connectionState)}</p>
+            <p>{tab === 'library' ? `${displayLocalBooks.length} 本地书` : tab === 'search' ? (selectedBook?.title ?? '未选择书籍') : connectionLabel(connectionState)}</p>
           </div>
-          <button className="icon-button" type="button" onClick={() => void refreshBooks()} disabled={loadingBooks}>
+          <button className="icon-button" type="button" onClick={() => void (tab === 'library' ? refreshLocalLibrary() : refreshBooks())} disabled={tab !== 'library' && loadingBooks}>
             刷新
           </button>
         </header>
@@ -1834,17 +2169,18 @@ function App() {
           <div className="book-list">
             <div className="section-title">
               <h2>书库</h2>
-              <span>{loadingBooks ? '同步中' : `${books.length} 本`}</span>
+              <span>{`${displayLocalBooks.length} 本`}</span>
             </div>
-            {books.length === 0 ? (
+            <div className={`visibility-notice role-${gatewaySession?.auth.role ?? 'unknown'}`}>{visibilityNotice}</div>
+            {displayLocalBooks.length === 0 ? (
               <div className="empty-state">
-                <p>暂无书籍</p>
-                <button type="button" onClick={() => switchTab('settings')}>去设置连接</button>
+                <p>还没有本地书</p>
+                <button type="button" onClick={() => switchTab('settings')}>去云端书库下载</button>
               </div>
             ) : (
               <div className="book-items">
-                {books.map((book) => {
-                  const audioCount = book.id === selectedBookId ? displayCloudAudioChapterCount : undefined
+                {displayLocalBooks.map((book) => {
+                  const audioCount = book.id === selectedBookId ? displayCachedAudioChapterCount : bookCachedAudioCount(book)
                   return (
                     <button
                       className={book.id === selectedBookId ? 'book-row active' : 'book-row'}
@@ -1863,27 +2199,27 @@ function App() {
 
           <div className="book-detail">
             <div className="section-title">
-              <h2>{selectedBook?.title ?? '阅读'}</h2>
-              <span>{loadingPackage ? '加载中' : selectedBook ? `${selectedBook.chapterCount} 章` : ''}</span>
+              <h2>{selectedLocalBook?.title ?? '阅读'}</h2>
+              <span>{loadingPackage ? '加载中' : selectedLocalBook ? `${selectedLocalBook.chapterCount} 章` : ''}</span>
             </div>
-            {selectedBook ? (
+            {selectedLocalBook ? (
               <div className="detail-body">
                 <dl>
                   <div>
                     <dt>作者</dt>
-                    <dd>{selectedBook.author || '未标注'}</dd>
+                    <dd>{selectedLocalBook.author || '未标注'}</dd>
                   </div>
                   <div>
                     <dt>字数</dt>
-                    <dd>{selectedBook.wordCount ? selectedBook.wordCount.toLocaleString('zh-CN') : '未统计'}</dd>
+                    <dd>{selectedLocalBook.wordCount ? selectedLocalBook.wordCount.toLocaleString('zh-CN') : '未统计'}</dd>
                   </div>
                   <div>
-                    <dt>云端音频</dt>
-                    <dd>{displayCloudAudioChapterCount} 章</dd>
+                    <dt>本机音频</dt>
+                    <dd>{displayCachedAudioChapterCount} 章</dd>
                   </div>
                   <div>
                     <dt>更新</dt>
-                    <dd>{formatDate(selectedBook.updatedAt)}</dd>
+                    <dd>{formatDate(selectedLocalBook.updatedAt)}</dd>
                   </div>
                 </dl>
                 <div className="coverage-row">
@@ -1909,14 +2245,14 @@ function App() {
                   className="secondary-button full-width-button"
                   type="button"
                   onClick={() => void syncCurrentFullPackage()}
-                  disabled={!selectedBookId || fullPackageStatus === 'downloading' || fullPackageStatus === 'importing'}
+                  disabled={!selectedBookId || Boolean(syncBlockedReason) || fullPackageStatus === 'downloading' || fullPackageStatus === 'importing'}
                 >
                   {fullPackageStatus === 'downloading'
                     ? '下载数据包中'
                     : fullPackageStatus === 'importing'
                       ? '导入数据包中'
                       : visibleFullPackageCache
-                        ? '重新同步数据包'
+                        ? '重新下载完整包'
                         : '下载完整数据包'}
                 </button>
                 <div className="package-line">
@@ -1926,25 +2262,43 @@ function App() {
                       ? `${visibleAudioSyncProgress.done}/${visibleAudioSyncProgress.total}`
                       : loadingAudio
                         ? '同步中'
-                        : `${visibleCachedAudioIds.size}/${displayCloudAudioChapterCount} 已缓存`}
+                        : `${displayCachedAudioChapterCount}/${displayCloudAudioChapterCount} 已缓存`}
                   </strong>
                 </div>
                 <button
                   className="secondary-button full-width-button"
                   type="button"
-                  onClick={() => void syncCurrentBookAudio()}
+                  onClick={openMp3Manager}
                   disabled={!selectedBookId || loadingAudio}
                 >
-                  {visibleAudioSyncProgress ? `同步音频 ${visibleAudioSyncProgress.done}/${visibleAudioSyncProgress.total}` : '同步 Audio'}
+                  {visibleAudioSyncProgress ? `同步音频 ${visibleAudioSyncProgress.done}/${visibleAudioSyncProgress.total}` : 'MP3 管理'}
                 </button>
-                <button className="primary-button full-width-button" type="button" onClick={() => void openBook(selectedBook.id)} disabled={loadingPackage}>
+                {visibleAudioSyncProgress ? (
+                  <button className="secondary-button danger-button full-width-button" type="button" onClick={stopAudioSync}>
+                    停止 MP3 同步
+                  </button>
+                ) : null}
+                <button className="primary-button full-width-button" type="button" onClick={() => void openBook(selectedLocalBook.id)} disabled={loadingPackage}>
                   开始阅读
+                </button>
+                <button
+                  className="secondary-button danger-button full-width-button"
+                  type="button"
+                  disabled={!selectedBookId || clearingCacheKey === `${selectedBookId}:book`}
+                  onClick={() => {
+                    if (!selectedBookId) return
+                    if (window.confirm(`删除本地书《${selectedLocalBook.title}》？完整数据包和本机 MP3 都会从本机移除。`)) {
+                      void deleteLocalBook(selectedBookId)
+                    }
+                  }}
+                >
+                  {clearingCacheKey === `${selectedBookId}:book` ? '删除中' : '删除本地书'}
                 </button>
               </div>
             ) : (
               <div className="empty-state">
-                <p>选择书籍</p>
-                <button type="button" onClick={() => switchTab('settings')}>同步书库</button>
+                <p>选择一本本地书</p>
+                <button type="button" onClick={() => switchTab('settings')}>去云端书库下载</button>
               </div>
             )}
           </div>
@@ -2153,14 +2507,108 @@ function App() {
                 onChange={(event) => setSettings({ ...settings, deviceName: event.target.value })}
               />
             </label>
+            <label>
+              <span>设备 ID</span>
+              <input readOnly value={settings.deviceId} />
+            </label>
+            <div className={`device-identity-card role-${gatewaySession?.auth.role ?? 'default'}`}>
+              <div className="device-identity-heading">
+                <strong>{gatewaySession ? deviceRoleLabel(gatewaySession.auth.role) : '授权状态未知'}</strong>
+                <span>{gatewaySession?.auth.pairingCode ? `配对码 ${gatewaySession.auth.pairingCode}` : '未获取配对码'}</span>
+              </div>
+              <dl>
+                <div>
+                  <dt>设备 ID</dt>
+                  <dd>{settings.deviceId}</dd>
+                </div>
+                <div>
+                  <dt>设备名</dt>
+                  <dd>{settings.deviceName || '未命名设备'}</dd>
+                </div>
+                <div>
+                  <dt>Pairing Code</dt>
+                  <dd>{gatewaySession?.auth.pairingCode || '未获取'}</dd>
+                </div>
+                <div>
+                  <dt>当前角色 / 授权</dt>
+                  <dd>{gatewaySession ? `${deviceRoleLabel(gatewaySession.auth.role)} / 已授权` : '未知 / 未刷新'}</dd>
+                </div>
+                <div>
+                  <dt>授权说明</dt>
+                  <dd>{gatewaySession ? deviceRoleDescription(gatewaySession.auth.role) : '点击刷新授权状态获取当前设备身份'}</dd>
+                </div>
+                <div>
+                  <dt>可见范围</dt>
+                  <dd>{gatewaySession?.auth.allowedVisibilities.length ? gatewaySession.auth.allowedVisibilities.join('、') : '未获取'}</dd>
+                </div>
+                <div>
+                  <dt>设备型号</dt>
+                  <dd>{deviceMetadata.model}</dd>
+                </div>
+                <div>
+                  <dt>平台 / 版本</dt>
+                  <dd>{`${deviceMetadata.platform} / ${deviceMetadata.appVersion}`}</dd>
+                </div>
+                <div>
+                  <dt>最近同步</dt>
+                  <dd>{syncStatusLabel(librarySyncState)}</dd>
+                </div>
+              </dl>
+            </div>
             <div className="settings-actions">
               <button className="primary-button" type="button" onClick={() => void checkSession()} disabled={connectionState === 'checking'}>
-                {connectionState === 'checking' ? '连接中' : '重新连接'}
+                {connectionState === 'checking' ? '刷新中' : '刷新授权状态'}
               </button>
-              <button className="secondary-button" type="button" onClick={() => void refreshBooks()} disabled={loadingBooks}>
-                {loadingBooks ? '同步中' : '刷新书库'}
+              <button className="secondary-button" type="button" onClick={() => void refreshBooks()} disabled={loadingBooks || Boolean(syncBlockedReason)}>
+                {loadingBooks ? '同步中' : '刷新云端书库'}
               </button>
             </div>
+          </section>
+
+          <section className="cache-manager cloud-library-panel">
+            <div className="section-title">
+              <h2>云端书库</h2>
+              <span>{loadingBooks ? '同步中' : `${books.length} 本`}</span>
+            </div>
+            {books.length ? (
+              <div className="book-items">
+                {books.map((book) => {
+                  const localMatch = findMatchingLocalBook(book, localBooks)
+                  const isLocal = Boolean(localMatch)
+                  const isBusy = addingBookId === book.id
+                  return (
+                    <div className="cloud-book-row" key={book.id}>
+                      <button className="book-row" type="button" onClick={() => selectBook(localMatch?.id ?? book.id)}>
+                        <span className="book-title">{book.title}</span>
+                        <span className="book-meta">{formatBookMeta(book, book.audioChapterCount)}</span>
+                      </button>
+                      <button
+                        className={isLocal ? 'secondary-button compact-button' : 'primary-button compact-button'}
+                        type="button"
+                        disabled={isBusy || Boolean(syncBlockedReason)}
+                        onClick={() => {
+                          if (localMatch) {
+                            selectBook(localMatch.id)
+                            switchTab('library')
+                            return
+                          }
+                          void addCloudBookToShelf(book.id)
+                        }}
+                      >
+                        {isBusy ? '加入中' : isLocal ? '已在书架' : '加入书架'}
+                      </button>
+                    </div>
+                  )
+                })}
+              </div>
+            ) : (
+              <div className="empty-state">
+                <p>尚未刷新云端书库</p>
+                <button type="button" onClick={() => void refreshBooks()} disabled={loadingBooks || Boolean(syncBlockedReason)}>
+                  {loadingBooks ? '同步中' : '刷新云端书库'}
+                </button>
+              </div>
+            )}
           </section>
 
           <section className="cache-manager">
@@ -2205,6 +2653,18 @@ function App() {
                       >
                         {clearingCacheKey === `${cache.bookId}:audio` ? '清除中' : '清除 MP3'}
                       </button>
+                      <button
+                        className="secondary-button danger-button cache-delete-book-button"
+                        type="button"
+                        disabled={!cache.packageCache || clearingCacheKey === `${cache.bookId}:book`}
+                        onClick={() => {
+                          if (window.confirm(`删除本地书《${cache.title}》？完整数据包和本机 MP3 都会从本机移除。`)) {
+                            void deleteLocalBook(cache.bookId)
+                          }
+                        }}
+                      >
+                        {clearingCacheKey === `${cache.bookId}:book` ? '删除中' : '删除本地书'}
+                      </button>
                     </div>
                   </article>
                 ))}
@@ -2234,12 +2694,79 @@ function App() {
               </div>
               <div>
                 <dt>本机音频</dt>
-                <dd>{visibleCachedAudioIds.size}/{visibleAudioChapters.length || selectedBook?.audioChapterCount || 0} 章已缓存</dd>
+                <dd>{displayCachedAudioChapterCount}/{displayCloudAudioChapterCount} 章已缓存</dd>
               </div>
             </dl>
           </section>
         </section>
       )}
+
+      {mp3ManagerOpen ? (
+        <div className="reader-menu-overlay" role="presentation" onClick={() => setMp3ManagerOpen(false)}>
+          <section className="reader-menu-sheet mp3-manager-sheet" role="dialog" aria-modal="true" aria-label="MP3 管理" onClick={(event) => event.stopPropagation()}>
+            <div className="reader-menu-header">
+              <div>
+                <strong>MP3 管理</strong>
+                <span>{selectedLocalBook?.title ?? selectedBook?.title ?? '未选择书籍'}</span>
+              </div>
+              <button className="reader-menu-close" type="button" aria-label="关闭" onClick={() => setMp3ManagerOpen(false)}>×</button>
+            </div>
+            <div className="mp3-status-grid">
+              <div>
+                <dt>本机 MP3</dt>
+                <dd>{displayCachedAudioChapterCount} 章</dd>
+              </div>
+              <div>
+                <dt>云端 MP3</dt>
+                <dd>{displayCloudAudioChapterCount || visibleAudioChapters.length || '未刷新'} 章</dd>
+              </div>
+              <div>
+                <dt>当前章节</dt>
+                <dd>{currentChapter ? `${Math.max(1, currentChapterPosition + 1)} / ${chapters.length}` : '未打开'}</dd>
+              </div>
+            </div>
+            {visibleAudioSyncProgress ? (
+              <div className="package-line mp3-progress-line">
+                <span>下载进度</span>
+                <strong>{visibleAudioSyncProgress.done}/{visibleAudioSyncProgress.total}</strong>
+              </div>
+            ) : null}
+            {syncBlockedReason ? <div className="visibility-notice role-disabled">{syncBlockedReason}</div> : null}
+            <div className="mp3-action-list">
+              {visibleAudioSyncProgress ? (
+                <button className="danger-button" type="button" onClick={stopAudioSync}>
+                  停止同步
+                </button>
+              ) : null}
+              <button type="button" onClick={() => void syncCurrentBookAudioRange('current')} disabled={!selectedBookId || !currentChapter || loadingAudio || cloudSyncBlocked}>
+                当前章节
+              </button>
+              <button type="button" onClick={() => void syncCurrentBookAudioRange(10)} disabled={!selectedBookId || !currentChapter || loadingAudio || cloudSyncBlocked}>
+                当前起 10 章
+              </button>
+              <button type="button" onClick={() => void syncCurrentBookAudioRange(30)} disabled={!selectedBookId || !currentChapter || loadingAudio || cloudSyncBlocked}>
+                当前起 30 章
+              </button>
+              <button type="button" onClick={() => void syncCurrentBookAudioRange('all')} disabled={!selectedBookId || loadingAudio || cloudSyncBlocked}>
+                全部未缓存
+              </button>
+              <button
+                className="danger-button"
+                type="button"
+                disabled={!selectedBookId || displayCachedAudioChapterCount === 0 || clearingCacheKey === `${selectedBookId}:audio`}
+                onClick={() => {
+                  if (!selectedBookId) return
+                  if (window.confirm('删除本书所有本机 MP3？完整数据包和阅读进度会保留。')) {
+                    void clearBookAudioCache(selectedBookId)
+                  }
+                }}
+              >
+                {clearingCacheKey === `${selectedBookId}:audio` ? '删除中' : '删除本书 MP3'}
+              </button>
+            </div>
+          </section>
+        </div>
+      ) : null}
 
       {tab === 'search' ? (
         <section className="search-page">
@@ -2934,10 +3461,7 @@ async function gatewayFetch(settings: GatewaySettings, path: string) {
     throw new Error('请填写 Token')
   }
 
-  const headers = {
-    authorization: `Bearer ${settings.token.trim()}`,
-    'x-device-name': settings.deviceName.trim() || 'Android Phone',
-  }
+  const headers = buildGatewayHeaders(settings, getDeviceMetadata(appVersion))
   if (Capacitor.isNativePlatform()) {
     const response = await CapacitorHttp.get({
       headers,
@@ -2947,7 +3471,7 @@ async function gatewayFetch(settings: GatewaySettings, path: string) {
     })
     const body = typeof response.data === 'string' ? parseJsonBody(response.data) : response.data
     if (response.status < 200 || response.status >= 300) {
-      throw new Error(body?.error?.message || `Gateway HTTP ${response.status}`)
+      throw createGatewayError(body, `Gateway HTTP ${response.status}`, response.status)
     }
     return body as Record<string, unknown>
   }
@@ -2957,7 +3481,7 @@ async function gatewayFetch(settings: GatewaySettings, path: string) {
   })
   const body = (await response.json().catch(() => ({}))) as { error?: { message?: string } }
   if (!response.ok) {
-    throw new Error(body.error?.message || `Gateway HTTP ${response.status}`)
+    throw createGatewayError(body, `Gateway HTTP ${response.status}`, response.status)
   }
   return body as Record<string, unknown>
 }
@@ -2971,11 +3495,9 @@ async function gatewayPost(settings: GatewaySettings, path: string, data: Record
     throw new Error('请填写 Token')
   }
 
-  const headers = {
-    authorization: `Bearer ${settings.token.trim()}`,
-    'content-type': 'application/json',
-    'x-device-name': settings.deviceName.trim() || 'Android Phone',
-  }
+  const headers = buildGatewayHeaders(settings, getDeviceMetadata(appVersion), {
+    'Content-Type': 'application/json',
+  })
   if (Capacitor.isNativePlatform()) {
     const response = await CapacitorHttp.post({
       headers,
@@ -2986,7 +3508,7 @@ async function gatewayPost(settings: GatewaySettings, path: string, data: Record
     })
     const body = typeof response.data === 'string' ? parseJsonBody(response.data) : response.data
     if (response.status < 200 || response.status >= 300) {
-      throw new Error(body?.error?.message || `Gateway HTTP ${response.status}`)
+      throw createGatewayError(body, `Gateway HTTP ${response.status}`, response.status)
     }
     return body as Record<string, unknown>
   }
@@ -2998,7 +3520,7 @@ async function gatewayPost(settings: GatewaySettings, path: string, data: Record
   })
   const body = (await response.json().catch(() => ({}))) as { error?: { message?: string } }
   if (!response.ok) {
-    throw new Error(body.error?.message || `Gateway HTTP ${response.status}`)
+    throw createGatewayError(body, `Gateway HTTP ${response.status}`, response.status)
   }
   return body as Record<string, unknown>
 }
@@ -3012,10 +3534,7 @@ async function gatewayFetchBlob(settings: GatewaySettings, path: string) {
     throw new Error('请填写 Token')
   }
 
-  const headers = {
-    authorization: `Bearer ${settings.token.trim()}`,
-    'x-device-name': settings.deviceName.trim() || 'Android Phone',
-  }
+  const headers = buildGatewayHeaders(settings, getDeviceMetadata(appVersion))
   if (Capacitor.isNativePlatform()) {
     const response = await CapacitorHttp.get({
       headers,
@@ -3026,7 +3545,7 @@ async function gatewayFetchBlob(settings: GatewaySettings, path: string) {
     })
     if (response.status < 200 || response.status >= 300) {
       const body = typeof response.data === 'string' ? parseJsonBody(response.data) : response.data
-      throw new Error(body?.error?.message || `Gateway HTTP ${response.status}`)
+      throw createGatewayError(body, `Gateway HTTP ${response.status}`, response.status)
     }
     return capacitorDataToBlob(response.data)
   }
@@ -3036,7 +3555,7 @@ async function gatewayFetchBlob(settings: GatewaySettings, path: string) {
   })
   if (!response.ok) {
     const body = (await response.json().catch(() => ({}))) as { error?: { message?: string } }
-    throw new Error(body.error?.message || `Gateway HTTP ${response.status}`)
+    throw createGatewayError(body, `Gateway HTTP ${response.status}`, response.status)
   }
   return response.blob()
 }
@@ -3050,10 +3569,15 @@ async function downloadAudioToNativeFile(settings: GatewaySettings, bookId: stri
     throw new Error('请填写 Token')
   }
 
+  const metadata = getDeviceMetadata(appVersion)
   return NativeAudio.downloadAudio({
     bookId,
     chapterId,
+    appVersion: metadata.appVersion,
+    deviceId: settings.deviceId,
+    deviceModel: metadata.model,
     deviceName: settings.deviceName.trim() || 'Android Phone',
+    devicePlatform: metadata.platform,
     token: settings.token.trim(),
     url: `${baseUrl}/mobile/books/${encodeURIComponent(bookId)}/audio/${encodeURIComponent(chapterId)}/download`,
   })
@@ -3068,9 +3592,14 @@ async function downloadPackageToNativeFile(settings: GatewaySettings, bookId: st
     throw new Error('请填写 Token')
   }
 
+  const metadata = getDeviceMetadata(appVersion)
   return NativeAudio.downloadPackage({
     bookId,
+    appVersion: metadata.appVersion,
+    deviceId: settings.deviceId,
+    deviceModel: metadata.model,
     deviceName: settings.deviceName.trim() || 'Android Phone',
+    devicePlatform: metadata.platform,
     token: settings.token.trim(),
     url: `${baseUrl}/mobile/books/${encodeURIComponent(bookId)}/package/download`,
   })
@@ -3082,6 +3611,36 @@ async function importPackageToNativeStore(bookId: string, filePath: string, expe
     filePath,
     expectedChapterCount,
   })
+}
+
+async function listLocalBookSummaries(): Promise<BookSummary[]> {
+  const fullPackageIndex = loadFullPackageCacheIndex()
+  const audioIndex = loadAudioCacheIndex()
+  const cachedPackages = await listCachedBookPackages()
+  const bookIds = new Set<string>([...Object.keys(fullPackageIndex), ...cachedPackages.map((entry) => entry.bookId)])
+  const books = await Promise.all(
+    Array.from(bookIds).map(async (bookId) => {
+      const cache = fullPackageIndex[bookId] ?? null
+      const indexedPackage = cachedPackages.find((entry) => entry.bookId === bookId)?.package ?? null
+      const cachedPackage = indexedPackage ?? (await loadCachedBookPackage(bookId))
+      const packageBook = cachedPackage?.book
+      const localAudioChapterCount = Object.values(audioIndex).filter((record) => record.bookId === bookId).length
+      return {
+        id: bookId,
+        title: packageBook?.title || cache?.title || bookId,
+        author: packageBook?.author || cache?.author,
+        chapterCount: packageBook?.chapterCount || cache?.chapterCount || cache?.importStats?.chapterCount || packageChapters(cachedPackage).length || 0,
+        wordCount: packageBook?.wordCount ?? cache?.wordCount,
+        summaryCoverage: packageBook?.summaryCoverage,
+        kgCoverage: packageBook?.kgCoverage,
+        embeddingCoverage: packageBook?.embeddingCoverage,
+        audioChapterCount: packageBook?.audioChapterCount,
+        localAudioChapterCount,
+        updatedAt: packageBook?.updatedAt || cache?.updatedAt || cache?.importedAt || cache?.cachedAt || new Date().toISOString(),
+      } satisfies BookSummary
+    }),
+  )
+  return books.sort((left, right) => left.title.localeCompare(right.title, 'zh-CN'))
 }
 
 function loadFullPackageCache(bookId?: string | null): FullPackageCache | null {
@@ -3130,6 +3689,11 @@ function normalizeFullPackageCache(value: unknown): FullPackageCache | null {
   if (typeof value.sizeBytes !== 'number' || typeof value.cachedAt !== 'string') return null
   return {
     bookId: value.bookId,
+    title: typeof value.title === 'string' ? value.title : undefined,
+    author: typeof value.author === 'string' ? value.author : undefined,
+    chapterCount: typeof value.chapterCount === 'number' ? value.chapterCount : undefined,
+    wordCount: typeof value.wordCount === 'number' ? value.wordCount : undefined,
+    updatedAt: typeof value.updatedAt === 'string' ? value.updatedAt : undefined,
     filePath: value.filePath,
     sizeBytes: value.sizeBytes,
     cachedAt: value.cachedAt,
@@ -3178,15 +3742,7 @@ function capacitorDataToBlob(value: unknown) {
 }
 
 function loadSettings(): GatewaySettings {
-  try {
-    const parsed = JSON.parse(localStorage.getItem(settingsKey) || 'null') as Partial<GatewaySettings> | null
-    return {
-      ...defaultSettings,
-      ...parsed,
-    }
-  } catch {
-    return defaultSettings
-  }
+  return loadGatewaySettings(localStorage, settingsKey, defaultSettings)
 }
 
 function isGatewayConfigured(settings: GatewaySettings) {
@@ -3294,6 +3850,24 @@ function connectionLabel(state: ConnectionState) {
   if (state === 'checking') return '连接中'
   if (state === 'error') return '连接失败'
   return '未连接'
+}
+
+function findMatchingLocalBook(cloudBook: BookSummary, localBooks: BookSummary[]) {
+  const exactMatch = localBooks.find((book) => book.id === cloudBook.id)
+  if (exactMatch) return exactMatch
+
+  const cloudTitle = normalizeBookTitle(cloudBook.title)
+  return (
+    localBooks.find((book) => {
+      if (normalizeBookTitle(book.title) !== cloudTitle) return false
+      if (book.chapterCount && cloudBook.chapterCount && book.chapterCount !== cloudBook.chapterCount) return false
+      return true
+    }) ?? null
+  )
+}
+
+function normalizeBookTitle(title: string) {
+  return title.trim().replace(/\s+/g, '').toLocaleLowerCase()
 }
 
 function formatBookMeta(book: BookSummary, audioChapterCount = book.audioChapterCount) {
@@ -3405,6 +3979,47 @@ async function readBookPackageFromIndexedDb(bookId: string) {
   } catch {
     return null
   }
+}
+
+async function listCachedBookPackages() {
+  const records: Array<{ bookId: string; package: BookPackage }> = []
+  try {
+    const db = await openPackageCacheDb()
+    const values = await runPackageStoreRequest<unknown[]>(db, 'readonly', packageCacheStoreName, (store) => store.getAll())
+    db.close()
+    for (const value of values) {
+      if (!isRecord(value) || typeof value.bookId !== 'string') continue
+      try {
+        records.push({
+          bookId: value.bookId,
+          package: normalizeBookPackage(value.package),
+        })
+      } catch {
+        // Skip stale or malformed cached packages.
+      }
+    }
+  } catch {
+    // IndexedDB can be unavailable in constrained webviews; fall back to localStorage below.
+  }
+
+  try {
+    for (let index = 0; index < localStorage.length; index += 1) {
+      const key = localStorage.key(index)
+      if (!key?.startsWith(packageCachePrefix)) continue
+      const bookId = key.slice(packageCachePrefix.length)
+      if (!bookId || records.some((record) => record.bookId === bookId)) continue
+      const raw = localStorage.getItem(key)
+      if (!raw) continue
+      records.push({
+        bookId,
+        package: normalizeBookPackage(JSON.parse(raw) as unknown),
+      })
+    }
+  } catch {
+    // Best effort only.
+  }
+
+  return records
 }
 
 async function deleteBookPackageFromIndexedDb(bookId: string) {
@@ -3773,10 +4388,6 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function shouldShowGlobalStatusMessage(message: string) {
   if (!message) return false
   return !['数据包已加载', '完整数据包已导入'].includes(message)
-}
-
-function errorMessage(error: unknown) {
-  return error instanceof Error ? error.message : '请求失败'
 }
 
 export default App

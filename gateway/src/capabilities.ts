@@ -12,7 +12,9 @@ export function buildCapabilities(config: GatewayConfig) {
     version: '0.1.0',
     auth: {
       requiredByDefault: true,
-      mode: config.auth.devAccessToken ? 'development-static-token' : 'not-configured',
+      mode: config.auth.adminAccessToken || config.auth.mobileAccessToken ? 'development-static-token' : 'not-configured',
+      adminTokenConfigured: Boolean(config.auth.adminAccessToken),
+      mobileTokenConfigured: Boolean(config.auth.mobileAccessToken),
       tokenSecretConfigured: config.auth.tokenSecretConfigured,
     },
     limits: {

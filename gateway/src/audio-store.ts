@@ -1,8 +1,9 @@
 import { createReadStream } from 'node:fs'
-import { readFile, stat } from 'node:fs/promises'
+import { readFile, rm, stat } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import type { GatewayConfig } from './config.js'
 import { GatewayHttpError } from './errors.js'
+import type { GatewayBookSummary } from './data-store.js'
 
 export type GatewayAudioChapter = {
   chapterId: string
@@ -18,6 +19,26 @@ export type GatewayAudioChapter = {
 export type GatewayAudioCatalog = {
   schemaVersion: 1
   chapters: GatewayAudioChapter[]
+}
+
+export type GatewayAudioSummary = {
+  bookId: string
+  title: string
+  author?: string
+  chapterCount: number
+  audioChapterCount: number
+  missingChapterCount: number
+  missingChapterIds: string[]
+  coverage: number
+  totalSizeBytes: number
+  updatedAt?: string
+}
+
+export type GatewayAudioCleanupResult = {
+  bookId: string
+  removed: boolean
+  deletedFileCount: number
+  deletedFiles: string[]
 }
 
 export async function readAudioCatalog(config: GatewayConfig, bookId: string): Promise<GatewayAudioCatalog> {
@@ -76,6 +97,82 @@ export async function readAudioManifest(config: GatewayConfig, bookId: string, c
     return JSON.parse(rawManifest) as unknown
   } catch {
     throw new GatewayHttpError(500, 'audio_manifest_invalid', 'Gateway audio manifest is not valid JSON.')
+  }
+}
+
+export async function summarizeBookAudio(
+  config: GatewayConfig,
+  book: GatewayBookSummary,
+  expectedChapterIds: string[] = [],
+): Promise<GatewayAudioSummary> {
+  const catalog = await readAudioCatalog(config, book.id)
+  const expectedIds = expectedChapterIds
+  const audioIds = new Set(catalog.chapters.map((chapter) => chapter.chapterId))
+  const missingChapterIds = expectedIds.filter((chapterId) => !audioIds.has(chapterId))
+  const missingChapterCount = expectedIds.length > 0
+    ? missingChapterIds.length
+    : Math.max(0, book.chapterCount - catalog.chapters.length)
+  const chapterStats = await Promise.all(catalog.chapters.map((chapter) => readAudioChapterStats(config, book.id, chapter)))
+  const totalSizeBytes = chapterStats.reduce((sum, chapter) => sum + chapter.sizeBytes, 0)
+  const updatedAt = chapterStats
+    .map((chapter) => chapter.updatedAt)
+    .filter((value): value is string => Boolean(value))
+    .sort((left, right) => Date.parse(right) - Date.parse(left))[0]
+
+  return {
+    bookId: book.id,
+    title: book.title,
+    author: book.author,
+    chapterCount: book.chapterCount,
+    audioChapterCount: catalog.chapters.length,
+    missingChapterCount,
+    missingChapterIds,
+    coverage: book.chapterCount > 0 ? catalog.chapters.length / book.chapterCount : 0,
+    totalSizeBytes,
+    updatedAt,
+  }
+}
+
+export async function deleteBookAudio(config: GatewayConfig, bookId: string): Promise<GatewayAudioCleanupResult> {
+  const audioCatalogPath = resolve(config.audioDir, 'books', bookId, 'audio.json')
+  try {
+    await rm(audioCatalogPath, { force: false })
+  } catch (error) {
+    if (isNodeError(error) && error.code === 'ENOENT') {
+      return {
+        bookId,
+        removed: false,
+        deletedFileCount: 0,
+        deletedFiles: [],
+      }
+    }
+    throw error
+  }
+
+  return {
+    bookId,
+    removed: true,
+    deletedFileCount: 1,
+    deletedFiles: ['audio.json'],
+  }
+}
+
+async function readAudioChapterStats(config: GatewayConfig, bookId: string, chapter: GatewayAudioChapter) {
+  const filePath = resolveSafeAudioPath(config, bookId, chapter.fileName)
+  try {
+    const fileStat = await stat(filePath)
+    return {
+      sizeBytes: fileStat.size,
+      updatedAt: chapter.updatedAt ?? fileStat.mtime.toISOString(),
+    }
+  } catch (error) {
+    if (isNodeError(error) && error.code === 'ENOENT') {
+      return {
+        sizeBytes: chapter.sizeBytes ?? 0,
+        updatedAt: chapter.updatedAt,
+      }
+    }
+    throw error
   }
 }
 

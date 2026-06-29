@@ -291,6 +291,71 @@ button:disabled {
   padding: 0 12px;
 }
 
+.settings-panel input[readonly] {
+  color: #53616f;
+  background: #f3f6f9;
+}
+
+.device-identity-card {
+  display: grid;
+  gap: 12px;
+  border: 1px solid #d9e1e8;
+  border-left: 4px solid #8794a2;
+  border-radius: 8px;
+  background: #fbfdff;
+  padding: 12px;
+}
+
+.device-identity-card.role-trusted {
+  border-left-color: #2f6f73;
+}
+
+.device-identity-card.role-disabled {
+  border-color: #f0b8ae;
+  border-left-color: #c94635;
+  background: #fff8f6;
+}
+
+.device-identity-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.device-identity-heading strong {
+  color: #17202a;
+  font-size: 15px;
+}
+
+.device-identity-heading span {
+  color: #53616f;
+  font-size: 13px;
+  font-weight: 800;
+  white-space: nowrap;
+}
+
+.device-identity-card dl {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: 10px;
+  margin: 0;
+}
+
+.device-identity-card dt {
+  color: #667584;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.device-identity-card dd {
+  margin: 3px 0 0;
+  color: #17202a;
+  font-size: 13px;
+  font-weight: 800;
+  overflow-wrap: anywhere;
+}
+
 .settings-actions {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -380,6 +445,31 @@ button:disabled {
   gap: 10px;
 }
 
+.cache-delete-book-button {
+  grid-column: 1 / -1;
+}
+
+.cloud-library-panel .book-items {
+  padding: 0;
+}
+
+.cloud-book-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: stretch;
+  border-bottom: 1px solid #eef2f6;
+}
+
+.cloud-book-row .book-row {
+  border-bottom: 0;
+}
+
+.cloud-book-row .compact-button {
+  align-self: center;
+  margin-right: 12px;
+  min-width: 84px;
+}
+
 .cache-empty {
   margin: 0;
   padding: 18px 14px;
@@ -412,6 +502,38 @@ button:disabled {
 .status-checking {
   background: #e8eef5;
   color: #506070;
+}
+
+.visibility-notice {
+  margin: 12px 14px 0;
+  border: 1px solid #d9e1e8;
+  border-left: 4px solid #8794a2;
+  border-radius: 8px;
+  background: #fbfdff;
+  color: #53616f;
+  padding: 10px 12px;
+  font-size: 13px;
+  font-weight: 700;
+  line-height: 1.5;
+}
+
+.visibility-notice.role-default {
+  border-left-color: #4f7d91;
+  background: #f2f8fb;
+  color: #31596b;
+}
+
+.visibility-notice.role-trusted {
+  border-left-color: #2f6f73;
+  background: #f2faf7;
+  color: #1f5457;
+}
+
+.visibility-notice.role-disabled {
+  border-color: #f0b8ae;
+  border-left-color: #c94635;
+  background: #fff8f6;
+  color: #9a3324;
 }
 
 .library-page {
@@ -1094,6 +1216,10 @@ button:disabled {
   overflow: auto;
 }
 
+.mp3-manager-sheet {
+  max-height: min(58vh, 520px);
+}
+
 .reader-menu-header {
   display: flex;
   align-items: flex-start;
@@ -1182,6 +1308,63 @@ button:disabled {
   color: #667584;
   font-size: 13px;
   font-weight: 700;
+}
+
+.mp3-status-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.mp3-status-grid div {
+  min-height: 64px;
+  border: 1px solid #e3e9ef;
+  border-radius: 8px;
+  background: #fbfdff;
+  padding: 10px;
+}
+
+.mp3-status-grid dt {
+  color: #667584;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.mp3-status-grid dd {
+  margin: 4px 0 0;
+  color: #17202a;
+  font-size: 15px;
+  font-weight: 900;
+}
+
+.mp3-progress-line {
+  margin-top: 0;
+}
+
+.mp3-action-list {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.mp3-action-list button {
+  min-height: 42px;
+  border: 1px solid #cfd9e3;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #26313d;
+  padding: 0 12px;
+  font-weight: 800;
+}
+
+.mp3-action-list button:nth-child(4) {
+  border-color: #2f7d7d;
+  background: #2f7d7d;
+  color: #ffffff;
+}
+
+.mp3-action-list .danger-button {
+  grid-column: 1 / -1;
 }
 
 .reader-size-control {
@@ -1300,6 +1483,10 @@ button:disabled {
   .settings-page {
     grid-template-columns: minmax(360px, 1fr) minmax(300px, 0.8fr);
     align-items: start;
+  }
+
+  .device-identity-card dl {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .library-page {
