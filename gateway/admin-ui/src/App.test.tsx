@@ -10,16 +10,30 @@ afterEach(() => {
 })
 
 describe('Gateway 管理后台 UI', () => {
-  it('展示总览指标、内容健康和最近事件', () => {
+  it('展示总览指标、内容健康和最近事件', async () => {
     render(<App />)
 
     expect(screen.getByText('Novel Reader Gateway')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: '总览' })).toHaveAttribute('aria-current', 'page')
-    expect(screen.getByText('今日请求')).toBeInTheDocument()
+    expect(await screen.findByText('今日请求')).toBeInTheDocument()
     expect(screen.getByText('错误率')).toBeInTheDocument()
     expect(screen.getByText('内容健康')).toBeInTheDocument()
     expect(screen.getByText('最近事件')).toBeInTheDocument()
     expect(screen.getByText('导入《烬鳞纪》数据包成功')).toBeInTheDocument()
+  })
+
+  it('初次连接 Gateway API 时不在书籍页闪现 mock 数据', async () => {
+    vi.spyOn(window, 'fetch').mockImplementation(async () => new Promise<Response>(() => {}))
+
+    const user = userEvent.setup()
+    render(<App />)
+
+    expect(screen.getByText('连接中')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: '书籍' }))
+
+    expect(screen.getByRole('heading', { name: '书籍' })).toBeInTheDocument()
+    expect(screen.getByText('正在加载后台数据')).toBeInTheDocument()
+    expect(screen.queryByRole('row', { name: /烬鳞纪 青岚 trusted/ })).not.toBeInTheDocument()
   })
 
   it('从 Gateway 管理 API 加载书籍和设备数据', async () => {
@@ -146,6 +160,7 @@ describe('Gateway 管理后台 UI', () => {
     expect(screen.getByText('实时')).toBeInTheDocument()
     expect(screen.getByText('42')).toBeInTheDocument()
     expect(screen.getByText('12.5%')).toBeInTheDocument()
+    expect(screen.getByText('20:34')).toBeInTheDocument()
     expect(screen.getByText('接口事件')).toBeInTheDocument()
 
     await user.click(screen.getByRole('button', { name: '书籍' }))
@@ -155,14 +170,14 @@ describe('Gateway 管理后台 UI', () => {
     expect(screen.getByRole('row', { name: /接口平板 112233 受信 192\.168\.88\.66/ })).toBeInTheDocument()
 
     await user.click(screen.getByRole('button', { name: '数据包' }))
-    expect(screen.getByRole('row', { name: /接口书籍 2026-06-29 12:10 可发布 12\.5 MB/ })).toBeInTheDocument()
+    expect(screen.getByRole('row', { name: /接口书籍 2026-06-29 20:10 可发布 12\.5 MB/ })).toBeInTheDocument()
 
     await user.click(screen.getByRole('button', { name: '音频' }))
     expect(screen.getByRole('row', { name: /接口书籍 部分缺失 60% 6\/10/ })).toBeInTheDocument()
     expect(screen.getByText('chapter-7、chapter-8、chapter-9、chapter-10')).toBeInTheDocument()
 
     await user.click(screen.getByRole('button', { name: '请求日志' }))
-    expect(screen.getByRole('row', { name: /GET .*\/mobile\/books\/api-book\/package 503 777ms 未知设备/ })).toBeInTheDocument()
+    expect(screen.getByRole('row', { name: /20:12 GET .*\/mobile\/books\/api-book\/package 503 777ms 未知设备/ })).toBeInTheDocument()
   })
 
   it('API 不可用时用 mock 数据展示数据包、音频和请求日志页面', async () => {
@@ -369,6 +384,102 @@ describe('Gateway 管理后台 UI', () => {
     expect(confirmSpy).toHaveBeenCalledWith('确认清理《烬鳞纪》的音频文件？')
     expect(await screen.findByRole('row', { name: /烬鳞纪 缺失 0% 0\/186/ })).toBeInTheDocument()
     expect(screen.getByText('已清理音频')).toBeInTheDocument()
+  })
+
+  it('书籍详情支持删除整本书并同步移除列表行', async () => {
+    window.localStorage.setItem(adminTokenStorageKey, 'delete-token')
+    const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
+    const authHeaders: string[] = []
+    vi.spyOn(window, 'fetch').mockImplementation(async (input, init) => {
+      const url = String(input)
+      const authorization = init?.headers instanceof Headers ? init.headers.get('authorization') ?? '' : ''
+      authHeaders.push(`${url}:${init?.method ?? 'GET'}:${authorization}`)
+      if (url === '/admin/books') {
+        return jsonResponse({
+          books: [
+            {
+              id: 'delete-book',
+              title: '待删除书',
+              author: '测试作者',
+              chapterCount: 2,
+              updatedAt: '2026-06-29T12:00:00.000Z',
+              visibility: 'default',
+              labels: ['test'],
+              audioChapterCount: 1,
+            },
+            {
+              id: 'keep-book',
+              title: '保留书',
+              author: '测试作者',
+              chapterCount: 1,
+              updatedAt: '2026-06-28T12:00:00.000Z',
+              visibility: 'default',
+              labels: [],
+              audioChapterCount: 0,
+            },
+          ],
+        })
+      }
+      if (url === '/admin/packages') {
+        return jsonResponse({
+          packages: [
+            {
+              bookId: 'delete-book',
+              title: '待删除书',
+              importStatus: 'imported',
+              sizeBytes: 2048,
+              chapterCount: 2,
+              packageChapterCount: 2,
+            },
+          ],
+        })
+      }
+      if (url === '/admin/audio') {
+        return jsonResponse({
+          audio: [
+            {
+              bookId: 'delete-book',
+              title: '待删除书',
+              chapterCount: 2,
+              audioChapterCount: 1,
+              coverage: 0.5,
+              missingChapterIds: ['chapter-2'],
+              totalSizeBytes: 1024,
+            },
+          ],
+        })
+      }
+      if (url === '/admin/metrics') return jsonResponse({ requests: {}, downloads: {} })
+      if (url === '/admin/events') return jsonResponse({ events: [] })
+      if (url === '/admin/devices') return jsonResponse({ devices: [] })
+      if (url === '/admin/requests') return jsonResponse({ requests: [] })
+      if (url === '/admin/books/delete-book' && init?.method === 'DELETE') {
+        return jsonResponse({
+          deleted: {
+            bookId: 'delete-book',
+            title: '待删除书',
+            removed: true,
+            packageRemoved: true,
+            audioRemoved: true,
+          },
+        })
+      }
+      throw new TypeError(`unexpected request ${url}`)
+    })
+
+    const user = userEvent.setup()
+    render(<App />)
+    await screen.findByText(/实时/)
+
+    await user.click(screen.getByRole('button', { name: '书籍' }))
+    await user.click(screen.getByRole('row', { name: /待删除书/ }))
+    await user.click(screen.getByRole('button', { name: '删除 待删除书' }))
+
+    expect(confirmSpy).toHaveBeenCalledWith('确认删除《待删除书》？这会同时删除 package、音频和相关清单。')
+    expect(await screen.findByText('已删除书籍')).toBeInTheDocument()
+    expect(screen.queryByRole('row', { name: /待删除书/ })).not.toBeInTheDocument()
+    expect(screen.getByRole('row', { name: /保留书/ })).toBeInTheDocument()
+    expect(authHeaders).toContain('/admin/books/delete-book:DELETE:Bearer delete-token')
   })
 
   it('书籍和设备编辑失败时回滚并提供重试', async () => {

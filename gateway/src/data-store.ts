@@ -1,6 +1,6 @@
 import { createReadStream } from 'node:fs'
-import { mkdir, readFile, rename, stat, writeFile } from 'node:fs/promises'
-import { join } from 'node:path'
+import { mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises'
+import { join, relative, resolve } from 'node:path'
 import type { GatewayConfig } from './config.js'
 import { GatewayHttpError } from './errors.js'
 
@@ -51,6 +51,14 @@ export type GatewayBookPackageStatus = {
   updatedAt?: string
   importedAt?: string
   errorCode?: string
+}
+
+export type GatewayBookDeleteResult = {
+  bookId: string
+  title: string
+  removed: true
+  packageRemoved: boolean
+  audioRemoved: boolean
 }
 
 export async function readBookCatalog(config: GatewayConfig): Promise<GatewayBookCatalog> {
@@ -150,6 +158,29 @@ export async function upsertBookPackage(
     hasExplicitVisibility: isRecord(bookPackage.book) && isBookVisibility(bookPackage.book.visibility),
     hasExplicitLabels: isRecord(bookPackage.book) && Array.isArray(bookPackage.book.labels),
   })
+}
+
+export async function deleteBook(config: GatewayConfig, bookId: string): Promise<GatewayBookDeleteResult> {
+  const catalog = await readBookCatalog(config)
+  const book = catalog.books.find((candidate) => candidate.id === bookId)
+  if (!book) {
+    throw new GatewayHttpError(404, 'book_not_found', `Gateway book ${bookId} was not found.`)
+  }
+
+  const packageRemoved = await removeBookDirectory(config.dataDir, bookId)
+  const audioRemoved = await removeBookDirectory(config.audioDir, bookId)
+  await writeBookCatalog(
+    config,
+    catalog.books.filter((candidate) => candidate.id !== bookId),
+  )
+
+  return {
+    bookId,
+    title: book.title,
+    removed: true,
+    packageRemoved,
+    audioRemoved,
+  }
 }
 
 async function readBookPackageStatus(config: GatewayConfig, book: GatewayBookSummary): Promise<GatewayBookPackageStatus> {
@@ -272,6 +303,25 @@ async function writeJsonFile(path: string, value: unknown) {
   const tmpPath = `${path}.tmp-${process.pid}-${Date.now()}`
   await writeFile(tmpPath, `${JSON.stringify(value, null, 2)}\n`, 'utf8')
   await rename(tmpPath, path)
+}
+
+async function removeBookDirectory(rootDir: string, bookId: string) {
+  const root = resolve(rootDir, 'books')
+  const path = resolve(root, bookId)
+  const pathFromRoot = relative(root, path)
+  if (!pathFromRoot || pathFromRoot.startsWith('..') || resolve(pathFromRoot) === pathFromRoot) {
+    throw new GatewayHttpError(500, 'book_catalog_invalid', 'Gateway book id resolves outside the storage directory.')
+  }
+
+  try {
+    await rm(path, { recursive: true, force: false })
+    return true
+  } catch (error) {
+    if (isNodeError(error) && error.code === 'ENOENT') {
+      return false
+    }
+    throw error
+  }
 }
 
 function parseCatalog(rawCatalog: string) {

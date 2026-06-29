@@ -1338,8 +1338,8 @@ describe('gateway app', () => {
       cleanup: {
         bookId: 'book-audio',
         removed: true,
-        deletedFileCount: 1,
-        deletedFiles: ['audio.json'],
+        deletedFileCount: 2,
+        deletedFiles: ['audio.json', 'chapter-1.mp3'],
       },
       audio: {
         audioChapterCount: 0,
@@ -1348,7 +1348,7 @@ describe('gateway app', () => {
       },
     })
     await expect(readFile(join(bookAudioDir, 'audio.json'), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
-    await expect(readFile(join(bookAudioDir, 'chapter-1.mp3'), 'utf8')).resolves.toBe('audio-one')
+    await expect(readFile(join(bookAudioDir, 'chapter-1.mp3'), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
     expect(refreshAfterDeleteResponse.statusCode).toBe(200)
     expect(refreshAfterDeleteResponse.json().audio).toMatchObject({
       audioChapterCount: 0,
@@ -1802,6 +1802,111 @@ describe('gateway app', () => {
         },
       },
     })
+  })
+
+  it('deletes a catalog book together with its package and audio files', async () => {
+    const dataDir = await makeDataDir()
+    const audioDir = await makeDataDir()
+    const bookDir = join(dataDir, 'books', 'book-delete')
+    const audioBookDir = join(audioDir, 'books', 'book-delete')
+    await writeFile(
+      join(dataDir, 'books.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        books: [
+          {
+            id: 'book-keep',
+            title: '保留书',
+            chapterCount: 1,
+            updatedAt: '2026-06-25T00:00:00.000Z',
+          },
+          {
+            id: 'book-delete',
+            title: '待删除书',
+            chapterCount: 2,
+            updatedAt: '2026-06-26T00:00:00.000Z',
+          },
+        ],
+      }),
+      'utf8',
+    )
+    await mkdir(bookDir, { recursive: true })
+    await writeFile(
+      join(bookDir, 'package.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        book: {
+          id: 'book-delete',
+          title: '待删除书',
+          chapterCount: 2,
+          updatedAt: '2026-06-26T00:00:00.000Z',
+        },
+        chapters: [{ id: 'chapter-1' }, { id: 'chapter-2' }],
+      }),
+      'utf8',
+    )
+    await mkdir(audioBookDir, { recursive: true })
+    await writeFile(join(audioBookDir, 'chapter-1.mp3'), 'audio-one', 'utf8')
+    await writeFile(join(audioBookDir, 'chapter-1.manifest.json'), '{"timeline":[]}', 'utf8')
+    await writeFile(
+      join(audioBookDir, 'audio.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        chapters: [
+          {
+            chapterId: 'chapter-1',
+            fileName: 'chapter-1.mp3',
+            manifestFileName: 'chapter-1.manifest.json',
+          },
+        ],
+      }),
+      'utf8',
+    )
+    const app = buildTestApp({
+      GATEWAY_DEV_ACCESS_TOKEN: 'dev-token',
+      GATEWAY_DATA_DIR: dataDir,
+      GATEWAY_AUDIO_DIR: audioDir,
+    })
+    const authHeaders = { authorization: 'Bearer dev-token' }
+
+    const unauthorizedResponse = await app.inject({
+      method: 'DELETE',
+      url: '/admin/books/book-delete',
+    })
+    const deleteResponse = await app.inject({
+      method: 'DELETE',
+      url: '/admin/books/book-delete',
+      headers: authHeaders,
+    })
+    const catalogResponse = await app.inject({
+      method: 'GET',
+      url: '/admin/books',
+      headers: authHeaders,
+    })
+    const deletedBookResponse = await app.inject({
+      method: 'GET',
+      url: '/mobile/books/book-delete',
+      headers: authHeaders,
+    })
+
+    expect(unauthorizedResponse.statusCode).toBe(401)
+    expect(deleteResponse.statusCode).toBe(200)
+    expect(deleteResponse.json()).toMatchObject({
+      schemaVersion: 1,
+      deleted: {
+        bookId: 'book-delete',
+        title: '待删除书',
+        removed: true,
+        packageRemoved: true,
+        audioRemoved: true,
+      },
+    })
+    expect(catalogResponse.statusCode).toBe(200)
+    expect(catalogResponse.json().books.map((book: { id: string }) => book.id)).toEqual(['book-keep'])
+    expect(deletedBookResponse.statusCode).toBe(404)
+    expect(deletedBookResponse.json().error).toMatchObject({ code: 'book_not_found' })
+    await expect(readFile(bookDir, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(readFile(audioBookDir, 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
   })
 
   it('preserves existing book visibility and labels when importing replacement packages', async () => {

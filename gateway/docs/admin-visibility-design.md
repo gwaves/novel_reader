@@ -295,7 +295,7 @@ GET /admin/requests
 }
 ```
 
-`DELETE /admin/books/:bookId/audio` 清理该书 `GATEWAY_AUDIO_DIR/books/<bookId>/audio.json` 音频清单/文件索引，不删除实际 MP3 文件，并返回清理结果以及清理后的单书音频 summary：
+`DELETE /admin/books/:bookId/audio` 递归删除该书 `GATEWAY_AUDIO_DIR/books/<bookId>/` 本地音频目录，包括 `audio.json`、MP3 和 manifest，并返回清理结果以及清理后的单书音频 summary：
 
 ```json
 {

@@ -16,6 +16,8 @@ import {
   recentEvents,
 } from './mockData'
 
+const gatewayDisplayTimeZone = 'Asia/Shanghai'
+
 type GatewayBook = {
   id?: string
   title?: string
@@ -218,6 +220,12 @@ export async function deleteBookAudio(bookId: string, fetcher: typeof fetch = fe
     method: 'DELETE',
   })
   return response.audio ? mapAudioLike(response.audio) : null
+}
+
+export async function deleteBook(bookId: string, fetcher: typeof fetch = fetch) {
+  await adminFetch(`/admin/books/${encodeURIComponent(bookId)}`, fetcher, {
+    method: 'DELETE',
+  })
 }
 
 export function adminErrorLabel(error: unknown) {
@@ -533,7 +541,7 @@ function formatDate(value: unknown) {
   if (!raw) return '-'
   const date = new Date(raw)
   if (Number.isNaN(date.getTime())) return raw
-  return date.toISOString().slice(0, 16).replace('T', ' ')
+  return formatDateTimeInGatewayTimeZone(date)
 }
 
 function formatTime(value: unknown) {
@@ -541,7 +549,32 @@ function formatTime(value: unknown) {
   if (!raw) return '--:--'
   const date = new Date(raw)
   if (Number.isNaN(date.getTime())) return raw
-  return date.toISOString().slice(11, 16)
+  return formatTimeInGatewayTimeZone(date)
+}
+
+function formatDateTimeInGatewayTimeZone(date: Date) {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: gatewayDisplayTimeZone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).formatToParts(date)
+  const values = Object.fromEntries(parts.map((part) => [part.type, part.value]))
+  return `${values.year}-${values.month}-${values.day} ${values.hour}:${values.minute}`
+}
+
+function formatTimeInGatewayTimeZone(date: Date) {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: gatewayDisplayTimeZone,
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  }).formatToParts(date)
+  const values = Object.fromEntries(parts.map((part) => [part.type, part.value]))
+  return `${values.hour}:${values.minute}`
 }
 
 function formatCount(value: number) {

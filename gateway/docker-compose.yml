@@ -5,7 +5,7 @@ services:
     container_name: novel-reader-gateway
     restart: unless-stopped
     ports:
-      - "${GATEWAY_PORT:-6180}:6180"
+      - "${GATEWAY_HTTP_PORT:-6180}:6180"
     environment:
       GATEWAY_HOST: 0.0.0.0
       GATEWAY_PORT: 6180
@@ -31,4 +31,18 @@ services:
       GATEWAY_UPSTREAM_TIMEOUT_MS: ${GATEWAY_UPSTREAM_TIMEOUT_MS:-60000}
     volumes:
       - ./data:/data
-      - ./audio:/audio:ro
+      - ./audio:/audio
+
+  gateway-https:
+    profiles:
+      - https
+    image: nginx:1.27-alpine
+    container_name: novel-reader-gateway-https
+    restart: unless-stopped
+    depends_on:
+      - gateway
+    ports:
+      - "${GATEWAY_PORT:-8888}:8443"
+    volumes:
+      - ./nginx/gateway-https.conf:/etc/nginx/conf.d/default.conf:ro
+      - ./tls:/etc/nginx/tls:ro

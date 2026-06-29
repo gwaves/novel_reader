@@ -63,12 +63,13 @@ localStorage.setItem('novel-reader-gateway-admin-token', '<GATEWAY_ADMIN_ACCESS_
 - `PUT /admin/books/:bookId/package`（受保护，导入 PC 端导出的移动数据包）
 - `GET /admin/books/:bookId/package/download`（受保护，下载后台完整数据包）
 - `GET /admin/books`（受保护，返回后台全量书库视图）
+- `DELETE /admin/books/:bookId`（受保护，从书库索引删除该书，并递归删除对应 package 与音频目录）
 - `PATCH /admin/books/:bookId/visibility`（受保护，更新书籍可见范围）
 - `PATCH /admin/books/:bookId/labels`（受保护，更新书籍内容标签）
 - `GET /admin/packages`（受保护，返回数据包状态）
 - `GET /admin/audio`（受保护，返回音频覆盖状态）
 - `POST /admin/books/:bookId/audio/refresh`（受保护，重新读取音频状态）
-- `DELETE /admin/books/:bookId/audio`（受保护，清理该书音频清单索引，不删除 MP3 文件）
+- `DELETE /admin/books/:bookId/audio`（受保护，递归删除该书本地音频目录，包括 `audio.json`、MP3 和 manifest）
 - `GET /admin/devices`（受保护，返回已登记设备）
 - `PATCH /admin/devices/:deviceId`（受保护，更新设备名称或角色）
 - `GET /admin/metrics`（受保护，返回请求量、错误率、P95 和下载统计）
@@ -178,7 +179,7 @@ npm run gateway:publish-audio -- \
 
 脚本会扫描 `<source-root>/chNNN-full/audio/chapter.mp3` 和 `manifest.json`，根据本地移动数据包章节序号匹配真实 `chapterId`，复制到 `GATEWAY_AUDIO_DIR/books/<bookId>/`，并生成 `audio.json`。可以用 `--package-file path/to/package.json` 跳过本地 API，或用 `--dry-run` 只检查映射结果。
 
-如果 Gateway 跑在远端机器上，可以在本地整理完音频目录后直接同步到远端挂载目录。例如家里网关机器 `192.168.88.100` 的 compose 挂载了 `~/novel-reader-gateway/audio:/audio:ro`：
+如果 Gateway 跑在远端机器上，可以在本地整理完音频目录后直接同步到远端挂载目录。例如家里网关机器 `192.168.88.100` 的 compose 挂载了 `~/novel-reader-gateway/audio:/audio`，以便管理后台可以清理重建单书音频目录：
 
 ```bash
 npm run gateway:publish-audio -- \

@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import {
   adminErrorLabel,
   adminTokenStorageKey,
+  deleteBook,
   deleteBookAudio,
   downloadPackage,
   loadAdminDashboardData,
@@ -35,7 +36,7 @@ import {
 } from './mockData'
 
 type ViewKey = 'overview' | 'books' | 'packages' | 'audio' | 'devices' | 'logs' | 'settings'
-type ConnectionStatus = AdminDashboardData['status']
+type ConnectionStatus = AdminDashboardData['status'] | 'loading'
 type OperationState = 'idle' | 'saving' | 'success' | 'failed'
 type OperationStatus = {
   state: OperationState
@@ -58,15 +59,15 @@ const navItems: Array<{ key: ViewKey; label: string }> = [
 
 function App() {
   const [activeView, setActiveView] = useState<ViewKey>('overview')
-  const [books, setBooks] = useState(initialBooks)
-  const [devices, setDevices] = useState(initialDevices)
-  const [packages, setPackages] = useState(initialPackages)
-  const [audio, setAudio] = useState(initialAudio)
-  const [requestLogs, setRequestLogs] = useState(initialRequestLogs)
-  const [metrics, setMetrics] = useState(mockOverviewMetrics)
-  const [events, setEvents] = useState(mockRecentEvents)
-  const [dataSource, setDataSource] = useState<AdminDashboardData['source']>('mock')
-  const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>('mock')
+  const [books, setBooks] = useState<AdminBook[]>([])
+  const [devices, setDevices] = useState<AdminDevice[]>([])
+  const [packages, setPackages] = useState<AdminPackage[]>([])
+  const [audio, setAudio] = useState<AdminAudio[]>([])
+  const [requestLogs, setRequestLogs] = useState<AdminRequestLog[]>([])
+  const [metrics, setMetrics] = useState<typeof mockOverviewMetrics>([])
+  const [events, setEvents] = useState<typeof mockRecentEvents>([])
+  const [dataSource, setDataSource] = useState<AdminDashboardData['source']>('api')
+  const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>('loading')
   const [loadMessage, setLoadMessage] = useState('正在连接 Gateway 管理 API')
   const [selectedBookId, setSelectedBookId] = useState<string | null>(null)
   const [selectedDeviceId, setSelectedDeviceId] = useState<string | null>(null)
@@ -87,6 +88,7 @@ function App() {
     () => devices.find((device) => device.id === selectedDeviceId) ?? null,
     [devices, selectedDeviceId],
   )
+  const isInitialLoading = connectionStatus === 'loading'
 
   const applyDashboardData = (data: AdminDashboardData) => {
     setBooks(data.books)
@@ -104,6 +106,10 @@ function App() {
   const refreshDashboardData = async () => {
     setIsRefreshing(true)
     setLoadMessage('正在连接 Gateway 管理 API')
+    if (books.length === 0 && devices.length === 0 && packages.length === 0 && audio.length === 0) {
+      setConnectionStatus('loading')
+      setDataSource('api')
+    }
     const data = await loadAdminDashboardData()
     applyDashboardData(data)
     setIsRefreshing(false)
@@ -151,6 +157,36 @@ function App() {
   const updateBook = (bookId: string, patch: Partial<AdminBook>) => {
     if (patch.visibility) void saveBookPatch(bookId, patch, `${bookId}:visibility`, '可见范围')
     if (patch.labels) void saveBookPatch(bookId, patch, `${bookId}:labels`, '标签')
+  }
+
+  const handleDeleteBook = async (book: AdminBook) => {
+    if (!window.confirm(`确认删除《${book.title}》？这会同时删除 package、音频和相关清单。`)) return
+    const operationKey = `${book.id}:delete`
+    setBookOperationStatus((current) => ({ ...current, [operationKey]: { state: 'saving', message: '删除中' } }))
+    if (isLocalDemoEdit(connectionStatus, adminToken)) {
+      removeBookRows(book.id)
+      setLoadMessage('已删除书籍')
+      setBookOperationStatus((current) => ({ ...current, [operationKey]: { state: 'success', message: '本地已删除' } }))
+      return
+    }
+    try {
+      await deleteBook(book.id)
+      removeBookRows(book.id)
+      setLoadMessage('已删除书籍')
+      setBookOperationStatus((current) => ({ ...current, [operationKey]: { state: 'success', message: '已删除书籍' } }))
+    } catch (error) {
+      setBookOperationStatus((current) => ({
+        ...current,
+        [operationKey]: { state: 'failed', message: `删除失败：${adminErrorLabel(error)}` },
+      }))
+    }
+  }
+
+  const removeBookRows = (bookId: string) => {
+    setBooks((current) => current.filter((book) => book.id !== bookId))
+    setPackages((current) => current.filter((item) => item.bookId !== bookId))
+    setAudio((current) => current.filter((item) => item.bookId !== bookId))
+    setSelectedBookId((current) => (current === bookId ? null : current))
   }
 
   const saveDevicePatch = async (deviceId: string, patch: Partial<AdminDevice>, operationKey: string) => {
@@ -284,21 +320,28 @@ function App() {
             <StatusPill label="环境" value="local" />
             <StatusPill label="状态" value="健康" tone="ok" />
             <StatusPill label="刷新" value="5s" />
-            <StatusPill label="数据" value={dataSource === 'api' ? '实时' : 'Mock'} tone={dataSource === 'api' ? 'ok' : undefined} />
+            <StatusPill
+              label="数据"
+              value={isInitialLoading ? '连接中' : dataSource === 'api' ? '实时' : 'Mock'}
+              tone={!isInitialLoading && dataSource === 'api' ? 'ok' : undefined}
+            />
           </div>
         </header>
 
         <main className="content">
-          {activeView === 'overview' && <Overview metrics={metrics} events={events} />}
-          {activeView === 'books' && (
+          {isInitialLoading && activeView !== 'settings' && <LoadingPanel title={navTitle(activeView)} />}
+          {!isInitialLoading && activeView === 'overview' && <Overview metrics={metrics} events={events} />}
+          {!isInitialLoading && activeView === 'books' && (
             <BooksPage
               books={books}
               selectedBook={selectedBook}
               onSelect={setSelectedBookId}
               onUpdate={updateBook}
+              onDelete={handleDeleteBook}
               operationStatus={selectedBook ? {
                 visibility: bookOperationStatus[`${selectedBook.id}:visibility`],
                 labels: bookOperationStatus[`${selectedBook.id}:labels`],
+                delete: bookOperationStatus[`${selectedBook.id}:delete`],
               } : {}}
               retryActions={selectedBook ? {
                 visibility: bookRetryActions[`${selectedBook.id}:visibility`],
@@ -306,7 +349,7 @@ function App() {
               } : {}}
             />
           )}
-          {activeView === 'devices' && (
+          {!isInitialLoading && activeView === 'devices' && (
             <DevicesPage
               devices={devices}
               selectedDevice={selectedDevice}
@@ -316,10 +359,10 @@ function App() {
               retryAction={selectedDevice ? deviceRetryActions[`${selectedDevice.id}:role`] : undefined}
             />
           )}
-          {activeView === 'packages' && (
+          {!isInitialLoading && activeView === 'packages' && (
             <PackagesPage packages={packages} operationStatus={packageOperationStatus} onDownload={handleDownloadPackage} />
           )}
-          {activeView === 'audio' && (
+          {!isInitialLoading && activeView === 'audio' && (
             <AudioPage
               audio={audio}
               operationStatus={audioOperationStatus}
@@ -327,7 +370,7 @@ function App() {
               onDelete={handleDeleteBookAudio}
             />
           )}
-          {activeView === 'logs' && <RequestLogsPage requestLogs={requestLogs} />}
+          {!isInitialLoading && activeView === 'logs' && <RequestLogsPage requestLogs={requestLogs} />}
           {activeView === 'settings' && (
             <SettingsPage
               key={adminToken}
@@ -352,6 +395,15 @@ function StatusPill({ label, value, tone }: { label: string; value: string; tone
       <span>{label}</span>
       <strong>{value}</strong>
     </span>
+  )
+}
+
+function LoadingPanel({ title }: { title: string }) {
+  return (
+    <section className="panel loading-panel" aria-label={`${title}加载状态`}>
+      <h2>{title}</h2>
+      <p>正在加载后台数据</p>
+    </section>
   )
 }
 
@@ -438,6 +490,7 @@ function BooksPage({
   selectedBook,
   onSelect,
   onUpdate,
+  onDelete,
   operationStatus,
   retryActions,
 }: {
@@ -445,7 +498,8 @@ function BooksPage({
   selectedBook: AdminBook | null
   onSelect: (bookId: string) => void
   onUpdate: (bookId: string, patch: Partial<AdminBook>) => void
-  operationStatus: Partial<Record<'visibility' | 'labels', OperationStatus>>
+  onDelete: (book: AdminBook) => void
+  operationStatus: Partial<Record<'visibility' | 'labels' | 'delete', OperationStatus>>
   retryActions: Partial<Record<'visibility' | 'labels', RetryAction>>
 }) {
   return (
@@ -495,7 +549,13 @@ function BooksPage({
         </table>
       </div>
 
-      <BookDrawer book={selectedBook} onUpdate={onUpdate} operationStatus={operationStatus} retryActions={retryActions} />
+      <BookDrawer
+        book={selectedBook}
+        onUpdate={onUpdate}
+        onDelete={onDelete}
+        operationStatus={operationStatus}
+        retryActions={retryActions}
+      />
     </section>
   )
 }
@@ -503,12 +563,14 @@ function BooksPage({
 function BookDrawer({
   book,
   onUpdate,
+  onDelete,
   operationStatus,
   retryActions,
 }: {
   book: AdminBook | null
   onUpdate: (bookId: string, patch: Partial<AdminBook>) => void
-  operationStatus: Partial<Record<'visibility' | 'labels', OperationStatus>>
+  onDelete: (book: AdminBook) => void
+  operationStatus: Partial<Record<'visibility' | 'labels' | 'delete', OperationStatus>>
   retryActions: Partial<Record<'visibility' | 'labels', RetryAction>>
 }) {
   if (!book) {
@@ -573,6 +635,19 @@ function BookDrawer({
       <div className="action-row">
         <button type="button">下载 package</button>
         <button type="button">上传替换</button>
+      </div>
+
+      <div className="danger-zone">
+        <strong>危险操作</strong>
+        <button
+          type="button"
+          className="danger-button"
+          disabled={operationStatus.delete?.state === 'saving'}
+          onClick={() => onDelete(book)}
+        >
+          删除 {book.title}
+        </button>
+        <OperationNote status={operationStatus.delete} />
       </div>
     </aside>
   )
@@ -1082,10 +1157,15 @@ function connectionMessage(data: AdminDashboardData) {
 }
 
 function connectionTitle(status: ConnectionStatus, source: AdminDashboardData['source']) {
+  if (status === 'loading') return '连接中'
   if (status === 'unauthorized') return '未授权'
   if (status === 'partial') return '部分可用'
   if (status === 'unavailable' || status === 'mock') return 'Mock 数据'
   return source === 'api' ? '实时数据' : 'Mock 数据'
+}
+
+function navTitle(view: ViewKey) {
+  return navItems.find((item) => item.key === view)?.label ?? '后台数据'
 }
 
 function omitKey<T>(record: Record<string, T>, key: string) {

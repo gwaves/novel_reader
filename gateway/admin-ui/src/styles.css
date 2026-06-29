@@ -211,6 +211,23 @@ nav {
   padding: 14px;
 }
 
+.loading-panel {
+  min-height: 180px;
+  display: grid;
+  place-content: center;
+  gap: 8px;
+  text-align: center;
+}
+
+.loading-panel h2,
+.loading-panel p {
+  margin: 0;
+}
+
+.loading-panel p {
+  color: #64748b;
+}
+
 .panel-header {
   display: flex;
   align-items: center;
@@ -517,6 +534,33 @@ input {
 }
 
 .action-row button:disabled {
+  cursor: wait;
+  opacity: 0.62;
+}
+
+.danger-zone {
+  display: grid;
+  gap: 8px;
+  margin-top: 18px;
+  border-top: 1px solid #e2e8f0;
+  padding-top: 14px;
+}
+
+.danger-zone strong {
+  color: #991b1b;
+}
+
+.danger-button {
+  width: fit-content;
+  border: 1px solid #fecaca;
+  border-radius: 6px;
+  background: #fff7f7;
+  color: #b91c1c;
+  padding: 7px 10px;
+  cursor: pointer;
+}
+
+.danger-button:disabled {
   cursor: wait;
   opacity: 0.62;
 }

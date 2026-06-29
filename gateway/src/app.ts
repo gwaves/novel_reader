@@ -13,6 +13,7 @@ import { buildCapabilities } from './capabilities.js'
 import { type GatewayConfig, loadConfig } from './config.js'
 import {
   type GatewayBookSummary,
+  deleteBook,
   openBookPackageFile,
   readBookCatalog,
   readBookPackage,
@@ -249,6 +250,15 @@ export function buildGatewayApp(config: GatewayConfig = loadConfig()) {
       .header('content-length', packageFile.sizeBytes)
       .header('content-disposition', `attachment; filename="${basename(packageFile.fileName)}"`)
       .send(packageFile.stream)
+  })
+
+  app.delete<{ Params: { bookId: string } }>('/admin/books/:bookId', async (request) => {
+    requireAdminAuth(config, request)
+    return {
+      schemaVersion: 1,
+      deletedAt: new Date().toISOString(),
+      deleted: await deleteBook(config, request.params.bookId),
+    }
   })
 
   app.delete<{ Params: { bookId: string } }>('/admin/books/:bookId/audio', async (request) => {
