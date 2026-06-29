@@ -19,7 +19,7 @@
     "baseUrl": "http://llm-provider.example/v1",
     "apiKey": "LLM_API_KEY_PLACEHOLDER",
     "model": "qwen3.6-27b",
-    "concurrency": 4,
+    "concurrency": 8,
     "retries": 3,
     "timeoutMs": 300000
   },
