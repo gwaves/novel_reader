@@ -103,17 +103,7 @@ server {
     client_max_body_size 50m;
 
     location ^~ /admin/ui {
-        allow 192.168.0.0/16;
-        allow 10.0.0.0/8;
-        allow 172.16.0.0/12;
-        allow 127.0.0.1;
-        deny all;
-
-        proxy_pass http://127.0.0.1:6180;
-        proxy_http_version 1.1;
-        proxy_set_header Host $host;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto https;
+        return 403;
     }
 
     location / {
@@ -144,18 +134,7 @@ server {
     proxy_request_buffering off;
 
     location ^~ /admin/ui {
-        allow 192.168.0.0/16;
-        allow 10.0.0.0/8;
-        allow 172.16.0.0/12;
-        allow 127.0.0.1;
-        deny all;
-
-        proxy_pass http://gateway:6180;
-        proxy_http_version 1.1;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto https;
+        return 403;
     }
 
     location / {
@@ -169,7 +148,7 @@ server {
 }
 ```
 
-`/admin/ui` 是管理后台静态入口，建议始终在 Nginx 层限制为内网访问。上面的 `location ^~ /admin/ui` 必须放在通用 `location /` 前面；管理 API 仍由 Gateway 的 admin bearer token 保护。
+`/admin/ui` 是管理后台静态入口。如果公网入口经过家庭路由器 DNAT/SNAT，Nginx 看到的来源地址可能已经变成内网地址，基于 `allow`/`deny` 的内网 ACL 可能失效。推荐在公网 Nginx 入口直接禁止 `/admin/ui`，管理后台改走家里内网直连 `http://192.168.88.100:6180/admin/ui`。上面的 `location ^~ /admin/ui` 必须放在通用 `location /` 前面；管理 API 仍由 Gateway 的 admin bearer token 保护。
 
 对应端口关系：
 
@@ -196,6 +175,7 @@ curl -H "Authorization: Bearer $GATEWAY_ADMIN_ACCESS_TOKEN" \
   http://192.168.88.100:6180/capabilities
 
 curl -kI https://novel.gwaves.net:8888/admin/ui
+curl -I http://192.168.88.100:6180/admin/ui
 ```
 
-`/health` 可公开访问；`/admin/ui` 由 Nginx 内网 ACL 保护；`/admin/*` 和后台 AI/RAG 接口使用 admin bearer token，`/auth/*`、`/mobile/*` 和 MP3 接口使用 mobile bearer token。未设置 `GATEWAY_ADMIN_ACCESS_TOKEN` 或 `GATEWAY_MOBILE_ACCESS_TOKEN` 时，会分别回退到 `GATEWAY_DEV_ACCESS_TOKEN`，方便开发期沿用旧配置。
+`/health` 可公开访问；公网 Nginx 入口的 `/admin/ui` 应返回 403；内网直连 `6180` 可访问管理后台；`/admin/*` 和后台 AI/RAG 接口使用 admin bearer token，`/auth/*`、`/mobile/*` 和 MP3 接口使用 mobile bearer token。未设置 `GATEWAY_ADMIN_ACCESS_TOKEN` 或 `GATEWAY_MOBILE_ACCESS_TOKEN` 时，会分别回退到 `GATEWAY_DEV_ACCESS_TOKEN`，方便开发期沿用旧配置。
