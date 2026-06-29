@@ -26,6 +26,7 @@ type BookSummary = {
   kgCoverage?: number
   embeddingCoverage?: number
   audioChapterCount?: number
+  localAudioChapterCount?: number
   updatedAt: string
 }
 
@@ -376,6 +377,7 @@ function App() {
   const displayKgCoverage = inferredKgCoverage(selectedBook, bookPackage, visibleFullPackageCache)
   const displayEmbeddingCoverage = inferredEmbeddingCoverage(selectedBook, bookPackage, visibleFullPackageCache)
   const displayCloudAudioChapterCount = visibleAudioChapters.length || selectedBook?.audioChapterCount || 0
+  const displayCachedAudioChapterCount = visibleCachedAudioIds.size || bookCachedAudioCount(selectedLocalBook ?? selectedBook)
   const cacheSummaries = useMemo(() => buildBookCacheSummaries([...displayLocalBooks, ...books], cacheVersion), [books, displayLocalBooks, cacheVersion])
   const currentAudio = useMemo(
     () => visibleAudioChapters.find((chapter) => chapter.chapterId === currentChapter?.id) ?? null,
@@ -429,6 +431,7 @@ function App() {
   const isSpeechAutoScrollingRef = useRef(false)
   const playbackEngineTouchedRef = useRef(false)
   const deviceMetadata = useMemo(() => getDeviceMetadata(appVersion), [])
+  const audioSyncCancelRequestedRef = useRef(false)
 
   useEffect(() => {
     localStorage.setItem(settingsKey, JSON.stringify(settings))
@@ -1023,11 +1026,15 @@ function App() {
 
   async function syncBookAudioChapters(bookId: string, chaptersToSync: AudioChapter[], label: string) {
     setLoadingAudio(true)
+    audioSyncCancelRequestedRef.current = false
     setAudioSyncBookId(bookId)
+    setCachedAudioBookId(bookId)
+    setCachedAudioIds(new Set(await listCachedAudioChapterIds(bookId)))
     setAudioSyncProgress({ done: 0, total: chaptersToSync.length })
     try {
       let done = 0
       for (const audioChapter of chaptersToSync) {
+        if (audioSyncCancelRequestedRef.current) break
         const cached = readCachedAudio(bookId, audioChapter.chapterId)
         if (!cached) {
           await cacheAudioChapter(bookId, audioChapter)
@@ -1037,7 +1044,12 @@ function App() {
         setCachedAudioIds((current) => new Set(current).add(audioChapter.chapterId))
       }
       await refreshCachedAudioIds(bookId)
-      setMessage(`${label} 已缓存 ${chaptersToSync.length}/${chaptersToSync.length} 章`)
+      await refreshLocalLibrary()
+      setMessage(
+        audioSyncCancelRequestedRef.current
+          ? `${label} 已停止，已缓存 ${done}/${chaptersToSync.length} 章`
+          : `${label} 已缓存 ${chaptersToSync.length}/${chaptersToSync.length} 章`,
+      )
     } catch (error) {
       if (isDeviceDisabledError(error)) {
         setConnectionState('error')
@@ -1047,7 +1059,13 @@ function App() {
       setLoadingAudio(false)
       setAudioSyncProgress(null)
       setAudioSyncBookId(null)
+      audioSyncCancelRequestedRef.current = false
     }
+  }
+
+  function stopAudioSync() {
+    audioSyncCancelRequestedRef.current = true
+    setMessage('正在停止 MP3 同步，当前章节完成后停止')
   }
 
   function openMp3Manager() {
@@ -2071,7 +2089,7 @@ function App() {
             ) : (
               <div className="book-items">
                 {displayLocalBooks.map((book) => {
-                  const audioCount = book.id === selectedBookId ? visibleCachedAudioIds.size : book.audioChapterCount
+                  const audioCount = book.id === selectedBookId ? displayCachedAudioChapterCount : bookCachedAudioCount(book)
                   return (
                     <button
                       className={book.id === selectedBookId ? 'book-row active' : 'book-row'}
@@ -2106,7 +2124,7 @@ function App() {
                   </div>
                   <div>
                     <dt>本机音频</dt>
-                    <dd>{visibleCachedAudioIds.size || selectedLocalBook.audioChapterCount || 0} 章</dd>
+                    <dd>{displayCachedAudioChapterCount} 章</dd>
                   </div>
                   <div>
                     <dt>更新</dt>
@@ -2153,7 +2171,7 @@ function App() {
                       ? `${visibleAudioSyncProgress.done}/${visibleAudioSyncProgress.total}`
                       : loadingAudio
                         ? '同步中'
-                        : `${visibleCachedAudioIds.size}/${displayCloudAudioChapterCount} 已缓存`}
+                        : `${displayCachedAudioChapterCount}/${displayCloudAudioChapterCount} 已缓存`}
                   </strong>
                 </div>
                 <button
@@ -2164,6 +2182,11 @@ function App() {
                 >
                   {visibleAudioSyncProgress ? `同步音频 ${visibleAudioSyncProgress.done}/${visibleAudioSyncProgress.total}` : 'MP3 管理'}
                 </button>
+                {visibleAudioSyncProgress ? (
+                  <button className="secondary-button danger-button full-width-button" type="button" onClick={stopAudioSync}>
+                    停止 MP3 同步
+                  </button>
+                ) : null}
                 <button className="primary-button full-width-button" type="button" onClick={() => void openBook(selectedLocalBook.id)} disabled={loadingPackage}>
                   开始阅读
                 </button>
@@ -2560,7 +2583,7 @@ function App() {
               </div>
               <div>
                 <dt>本机音频</dt>
-                <dd>{visibleCachedAudioIds.size}/{visibleAudioChapters.length || selectedBook?.audioChapterCount || 0} 章已缓存</dd>
+                <dd>{displayCachedAudioChapterCount}/{displayCloudAudioChapterCount} 章已缓存</dd>
               </div>
             </dl>
           </section>
@@ -2580,7 +2603,7 @@ function App() {
             <div className="mp3-status-grid">
               <div>
                 <dt>本机 MP3</dt>
-                <dd>{visibleCachedAudioIds.size} 章</dd>
+                <dd>{displayCachedAudioChapterCount} 章</dd>
               </div>
               <div>
                 <dt>云端 MP3</dt>
@@ -2598,6 +2621,11 @@ function App() {
               </div>
             ) : null}
             <div className="mp3-action-list">
+              {visibleAudioSyncProgress ? (
+                <button className="danger-button" type="button" onClick={stopAudioSync}>
+                  停止同步
+                </button>
+              ) : null}
               <button type="button" onClick={() => void syncCurrentBookAudioRange('current')} disabled={!selectedBookId || !currentChapter || loadingAudio}>
                 当前章节
               </button>
@@ -2613,7 +2641,7 @@ function App() {
               <button
                 className="danger-button"
                 type="button"
-                disabled={!selectedBookId || visibleCachedAudioIds.size === 0 || clearingCacheKey === `${selectedBookId}:audio`}
+                disabled={!selectedBookId || displayCachedAudioChapterCount === 0 || clearingCacheKey === `${selectedBookId}:audio`}
                 onClick={() => {
                   if (!selectedBookId) return
                   if (window.confirm('删除本书所有本机 MP3？完整数据包和阅读进度会保留。')) {
@@ -3484,6 +3512,7 @@ async function listLocalBookSummaries(): Promise<BookSummary[]> {
       const indexedPackage = cachedPackages.find((entry) => entry.bookId === bookId)?.package ?? null
       const cachedPackage = indexedPackage ?? (await loadCachedBookPackage(bookId))
       const packageBook = cachedPackage?.book
+      const localAudioChapterCount = Object.values(audioIndex).filter((record) => record.bookId === bookId).length
       return {
         id: bookId,
         title: packageBook?.title || cache?.title || bookId,
@@ -3493,7 +3522,8 @@ async function listLocalBookSummaries(): Promise<BookSummary[]> {
         summaryCoverage: packageBook?.summaryCoverage,
         kgCoverage: packageBook?.kgCoverage,
         embeddingCoverage: packageBook?.embeddingCoverage,
-        audioChapterCount: Object.values(audioIndex).filter((record) => record.bookId === bookId).length,
+        audioChapterCount: packageBook?.audioChapterCount,
+        localAudioChapterCount,
         updatedAt: packageBook?.updatedAt || cache?.updatedAt || cache?.importedAt || cache?.cachedAt || new Date().toISOString(),
       } satisfies BookSummary
     }),
@@ -3710,10 +3740,16 @@ function connectionLabel(state: ConnectionState) {
   return '未连接'
 }
 
-function mergeLocalBooksWithCloudMetadata(localBooks: BookSummary[], cloudBooks: BookSummary[]) {
+export function mergeLocalBooksWithCloudMetadata(localBooks: BookSummary[], cloudBooks: BookSummary[]) {
   return localBooks.map((localBook) => {
     const cloudBook = cloudBooks.find((book) => book.id === localBook.id)
-    if (!cloudBook) return localBook
+    const localAudioChapterCount = bookCachedAudioCount(localBook)
+    if (!cloudBook) {
+      return {
+        ...localBook,
+        localAudioChapterCount,
+      }
+    }
     return {
       ...localBook,
       title: cloudBook.title || localBook.title,
@@ -3723,10 +3759,15 @@ function mergeLocalBooksWithCloudMetadata(localBooks: BookSummary[], cloudBooks:
       summaryCoverage: cloudBook.summaryCoverage ?? localBook.summaryCoverage,
       kgCoverage: cloudBook.kgCoverage ?? localBook.kgCoverage,
       embeddingCoverage: cloudBook.embeddingCoverage ?? localBook.embeddingCoverage,
-      audioChapterCount: localBook.audioChapterCount ?? cloudBook.audioChapterCount,
+      audioChapterCount: cloudBook.audioChapterCount ?? localBook.audioChapterCount,
+      localAudioChapterCount,
       updatedAt: cloudBook.updatedAt || localBook.updatedAt,
     }
   })
+}
+
+export function bookCachedAudioCount(book: Pick<BookSummary, 'audioChapterCount' | 'localAudioChapterCount'> | null | undefined) {
+  return book?.localAudioChapterCount ?? book?.audioChapterCount ?? 0
 }
 
 function findMatchingLocalBook(cloudBook: BookSummary, localBooks: BookSummary[]) {
