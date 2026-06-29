@@ -102,6 +102,20 @@ server {
 
     client_max_body_size 50m;
 
+    location ^~ /admin/ui {
+        allow 192.168.0.0/16;
+        allow 10.0.0.0/8;
+        allow 172.16.0.0/12;
+        allow 127.0.0.1;
+        deny all;
+
+        proxy_pass http://127.0.0.1:6180;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+    }
+
     location / {
         proxy_pass http://127.0.0.1:6180;
         proxy_http_version 1.1;
@@ -129,6 +143,21 @@ server {
     proxy_buffering off;
     proxy_request_buffering off;
 
+    location ^~ /admin/ui {
+        allow 192.168.0.0/16;
+        allow 10.0.0.0/8;
+        allow 172.16.0.0/12;
+        allow 127.0.0.1;
+        deny all;
+
+        proxy_pass http://gateway:6180;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto https;
+    }
+
     location / {
         proxy_pass http://gateway:6180;
         proxy_http_version 1.1;
@@ -139,6 +168,8 @@ server {
     }
 }
 ```
+
+`/admin/ui` 是管理后台静态入口，建议始终在 Nginx 层限制为内网访问。上面的 `location ^~ /admin/ui` 必须放在通用 `location /` 前面；管理 API 仍由 Gateway 的 admin bearer token 保护。
 
 对应端口关系：
 
@@ -163,6 +194,8 @@ curl -H "Authorization: Bearer $GATEWAY_MOBILE_ACCESS_TOKEN" \
 curl http://192.168.88.100:6180/health
 curl -H "Authorization: Bearer $GATEWAY_ADMIN_ACCESS_TOKEN" \
   http://192.168.88.100:6180/capabilities
+
+curl -kI https://novel.gwaves.net:8888/admin/ui
 ```
 
-`/health` 可公开访问；`/admin/*` 和后台 AI/RAG 接口使用 admin bearer token，`/auth/*`、`/mobile/*` 和 MP3 接口使用 mobile bearer token。未设置 `GATEWAY_ADMIN_ACCESS_TOKEN` 或 `GATEWAY_MOBILE_ACCESS_TOKEN` 时，会分别回退到 `GATEWAY_DEV_ACCESS_TOKEN`，方便开发期沿用旧配置。
+`/health` 可公开访问；`/admin/ui` 由 Nginx 内网 ACL 保护；`/admin/*` 和后台 AI/RAG 接口使用 admin bearer token，`/auth/*`、`/mobile/*` 和 MP3 接口使用 mobile bearer token。未设置 `GATEWAY_ADMIN_ACCESS_TOKEN` 或 `GATEWAY_MOBILE_ACCESS_TOKEN` 时，会分别回退到 `GATEWAY_DEV_ACCESS_TOKEN`，方便开发期沿用旧配置。
