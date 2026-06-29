@@ -1929,6 +1929,9 @@ function getEmbeddingTargetChapterIds(bookId, model, force = false) {
 const EMBEDDING_BATCH_SIZE_OLLAMA = 5
 const EMBEDDING_BATCH_SIZE_OPENAI = 5
 const EMBEDDING_REQUEST_TIMEOUT_MS = 300000
+const EMBEDDING_TRANSIENT_RETRY_STATUSES = new Set([408, 429, 500, 502, 503, 504])
+const EMBEDDING_MAX_ATTEMPTS = 4
+const EMBEDDING_RETRY_BASE_DELAY_MS = 1000
 
 async function callOllamaEmbedding(text, config) {
   const baseUrl = (config?.baseUrl || 'http://127.0.0.1:11434').trim().replace(/\/+$/, '')
@@ -1974,33 +1977,38 @@ async function callOpenAIEmbedding(text, config) {
     headers.Authorization = `Bearer ${apiKey.trim()}`
   }
 
-  const controller = new AbortController()
-  const timeoutId = setTimeout(() => controller.abort(), EMBEDDING_REQUEST_TIMEOUT_MS)
+  return retryEmbeddingRequest(async (attempt) => {
+    const controller = new AbortController()
+    const timeoutId = setTimeout(() => controller.abort(), EMBEDDING_REQUEST_TIMEOUT_MS)
 
-  try {
-    const response = await fetch(`${baseUrl}/embeddings`, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({ model, input: text, encoding_format: 'float' }),
-      signal: controller.signal,
-    })
+    try {
+      const response = await fetch(`${baseUrl}/embeddings`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ model, input: text, encoding_format: 'float' }),
+        signal: controller.signal,
+      })
 
-    clearTimeout(timeoutId)
+      clearTimeout(timeoutId)
 
-    if (!response.ok) {
-      throw new Error(`OpenAI embedding failed: ${response.status} ${response.statusText}`)
+      if (!response.ok) {
+        const error = new Error(`OpenAI embedding failed: ${response.status} ${response.statusText}`)
+        error.status = response.status
+        error.attempt = attempt
+        throw error
+      }
+
+      const data = await response.json()
+      const embedding = data?.data?.[0]?.embedding
+      if (!Array.isArray(embedding)) {
+        throw new Error('OpenAI embedding response missing embedding array.')
+      }
+      return embedding
+    } catch (error) {
+      clearTimeout(timeoutId)
+      throw error
     }
-
-    const data = await response.json()
-    const embedding = data?.data?.[0]?.embedding
-    if (!Array.isArray(embedding)) {
-      throw new Error('OpenAI embedding response missing embedding array.')
-    }
-    return embedding
-  } catch (error) {
-    clearTimeout(timeoutId)
-    throw error
-  }
+  })
 }
 
 async function generateEmbedding(text, config) {
@@ -2009,6 +2017,38 @@ async function generateEmbedding(text, config) {
     return callOpenAIEmbedding(text, config)
   }
   return callOllamaEmbedding(text, config)
+}
+
+async function retryEmbeddingRequest(request) {
+  let lastError
+  for (let attempt = 1; attempt <= EMBEDDING_MAX_ATTEMPTS; attempt += 1) {
+    try {
+      return await request(attempt)
+    } catch (error) {
+      lastError = error
+      if (attempt >= EMBEDDING_MAX_ATTEMPTS || !isRetryableEmbeddingError(error)) {
+        throw error
+      }
+      await sleep(embeddingRetryDelay(attempt))
+    }
+  }
+  throw lastError
+}
+
+function isRetryableEmbeddingError(error) {
+  if (error?.name === 'AbortError') return true
+  if (typeof error?.status === 'number') return EMBEDDING_TRANSIENT_RETRY_STATUSES.has(error.status)
+  const message = error instanceof Error ? error.message : String(error || '')
+  return /\b(408|429|500|502|503|504)\b|Bad Gateway|ECONNRESET|ETIMEDOUT|timeout/i.test(message)
+}
+
+function embeddingRetryDelay(attempt) {
+  const jitter = Math.floor(Math.random() * 300)
+  return EMBEDDING_RETRY_BASE_DELAY_MS * 2 ** (attempt - 1) + jitter
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms))
 }
 
 const LLM_CHAT_TIMEOUT_MS = 300000

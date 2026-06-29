@@ -61,6 +61,18 @@
 
 ## Phase 4：Gateway 任务化
 
+- [x] 新增独立 `content-pipeline` Web service，不把生产调度职责塞进 Gateway。
+- [x] Web service 可启动 CLI job、保存任务记录、捕获日志，并读取 manifest 显示阶段状态。
+- [x] 提供本地 Web 控制台，支持已有 `bookId` 生产、文件导入、现有 manifest 续跑。
+
+验收标准：
+
+- 可以在浏览器中启动内容生产任务。
+- 可以看到 job 状态、manifest 阶段状态和实时日志。
+- Gateway 仍只承担移动端同步、AI 转发、package/audio 分发等职责。
+
+## Phase 5：Gateway 任务化
+
 - Gateway 增加上传入口，保存原始文件与任务记录。
 - Gateway 任务状态与 production manifest 对齐。
 - 生产进程可轮询或接收 Gateway job。

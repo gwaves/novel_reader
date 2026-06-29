@@ -1,0 +1,57 @@
+{
+  "bookId": "mqxe7ya6-yiulrd3l",
+  "title": "大唐双龙传",
+  "mainDbPath": "~/.novel_reader/novel_reader.sqlite",
+  "source": {
+    "type": "main-db"
+  },
+  "stages": [
+    "summary",
+    "kg",
+    "embedding",
+    "audio",
+    "package",
+    "publish",
+    "verify"
+  ],
+  "llm": {
+    "provider": "openai-compatible",
+    "baseUrl": "http://llm-provider.example/v1",
+    "apiKey": "LLM_API_KEY_PLACEHOLDER",
+    "model": "qwen3.6-27b",
+    "concurrency": 8,
+    "retries": 3,
+    "timeoutMs": 300000
+  },
+  "summary": {
+    "limit": 0
+  },
+  "kg": {
+    "limit": 0
+  },
+  "embedding": {
+    "provider": "ollama",
+    "baseUrl": "http://192.168.88.100:11434",
+    "model": "qwen3-embedding:8b",
+    "concurrency": 16,
+    "retries": 5,
+    "timeoutMs": 300000
+  },
+  "audio": {
+    "ttsConfig": "~/.novel_reader/tts-director.config.json",
+    "ttsConcurrency": 16,
+    "ttsChapters": 2,
+    "resume": true,
+    "strict": true
+  },
+  "publish": {
+    "dryRun": false
+  },
+  "gateway": {
+    "host": "gateway.example.lan",
+    "user": "gwaves",
+    "root": "/home/gwaves/novel-reader-gateway",
+    "url": "https://gateway.example.lan:8888",
+    "token": "GATEWAY_TOKEN_PLACEHOLDER"
+  }
+}

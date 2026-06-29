@@ -478,6 +478,77 @@ function normalizeChapterTitle(title: string): string {
   return title.replace(/^正文\s+/, '').trim()
 }
 
+function splitHeadingLine(line: string): { title: string; contentPrefix: string } {
+  const normalizedLine = normalizeChapterTitle(line)
+  const headingMatch = normalizedLine.match(
+    /^((?:第\s*[0-9零一二三四五六七八九十百千万亿〇○]+\s*[集卷部]\s+)?第\s*[0-9零一二三四五六七八九十百千万亿〇○]+\s*[章卷节回])([\s\S]*)$/,
+  )
+
+  if (!headingMatch) {
+    return { title: normalizedLine, contentPrefix: '' }
+  }
+
+  const headingPrefix = headingMatch[1]
+  const headingText = headingMatch[2] ?? ''
+  const proseMarkers = ['却说', '话说', '且说', '诗曰', '原来', '当下', '却表', '却才']
+  const markerIndex = proseMarkers
+    .map((marker) => headingText.indexOf(marker))
+    .filter((index) => index >= 4)
+    .sort((a, b) => a - b)[0]
+
+  if (markerIndex == null) {
+    return { title: normalizedLine, contentPrefix: '' }
+  }
+
+  return {
+    title: `${headingPrefix}${headingText.slice(0, markerIndex)}`.trim(),
+    contentPrefix: headingText.slice(markerIndex).trim(),
+  }
+}
+
+type ChapterTitleAnomaly = {
+  chapterIndex: number
+  headingLine: string
+  suspectedTitle: string
+  suspectedContentPrefix: string
+  reason: string
+}
+
+type ChapterTitleRepairSuggestion = {
+  chapterIndex: number
+  isAnomaly: boolean
+  fixedTitle: string
+  contentPrefix: string
+  confidence: number
+  reason: string
+}
+
+export function detectChapterTitleAnomalies(rawText: string): ChapterTitleAnomaly[] {
+  const matches = Array.from(rawText.matchAll(CHAPTER_PATTERN))
+
+  return matches
+    .map((match, index) => {
+      const headingLine = normalizeChapterTitle(String(match[0] ?? '').trim())
+      const split = splitHeadingLine(headingLine)
+      const hasQuotedDialogue = /["“”][^"“”]{2,80}["“”]/.test(headingLine)
+      const isVeryLong = headingLine.length > 80
+      const hasInlineProse = Boolean(split.contentPrefix)
+
+      if (!hasInlineProse && !isVeryLong && !hasQuotedDialogue) return null
+
+      return {
+        chapterIndex: index + 1,
+        headingLine,
+        suspectedTitle: split.title,
+        suspectedContentPrefix: split.contentPrefix,
+        reason: hasInlineProse
+          ? '章节标题行疑似粘连正文起手句。'
+          : '章节标题行过长或包含对白，疑似把正文误并入标题。',
+      }
+    })
+    .filter((item): item is ChapterTitleAnomaly => Boolean(item))
+}
+
 export function splitChapters(rawText: string): Chapter[] {
   const matches = Array.from(rawText.matchAll(CHAPTER_PATTERN))
 
@@ -490,13 +561,14 @@ export function splitChapters(rawText: string): Chapter[] {
     const end = idx < matches.length - 1 ? (matches[idx + 1].index ?? rawText.length) : rawText.length
     const block = rawText.slice(start, end).trim()
     const lines = block.split(/\r?\n/)
-    const title = normalizeChapterTitle(lines[0].trim())
-    const content = lines.slice(1).join('\n').trim()
+    const heading = splitHeadingLine(lines[0].trim())
+    const contentLines = heading.contentPrefix ? [heading.contentPrefix, ...lines.slice(1)] : lines.slice(1)
+    const content = contentLines.join('\n').trim()
 
     return {
-      id: `${idx + 1}-${title.slice(0, 32)}`,
+      id: `${idx + 1}-${heading.title.slice(0, 32)}`,
       index: idx + 1,
-      title,
+      title: heading.title,
       content,
       wordCount: countWords(content),
     }
@@ -1014,6 +1086,168 @@ function parseFormatAnalysis(raw: string): FormatAnalysis | null {
   }
 }
 
+function parseChapterTitleRepairSuggestions(raw: string): ChapterTitleRepairSuggestion[] {
+  const jsonText = raw
+    .trim()
+    .replace(/^```json\s*/i, '')
+    .replace(/^```\s*/i, '')
+    .replace(/```$/i, '')
+    .trim()
+
+  try {
+    const parsed = parseJsonObject(jsonText) as Record<string, unknown>
+    const repairs = Array.isArray(parsed.repairs) ? parsed.repairs : []
+
+    return repairs
+      .map((item) => {
+        const repair = item as Record<string, unknown>
+        const chapterIndex = Number(repair.chapterIndex)
+        const fixedTitle = typeof repair.fixedTitle === 'string' ? repair.fixedTitle.trim() : ''
+        const contentPrefix = typeof repair.contentPrefix === 'string' ? repair.contentPrefix.trim() : ''
+        const confidence = Number(repair.confidence)
+
+        if (!Number.isInteger(chapterIndex) || chapterIndex < 1 || !fixedTitle || !Number.isFinite(confidence)) {
+          return null
+        }
+
+        return {
+          chapterIndex,
+          isAnomaly: repair.isAnomaly === true,
+          fixedTitle,
+          contentPrefix,
+          confidence,
+          reason: typeof repair.reason === 'string' ? repair.reason : '',
+        }
+      })
+      .filter((item): item is ChapterTitleRepairSuggestion => Boolean(item))
+  } catch {
+    return []
+  }
+}
+
+function buildChapterTitleRepairPrompt(anomalies: ChapterTitleAnomaly[], chapters: Chapter[]): string {
+  const candidates = anomalies
+    .slice(0, 8)
+    .map((anomaly) => {
+      const chapter = chapters[anomaly.chapterIndex - 1]
+      const previousTitle = chapters[anomaly.chapterIndex - 2]?.title ?? ''
+      const nextTitle = chapters[anomaly.chapterIndex]?.title ?? ''
+
+      return {
+        chapterIndex: anomaly.chapterIndex,
+        previousTitle,
+        headingLine: anomaly.headingLine,
+        currentParsedTitle: chapter?.title ?? '',
+        currentContentStart: chapter?.content.slice(0, 500) ?? '',
+        nextTitle,
+        localGuess: {
+          fixedTitle: anomaly.suspectedTitle,
+          contentPrefix: anomaly.suspectedContentPrefix,
+          reason: anomaly.reason,
+        },
+      }
+    })
+
+  return `你是一名中文小说章节切分审校助手。下面是程序检测出的可疑章节标题行，可能存在“章节标题和正文粘在同一行”的情况。
+
+请判断每个候选是否异常，并给出修正建议。只返回 JSON 对象，不要输出解释或 Markdown。
+
+返回格式：
+{
+  "repairs": [
+    {
+      "chapterIndex": 25,
+      "isAnomaly": true,
+      "fixedTitle": "第二十五回\u3000镇元仙赶捉取经僧\u3000孙行者大闹五庄观",
+      "contentPrefix": "却说他兄弟三众，到了殿上",
+      "confidence": 0.95,
+      "reason": "从“却说”开始进入章回小说正文叙述"
+    }
+  ]
+}
+
+要求：
+- fixedTitle 必须是候选 headingLine 开头的真实章节标题，不要改写用字。
+- contentPrefix 必须是 headingLine 中紧跟标题后的正文开头；如果没有正文粘连，返回空字符串。
+- 只有确实异常时 isAnomaly 才为 true。
+- confidence 用 0 到 1 的数字。
+
+候选：
+${JSON.stringify(candidates, null, 2)}`
+}
+
+async function generateJsonTextWithModel(
+  prompt: string,
+  modelConfig: ModelConfigDraft,
+  systemPrompt: string,
+): Promise<string | null> {
+  if (modelConfig.aiProvider === 'ollama') {
+    const model = modelConfig.ollamaModel.trim()
+    if (!model) return null
+
+    const response = await fetch(`${OLLAMA_BASE_URL}/api/generate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model,
+        prompt,
+        stream: false,
+        format: 'json',
+        options: { temperature: 0.1 },
+      }),
+    })
+
+    if (!response.ok) return null
+
+    const data = (await response.json()) as { response?: string }
+    return data.response ?? '{}'
+  }
+
+  const activeConfig = getActiveOpenAIConfig(modelConfig)
+  if (!activeConfig) return null
+
+  const normalizedBaseUrl = activeConfig.baseUrl.trim().replace(/\/+$/, '')
+  const model = activeConfig.model.trim()
+  if (!normalizedBaseUrl || !model) return null
+
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+  }
+  if (activeConfig.apiKey.trim()) {
+    headers.Authorization = `Bearer ${activeConfig.apiKey.trim()}`
+  }
+
+  const requestBody: Record<string, unknown> = {
+    model,
+    messages: [
+      {
+        role: 'system',
+        content: systemPrompt,
+      },
+      { role: 'user', content: prompt },
+    ],
+    temperature: 0.1,
+    response_format: { type: 'json_object' },
+  }
+
+  if (!modelConfig.thinkingEnabled) {
+    requestBody.chat_template_kwargs = { enable_thinking: false }
+  }
+
+  const response = await fetch(`${normalizedBaseUrl}/chat/completions`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(requestBody),
+  })
+
+  if (!response.ok) return null
+
+  const data = (await response.json()) as {
+    choices?: Array<{ message?: { content?: string } }>
+  }
+  return data.choices?.[0]?.message?.content ?? '{}'
+}
+
 async function analyzeChapterFormats(
   rawText: string,
   modelConfig: ModelConfigDraft,
@@ -1027,77 +1261,86 @@ async function analyzeChapterFormats(
   const prompt = buildFormatAnalysisPrompt(sample)
 
   try {
-    let responseText: string
-
-    if (modelConfig.aiProvider === 'ollama') {
-      const model = modelConfig.ollamaModel.trim()
-      if (!model) return null
-
-      const response = await fetch(`${OLLAMA_BASE_URL}/api/generate`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          model,
-          prompt,
-          stream: false,
-          format: 'json',
-          options: { temperature: 0.2 },
-        }),
-      })
-
-      if (!response.ok) return null
-
-      const data = (await response.json()) as { response?: string }
-      responseText = data.response ?? '{}'
-    } else {
-      const activeConfig = getActiveOpenAIConfig(modelConfig)
-      if (!activeConfig) return null
-
-      const normalizedBaseUrl = activeConfig.baseUrl.trim().replace(/\/+$/, '')
-      const model = activeConfig.model.trim()
-      if (!normalizedBaseUrl || !model) return null
-
-      const headers: Record<string, string> = {
-        'Content-Type': 'application/json',
-      }
-      if (activeConfig.apiKey.trim()) {
-        headers.Authorization = `Bearer ${activeConfig.apiKey.trim()}`
-      }
-
-      const requestBody: Record<string, unknown> = {
-        model,
-        messages: [
-          {
-            role: 'system',
-            content: '你是文本处理助手。你必须只输出符合要求的 JSON。',
-          },
-          { role: 'user', content: prompt },
-        ],
-        temperature: 0.2,
-        response_format: { type: 'json_object' },
-      }
-
-      if (!modelConfig.thinkingEnabled) {
-        requestBody.chat_template_kwargs = { enable_thinking: false }
-      }
-
-      const response = await fetch(`${normalizedBaseUrl}/chat/completions`, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify(requestBody),
-      })
-
-      if (!response.ok) return null
-
-      const data = (await response.json()) as {
-        choices?: Array<{ message?: { content?: string } }>
-      }
-      responseText = data.choices?.[0]?.message?.content ?? '{}'
-    }
+    const responseText = await generateJsonTextWithModel(
+      prompt,
+      modelConfig,
+      '你是文本处理助手。你必须只输出符合要求的 JSON。',
+    )
+    if (!responseText) return null
 
     return parseFormatAnalysis(responseText)
   } catch {
     return null
+  }
+}
+
+function normalizeForBoundaryCheck(value: string): string {
+  return value.replace(/\s/g, '')
+}
+
+export function applyChapterTitleRepairSuggestions(
+  chapters: Chapter[],
+  suggestions: ChapterTitleRepairSuggestion[],
+): Chapter[] {
+  if (!suggestions.length) return chapters
+
+  const suggestionByIndex = new Map(
+    suggestions
+      .filter((suggestion) => suggestion.isAnomaly && suggestion.confidence >= 0.65)
+      .map((suggestion) => [suggestion.chapterIndex, suggestion]),
+  )
+
+  if (!suggestionByIndex.size) return chapters
+
+  return chapters.map((chapter) => {
+    const suggestion = suggestionByIndex.get(chapter.index)
+    if (!suggestion) return chapter
+
+    const fixedTitle = normalizeChapterTitle(suggestion.fixedTitle)
+    if (!fixedTitle || fixedTitle.length >= chapter.title.length) return chapter
+
+    const currentTitle = normalizeChapterTitle(chapter.title)
+    if (!currentTitle.startsWith(fixedTitle)) return chapter
+
+    const titleTail = currentTitle.slice(fixedTitle.length).trim()
+    const contentPrefix = suggestion.contentPrefix.trim()
+    if (contentPrefix && titleTail && !normalizeForBoundaryCheck(titleTail).startsWith(normalizeForBoundaryCheck(contentPrefix))) {
+      return chapter
+    }
+
+    const content = [titleTail, chapter.content].filter(Boolean).join('\n').trim()
+    if (!content) return chapter
+
+    return {
+      ...chapter,
+      id: `${chapter.index}-${fixedTitle.slice(0, 32)}`,
+      title: fixedTitle,
+      content,
+      wordCount: countWords(content),
+    }
+  })
+}
+
+async function repairChapterTitleAnomaliesWithLlm(
+  rawText: string,
+  chapters: Chapter[],
+  modelConfig: ModelConfigDraft,
+): Promise<Chapter[]> {
+  const anomalies = detectChapterTitleAnomalies(rawText)
+  if (!anomalies.length) return chapters
+
+  try {
+    const prompt = buildChapterTitleRepairPrompt(anomalies, chapters)
+    const responseText = await generateJsonTextWithModel(
+      prompt,
+      modelConfig,
+      '你是中文小说章节切分审校助手。你必须只输出符合要求的 JSON。',
+    )
+    if (!responseText) return chapters
+
+    return applyChapterTitleRepairSuggestions(chapters, parseChapterTitleRepairSuggestions(responseText))
+  } catch {
+    return chapters
   }
 }
 
@@ -1373,6 +1616,29 @@ function makeChapterFromText(index: number, title: string, text: string): Chapte
   }
 }
 
+function isReadableEpubText(text: string): boolean {
+  const normalized = text.replace(/\s+/g, ' ').trim()
+  if (!normalized) return false
+  if (countWords(normalized) < 80 && /^(?:cover|table of contents|目录)(?:\b|$)/i.test(normalized)) {
+    return false
+  }
+  return true
+}
+
+function selectEpubChapters(spineChapters: Chapter[]): Chapter[] {
+  const fullText = spineChapters.map((chapter) => chapter.content).join('\n')
+  const textChapters = splitChapters(fullText)
+  const spineWordCount = spineChapters.reduce((sum, chapter) => sum + chapter.wordCount, 0)
+  const textWordCount = textChapters.reduce((sum, chapter) => sum + chapter.wordCount, 0)
+  const preservesMostContent = spineWordCount === 0 || textWordCount / spineWordCount > 0.85
+
+  if (textChapters.length >= spineChapters.length * 2 && preservesMostContent) {
+    return textChapters
+  }
+
+  return spineChapters
+}
+
 async function parseEpubFile(file: File): Promise<ImportedBookContent> {
   const entries = readZipEntries(await file.arrayBuffer())
   const containerXml = await readZipText(entries, 'META-INF/container.xml')
@@ -1410,7 +1676,7 @@ async function parseEpubFile(file: File): Promise<ImportedBookContent> {
 
     const html = await readZipText(entries, item.href)
     const { heading, text } = extractHtmlText(html)
-    if (!text) continue
+    if (!text || !isReadableEpubText(text)) continue
 
     chapters.push(makeChapterFromText(chapters.length + 1, heading || stripExtension(item.href), text))
   }
@@ -1419,7 +1685,7 @@ async function parseEpubFile(file: File): Promise<ImportedBookContent> {
     throw new Error('EPUB 中没有识别到可阅读章节。')
   }
 
-  return { title: metadataTitle, chapters }
+  return { title: metadataTitle, chapters: selectEpubChapters(chapters) }
 }
 
 async function parseImportedBook(
@@ -1440,6 +1706,10 @@ async function parseImportedBook(
     if (hybridChapters && hybridChapters.length > chapters.length && !isBadSplit(hybridChapters, cleanedText)) {
       chapters = hybridChapters
     }
+  }
+
+  if (modelConfig) {
+    chapters = await repairChapterTitleAnomaliesWithLlm(cleanedText, chapters, modelConfig)
   }
 
   return {

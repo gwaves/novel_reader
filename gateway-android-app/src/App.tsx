@@ -341,8 +341,7 @@ function App() {
   const displaySummaryCoverage = hasImportedPackage(visibleFullPackageCache) ? 1 : inferredSummaryCoverage(selectedBook, bookPackage, visibleFullPackageCache)
   const displayKgCoverage = inferredKgCoverage(selectedBook, bookPackage, visibleFullPackageCache)
   const displayEmbeddingCoverage = inferredEmbeddingCoverage(selectedBook, bookPackage, visibleFullPackageCache)
-  const displayAudioChapterCount =
-    visibleAudioChapters.length || visibleCachedAudioIds.size || selectedBook?.audioChapterCount || 0
+  const displayCloudAudioChapterCount = visibleAudioChapters.length || selectedBook?.audioChapterCount || 0
   const cacheSummaries = useMemo(() => buildBookCacheSummaries(books, cacheVersion), [books, cacheVersion])
   const currentAudio = useMemo(
     () => visibleAudioChapters.find((chapter) => chapter.chapterId === currentChapter?.id) ?? null,
@@ -380,6 +379,7 @@ function App() {
   const audioManifestRef = useRef<AudioManifest | null>(null)
   const pendingAudioStartTimeRef = useRef<number | null>(null)
   const pendingAudioShouldPlayRef = useRef(false)
+  const pendingAutoPlayChapterIdRef = useRef<string | null>(null)
   const autoConnectAttemptedRef = useRef(false)
   const autoRestoreAttemptedRef = useRef(false)
   const lastReaderScrollYRef = useRef(0)
@@ -424,6 +424,17 @@ function App() {
       void stopSpeechReading()
     }
   }, [currentAudio, ttsSettings.engine])
+
+  useEffect(() => {
+    const pendingChapterId = pendingAutoPlayChapterIdRef.current
+    if (!pendingChapterId || currentChapter?.id !== pendingChapterId) return
+    pendingAutoPlayChapterIdRef.current = null
+    if (!currentAudio) {
+      window.setTimeout(() => setMessage('下一章暂无 MP3'), 0)
+      return
+    }
+    void playCurrentAudio({ autoplay: true })
+  }, [currentAudio, currentChapter?.id])
 
   useEffect(() => {
     void clearLegacyAudioIndexedDbCache()
@@ -570,6 +581,7 @@ function App() {
         setFullPackageStatus(cachedFullPackage.importStats ? 'imported' : 'downloaded')
       }
       setBooks(nextBooks)
+      void refreshBookAudioCounts(nextBooks)
       const nextSelectedBookId = nextBooks.some((book) => book.id === selectedBookId) ? selectedBookId : nextBooks[0]?.id
       const cachedForSelectedBook = nextSelectedBookId ? loadFullPackageCache(nextSelectedBookId) : null
       setFullPackageCache(cachedForSelectedBook)
@@ -765,6 +777,25 @@ function App() {
     } finally {
       setLoadingAudio(false)
     }
+  }
+
+  async function refreshBookAudioCounts(sourceBooks: BookSummary[]) {
+    const booksWithAudioCounts = await Promise.all(
+      sourceBooks.map(async (book) => {
+        try {
+          const chapters = await fetchAudioCatalog(book.id)
+          return {
+            ...book,
+            audioChapterCount: chapters.length,
+          }
+        } catch {
+          return book
+        }
+      }),
+    )
+    setBooks((currentBooks) =>
+      currentBooks.map((book) => booksWithAudioCounts.find((updatedBook) => updatedBook.id === book.id) ?? book),
+    )
   }
 
   async function playCurrentAudio(options: { autoplay?: boolean; sourcePosition?: number | null; startTime?: number } = {}) {
@@ -1080,6 +1111,16 @@ function App() {
     if (selectedBookId) {
       persistReadingProgress(selectedBookId, chapterId, 0)
     }
+  }
+
+  function handleChapterAudioEnded() {
+    setChapterAudioPlaying(false)
+    if (!nextChapter) {
+      setMessage('本书 MP3 已播放完')
+      return
+    }
+    pendingAutoPlayChapterIdRef.current = nextChapter.id
+    selectChapter(nextChapter.id)
   }
 
   function openSearchResult(chapterId: string) {
@@ -1410,7 +1451,8 @@ function App() {
     const containingIndex = segments.findIndex((segment) => sourcePosition >= segment.startChar && sourcePosition < segment.endChar)
     if (containingIndex >= 0) return containingIndex
 
-    let nearest: { index: number; distance: number } | null = null
+    let nearestIndex: number | null = null
+    let nearestDistance = Number.POSITIVE_INFINITY
     segments.forEach((segment, index) => {
       const distance =
         sourcePosition < segment.startChar
@@ -1418,9 +1460,12 @@ function App() {
           : sourcePosition > segment.endChar
             ? sourcePosition - segment.endChar
             : 0
-      if (!nearest || distance < nearest.distance) nearest = { index, distance }
+      if (distance < nearestDistance) {
+        nearestIndex = index
+        nearestDistance = distance
+      }
     })
-    return nearest?.index ?? null
+    return nearestIndex
   }
 
   function audioEntryKey(entry: AudioTimelineEntry) {
@@ -1798,17 +1843,20 @@ function App() {
               </div>
             ) : (
               <div className="book-items">
-                {books.map((book) => (
-                  <button
-                    className={book.id === selectedBookId ? 'book-row active' : 'book-row'}
-                    type="button"
-                    key={book.id}
-                    onClick={() => selectBook(book.id)}
-                  >
-                    <span className="book-title">{book.title}</span>
-                    <span className="book-meta">{formatBookMeta(book)}</span>
-                  </button>
-                ))}
+                {books.map((book) => {
+                  const audioCount = book.id === selectedBookId ? displayCloudAudioChapterCount : undefined
+                  return (
+                    <button
+                      className={book.id === selectedBookId ? 'book-row active' : 'book-row'}
+                      type="button"
+                      key={book.id}
+                      onClick={() => selectBook(book.id)}
+                    >
+                      <span className="book-title">{book.title}</span>
+                      <span className="book-meta">{formatBookMeta(book, audioCount)}</span>
+                    </button>
+                  )
+                })}
               </div>
             )}
           </div>
@@ -1830,8 +1878,8 @@ function App() {
                     <dd>{selectedBook.wordCount ? selectedBook.wordCount.toLocaleString('zh-CN') : '未统计'}</dd>
                   </div>
                   <div>
-                    <dt>音频</dt>
-                    <dd>{displayAudioChapterCount} 章</dd>
+                    <dt>云端音频</dt>
+                    <dd>{displayCloudAudioChapterCount} 章</dd>
                   </div>
                   <div>
                     <dt>更新</dt>
@@ -1872,13 +1920,13 @@ function App() {
                         : '下载完整数据包'}
                 </button>
                 <div className="package-line">
-                  <span>Audio</span>
+                  <span>本机音频</span>
                   <strong>
                     {visibleAudioSyncProgress
                       ? `${visibleAudioSyncProgress.done}/${visibleAudioSyncProgress.total}`
                       : loadingAudio
                         ? '同步中'
-                        : `${visibleCachedAudioIds.size}/${visibleAudioChapters.length || selectedBook.audioChapterCount || 0} 已缓存`}
+                        : `${visibleCachedAudioIds.size}/${displayCloudAudioChapterCount} 已缓存`}
                   </strong>
                 </div>
                 <button
@@ -2185,8 +2233,8 @@ function App() {
                 <dd>{bookPackage ? packageSummary(bookPackage) : '未加载'}</dd>
               </div>
               <div>
-                <dt>Audio</dt>
-                <dd>{visibleCachedAudioIds.size}/{visibleAudioChapters.length || selectedBook?.audioChapterCount || 0} 章</dd>
+                <dt>本机音频</dt>
+                <dd>{visibleCachedAudioIds.size}/{visibleAudioChapters.length || selectedBook?.audioChapterCount || 0} 章已缓存</dd>
               </div>
             </dl>
           </section>
@@ -2323,7 +2371,7 @@ function App() {
             setChapterAudioPlaying(true)
           }}
           onPause={() => setChapterAudioPlaying(false)}
-          onEnded={() => setChapterAudioPlaying(false)}
+          onEnded={handleChapterAudioEnded}
         />
       ) : null}
 
@@ -2582,7 +2630,7 @@ function searchGraphPackage(bookPackage: BookPackage | null, query: string): Gra
         score,
       }
     })
-    .filter((result): result is GraphResult & { score: number } => Boolean(result))
+    .filter(isPresent)
 
   const relationResults = relations
     .map((relation) => {
@@ -2609,7 +2657,7 @@ function searchGraphPackage(bookPackage: BookPackage | null, query: string): Gra
         score,
       }
     })
-    .filter((result): result is GraphResult & { score: number } => Boolean(result))
+    .filter(isPresent)
 
   const evidenceResults = [...entityMentions, ...relationMentions]
     .map((mention) => {
@@ -2629,7 +2677,7 @@ function searchGraphPackage(bookPackage: BookPackage | null, query: string): Gra
         score,
       }
     })
-    .filter((result): result is GraphResult & { score: number } => Boolean(result))
+    .filter(isPresent)
 
   return [...entityResults, ...relationResults, ...evidenceResults]
     .sort((left, right) => right.score - left.score)
@@ -2694,6 +2742,10 @@ function readStringArray(value: unknown) {
 
 function readNumber(value: unknown) {
   return typeof value === 'number' && Number.isFinite(value) ? value : undefined
+}
+
+function isPresent<T>(value: T | null | undefined): value is T {
+  return value != null
 }
 
 function TextContent({ text, activeEntry }: { text: string; activeEntry?: AudioTimelineEntry | null }) {
@@ -3244,10 +3296,10 @@ function connectionLabel(state: ConnectionState) {
   return '未连接'
 }
 
-function formatBookMeta(book: BookSummary) {
+function formatBookMeta(book: BookSummary, audioChapterCount = book.audioChapterCount) {
   const parts = [`${book.chapterCount} 章`]
   if (book.author) parts.push(book.author)
-  if (book.audioChapterCount) parts.push(`${book.audioChapterCount} 音频`)
+  if (audioChapterCount) parts.push(`${audioChapterCount} 云端音频`)
   return parts.join(' · ')
 }
 

@@ -3,6 +3,10 @@
   "sourceApi": "http://127.0.0.1:5174",
   "gatewayUrl": "http://127.0.0.1:6180",
   "gatewayAudioDir": "gateway/audio",
+  "gatewayRemoteHost": "",
+  "gatewayRemoteUser": "",
+  "gatewayRemoteAudioDir": "",
+  "gatewayRemoteSshPort": "",
   "deviceName": "Content Pipeline",
   "offlineScanner": {
     "script": "scripts/offline-scanner.mjs"

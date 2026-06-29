@@ -22,11 +22,19 @@ export async function forwardChatCompletion(config: GatewayConfig, body: unknown
 
 export async function forwardEmbeddings(config: GatewayConfig, body: unknown) {
   const upstream = config.upstreams.embeddings
-  if (!upstream.baseUrl || !upstream.apiKey) {
-    throw new GatewayHttpError(503, 'embeddings_not_configured', 'OpenAI embedding upstream is not configured.')
+  const provider = normalizeEmbeddingProvider(upstream.provider)
+  if (!upstream.baseUrl || (provider !== 'ollama' && !upstream.apiKey)) {
+    throw new GatewayHttpError(503, 'embeddings_not_configured', `${provider === 'ollama' ? 'Ollama' : 'OpenAI-compatible'} embedding upstream is not configured.`)
   }
   if (!isRecord(body) || body.input === undefined) {
     throw new GatewayHttpError(400, 'invalid_embedding_request', 'Embedding request must include input.')
+  }
+  if (provider === 'ollama') {
+    return postOllamaEmbeddings({
+      baseUrl: upstream.baseUrl,
+      body: withDefaultModel(body, upstream.model),
+      timeoutMs: config.upstreamTimeoutMs,
+    })
   }
 
   return postOpenAiJson({
@@ -49,6 +57,45 @@ export async function createEmbedding(config: GatewayConfig, input: string) {
     throw new GatewayHttpError(502, 'embedding_upstream_invalid_response', 'OpenAI-compatible embedding upstream returned no embedding.')
   }
   return first.embedding.filter((value): value is number => typeof value === 'number' && Number.isFinite(value))
+}
+
+async function postOllamaEmbeddings({
+  baseUrl,
+  body,
+  timeoutMs,
+}: {
+  baseUrl: string
+  body: Record<string, unknown>
+  timeoutMs: number
+}) {
+  const model = typeof body.model === 'string' && body.model.trim() ? body.model.trim() : ''
+  if (!model) {
+    throw new GatewayHttpError(400, 'invalid_embedding_request', 'Ollama embedding request must include model or configure GATEWAY_EMBEDDING_MODEL.')
+  }
+  const inputs = normalizeEmbeddingInputs(body.input)
+  const data = []
+  for (const [index, input] of inputs.entries()) {
+    const response = await postOpenAiJson({
+      baseUrl,
+      path: '/api/embeddings',
+      body: { model, prompt: input },
+      timeoutMs,
+      errorCode: 'embedding_upstream_error',
+    })
+    if (!isRecord(response) || !Array.isArray(response.embedding)) {
+      throw new GatewayHttpError(502, 'embedding_upstream_invalid_response', 'Ollama embedding upstream returned no embedding.')
+    }
+    data.push({
+      object: 'embedding',
+      index,
+      embedding: response.embedding.filter((value): value is number => typeof value === 'number' && Number.isFinite(value)),
+    })
+  }
+  return {
+    object: 'list',
+    model,
+    data,
+  }
 }
 
 async function postOpenAiJson({
@@ -89,6 +136,16 @@ function withDefaultModel(body: Record<string, unknown>, model: string | undefin
     ...body,
     model,
   }
+}
+
+function normalizeEmbeddingProvider(provider: string | undefined) {
+  return provider === 'ollama' ? 'ollama' : 'openai-compatible'
+}
+
+function normalizeEmbeddingInputs(input: unknown) {
+  if (typeof input === 'string') return [input]
+  if (Array.isArray(input) && input.every((item) => typeof item === 'string')) return input
+  throw new GatewayHttpError(400, 'invalid_embedding_request', 'Embedding input must be a string or an array of strings.')
 }
 
 async function readResponseBody(response: Response) {

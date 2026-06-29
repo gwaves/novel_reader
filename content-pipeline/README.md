@@ -32,6 +32,50 @@ npm run content:pipeline -- help
 npm run content:pipeline:smoke
 ```
 
+启动独立 Web 生产控制台：
+
+```bash
+npm --prefix content-pipeline install
+npm run content:pipeline:service
+```
+
+默认监听 `http://127.0.0.1:6290`。控制台通过本地服务启动生产 job、捕获 stdout/stderr、读取 `production-manifest.json`，并显示每个阶段的状态。可选环境变量：
+
+- `CONTENT_PIPELINE_HOST` / `CONTENT_PIPELINE_PORT`：监听地址，默认 `127.0.0.1:6290`。
+- `CONTENT_PIPELINE_SERVICE_DATA_DIR`：job 与日志目录，默认 `tmp/content-pipeline-service`。
+- `CONTENT_PIPELINE_WORK_ROOT`：manifest 默认工作根目录，默认 `tmp/content-pipeline`。
+- `CONTENT_PIPELINE_MAIN_DB`：书籍查询使用的主数据库；默认依次读取 `NOVEL_READER_MAIN_DB`、`NOVEL_READER_DB_PATH` 或 `~/.novel_reader/novel_reader.sqlite`。
+- `CONTENT_PIPELINE_SERVICE_TOKEN`：设置后 API 需要 `Authorization: Bearer <token>`；本机开发可不设置。
+- `PRODUCTION_PIPELINE_RUN_ROOT`：Production Pipeline v2 的默认 run 根目录，默认 `tmp/production-pipeline/runs`。
+
+不知道 `bookId` 时，先在控制台左侧“主数据库书籍”里搜索书名或直接点“查询书籍”，选中书籍后会自动填入 `Book ID` 和标题。
+
+### 使用 Production Pipeline v2
+
+新的 v2 流水线不依赖 PC 本地 API 服务。打开 `http://127.0.0.1:6290` 后，将“模式”切到
+`Production v2`，在 `V2 Job JSON` 中填写 v2 job 文件路径，例如：
+
+```text
+production-pipeline/config/shuanglongzhuan_jog.json
+```
+
+点击“启动”后，控制台会调用：
+
+```bash
+npm run production-pipeline -- run --job <job.json>
+```
+
+任务详情里会显示 v2 的 `run.json`、阶段状态、子阶段 `runJson` 和日志路径。也可以直接通过 API 启动：
+
+```bash
+curl -X POST http://127.0.0.1:6290/api/jobs \
+  -H 'content-type: application/json' \
+  -d '{
+    "action": "production-v2",
+    "jobPath": "production-pipeline/config/example.job.json"
+  }'
+```
+
 使用配置文件提供默认 Gateway、脚本路径和输出目录：
 
 ```bash
@@ -47,7 +91,7 @@ npm run content:pipeline -- run \
 npm run content:pipeline -- init --book-id <bookId> --title <bookTitle>
 ```
 
-从 TXT/EPUB 文件导入到主数据库，并创建或更新生产 manifest：
+从 TXT/EPUB/MOBI/AZW/AZW3 文件导入到主数据库，并创建或更新生产 manifest。MOBI/AZW/AZW3 需要本机安装 Calibre，并确保 `ebook-convert` 在 `PATH` 中：
 
 ```bash
 npm run content:pipeline -- ingest --file ~/Books/example.txt
@@ -87,9 +131,24 @@ npm run content:pipeline -- run \
   --gateway-audio-dir gateway/data/audio
 ```
 
+发布到远端 Gateway 机器时，`publish-audio` 可以把本地整理好的 `books/<bookId>/` 继续同步到远端音频挂载目录：
+
+```bash
+npm run content:pipeline -- run \
+  --manifest tmp/content-pipeline/<bookId>/production-manifest.json \
+  --steps publish-package,publish-audio \
+  --audio-source-root tmp/content-pipeline/<bookId>/audio \
+  --gateway-url https://192.168.88.100:8888 \
+  --gateway-token <GATEWAY_DEV_ACCESS_TOKEN> \
+  --gateway-audio-dir ~/.novel_reader_gateway/audio \
+  --gateway-remote-host 192.168.88.100 \
+  --gateway-remote-audio-dir '~/novel-reader-gateway/audio'
+```
+
 ## 当前边界
 
-- `ingest --file` 已支持 TXT/EPUB 导入到主数据库，并按文件 sha256 稳定生成默认 `bookId`，重复提交同一文件会复用同一书籍记录。
+- `ingest --file` 已支持 TXT/EPUB/MOBI/AZW/AZW3 导入到主数据库，并按文件 sha256 稳定生成默认 `bookId`，重复提交同一文件会复用同一书籍记录。
+- MOBI/AZW/AZW3 通过 Calibre `ebook-convert` 转成临时 EPUB 后复用 EPUB 导入路径；未安装 Calibre 时会给出明确错误。
 - `init` 仍可记录 `--source-file` 但不会解析文件；真实文件导入请使用 `ingest`。
 - PDF 解析尚未接入；Phase 2 先支持 TXT/EPUB，文本型 PDF 后续补充。
 - `scan` 复用 `scripts/offline-scanner.mjs`，目前覆盖 summary 和 kg。

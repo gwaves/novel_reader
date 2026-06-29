@@ -8,7 +8,14 @@ import { requireGatewayAuth } from './auth.js'
 import { openAudioFile, readAudioCatalog, readAudioManifest } from './audio-store.js'
 import { buildCapabilities } from './capabilities.js'
 import { type GatewayConfig, loadConfig } from './config.js'
-import { openBookPackageFile, readBookCatalog, readBookPackage, readBookSummary, upsertBookPackage } from './data-store.js'
+import {
+  type GatewayBookSummary,
+  openBookPackageFile,
+  readBookCatalog,
+  readBookPackage,
+  readBookSummary,
+  upsertBookPackage,
+} from './data-store.js'
 import { readDeviceRegistry, touchGatewayDevice } from './device-store.js'
 import { GatewayHttpError, isGatewayHttpError } from './errors.js'
 import { createEmbedding, forwardChatCompletion, forwardEmbeddings } from './openai-client.js'
@@ -115,7 +122,7 @@ export function buildGatewayApp(config: GatewayConfig = loadConfig()) {
     return {
       schemaVersion: catalog.schemaVersion,
       generatedAt: new Date().toISOString(),
-      books: catalog.books,
+      books: await withAudioChapterCounts(config, catalog.books),
     }
   })
 
@@ -124,7 +131,7 @@ export function buildGatewayApp(config: GatewayConfig = loadConfig()) {
     return {
       schemaVersion: 1,
       generatedAt: new Date().toISOString(),
-      book: await readBookSummary(config, request.params.bookId),
+      book: await withAudioChapterCount(config, await readBookSummary(config, request.params.bookId)),
     }
   })
 
@@ -254,6 +261,18 @@ export function buildGatewayApp(config: GatewayConfig = loadConfig()) {
   )
 
   return app
+}
+
+async function withAudioChapterCounts(config: GatewayConfig, books: GatewayBookSummary[]) {
+  return Promise.all(books.map((book) => withAudioChapterCount(config, book)))
+}
+
+async function withAudioChapterCount(config: GatewayConfig, book: GatewayBookSummary) {
+  const audioCatalog = await readAudioCatalog(config, book.id)
+  return {
+    ...book,
+    audioChapterCount: audioCatalog.chapters.length,
+  }
 }
 
 function buildReaderPackage(bookPackage: Awaited<ReturnType<typeof readBookPackage>>) {

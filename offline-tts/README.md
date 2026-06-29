@@ -90,7 +90,7 @@ node offline-tts/scripts/tts-director.mjs \
 node offline-tts/scripts/tts-director.mjs synth \
   --script tmp/tts/yaodao/ch001/director-script.json \
   --out-dir tmp/tts/yaodao/ch001/audio-c3 \
-  --concurrency 3
+  --concurrency 8
 ```
 
 批量生成多章时，推荐使用流水线模式，避免多个章节同时压住本地 LLM：
@@ -102,7 +102,7 @@ node offline-tts/scripts/tts-director.mjs batch-pipeline \
   --batch-size 10 \
   --director-concurrency 3 \
   --min-batch-size 6 \
-  --tts-concurrency 4 \
+  --tts-concurrency 16 \
   --tts-chapters 2 \
   --resume \
   --out-root tmp/tts/yaodao
@@ -117,6 +117,7 @@ node offline-tts/scripts/tts-director.mjs batch-pipeline \
 - LLM 批次会自动重试；如果整章脚本生成失败，流水线会降低 batch size 和 LLM 并发后重试。
 - 每章会生成 `director-script.audit.json`，统计未知角色、默认音色、疑似错别字 speaker 和别名 speaker。
 - 当前实测更稳的 LLM 参数是 `--batch-size 10 --director-concurrency 3`；不要盲目提高到 10 并发。
+- 当前推荐的 TTS 参数是 `--tts-concurrency 16 --tts-chapters 2`；脚本默认开启自适应降档，服务波动或排障时可降到 `--tts-concurrency 8 --tts-chapters 2`。
 
 完整的 MP3 生产流程、产物目录结构和移动端配置方式见：
 

@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 
 import { copyFile, mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises'
-import { basename, dirname, join, relative, resolve } from 'node:path'
+import { dirname, join, relative, resolve } from 'node:path'
+import { spawnSync } from 'node:child_process'
 
 const defaultSourceApi = process.env.NOVEL_READER_API_BASE_URL || 'http://127.0.0.1:5174'
 const defaultAudioDir = process.env.GATEWAY_AUDIO_DIR || join(process.cwd(), 'gateway', 'data', 'audio')
@@ -26,6 +27,7 @@ async function main() {
 
   if (!bookId) throw new Error('缺少 --book-id')
   if (!sourceRoot) throw new Error('缺少 --source-root')
+  const remoteTarget = buildRemoteTarget(options, bookId)
 
   const bookPackage = await loadBookPackage({
     bookId,
@@ -110,10 +112,16 @@ async function main() {
   }
 
   await mkdir(bookAudioDir, { recursive: true })
-  await writeFile(join(bookAudioDir, 'audio.json'), `${JSON.stringify(catalog, null, 2)}\n`, 'utf8')
+  const catalogPath = join(bookAudioDir, 'audio.json')
+  await writeFile(catalogPath, `${JSON.stringify(catalog, null, 2)}\n`, 'utf8')
+
+  if (remoteTarget) {
+    await syncBookAudioToRemote({ bookAudioDir, remoteTarget, deleteRemote: options.remoteDelete })
+  }
 
   console.log(`已发布 ${catalog.chapters.length} 章音频到 Gateway 目录。`)
-  console.log(`audio.json: ${join(bookAudioDir, 'audio.json')}`)
+  console.log(`audio.json: ${catalogPath}`)
+  if (remoteTarget) console.log(`remote: ${remoteTarget.display}`)
   console.log(`files: ${copiedFiles.length}`)
 }
 
@@ -232,6 +240,11 @@ function parseArgs(argv) {
     packageFile: '',
     sourceApi: '',
     sourceToken: '',
+    remoteHost: '',
+    remoteUser: '',
+    remoteAudioDir: '',
+    remoteSshPort: '',
+    remoteDelete: true,
     timeoutMs: defaultTimeoutMs,
     dryRun: false,
     strict: false,
@@ -258,6 +271,16 @@ function parseArgs(argv) {
       options.sourceApi = readArgValue(argv, ++index, arg)
     } else if (arg === '--source-token') {
       options.sourceToken = readArgValue(argv, ++index, arg)
+    } else if (arg === '--remote-host') {
+      options.remoteHost = readArgValue(argv, ++index, arg)
+    } else if (arg === '--remote-user') {
+      options.remoteUser = readArgValue(argv, ++index, arg)
+    } else if (arg === '--remote-audio-dir') {
+      options.remoteAudioDir = readArgValue(argv, ++index, arg)
+    } else if (arg === '--remote-ssh-port') {
+      options.remoteSshPort = readArgValue(argv, ++index, arg)
+    } else if (arg === '--no-remote-delete') {
+      options.remoteDelete = false
     } else if (arg === '--timeout-ms') {
       const value = Number(readArgValue(argv, ++index, arg))
       if (!Number.isFinite(value) || value <= 0) throw new Error('--timeout-ms 必须是正数')
@@ -268,6 +291,44 @@ function parseArgs(argv) {
   }
 
   return options
+}
+
+function buildRemoteTarget(options, bookId) {
+  const host = normalizeRemotePart(options.remoteHost || process.env.GATEWAY_REMOTE_HOST || '')
+  if (!host) return null
+  const user = normalizeRemotePart(options.remoteUser || process.env.GATEWAY_REMOTE_USER || '')
+  const audioDir = normalizeRemotePart(options.remoteAudioDir || process.env.GATEWAY_REMOTE_AUDIO_DIR || '')
+  if (!audioDir) throw new Error('使用 --remote-host 时必须提供 --remote-audio-dir 或 GATEWAY_REMOTE_AUDIO_DIR')
+  const sshPort = normalizeRemotePart(options.remoteSshPort || process.env.GATEWAY_REMOTE_SSH_PORT || '')
+  if (sshPort && (!/^\d+$/.test(sshPort) || Number(sshPort) <= 0)) throw new Error('--remote-ssh-port 必须是正整数')
+  const login = user ? `${user}@${host}` : host
+  const remoteDir = joinRemotePath(audioDir, 'books', bookId)
+  return {
+    login,
+    sshPort,
+    remoteDir,
+    display: `${login}:${remoteDir}`,
+  }
+}
+
+async function syncBookAudioToRemote({ bookAudioDir, remoteTarget, deleteRemote }) {
+  const sshArgs = ['ssh']
+  if (remoteTarget.sshPort) sshArgs.push('-p', remoteTarget.sshPort)
+
+  const mkdirCommand = ['mkdir', '-p', shellQuoteRemotePath(remoteTarget.remoteDir)].join(' ')
+  runChecked('ssh', [...sshArgs.slice(1), remoteTarget.login, mkdirCommand], '创建远端音频目录')
+
+  const rsyncArgs = ['-az']
+  if (deleteRemote) rsyncArgs.push('--delete')
+  if (remoteTarget.sshPort) rsyncArgs.push('-e', `ssh -p ${remoteTarget.sshPort}`)
+  rsyncArgs.push(`${bookAudioDir}/`, `${remoteTarget.login}:${remoteTarget.remoteDir}/`)
+  runChecked('rsync', rsyncArgs, '同步远端音频目录')
+}
+
+function runChecked(command, args, label) {
+  const result = spawnSync(command, args, { stdio: 'inherit' })
+  if (result.error) throw new Error(`${label} 失败：${result.error.message}`)
+  if (result.status !== 0) throw new Error(`${label} 失败，退出码 ${result.status}`)
 }
 
 function readArgValue(argv, index, name) {
@@ -288,6 +349,32 @@ function trimTrailingSlash(value) {
   return value.replace(/\/+$/, '')
 }
 
+function normalizeRemotePart(value) {
+  return String(value || '').trim()
+}
+
+function joinRemotePath(...parts) {
+  return parts
+    .map((part, index) => {
+      const text = String(part || '').trim()
+      if (index === 0) return text.replace(/\/+$/, '')
+      return text.replace(/^\/+|\/+$/g, '')
+    })
+    .filter(Boolean)
+    .join('/')
+}
+
+function shellQuote(value) {
+  return `'${String(value).replace(/'/g, `'\\''`)}'`
+}
+
+function shellQuoteRemotePath(value) {
+  const text = String(value)
+  if (text === '~') return '~'
+  if (text.startsWith('~/')) return `~/${shellQuote(text.slice(2))}`
+  return shellQuote(text)
+}
+
 function printUsage() {
   console.log(`用法：
   node gateway/scripts/publish-audio.mjs --book-id <id> --source-root <offline-tts-output> --gateway-audio-dir <dir>
@@ -299,6 +386,11 @@ function printUsage() {
   --package-file <path>      从 package JSON 文件读取章节映射，跳过本地 API
   --source-api <url>         PC 本地 API 地址，默认 ${defaultSourceApi}
   --source-token <token>     访问 PC 本地 API 的 bearer token，可用 NOVEL_READER_SYNC_TOKEN
+  --remote-host <host>       发布后用 rsync 同步到远端 Gateway 主机，可用 GATEWAY_REMOTE_HOST
+  --remote-user <user>       远端 SSH 用户，可用 GATEWAY_REMOTE_USER
+  --remote-audio-dir <path>  远端 Gateway 音频根目录，例如 ~/novel-reader-gateway/audio
+  --remote-ssh-port <port>   远端 SSH 端口，可用 GATEWAY_REMOTE_SSH_PORT
+  --no-remote-delete         rsync 时不删除远端多余文件
   --dry-run                  只扫描和校验，不复制文件
   --strict                   source-root 中出现 package 无法匹配的章节时直接失败
   --timeout-ms <ms>          请求超时时间，默认 ${defaultTimeoutMs}

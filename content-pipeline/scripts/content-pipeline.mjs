@@ -22,6 +22,7 @@ const stageNames = [
   'publishPackage',
   'publishAudio',
 ]
+const localApiRetryStatuses = new Set([408, 429, 500, 502, 503, 504])
 
 main().catch((error) => {
   console.error(`内容生产失败：${error.message}`)
@@ -273,6 +274,10 @@ async function runStep({ manifestPath, manifest, step, options, config, dryRun }
   const gatewayUrl = options.gatewayUrl || config.gatewayUrl || process.env.GATEWAY_BASE_URL || ''
   const gatewayToken = options.gatewayToken || process.env.GATEWAY_DEV_ACCESS_TOKEN || ''
   const gatewayAudioDir = options.gatewayAudioDir || config.gatewayAudioDir || process.env.GATEWAY_AUDIO_DIR || 'gateway/data/audio'
+  const gatewayRemoteHost = options.gatewayRemoteHost || config.gatewayRemoteHost || process.env.GATEWAY_REMOTE_HOST || ''
+  const gatewayRemoteUser = options.gatewayRemoteUser || config.gatewayRemoteUser || process.env.GATEWAY_REMOTE_USER || ''
+  const gatewayRemoteAudioDir = options.gatewayRemoteAudioDir || config.gatewayRemoteAudioDir || process.env.GATEWAY_REMOTE_AUDIO_DIR || ''
+  const gatewayRemoteSshPort = options.gatewayRemoteSshPort || config.gatewayRemoteSshPort || process.env.GATEWAY_REMOTE_SSH_PORT || ''
   const ttsConfig = options.ttsConfig || config.tts?.config || 'offline-tts/config.example.json'
   const chapters = options.chapters || ''
 
@@ -375,14 +380,13 @@ async function runStep({ manifestPath, manifest, step, options, config, dryRun }
   }
 
   if (step === 'audio') {
-    if (!chapters) {
-      await failBeforeCommand({ manifest, manifestPath, stageName: 'audio', step, error: 'audio 步骤需要 --chapters，例如 1-10' })
-    }
+    const audioChapters = chapters || resolveAllAudioChapters(bookId, options, config)
     const outRoot = resolve(
       options.audioOutRoot ||
       (config.tts?.outRoot ? join(config.tts.outRoot, safePathSegment(bookId)) : join(manifest.workspace, 'audio')),
     )
     manifest.artifacts.audioRoot = outRoot
+    manifest.artifacts.audioChapters = audioChapters
     await runCommandStage({
       manifest,
       stageName: 'audio',
@@ -396,7 +400,7 @@ async function runStep({ manifestPath, manifest, step, options, config, dryRun }
         '--book-id',
         bookId,
         '--chapters',
-        chapters,
+        audioChapters,
         '--out-root',
         outRoot,
         '--resume',
@@ -465,8 +469,9 @@ async function runStep({ manifestPath, manifest, step, options, config, dryRun }
   }
 
   if (step === 'publish-audio') {
-    const sourceRoot = resolve(options.audioSourceRoot || manifest.artifacts.audioRoot || '')
-    if (!sourceRoot) {
+    const fallbackAudioRoot = manifest.workspace ? join(manifest.workspace, 'audio') : ''
+    const rawSourceRoot = options.audioSourceRoot || manifest.artifacts.audioRoot || fallbackAudioRoot
+    if (!rawSourceRoot) {
       await failBeforeCommand({
         manifest,
         manifestPath,
@@ -475,6 +480,7 @@ async function runStep({ manifestPath, manifest, step, options, config, dryRun }
         error: 'publish-audio 需要先运行 audio 或传入 --audio-source-root',
       })
     }
+    const sourceRoot = resolve(rawSourceRoot)
     if (!dryRun) {
       try {
         await assertDirectory(sourceRoot, 'publish-audio 音频来源目录不存在')
@@ -483,6 +489,12 @@ async function runStep({ manifestPath, manifest, step, options, config, dryRun }
       }
     }
     manifest.artifacts.gatewayAudioDir = gatewayAudioDir
+    const publishAudioArtifacts = { gatewayAudioDir }
+    if (gatewayRemoteHost) {
+      publishAudioArtifacts.gatewayRemoteAudioTarget = `${gatewayRemoteUser ? `${gatewayRemoteUser}@` : ''}${gatewayRemoteHost}:${joinRemotePath(gatewayRemoteAudioDir, 'books', bookId)}`
+      manifest.artifacts.gatewayRemoteAudioTarget = publishAudioArtifacts.gatewayRemoteAudioTarget
+    }
+    manifest.stages.publishAudio.artifacts = publishAudioArtifacts
     await runCommandStage({
       manifest,
       stageName: 'publishAudio',
@@ -498,6 +510,12 @@ async function runStep({ manifestPath, manifest, step, options, config, dryRun }
         gatewayAudioDir,
         '--source-api',
         sourceApi,
+        ...optionalArgs([
+          ['--remote-host', gatewayRemoteHost],
+          ['--remote-user', gatewayRemoteUser],
+          ['--remote-audio-dir', gatewayRemoteAudioDir],
+          ['--remote-ssh-port', gatewayRemoteSshPort],
+        ]),
       ],
       cwd: repoRoot,
       manifestPath,
@@ -512,6 +530,7 @@ async function runStep({ manifestPath, manifest, step, options, config, dryRun }
 async function runEmbeddingStage({ manifest, manifestPath, step, options, config, sourceApi, dryRun }) {
   const bookId = required(manifest.book?.id, 'manifest 缺少 book.id')
   const startedAt = new Date().toISOString()
+  const startedMs = Date.now()
   const stage = {
     ...createStage('embedding'),
     ...(manifest.stages?.embedding || {}),
@@ -535,8 +554,11 @@ async function runEmbeddingStage({ manifest, manifestPath, step, options, config
 
   if (dryRun) {
     const finishedAt = new Date().toISOString()
+    const durationMs = Date.now() - startedMs
     stage.finishedAt = finishedAt
+    stage.durationMs = durationMs
     run.finishedAt = finishedAt
+    run.durationMs = durationMs
     run.exitCode = 0
     await writeManifest(manifestPath, manifest)
     return
@@ -568,8 +590,12 @@ async function runEmbeddingStage({ manifest, manifestPath, step, options, config
     let chunkCompleted = 0
     let chunkFailed = 0
     const batchSize = Math.max(1, Math.min(20, Number(embeddingConfig.concurrency) || 3))
+    console.log(`embedding 待处理章节：${chapterIds.length}，并发/批大小：${batchSize}`)
     for (let index = 0; index < chapterIds.length; index += batchSize) {
       const batch = chapterIds.slice(index, index + batchSize)
+      const batchNumber = Math.floor(index / batchSize) + 1
+      const batchCount = Math.ceil(chapterIds.length / batchSize)
+      console.log(`embedding batch ${batchNumber}/${batchCount}: ${index + 1}-${index + batch.length}/${chapterIds.length}`)
       const payload = await postJson(`${sourceApiBase}/api/rag/embeddings/batch`, {
         bookId,
         ...embeddingConfig,
@@ -580,6 +606,9 @@ async function runEmbeddingStage({ manifest, manifestPath, step, options, config
       failed += Number(payload.failed) || 0
       chunkCompleted += Number(payload.chunkCompleted) || 0
       chunkFailed += Number(payload.chunkFailed) || 0
+      console.log(
+        `embedding batch ${batchNumber}/${batchCount} 完成：章节 ${payload.completed ?? 0} 成功/${payload.failed ?? 0} 失败，正文片段 ${payload.chunkCompleted ?? 0} 成功/${payload.chunkFailed ?? 0} 失败；累计章节 ${completed}/${chapterIds.length}`,
+      )
       const firstError = payload.errors?.[0]?.error || payload.chunkErrors?.[0]?.error
       if (firstError) throw new Error(firstError)
     }
@@ -588,8 +617,10 @@ async function runEmbeddingStage({ manifest, manifestPath, step, options, config
       `${sourceApiBase}/api/rag/embeddings/status?bookId=${encodeURIComponent(bookId)}&model=${encodeURIComponent(embeddingConfig.model)}`,
     )
     const finishedAt = new Date().toISOString()
+    const durationMs = Date.now() - startedMs
     stage.status = 'completed'
     stage.finishedAt = finishedAt
+    stage.durationMs = durationMs
     stage.message = `embedding 完成：处理 ${completed}/${chapterIds.length} 章，正文片段 ${chunkCompleted} 个。`
     stage.artifacts = {
       provider: embeddingConfig.provider,
@@ -605,15 +636,19 @@ async function runEmbeddingStage({ manifest, manifestPath, step, options, config
     }
     run.status = 'completed'
     run.finishedAt = finishedAt
+    run.durationMs = durationMs
     run.exitCode = 0
     await writeManifest(manifestPath, manifest)
   } catch (error) {
     const finishedAt = new Date().toISOString()
+    const durationMs = Date.now() - startedMs
     stage.status = 'failed'
     stage.finishedAt = finishedAt
+    stage.durationMs = durationMs
     stage.error = error.message
     run.status = 'failed'
     run.finishedAt = finishedAt
+    run.durationMs = durationMs
     run.exitCode = null
     await writeManifest(manifestPath, manifest)
     throw error
@@ -683,6 +718,7 @@ async function completeWithoutCommand({ manifest, manifestPath, stageName, step,
     status: 'completed',
     startedAt: now,
     finishedAt: now,
+    durationMs: 0,
     message,
     error: '',
     artifacts,
@@ -693,6 +729,7 @@ async function completeWithoutCommand({ manifest, manifestPath, stageName, step,
     status: 'completed',
     startedAt: now,
     finishedAt: now,
+    durationMs: 0,
     command: 'skip-complete',
     exitCode: 0,
   })
@@ -707,6 +744,7 @@ async function failBeforeCommand({ manifest, manifestPath, stageName, step, erro
     status: 'failed',
     startedAt: now,
     finishedAt: now,
+    durationMs: 0,
     error,
     message: '',
   }
@@ -716,6 +754,7 @@ async function failBeforeCommand({ manifest, manifestPath, stageName, step, erro
     status: 'failed',
     startedAt: now,
     finishedAt: now,
+    durationMs: 0,
     command: 'preflight',
     exitCode: null,
   })
@@ -725,6 +764,7 @@ async function failBeforeCommand({ manifest, manifestPath, stageName, step, erro
 
 async function runCommandStage({ manifest, manifestPath, stageName, step, command, args, cwd, dryRun, redactArgs = [] }) {
   const startedAt = new Date().toISOString()
+  const startedMs = Date.now()
   const stage = {
     ...createStage(stageName),
     ...(manifest.stages?.[stageName] || {}),
@@ -751,8 +791,11 @@ async function runCommandStage({ manifest, manifestPath, stageName, step, comman
   console.log(run.command)
   if (dryRun) {
     const finishedAt = new Date().toISOString()
+    const durationMs = Date.now() - startedMs
     stage.finishedAt = finishedAt
+    stage.durationMs = durationMs
     run.finishedAt = finishedAt
+    run.durationMs = durationMs
     run.exitCode = 0
     await writeManifest(manifestPath, manifest)
     return
@@ -763,19 +806,25 @@ async function runCommandStage({ manifest, manifestPath, stageName, step, comman
     result = await spawnCommand(command, args, cwd)
   } catch (error) {
     const finishedAt = new Date().toISOString()
+    const durationMs = Date.now() - startedMs
     stage.status = 'failed'
     stage.finishedAt = finishedAt
+    stage.durationMs = durationMs
     stage.error = error.message
     run.status = 'failed'
     run.finishedAt = finishedAt
+    run.durationMs = durationMs
     run.exitCode = null
     await writeManifest(manifestPath, manifest)
     throw error
   }
   const finishedAt = new Date().toISOString()
+  const durationMs = Date.now() - startedMs
   run.finishedAt = finishedAt
+  run.durationMs = durationMs
   run.exitCode = result.code
   stage.finishedAt = finishedAt
+  stage.durationMs = durationMs
 
   if (result.code === 0) {
     stage.status = 'completed'
@@ -865,6 +914,7 @@ function createStage(name) {
     status: 'pending',
     startedAt: '',
     finishedAt: '',
+    durationMs: null,
     message: '',
     error: '',
     artifacts: {},
@@ -893,6 +943,9 @@ function formatStageDetails(stage) {
   if (stage.name === 'publishAudio' && artifacts.gatewayAudioDir) {
     details.push(`gateway audio dir: ${artifacts.gatewayAudioDir}`)
   }
+  if (stage.name === 'publishAudio' && artifacts.gatewayRemoteAudioTarget) {
+    details.push(`gateway remote audio: ${artifacts.gatewayRemoteAudioTarget}`)
+  }
 
   return details
 }
@@ -914,6 +967,7 @@ function createManifest({ bookId, title, source, workspace, now }) {
       packageFile: '',
       audioRoot: '',
       gatewayAudioDir: '',
+      gatewayRemoteAudioTarget: '',
     },
     runs: [],
   }
@@ -972,10 +1026,42 @@ function getOfflineCoverage(bookId) {
   }
 }
 
+function resolveAllAudioChapters(bookId, options, config) {
+  const mainDbPath = resolve(
+    options.mainDb ||
+    options.mainDbPath ||
+    config.mainDbPath ||
+    process.env.NOVEL_READER_MAIN_DB ||
+    join(homedir(), '.novel_reader', 'novel_reader.sqlite'),
+  )
+  let db
+  try {
+    db = new DatabaseSync(mainDbPath, { readOnly: true })
+    const book = db.prepare(`
+      SELECT chapter_count
+      FROM books
+      WHERE id = ?
+    `).get(bookId)
+    const chapterCount =
+      typeof book?.chapter_count === 'number' && book.chapter_count > 0
+        ? book.chapter_count
+        : db.prepare(`SELECT COUNT(*) AS count FROM chapters WHERE book_id = ?`).get(bookId)?.count ?? 0
+    if (!Number.isInteger(chapterCount) || chapterCount <= 0) {
+      throw new Error(`主数据库没有可用章节：book=${bookId}`)
+    }
+    return `1-${chapterCount}`
+  } catch (error) {
+    throw new Error(`未填写 --chapters，且无法从主数据库推断全书章节范围：${mainDbPath} (${error.message})`)
+  } finally {
+    db?.close()
+  }
+}
+
 function inferSourceType(filePath) {
   const lower = filePath.toLowerCase()
   if (lower.endsWith('.txt')) return 'txt'
   if (lower.endsWith('.epub')) return 'epub'
+  if (lower.endsWith('.mobi') || lower.endsWith('.azw') || lower.endsWith('.azw3')) return 'mobi'
   if (lower.endsWith('.pdf')) return 'pdf'
   return 'file'
 }
@@ -986,6 +1072,14 @@ function optionalNumberArgs(options, pairs) {
     if (options[key] != null && options[key] !== '') {
       args.push(flag, String(options[key]))
     }
+  }
+  return args
+}
+
+function optionalArgs(pairs) {
+  const args = []
+  for (const [flag, value] of pairs) {
+    if (value != null && value !== '') args.push(flag, String(value))
   }
   return args
 }
@@ -1003,6 +1097,17 @@ function safePathSegment(value) {
     .replace(/[\\/:*?"<>|]+/g, '-')
     .replace(/\s+/g, '-')
     .slice(0, 120) || 'book'
+}
+
+function joinRemotePath(...parts) {
+  return parts
+    .map((part, index) => {
+      const text = String(part || '').trim()
+      if (index === 0) return text.replace(/\/+$/, '')
+      return text.replace(/^\/+|\/+$/g, '')
+    })
+    .filter(Boolean)
+    .join('/')
 }
 
 function required(value, message) {
@@ -1068,7 +1173,7 @@ run 参数：
   --skip-config-sync         scan 前不从 PC 主数据库同步模型配置
   --limit <n>                embedding 只处理前 n 个缺失章节，便于小成本验证
   --force-embedding true     embedding 重新生成已有章节
-  --chapters <list>          audio 章节列表，如 1-10,20
+  --chapters <list>          audio 章节列表，如 1-10,20；不填则生产全书
   --tts-config <path>        TTS 配置文件
   --audio-out-root <path>    audio 输出目录
   --audio-source-root <path> publish-audio 的音频来源目录
@@ -1076,6 +1181,12 @@ run 参数：
   --gateway-url <url>        Gateway 地址
   --gateway-token <token>    Gateway token，也可用 GATEWAY_DEV_ACCESS_TOKEN
   --gateway-audio-dir <path> Gateway 音频目录
+  --gateway-remote-host <h>  发布音频后 rsync 到远端 Gateway 主机
+  --gateway-remote-user <u>  远端 SSH 用户，可用 GATEWAY_REMOTE_USER
+  --gateway-remote-audio-dir <path>
+                            远端 Gateway 音频根目录，例如 ~/novel-reader-gateway/audio
+  --gateway-remote-ssh-port <port>
+                            远端 SSH 端口，可用 GATEWAY_REMOTE_SSH_PORT
 
 示例：
   npm run content:pipeline -- init --book-id <bookId> --title 妖刀记

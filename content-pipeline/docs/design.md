@@ -42,8 +42,8 @@ content-pipeline CLI
 - `schemaVersion`：manifest schema 版本。
 - `book`：书籍 ID、标题和来源信息。
 - `workspace`：当前书籍的生产目录。
-- `stages`：每个阶段的状态、开始/结束时间、错误和产物路径。
-- `runs`：最近执行过的命令记录，便于排查失败。
+- `stages`：每个阶段的状态、开始/结束时间、耗时、错误和产物路径。
+- `runs`：最近执行过的命令记录，包含命令摘要和耗时，便于排查失败与性能瓶颈。
 
 阶段状态：
 
@@ -85,6 +85,7 @@ import -> scan all -> export
 - LLM 阶段按章节串行，降低本地模型服务过载风险。
 - TTS 阶段允许章节级并发。
 - 默认使用 `--resume`。
+- 常规 TTS 推荐参数为 `--tts-concurrency 16 --tts-chapters 2`；服务波动、网络不稳定或排障时降到 `--tts-concurrency 8 --tts-chapters 2`。继续提高前应先记录片段级请求耗时和异常重试率。
 
 ### 4. publish-package
 

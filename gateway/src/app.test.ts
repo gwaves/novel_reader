@@ -114,6 +114,28 @@ describe('gateway app', () => {
     })
   })
 
+  it('reports Ollama embeddings as configured without an API key', async () => {
+    const app = buildTestApp({
+      GATEWAY_DEV_ACCESS_TOKEN: 'dev-token',
+      GATEWAY_EMBEDDING_PROVIDER: 'ollama',
+      GATEWAY_EMBEDDING_BASE_URL: 'http://192.168.88.100:11434',
+      GATEWAY_EMBEDDING_MODEL: 'qwen3-embedding:8b',
+    })
+    const response = await app.inject({
+      method: 'GET',
+      url: '/capabilities',
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect(response.json()).toMatchObject({
+      features: {
+        embeddings: {
+          available: true,
+        },
+      },
+    })
+  })
+
   it('returns unified errors for unknown routes', async () => {
     const app = buildTestApp()
     const response = await app.inject({
@@ -322,7 +344,7 @@ describe('gateway app', () => {
           summaryCoverage: 0.5,
           kgCoverage: 0.25,
           embeddingCoverage: 0.75,
-          audioChapterCount: 3,
+          audioChapterCount: 0,
         },
         {
           id: 'book-old',
@@ -331,6 +353,57 @@ describe('gateway app', () => {
           chapterCount: 8,
         },
       ],
+    })
+  })
+
+  it('reports book catalog audio counts from the current audio manifests', async () => {
+    const dataDir = await makeDataDir()
+    const audioDir = await makeDataDir()
+    await mkdir(join(audioDir, 'books', 'book-new'), { recursive: true })
+    await writeFile(
+      join(dataDir, 'books.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        books: [
+          {
+            id: 'book-new',
+            title: '新书',
+            chapterCount: 120,
+            audioChapterCount: 3,
+            updatedAt: '2026-06-25T00:00:00.000Z',
+          },
+        ],
+      }),
+      'utf8',
+    )
+    await writeFile(
+      join(audioDir, 'books', 'book-new', 'audio.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        chapters: Array.from({ length: 120 }, (_, index) => ({
+          chapterId: `chapter-${index + 1}`,
+          fileName: `chapter-${index + 1}.mp3`,
+        })),
+      }),
+      'utf8',
+    )
+    const app = buildTestApp({
+      GATEWAY_DEV_ACCESS_TOKEN: 'dev-token',
+      GATEWAY_DATA_DIR: dataDir,
+      GATEWAY_AUDIO_DIR: audioDir,
+    })
+    const response = await app.inject({
+      method: 'GET',
+      url: '/mobile/books',
+      headers: {
+        authorization: 'Bearer dev-token',
+      },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect(response.json().books[0]).toMatchObject({
+      id: 'book-new',
+      audioChapterCount: 120,
     })
   })
 
@@ -798,6 +871,47 @@ describe('gateway app', () => {
         body: JSON.stringify({
           input: '文本',
           model: 'text-embedding-test',
+        }),
+      }),
+    )
+  })
+
+  it('forwards protected embedding requests to an Ollama upstream', async () => {
+    const fetchMock = vi.fn(async () => jsonResponse({ embedding: [0.3, 0.4, 0.5] }))
+    vi.stubGlobal('fetch', fetchMock)
+    const app = buildTestApp({
+      GATEWAY_DEV_ACCESS_TOKEN: 'dev-token',
+      GATEWAY_EMBEDDING_PROVIDER: 'ollama',
+      GATEWAY_EMBEDDING_BASE_URL: 'http://ollama.example.test:11434',
+      GATEWAY_EMBEDDING_MODEL: 'qwen3-embedding:8b',
+    })
+    const response = await app.inject({
+      method: 'POST',
+      url: '/ai/embeddings',
+      headers: {
+        authorization: 'Bearer dev-token',
+      },
+      payload: {
+        input: '文本',
+      },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect(response.json()).toMatchObject({
+      object: 'list',
+      model: 'qwen3-embedding:8b',
+      data: [{ embedding: [0.3, 0.4, 0.5], index: 0 }],
+    })
+    expect(fetchMock).toHaveBeenCalledWith(
+      'http://ollama.example.test:11434/api/embeddings',
+      expect.objectContaining({
+        method: 'POST',
+        headers: expect.not.objectContaining({
+          authorization: expect.any(String),
+        }),
+        body: JSON.stringify({
+          model: 'qwen3-embedding:8b',
+          prompt: '文本',
         }),
       }),
     )

@@ -119,7 +119,7 @@ node offline-tts/scripts/tts-director.mjs \
   synth \
   --script tmp/tts/yaodao/ch019-full/director-script.json \
   --out-dir tmp/tts/yaodao/ch019-full/audio \
-  --concurrency 4
+  --concurrency 8
 ```
 
 合成完成后，至少应有：
@@ -142,7 +142,7 @@ node offline-tts/scripts/tts-director.mjs \
   --batch-size 10 \
   --director-concurrency 3 \
   --min-batch-size 6 \
-  --tts-concurrency 4 \
+  --tts-concurrency 16 \
   --tts-chapters 2 \
   --resume \
   --out-root tmp/tts/yaodao
@@ -152,9 +152,46 @@ node offline-tts/scripts/tts-director.mjs \
 
 - `--resume`：断点续跑，跳过已完成的 `chapter.mp3`，复用已有导演脚本和 TTS 片段缓存。
 - `--batch-size 10 --director-concurrency 3`：当前比高并发更稳。
-- `--tts-concurrency 4`：单章内 TTS 片段并发。
+- `--tts-concurrency 16`：当前推荐的单章内 TTS 片段并发；脚本默认开启自适应降档。
 - `--tts-chapters 2`：最多两章同时进入 TTS 阶段。
 - 不要在正式生产里使用 `--limit`。新版脚本默认处理整章；`--limit` 只用于小样调试，并且必须同时传 `--allow-partial`，否则脚本会拒绝生成部分章节音频。`synth` 也会默认拒绝部分章节脚本，调试合成 partial 脚本时同样需要传 `--allow-partial`。
+
+### TTS 并发建议
+
+2026-06-28 对《西游记》前三章做过一轮隔离 benchmark：复用同一批 `director-script.json`，只调整 TTS 片段并发，`--tts-chapters` 固定为 2。
+
+| 配置 | 总 TTS wall time | 第 1 章 | 第 2 章 | 第 3 章 | 结论 |
+| --- | ---: | ---: | ---: | ---: | --- |
+| `--tts-concurrency 4` | 678s | 197s | 327s | 364s | 基线，明显偏慢 |
+| `--tts-concurrency 8` | 335s | 111s | 175s | 335s | 常规推荐，约 2.0x 提升 |
+| `--tts-concurrency 16` | 261s | 85s | 166s | 261s | 高性能档，边际收益下降 |
+| `--tts-concurrency 16` + metrics | 233s | 124s | 90s | 233s | 6/681 片段重试，全部恢复 |
+
+推荐策略：
+
+- 默认使用 `--tts-concurrency 16 --tts-chapters 2`，总并发约 32 路 TTS 请求；脚本默认开启自适应降档，出现失败或高重试率时会自动降低单章片段并发。
+- `--tts-concurrency 8 --tts-chapters 2` 可作为保守档，用于 MIMO 服务波动、网络不稳定或排查异常时对照。
+- 暂时不要继续盲目提高到 32。当前瓶颈已经开始转向异常片段重试、ffprobe 校验和最终拼接，而不是单纯 TTS 请求数量。
+- 如果出现大量 `音频时长异常`、`含异常长静音` 或 HTTP 错误，优先降回 `--tts-concurrency 8`。
+- 两轮带 metrics 的重试片段没有 ID 重叠，异常更像 MIMO 偶发返回超长音频，而不是固定文本片段有问题；保留时长校验和自动重试很重要。
+
+### 异常响应识别
+
+当前脚本已经能识别两类异常 TTS 产物：
+
+- 音频时长异常：用 `ffprobe` 读取生成 WAV 时长，若超过 `max(12s, 字数 * tts.maxSecondsPerCharacter)`，删除并重试。
+- 长静音异常：用 `ffmpeg silencedetect` 检查静音段，若超过 `tts.maxSilenceSeconds`，删除并重试。
+
+每章 `audio/tts-metrics.json` 会输出片段级 telemetry，便于判断异常是否和服务响应有关：
+
+- `requestMs`：MIMO HTTP 请求响应耗时。
+- `audioDurationSeconds`：生成 WAV 的实际时长。
+- `textLength` 和 `durationPerChar`。
+- `attempt`、`maxAttempts` 和最终状态。
+- `errorType`：`http_error`、`missing_audio`、`duration_outlier`、`long_silence` 等。
+- 章节级 p50/p90/p95/p99 `requestMs`、重试次数和失败次数。批量生产的 summary 也会汇总这些指标。
+
+这些字段也会驱动自适应 TTS 并发：无重试时可升档，出现失败或重试率升高时降档。
 
 调试小样可以这样跑：
 
@@ -299,6 +336,6 @@ ffprobe -v error \
 - `director-script.audit.json`
 - `audio/chapter.mp3`
 - `audio/manifest.json`
-- `audio/segments/`
+- `audio/tts-metrics.json`
 
-`audio/work/` 是标准化、静音和整章 WAV 等中间文件，占用较大。确认 `chapter.mp3` 和 `manifest.json` 正常后，可以按需清理；如果还要排查拼接问题，先保留。
+默认配置 `tts.keepIntermediateWav: false` 会在 `chapter.mp3`、`manifest.json` 和 `tts-metrics.json` 成功写出后，自动删除 `audio/segments/` 与 `audio/work/` 里的中间 WAV。需要排查分片合成或拼接问题时，把该配置改为 `true` 再运行。
