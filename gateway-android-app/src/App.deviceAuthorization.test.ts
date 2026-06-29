@@ -7,7 +7,7 @@ import {
   libraryVisibilityNotice,
   roleChangeNotice,
   syncStatusLabel,
-} from './App'
+} from './libraryState'
 import { createGatewayError, type GatewaySession } from './deviceIdentity'
 
 const session = (role: GatewaySession['auth']['role'], allowedVisibilities: string[] = ['default']): GatewaySession => ({

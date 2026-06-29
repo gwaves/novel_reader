@@ -330,6 +330,7 @@ function App() {
           {activeView === 'logs' && <RequestLogsPage requestLogs={requestLogs} />}
           {activeView === 'settings' && (
             <SettingsPage
+              key={adminToken}
               adminToken={adminToken}
               dataSource={dataSource}
               connectionStatus={connectionStatus}
@@ -1005,10 +1006,6 @@ function SettingsPage({
   onSaveToken: (token: string) => void
 }) {
   const [draftToken, setDraftToken] = useState(adminToken)
-
-  useEffect(() => {
-    setDraftToken(adminToken)
-  }, [adminToken])
 
   return (
     <section className="settings-grid" aria-label="设置">

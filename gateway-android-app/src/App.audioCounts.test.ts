@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { bookCachedAudioCount, mergeLocalBooksWithCloudMetadata } from './App'
+import { bookCachedAudioCount, mergeLocalBooksWithCloudMetadata } from './libraryState'
 
 const updatedAt = '2026-06-29T00:00:00.000Z'
 
