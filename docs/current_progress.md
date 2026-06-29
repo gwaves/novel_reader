@@ -9,6 +9,8 @@
 - Gateway 总览指标继续推进：新增进程内 `/admin/metrics` 和 `/admin/events`，统计最近请求数、错误率、P95、package/audio 下载次数、热门书籍和最近下载/错误事件；后台总览页已接入这些真实 API。
 - Gateway Android 修正 MP3 计数串书：本机缓存章节数与云端音频总数已分离，下载三国演义时不会再把进度/缓存数显示到妖刀记；MP3 批量同步新增停止按钮，停止后当前章节完成即不再继续后续章节。
 - 本轮按 TDD 多 Agent 并行推进：Gateway 后端新增 `/admin/packages`、`/admin/audio`、`/admin/requests` 并补测试；admin-ui 的数据包、音频、请求日志页已从占位改为真实表格视图并兼容真实后端字段；Gateway Android 设置/书库页补强设备 ID、Pairing Code、角色/授权、可见范围和禁用态阻断提示。
+- 下一轮开发计划：继续采用测试驱动和多 Agent 并行，目标做到真实验证前的三步闭环。第一步补后台操作闭环，包含 package 下载/重新导入状态、音频清理/刷新状态、书籍/设备操作的保存中/失败回滚/确认提示；第二步补真实安全边界，将 admin 与 mobile 鉴权语义分开，并让 admin-ui 区分未授权、服务不可用和单接口失败，避免误回退 mock；第三步补移动端角色变化体验，明确 default/trusted/disabled 变化后的书库刷新、缓存可读策略和禁用态错误提示。最终真机和真实部署验证由用户执行。
+- 三步开发已按测试驱动完成：Gateway 后端新增后台 package 下载、音频刷新和音频清单清理接口，并引入 `GATEWAY_ADMIN_ACCESS_TOKEN` / `GATEWAY_MOBILE_ACCESS_TOKEN` 与 dev token fallback；admin-ui 增加数据包下载、音频刷新/清理、书籍/设备保存中/失败回滚/重试，以及未授权/不可用/部分失败状态；Gateway Android 增加角色变化提示，禁用后阻断云端操作但保留本地缓存阅读和清理能力。代码层面已通过 Gateway、admin-ui、Gateway Android 测试和构建，剩余真实部署/真机验证由用户执行。
 
 2026-06-29 更新：内容生产方向已收束到 `production-pipeline/`。
 - `production-pipeline/` 是当前唯一的正式生产流水线目录；旧的内容生产目录已删除，避免 v1 manifest 编排和 v2 生产模型并存造成混淆。

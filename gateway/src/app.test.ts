@@ -278,6 +278,81 @@ describe('gateway app', () => {
     })
   })
 
+  it('separates admin and mobile bearer token audiences while keeping dev token fallback', async () => {
+    const dataDir = await makeDataDir()
+    await writeFile(
+      join(dataDir, 'books.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        books: [],
+      }),
+      'utf8',
+    )
+    const app = buildTestApp({
+      GATEWAY_ADMIN_ACCESS_TOKEN: 'admin-token',
+      GATEWAY_MOBILE_ACCESS_TOKEN: 'mobile-token',
+      GATEWAY_DATA_DIR: dataDir,
+    })
+
+    const adminWithAdminToken = await app.inject({
+      method: 'GET',
+      url: '/admin/books',
+      headers: { authorization: 'Bearer admin-token' },
+    })
+    const adminWithMobileToken = await app.inject({
+      method: 'GET',
+      url: '/admin/books',
+      headers: { authorization: 'Bearer mobile-token' },
+    })
+    const mobileWithMobileToken = await app.inject({
+      method: 'GET',
+      url: '/mobile/books',
+      headers: { authorization: 'Bearer mobile-token' },
+    })
+    const mobileWithAdminToken = await app.inject({
+      method: 'GET',
+      url: '/auth/session',
+      headers: { authorization: 'Bearer admin-token' },
+    })
+
+    expect(adminWithAdminToken.statusCode).toBe(200)
+    expect(adminWithMobileToken.statusCode).toBe(401)
+    expect(adminWithMobileToken.json().error).toMatchObject({ code: 'invalid_token' })
+    expect(mobileWithMobileToken.statusCode).toBe(200)
+    expect(mobileWithAdminToken.statusCode).toBe(401)
+    expect(mobileWithAdminToken.json().error).toMatchObject({ code: 'invalid_token' })
+  })
+
+  it('falls back scoped admin and mobile auth to the development token', async () => {
+    const dataDir = await makeDataDir()
+    await writeFile(
+      join(dataDir, 'books.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        books: [],
+      }),
+      'utf8',
+    )
+    const app = buildTestApp({
+      GATEWAY_DEV_ACCESS_TOKEN: 'dev-token',
+      GATEWAY_DATA_DIR: dataDir,
+    })
+
+    const adminResponse = await app.inject({
+      method: 'GET',
+      url: '/admin/books',
+      headers: { authorization: 'Bearer dev-token' },
+    })
+    const mobileResponse = await app.inject({
+      method: 'GET',
+      url: '/mobile/books',
+      headers: { authorization: 'Bearer dev-token' },
+    })
+
+    expect(adminResponse.statusCode).toBe(200)
+    expect(mobileResponse.statusCode).toBe(200)
+  })
+
   it('records device names from protected session requests', async () => {
     const dataDir = await makeDataDir()
     const app = buildTestApp({
@@ -760,6 +835,89 @@ describe('gateway app', () => {
     })
   })
 
+  it('enforces patched device roles on mobile APIs', async () => {
+    const dataDir = await makeDataDir()
+    await writeFile(
+      join(dataDir, 'books.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        books: [
+          {
+            id: 'default-book',
+            title: '默认书',
+            chapterCount: 1,
+            updatedAt: '2026-06-25T00:00:00.000Z',
+            visibility: 'default',
+          },
+          {
+            id: 'trusted-book',
+            title: '受信书',
+            chapterCount: 1,
+            updatedAt: '2026-06-26T00:00:00.000Z',
+            visibility: 'trusted',
+          },
+        ],
+      }),
+      'utf8',
+    )
+    await writeFile(
+      join(dataDir, 'devices.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        devices: [
+          {
+            id: 'device-a',
+            name: '客厅平板',
+            pairingCode: '333333',
+            role: 'default',
+            firstSeenAt: '2026-06-29T00:00:00.000Z',
+            lastSeenAt: '2026-06-29T00:00:00.000Z',
+          },
+        ],
+      }),
+      'utf8',
+    )
+    const app = buildTestApp({
+      GATEWAY_DEV_ACCESS_TOKEN: 'dev-token',
+      GATEWAY_DATA_DIR: dataDir,
+    })
+    const adminHeaders = { authorization: 'Bearer dev-token' }
+    const mobileHeaders = {
+      authorization: 'Bearer dev-token',
+      'x-device-id': 'device-a',
+    }
+
+    const trustedPatch = await app.inject({
+      method: 'PATCH',
+      url: '/admin/devices/device-a',
+      headers: adminHeaders,
+      payload: { role: 'trusted' },
+    })
+    const trustedCatalog = await app.inject({
+      method: 'GET',
+      url: '/mobile/books',
+      headers: mobileHeaders,
+    })
+    const disabledPatch = await app.inject({
+      method: 'PATCH',
+      url: '/admin/devices/device-a',
+      headers: adminHeaders,
+      payload: { role: 'disabled' },
+    })
+    const disabledCatalog = await app.inject({
+      method: 'GET',
+      url: '/mobile/books',
+      headers: mobileHeaders,
+    })
+
+    expect(trustedPatch.statusCode).toBe(200)
+    expect(trustedCatalog.statusCode).toBe(200)
+    expect(trustedCatalog.json().books.map((book: { id: string }) => book.id)).toEqual(['trusted-book', 'default-book'])
+    expect(disabledPatch.statusCode).toBe(200)
+    expect(disabledCatalog.statusCode).toBe(403)
+    expect(disabledCatalog.json().error).toMatchObject({ code: 'device_disabled', statusCode: 403 })
+  })
+
   it('reports request metrics, download counts, and recent events for admin overview', async () => {
     const dataDir = await makeDataDir()
     await writeFile(
@@ -937,6 +1095,70 @@ describe('gateway app', () => {
     expect(response.json().packages[0].sizeBytes).toBeGreaterThan(0)
   })
 
+  it('downloads full book packages through the admin API', async () => {
+    const dataDir = await makeDataDir()
+    await writeFile(
+      join(dataDir, 'books.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        books: [
+          {
+            id: 'book-ready',
+            title: '已有包',
+            chapterCount: 1,
+            updatedAt: '2026-06-25T00:00:00.000Z',
+          },
+        ],
+      }),
+      'utf8',
+    )
+    await mkdir(join(dataDir, 'books', 'book-ready'), { recursive: true })
+    await writeFile(
+      join(dataDir, 'books', 'book-ready', 'package.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        book: {
+          id: 'book-ready',
+          title: '已有包',
+          chapterCount: 1,
+          updatedAt: '2026-06-25T00:00:00.000Z',
+        },
+        chapters: [{ id: 'chapter-1', content: '正文' }],
+        embeddings: { chunks: [{ chapterId: 'chapter-1', embedding: [0.1, 0.2] }] },
+      }),
+      'utf8',
+    )
+    const app = buildTestApp({
+      GATEWAY_DEV_ACCESS_TOKEN: 'dev-token',
+      GATEWAY_DATA_DIR: dataDir,
+    })
+
+    const unauthorizedResponse = await app.inject({
+      method: 'GET',
+      url: '/admin/books/book-ready/package/download',
+    })
+    const response = await app.inject({
+      method: 'GET',
+      url: '/admin/books/book-ready/package/download',
+      headers: {
+        authorization: 'Bearer dev-token',
+      },
+    })
+
+    expect(unauthorizedResponse.statusCode).toBe(401)
+    expect(response.statusCode).toBe(200)
+    expect(response.headers['content-type']).toContain('application/json')
+    expect(response.headers['content-disposition']).toBe('attachment; filename="book-ready-package-full.json"')
+    expect(response.json()).toMatchObject({
+      book: {
+        id: 'book-ready',
+      },
+      embeddings: {
+        chunks: [{ chapterId: 'chapter-1' }],
+      },
+    })
+  })
+
   it('returns admin audio coverage, missing chapters, and total size for every catalog book', async () => {
     const dataDir = await makeDataDir()
     const audioDir = await makeDataDir()
@@ -1027,6 +1249,111 @@ describe('gateway app', () => {
       ],
     })
     expect(Date.parse(response.json().audio[0].updatedAt)).not.toBeNaN()
+  })
+
+  it('refreshes and clears one book audio state through admin APIs', async () => {
+    const dataDir = await makeDataDir()
+    const audioDir = await makeDataDir()
+    const bookAudioDir = join(audioDir, 'books', 'book-audio')
+    await writeFile(
+      join(dataDir, 'books.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        books: [
+          {
+            id: 'book-audio',
+            title: '音频书',
+            chapterCount: 2,
+            updatedAt: '2026-06-25T00:00:00.000Z',
+          },
+        ],
+      }),
+      'utf8',
+    )
+    await mkdir(join(dataDir, 'books', 'book-audio'), { recursive: true })
+    await writeFile(
+      join(dataDir, 'books', 'book-audio', 'package.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        book: {
+          id: 'book-audio',
+          title: '音频书',
+          chapterCount: 2,
+          updatedAt: '2026-06-25T00:00:00.000Z',
+        },
+        chapters: [{ id: 'chapter-1' }, { id: 'chapter-2' }],
+      }),
+      'utf8',
+    )
+    await mkdir(bookAudioDir, { recursive: true })
+    await writeFile(join(bookAudioDir, 'chapter-1.mp3'), 'audio-one', 'utf8')
+    await writeFile(
+      join(bookAudioDir, 'audio.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        chapters: [
+          {
+            chapterId: 'chapter-1',
+            fileName: 'chapter-1.mp3',
+          },
+        ],
+      }),
+      'utf8',
+    )
+    const app = buildTestApp({
+      GATEWAY_DEV_ACCESS_TOKEN: 'dev-token',
+      GATEWAY_DATA_DIR: dataDir,
+      GATEWAY_AUDIO_DIR: audioDir,
+    })
+    const authHeaders = { authorization: 'Bearer dev-token' }
+
+    const refreshResponse = await app.inject({
+      method: 'POST',
+      url: '/admin/books/book-audio/audio/refresh',
+      headers: authHeaders,
+    })
+    const deleteResponse = await app.inject({
+      method: 'DELETE',
+      url: '/admin/books/book-audio/audio',
+      headers: authHeaders,
+    })
+    const refreshAfterDeleteResponse = await app.inject({
+      method: 'POST',
+      url: '/admin/books/book-audio/audio/refresh',
+      headers: authHeaders,
+    })
+
+    expect(refreshResponse.statusCode).toBe(200)
+    expect(refreshResponse.json()).toMatchObject({
+      schemaVersion: 1,
+      audio: {
+        bookId: 'book-audio',
+        audioChapterCount: 1,
+        missingChapterIds: ['chapter-2'],
+        totalSizeBytes: 9,
+      },
+    })
+    expect(deleteResponse.statusCode).toBe(200)
+    expect(deleteResponse.json()).toMatchObject({
+      cleanup: {
+        bookId: 'book-audio',
+        removed: true,
+        deletedFileCount: 1,
+        deletedFiles: ['audio.json'],
+      },
+      audio: {
+        audioChapterCount: 0,
+        missingChapterCount: 2,
+        missingChapterIds: ['chapter-1', 'chapter-2'],
+      },
+    })
+    await expect(readFile(join(bookAudioDir, 'audio.json'), 'utf8')).rejects.toMatchObject({ code: 'ENOENT' })
+    await expect(readFile(join(bookAudioDir, 'chapter-1.mp3'), 'utf8')).resolves.toBe('audio-one')
+    expect(refreshAfterDeleteResponse.statusCode).toBe(200)
+    expect(refreshAfterDeleteResponse.json().audio).toMatchObject({
+      audioChapterCount: 0,
+      missingChapterIds: ['chapter-1', 'chapter-2'],
+    })
   })
 
   it('returns recent request logs with fields needed by the admin requests view', async () => {

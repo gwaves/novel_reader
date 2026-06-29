@@ -44,10 +44,10 @@ npm run gateway:admin-ui:build
 npm run gateway:dev
 ```
 
-后台页面会从同源 `/admin/books` 和 `/admin/devices` 读取真实数据；API 暂时沿用 Gateway bearer token。浏览器本地可把 token 写入 `localStorage`：
+后台页面会从同源 `/admin/*` 读取真实数据；浏览器本地可把后台 token 写入 `localStorage`：
 
 ```js
-localStorage.setItem('novel-reader-gateway-admin-token', '<GATEWAY_DEV_ACCESS_TOKEN>')
+localStorage.setItem('novel-reader-gateway-admin-token', '<GATEWAY_ADMIN_ACCESS_TOKEN>')
 ```
 
 可复制 `.env.example` 中的变量到部署环境。Phase 1 已提供：
@@ -61,13 +61,19 @@ localStorage.setItem('novel-reader-gateway-admin-token', '<GATEWAY_DEV_ACCESS_TO
 - `GET /mobile/books/:bookId`（受保护，返回单书摘要）
 - `GET /mobile/books/:bookId/package`（受保护，返回移动端完整数据包）
 - `PUT /admin/books/:bookId/package`（受保护，导入 PC 端导出的移动数据包）
+- `GET /admin/books/:bookId/package/download`（受保护，下载后台完整数据包）
 - `GET /admin/books`（受保护，返回后台全量书库视图）
 - `PATCH /admin/books/:bookId/visibility`（受保护，更新书籍可见范围）
 - `PATCH /admin/books/:bookId/labels`（受保护，更新书籍内容标签）
+- `GET /admin/packages`（受保护，返回数据包状态）
+- `GET /admin/audio`（受保护，返回音频覆盖状态）
+- `POST /admin/books/:bookId/audio/refresh`（受保护，重新读取音频状态）
+- `DELETE /admin/books/:bookId/audio`（受保护，清理该书音频清单索引，不删除 MP3 文件）
 - `GET /admin/devices`（受保护，返回已登记设备）
 - `PATCH /admin/devices/:deviceId`（受保护，更新设备名称或角色）
 - `GET /admin/metrics`（受保护，返回请求量、错误率、P95 和下载统计）
 - `GET /admin/events`（受保护，返回最近下载、错误和告警事件）
+- `GET /admin/requests`（受保护，返回最近请求日志）
 - `GET /admin/ui`（内网管理后台静态入口）
 - `POST /ai/chat`（受保护，转发 OpenAI-compatible chat completions）
 - `POST /ai/embeddings`（受保护，转发 OpenAI-compatible embeddings）
@@ -76,16 +82,26 @@ localStorage.setItem('novel-reader-gateway-admin-token', '<GATEWAY_DEV_ACCESS_TO
 - 统一错误响应格式
 - 基础限流、安全响应头和可选 CORS 配置
 
-开发期可通过 `GATEWAY_DEV_ACCESS_TOKEN` 启用静态 bearer token 鉴权。受保护接口需要携带：
+第一版仍使用静态 bearer token，但已区分后台和移动端语义：
+
+- `GATEWAY_ADMIN_ACCESS_TOKEN`：用于 `/admin/*` 和后台 AI/RAG 转发接口。
+- `GATEWAY_MOBILE_ACCESS_TOKEN`：用于 `/auth/*` 和 `/mobile/*`。
+- `GATEWAY_DEV_ACCESS_TOKEN`：兼容旧开发流程；当 admin/mobile token 未配置时作为 fallback。
+
+受保护接口需要携带：
 
 ```text
-Authorization: Bearer <GATEWAY_DEV_ACCESS_TOKEN>
+Authorization: Bearer <token>
 ```
 
-新的 Android 客户端应额外携带设备名，Gateway 会记录到 `GATEWAY_DATA_DIR/devices.json`：
+新的 Android 客户端应额外携带稳定设备信息，Gateway 会记录到 `GATEWAY_DATA_DIR/devices.json`：
 
 ```text
+X-Device-Id: <stable-device-id>
 X-Device-Name: Android Phone
+X-Device-Model: <model>
+X-Device-Platform: android
+X-App-Version: <version>
 ```
 
 第一版书库索引从 `GATEWAY_DATA_DIR/books.json` 读取。文件缺失时返回空书库；文件存在时应使用：

@@ -1,5 +1,5 @@
 import { createReadStream } from 'node:fs'
-import { readFile, stat } from 'node:fs/promises'
+import { readFile, rm, stat } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import type { GatewayConfig } from './config.js'
 import { GatewayHttpError } from './errors.js'
@@ -32,6 +32,13 @@ export type GatewayAudioSummary = {
   coverage: number
   totalSizeBytes: number
   updatedAt?: string
+}
+
+export type GatewayAudioCleanupResult = {
+  bookId: string
+  removed: boolean
+  deletedFileCount: number
+  deletedFiles: string[]
 }
 
 export async function readAudioCatalog(config: GatewayConfig, bookId: string): Promise<GatewayAudioCatalog> {
@@ -123,6 +130,30 @@ export async function summarizeBookAudio(
     coverage: book.chapterCount > 0 ? catalog.chapters.length / book.chapterCount : 0,
     totalSizeBytes,
     updatedAt,
+  }
+}
+
+export async function deleteBookAudio(config: GatewayConfig, bookId: string): Promise<GatewayAudioCleanupResult> {
+  const audioCatalogPath = resolve(config.audioDir, 'books', bookId, 'audio.json')
+  try {
+    await rm(audioCatalogPath, { force: false })
+  } catch (error) {
+    if (isNodeError(error) && error.code === 'ENOENT') {
+      return {
+        bookId,
+        removed: false,
+        deletedFileCount: 0,
+        deletedFiles: [],
+      }
+    }
+    throw error
+  }
+
+  return {
+    bookId,
+    removed: true,
+    deletedFileCount: 1,
+    deletedFiles: ['audio.json'],
   }
 }
 

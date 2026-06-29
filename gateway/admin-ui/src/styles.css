@@ -521,6 +521,90 @@ input {
   opacity: 0.62;
 }
 
+.table-action-group {
+  display: flex;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.table-action {
+  border: 1px solid #cbd5e1;
+  border-radius: 6px;
+  background: #ffffff;
+  padding: 5px 8px;
+  cursor: pointer;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.table-action:hover {
+  background: #f8fafc;
+}
+
+.table-action.danger {
+  border-color: #fecaca;
+  color: #b91c1c;
+}
+
+.table-action:disabled {
+  cursor: wait;
+  opacity: 0.62;
+}
+
+.operation-status {
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  border-radius: 6px;
+  padding: 2px 7px;
+  white-space: nowrap;
+  background: #f1f5f9;
+  color: #475569;
+}
+
+.operation-status.success {
+  background: #e8f7ef;
+  color: #047857;
+}
+
+.operation-status.failed {
+  background: #fff0f0;
+  color: #b91c1c;
+}
+
+.operation-note {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin: -6px 0 12px;
+  border-radius: 6px;
+  padding: 8px 9px;
+  background: #f1f5f9;
+  color: #475569;
+  font-size: 13px;
+}
+
+.operation-note.success {
+  background: #e8f7ef;
+  color: #047857;
+}
+
+.operation-note.failed {
+  background: #fff0f0;
+  color: #b91c1c;
+}
+
+.operation-note button {
+  border: 1px solid currentColor;
+  border-radius: 6px;
+  background: #ffffff;
+  color: inherit;
+  padding: 4px 7px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
 .placeholder {
   min-height: 260px;
 }

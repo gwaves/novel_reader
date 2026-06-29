@@ -7,8 +7,8 @@ import { createReadStream } from 'node:fs'
 import { stat } from 'node:fs/promises'
 import { extname, join, normalize, relative, basename } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { requireGatewayAuth } from './auth.js'
-import { openAudioFile, readAudioCatalog, readAudioManifest, summarizeBookAudio } from './audio-store.js'
+import { requireAdminAuth, requireMobileAuth } from './auth.js'
+import { deleteBookAudio, openAudioFile, readAudioCatalog, readAudioManifest, summarizeBookAudio } from './audio-store.js'
 import { buildCapabilities } from './capabilities.js'
 import { type GatewayConfig, loadConfig } from './config.js'
 import {
@@ -126,7 +126,7 @@ export function buildGatewayApp(config: GatewayConfig = loadConfig()) {
   })
 
   app.get('/auth/session', async (request) => {
-    const auth = requireGatewayAuth(config, request)
+    const auth = requireMobileAuth(config, request)
     const device = await touchGatewayDevice(config, auth, request.ip)
     return {
       authenticated: true,
@@ -135,7 +135,7 @@ export function buildGatewayApp(config: GatewayConfig = loadConfig()) {
   })
 
   app.get('/auth/devices', async (request) => {
-    const auth = requireGatewayAuth(config, request)
+    const auth = requireMobileAuth(config, request)
     await touchGatewayDevice(config, auth, request.ip)
     return {
       generatedAt: new Date().toISOString(),
@@ -187,7 +187,7 @@ export function buildGatewayApp(config: GatewayConfig = loadConfig()) {
   })
 
   app.put<{ Body: unknown; Params: { bookId: string } }>('/admin/books/:bookId/package', async (request) => {
-    requireGatewayAuth(config, request)
+    requireAdminAuth(config, request)
     return {
       schemaVersion: 1,
       importedAt: new Date().toISOString(),
@@ -196,7 +196,7 @@ export function buildGatewayApp(config: GatewayConfig = loadConfig()) {
   })
 
   app.get('/admin/books', async (request) => {
-    requireGatewayAuth(config, request)
+    requireAdminAuth(config, request)
     const catalog = await readBookCatalog(config)
     return {
       schemaVersion: catalog.schemaVersion,
@@ -206,7 +206,7 @@ export function buildGatewayApp(config: GatewayConfig = loadConfig()) {
   })
 
   app.get('/admin/packages', async (request) => {
-    requireGatewayAuth(config, request)
+    requireAdminAuth(config, request)
     return {
       schemaVersion: 1,
       generatedAt: new Date().toISOString(),
@@ -215,7 +215,7 @@ export function buildGatewayApp(config: GatewayConfig = loadConfig()) {
   })
 
   app.get('/admin/audio', async (request) => {
-    requireGatewayAuth(config, request)
+    requireAdminAuth(config, request)
     const catalog = await readBookCatalog(config)
     return {
       schemaVersion: 1,
@@ -227,7 +227,7 @@ export function buildGatewayApp(config: GatewayConfig = loadConfig()) {
   })
 
   app.get<{ Params: { bookId: string } }>('/admin/books/:bookId', async (request) => {
-    requireGatewayAuth(config, request)
+    requireAdminAuth(config, request)
     return {
       schemaVersion: 1,
       generatedAt: new Date().toISOString(),
@@ -235,8 +235,39 @@ export function buildGatewayApp(config: GatewayConfig = loadConfig()) {
     }
   })
 
+  app.get<{ Params: { bookId: string } }>('/admin/books/:bookId/package/download', async (request, reply) => {
+    requireAdminAuth(config, request)
+    const packageFile = await openBookPackageFile(config, request.params.bookId)
+    return reply
+      .header('content-type', 'application/json; charset=utf-8')
+      .header('content-length', packageFile.sizeBytes)
+      .header('content-disposition', `attachment; filename="${basename(packageFile.fileName)}"`)
+      .send(packageFile.stream)
+  })
+
+  app.delete<{ Params: { bookId: string } }>('/admin/books/:bookId/audio', async (request) => {
+    requireAdminAuth(config, request)
+    const book = await readBookSummary(config, request.params.bookId)
+    return {
+      schemaVersion: 1,
+      clearedAt: new Date().toISOString(),
+      cleanup: await deleteBookAudio(config, request.params.bookId),
+      audio: await summarizeBookAudio(config, book, await readPackageChapterIds(config, request.params.bookId)),
+    }
+  })
+
+  app.post<{ Params: { bookId: string } }>('/admin/books/:bookId/audio/refresh', async (request) => {
+    requireAdminAuth(config, request)
+    const book = await readBookSummary(config, request.params.bookId)
+    return {
+      schemaVersion: 1,
+      refreshedAt: new Date().toISOString(),
+      audio: await summarizeBookAudio(config, book, await readPackageChapterIds(config, request.params.bookId)),
+    }
+  })
+
   app.patch<{ Body: unknown; Params: { bookId: string } }>('/admin/books/:bookId/visibility', async (request) => {
-    requireGatewayAuth(config, request)
+    requireAdminAuth(config, request)
     if (!isRecord(request.body)) {
       throw new GatewayHttpError(400, 'invalid_book_visibility', 'Book visibility patch body must be an object.')
     }
@@ -248,7 +279,7 @@ export function buildGatewayApp(config: GatewayConfig = loadConfig()) {
   })
 
   app.patch<{ Body: unknown; Params: { bookId: string } }>('/admin/books/:bookId/labels', async (request) => {
-    requireGatewayAuth(config, request)
+    requireAdminAuth(config, request)
     if (!isRecord(request.body)) {
       throw new GatewayHttpError(400, 'invalid_book_labels', 'Book labels patch body must be an object.')
     }
@@ -260,7 +291,7 @@ export function buildGatewayApp(config: GatewayConfig = loadConfig()) {
   })
 
   app.get('/admin/devices', async (request) => {
-    requireGatewayAuth(config, request)
+    requireAdminAuth(config, request)
     return {
       generatedAt: new Date().toISOString(),
       ...(await readDeviceRegistry(config)),
@@ -268,22 +299,22 @@ export function buildGatewayApp(config: GatewayConfig = loadConfig()) {
   })
 
   app.get('/admin/metrics', async (request) => {
-    requireGatewayAuth(config, request)
+    requireAdminAuth(config, request)
     return metrics.snapshot(await readBookCatalog(config))
   })
 
   app.get('/admin/events', async (request) => {
-    requireGatewayAuth(config, request)
+    requireAdminAuth(config, request)
     return metrics.recentEvents()
   })
 
   app.get('/admin/requests', async (request) => {
-    requireGatewayAuth(config, request)
+    requireAdminAuth(config, request)
     return metrics.recentRequests()
   })
 
   app.patch<{ Body: unknown; Params: { deviceId: string } }>('/admin/devices/:deviceId', async (request) => {
-    requireGatewayAuth(config, request)
+    requireAdminAuth(config, request)
     if (!isRecord(request.body)) {
       throw new GatewayHttpError(400, 'invalid_device_update', 'Device patch body must be an object.')
     }
@@ -295,17 +326,17 @@ export function buildGatewayApp(config: GatewayConfig = loadConfig()) {
   })
 
   app.post<{ Body: unknown }>('/ai/chat', async (request) => {
-    requireGatewayAuth(config, request)
+    requireAdminAuth(config, request)
     return forwardChatCompletion(config, request.body)
   })
 
   app.post<{ Body: unknown }>('/ai/embeddings', async (request) => {
-    requireGatewayAuth(config, request)
+    requireAdminAuth(config, request)
     return forwardEmbeddings(config, request.body)
   })
 
   app.post<{ Body: unknown }>('/ai/search', async (request) => {
-    requireGatewayAuth(config, request)
+    requireAdminAuth(config, request)
     if (!isRecord(request.body)) {
       throw new GatewayHttpError(400, 'invalid_search_request', 'Search request body must be an object.')
     }
@@ -331,7 +362,7 @@ export function buildGatewayApp(config: GatewayConfig = loadConfig()) {
   })
 
   app.post<{ Body: unknown }>('/ai/rag-answer', async (request) => {
-    requireGatewayAuth(config, request)
+    requireAdminAuth(config, request)
     if (!isRecord(request.body)) {
       throw new GatewayHttpError(400, 'invalid_rag_answer_request', 'RAG answer request body must be an object.')
     }
@@ -466,7 +497,7 @@ type MobileDeviceContext = {
 }
 
 async function requireMobileDevice(config: GatewayConfig, request: FastifyRequest): Promise<MobileDeviceContext> {
-  const auth = requireGatewayAuth(config, request)
+  const auth = requireMobileAuth(config, request)
   const device = await touchGatewayDevice(config, auth, request.ip)
   const role = device?.role ?? 'default'
   if (role === 'disabled') {
@@ -477,7 +508,7 @@ async function requireMobileDevice(config: GatewayConfig, request: FastifyReques
   }
 }
 
-function buildSessionAuth(auth: ReturnType<typeof requireGatewayAuth>, device?: GatewayDeviceRecord) {
+function buildSessionAuth(auth: ReturnType<typeof requireMobileAuth>, device?: GatewayDeviceRecord) {
   const role = device?.role ?? 'default'
   return {
     mode: auth.mode,

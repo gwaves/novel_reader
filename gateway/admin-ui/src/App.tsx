@@ -1,10 +1,14 @@
 import { useEffect, useMemo, useState } from 'react'
 import {
+  adminErrorLabel,
   adminTokenStorageKey,
+  deleteBookAudio,
+  downloadPackage,
   loadAdminDashboardData,
   patchBookLabels,
   patchBookVisibility,
   patchDeviceRole,
+  refreshBookAudio,
   type AdminDashboardData,
 } from './api'
 import {
@@ -31,6 +35,16 @@ import {
 } from './mockData'
 
 type ViewKey = 'overview' | 'books' | 'packages' | 'audio' | 'devices' | 'logs' | 'settings'
+type ConnectionStatus = AdminDashboardData['status']
+type OperationState = 'idle' | 'saving' | 'success' | 'failed'
+type OperationStatus = {
+  state: OperationState
+  message: string
+}
+type RetryAction = {
+  label: string
+  run: () => void
+}
 
 const navItems: Array<{ key: ViewKey; label: string }> = [
   { key: 'overview', label: '总览' },
@@ -52,11 +66,18 @@ function App() {
   const [metrics, setMetrics] = useState(mockOverviewMetrics)
   const [events, setEvents] = useState(mockRecentEvents)
   const [dataSource, setDataSource] = useState<AdminDashboardData['source']>('mock')
+  const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>('mock')
   const [loadMessage, setLoadMessage] = useState('正在连接 Gateway 管理 API')
   const [selectedBookId, setSelectedBookId] = useState<string | null>(null)
   const [selectedDeviceId, setSelectedDeviceId] = useState<string | null>(null)
   const [adminToken, setAdminToken] = useState(readStoredAdminToken)
   const [isRefreshing, setIsRefreshing] = useState(false)
+  const [bookOperationStatus, setBookOperationStatus] = useState<Record<string, OperationStatus>>({})
+  const [bookRetryActions, setBookRetryActions] = useState<Record<string, RetryAction>>({})
+  const [deviceOperationStatus, setDeviceOperationStatus] = useState<Record<string, OperationStatus>>({})
+  const [deviceRetryActions, setDeviceRetryActions] = useState<Record<string, RetryAction>>({})
+  const [packageOperationStatus, setPackageOperationStatus] = useState<Record<string, OperationStatus>>({})
+  const [audioOperationStatus, setAudioOperationStatus] = useState<Record<string, OperationStatus>>({})
 
   const selectedBook = useMemo(
     () => books.find((book) => book.id === selectedBookId) ?? null,
@@ -76,7 +97,8 @@ function App() {
     setMetrics(data.overviewMetrics)
     setEvents(data.recentEvents)
     setDataSource(data.source)
-    setLoadMessage(data.source === 'api' ? '已连接 Gateway 管理 API' : 'API 不可用，正在显示 mock 数据')
+    setConnectionStatus(data.status)
+    setLoadMessage(connectionMessage(data))
   }
 
   const refreshDashboardData = async () => {
@@ -97,17 +119,112 @@ function App() {
     }
   }, [])
 
-  const updateBook = (bookId: string, patch: Partial<AdminBook>) => {
+  const saveBookPatch = async (
+    bookId: string,
+    patch: Partial<AdminBook>,
+    operationKey: string,
+    label: string,
+  ) => {
+    const previous = books.find((book) => book.id === bookId)
+    if (!previous) return
+    setBookOperationStatus((current) => ({ ...current, [operationKey]: { state: 'saving', message: '保存中' } }))
+    setBookRetryActions((current) => omitKey(current, operationKey))
     setBooks((current) => current.map((book) => (book.id === bookId ? { ...book, ...patch } : book)))
-    if (patch.visibility) void patchBookVisibility(bookId, patch.visibility).catch(() => setLoadMessage('可见范围更新未同步到 Gateway'))
-    if (patch.labels) void patchBookLabels(bookId, patch.labels).catch(() => setLoadMessage('标签更新未同步到 Gateway'))
+    if (isLocalDemoEdit(connectionStatus, adminToken)) {
+      setBookOperationStatus((current) => ({ ...current, [operationKey]: { state: 'success', message: '本地已更新' } }))
+      return
+    }
+    try {
+      if (patch.visibility) await patchBookVisibility(bookId, patch.visibility)
+      if (patch.labels) await patchBookLabels(bookId, patch.labels)
+      setBookOperationStatus((current) => ({ ...current, [operationKey]: { state: 'success', message: '保存成功' } }))
+    } catch {
+      setBooks((current) => current.map((book) => (book.id === bookId ? previous : book)))
+      setBookOperationStatus((current) => ({ ...current, [operationKey]: { state: 'failed', message: '保存失败，已回滚' } }))
+      setBookRetryActions((current) => ({
+        ...current,
+        [operationKey]: { label: `重试保存${label}`, run: () => void saveBookPatch(bookId, patch, operationKey, label) },
+      }))
+    }
+  }
+
+  const updateBook = (bookId: string, patch: Partial<AdminBook>) => {
+    if (patch.visibility) void saveBookPatch(bookId, patch, `${bookId}:visibility`, '可见范围')
+    if (patch.labels) void saveBookPatch(bookId, patch, `${bookId}:labels`, '标签')
+  }
+
+  const saveDevicePatch = async (deviceId: string, patch: Partial<AdminDevice>, operationKey: string) => {
+    const previous = devices.find((device) => device.id === deviceId)
+    if (!previous) return
+    setDeviceOperationStatus((current) => ({ ...current, [operationKey]: { state: 'saving', message: '保存中' } }))
+    setDeviceRetryActions((current) => omitKey(current, operationKey))
+    setDevices((current) => current.map((device) => (device.id === deviceId ? { ...device, ...patch } : device)))
+    if (isLocalDemoEdit(connectionStatus, adminToken)) {
+      setDeviceOperationStatus((current) => ({ ...current, [operationKey]: { state: 'success', message: '本地已更新' } }))
+      return
+    }
+    try {
+      if (patch.role) await patchDeviceRole(deviceId, patch.role)
+      setDeviceOperationStatus((current) => ({ ...current, [operationKey]: { state: 'success', message: '保存成功' } }))
+    } catch {
+      setDevices((current) => current.map((device) => (device.id === deviceId ? previous : device)))
+      setDeviceOperationStatus((current) => ({ ...current, [operationKey]: { state: 'failed', message: '保存失败，已回滚' } }))
+      setDeviceRetryActions((current) => ({
+        ...current,
+        [operationKey]: { label: '重试保存设备角色', run: () => void saveDevicePatch(deviceId, patch, operationKey) },
+      }))
+    }
   }
 
   const updateDevice = (deviceId: string, patch: Partial<AdminDevice>) => {
-    setDevices((current) =>
-      current.map((device) => (device.id === deviceId ? { ...device, ...patch } : device)),
-    )
-    if (patch.role) void patchDeviceRole(deviceId, patch.role).catch(() => setLoadMessage('设备角色更新未同步到 Gateway'))
+    if (patch.role) void saveDevicePatch(deviceId, patch, `${deviceId}:role`)
+  }
+
+  const handleDownloadPackage = async (item: AdminPackage) => {
+    setPackageOperationStatus((current) => ({ ...current, [item.id]: { state: 'saving', message: '准备下载' } }))
+    try {
+      const packageBlob = await downloadPackage(item.bookId)
+      savePackageBlob(item, packageBlob)
+      setPackageOperationStatus((current) => ({ ...current, [item.id]: { state: 'success', message: '下载已就绪' } }))
+    } catch (error) {
+      setPackageOperationStatus((current) => ({
+        ...current,
+        [item.id]: { state: 'failed', message: `下载失败：${adminErrorLabel(error)}` },
+      }))
+    }
+  }
+
+  const replaceAudioRow = (nextAudio: AdminAudio) => {
+    setAudio((current) => current.map((item) => (item.bookId === nextAudio.bookId || item.id === nextAudio.id ? nextAudio : item)))
+  }
+
+  const handleRefreshBookAudio = async (item: AdminAudio) => {
+    setAudioOperationStatus((current) => ({ ...current, [item.id]: { state: 'saving', message: '刷新中' } }))
+    try {
+      const nextAudio = await refreshBookAudio(item.bookId)
+      if (nextAudio) replaceAudioRow(nextAudio)
+      setAudioOperationStatus((current) => ({ ...current, [item.id]: { state: 'success', message: '刷新完成' } }))
+    } catch (error) {
+      setAudioOperationStatus((current) => ({
+        ...current,
+        [item.id]: { state: 'failed', message: `刷新失败：${adminErrorLabel(error)}` },
+      }))
+    }
+  }
+
+  const handleDeleteBookAudio = async (item: AdminAudio) => {
+    if (!window.confirm(`确认清理《${item.bookTitle}》的音频文件？`)) return
+    setAudioOperationStatus((current) => ({ ...current, [item.id]: { state: 'saving', message: '清理中' } }))
+    try {
+      const nextAudio = await deleteBookAudio(item.bookId)
+      if (nextAudio) replaceAudioRow(nextAudio)
+      setAudioOperationStatus((current) => ({ ...current, [item.id]: { state: 'success', message: '已清理音频' } }))
+    } catch (error) {
+      setAudioOperationStatus((current) => ({
+        ...current,
+        [item.id]: { state: 'failed', message: `清理失败：${adminErrorLabel(error)}` },
+      }))
+    }
   }
 
   const openView = (view: ViewKey) => {
@@ -174,7 +291,20 @@ function App() {
         <main className="content">
           {activeView === 'overview' && <Overview metrics={metrics} events={events} />}
           {activeView === 'books' && (
-            <BooksPage books={books} selectedBook={selectedBook} onSelect={setSelectedBookId} onUpdate={updateBook} />
+            <BooksPage
+              books={books}
+              selectedBook={selectedBook}
+              onSelect={setSelectedBookId}
+              onUpdate={updateBook}
+              operationStatus={selectedBook ? {
+                visibility: bookOperationStatus[`${selectedBook.id}:visibility`],
+                labels: bookOperationStatus[`${selectedBook.id}:labels`],
+              } : {}}
+              retryActions={selectedBook ? {
+                visibility: bookRetryActions[`${selectedBook.id}:visibility`],
+                labels: bookRetryActions[`${selectedBook.id}:labels`],
+              } : {}}
+            />
           )}
           {activeView === 'devices' && (
             <DevicesPage
@@ -182,15 +312,27 @@ function App() {
               selectedDevice={selectedDevice}
               onSelect={setSelectedDeviceId}
               onUpdate={updateDevice}
+              operationStatus={selectedDevice ? deviceOperationStatus[`${selectedDevice.id}:role`] : undefined}
+              retryAction={selectedDevice ? deviceRetryActions[`${selectedDevice.id}:role`] : undefined}
             />
           )}
-          {activeView === 'packages' && <PackagesPage packages={packages} />}
-          {activeView === 'audio' && <AudioPage audio={audio} />}
+          {activeView === 'packages' && (
+            <PackagesPage packages={packages} operationStatus={packageOperationStatus} onDownload={handleDownloadPackage} />
+          )}
+          {activeView === 'audio' && (
+            <AudioPage
+              audio={audio}
+              operationStatus={audioOperationStatus}
+              onRefresh={handleRefreshBookAudio}
+              onDelete={handleDeleteBookAudio}
+            />
+          )}
           {activeView === 'logs' && <RequestLogsPage requestLogs={requestLogs} />}
           {activeView === 'settings' && (
             <SettingsPage
               adminToken={adminToken}
               dataSource={dataSource}
+              connectionStatus={connectionStatus}
               isRefreshing={isRefreshing}
               loadMessage={loadMessage}
               onRefresh={() => void refreshDashboardData()}
@@ -295,11 +437,15 @@ function BooksPage({
   selectedBook,
   onSelect,
   onUpdate,
+  operationStatus,
+  retryActions,
 }: {
   books: AdminBook[]
   selectedBook: AdminBook | null
   onSelect: (bookId: string) => void
   onUpdate: (bookId: string, patch: Partial<AdminBook>) => void
+  operationStatus: Partial<Record<'visibility' | 'labels', OperationStatus>>
+  retryActions: Partial<Record<'visibility' | 'labels', RetryAction>>
 }) {
   return (
     <section className="split-view">
@@ -348,7 +494,7 @@ function BooksPage({
         </table>
       </div>
 
-      <BookDrawer book={selectedBook} onUpdate={onUpdate} />
+      <BookDrawer book={selectedBook} onUpdate={onUpdate} operationStatus={operationStatus} retryActions={retryActions} />
     </section>
   )
 }
@@ -356,9 +502,13 @@ function BooksPage({
 function BookDrawer({
   book,
   onUpdate,
+  operationStatus,
+  retryActions,
 }: {
   book: AdminBook | null
   onUpdate: (bookId: string, patch: Partial<AdminBook>) => void
+  operationStatus: Partial<Record<'visibility' | 'labels', OperationStatus>>
+  retryActions: Partial<Record<'visibility' | 'labels', RetryAction>>
 }) {
   if (!book) {
     return <aside className="drawer empty">选择一本书查看可见范围、标签和数据包状态。</aside>
@@ -384,12 +534,14 @@ function BookDrawer({
         <select
           value={book.visibility}
           onChange={(event) => onUpdate(book.id, { visibility: event.target.value as Visibility })}
+          disabled={operationStatus.visibility?.state === 'saving'}
         >
           {visibilityOptions.map((visibility) => (
             <option key={visibility} value={visibility}>{visibility}</option>
           ))}
         </select>
       </label>
+      <OperationNote status={operationStatus.visibility} retryAction={retryActions.visibility} />
 
       <fieldset className="checkbox-group">
         <legend>内容标签</legend>
@@ -398,12 +550,14 @@ function BookDrawer({
             <input
               type="checkbox"
               checked={book.labels.includes(label)}
+              disabled={operationStatus.labels?.state === 'saving'}
               onChange={() => toggleLabel(label)}
             />
             <span>{labelNames[label]}</span>
           </label>
         ))}
       </fieldset>
+      <OperationNote status={operationStatus.labels} retryAction={retryActions.labels} />
 
       <p className="current-state">
         当前标签：{book.labels.length > 0 ? book.labels.map((label) => labelNames[label]).join('、') : '无'}
@@ -428,11 +582,15 @@ function DevicesPage({
   selectedDevice,
   onSelect,
   onUpdate,
+  operationStatus,
+  retryAction,
 }: {
   devices: AdminDevice[]
   selectedDevice: AdminDevice | null
   onSelect: (deviceId: string) => void
   onUpdate: (deviceId: string, patch: Partial<AdminDevice>) => void
+  operationStatus?: OperationStatus
+  retryAction?: RetryAction
 }) {
   return (
     <section className="split-view">
@@ -469,12 +627,20 @@ function DevicesPage({
         </table>
       </div>
 
-      <DeviceDrawer device={selectedDevice} onUpdate={onUpdate} />
+      <DeviceDrawer device={selectedDevice} onUpdate={onUpdate} operationStatus={operationStatus} retryAction={retryAction} />
     </section>
   )
 }
 
-function PackagesPage({ packages }: { packages: AdminPackage[] }) {
+function PackagesPage({
+  packages,
+  operationStatus,
+  onDownload,
+}: {
+  packages: AdminPackage[]
+  operationStatus: Record<string, OperationStatus>
+  onDownload: (item: AdminPackage) => void
+}) {
   const totalMissing = packages.reduce((sum, item) => sum + item.missingChapters.length, 0)
   const readyCount = packages.filter((item) => item.status === 'ready').length
 
@@ -502,25 +668,41 @@ function PackagesPage({ packages }: { packages: AdminPackage[] }) {
               <th>覆盖率</th>
               <th>缺失章节</th>
               <th>校验</th>
+              <th>操作</th>
+              <th>操作状态</th>
             </tr>
           </thead>
           <tbody>
-            {packages.map((item) => (
-              <tr key={item.id}>
-                <td><strong>{item.bookTitle}</strong></td>
-                <td><code>{item.version}</code></td>
-                <td><Badge>{packageStatusNames[item.status]}</Badge></td>
-                <td>{formatSizeMb(item.sizeMb)}</td>
-                <td>{item.updatedAt}</td>
-                <td>
-                  <span className="coverage">
-                    S {item.summaryCoverage}% · KG {item.kgCoverage}% · E {item.embeddingCoverage}%
-                  </span>
-                </td>
-                <td><ChapterList chapters={item.missingChapters} /></td>
-                <td><code>{item.checksum}</code></td>
-              </tr>
-            ))}
+            {packages.map((item) => {
+              const status = operationStatus[item.id]
+              return (
+                <tr key={item.id}>
+                  <td><strong>{item.bookTitle}</strong></td>
+                  <td><code>{item.version}</code></td>
+                  <td><Badge>{packageStatusNames[item.status]}</Badge></td>
+                  <td>{formatSizeMb(item.sizeMb)}</td>
+                  <td>{item.updatedAt}</td>
+                  <td>
+                    <span className="coverage">
+                      S {item.summaryCoverage}% · KG {item.kgCoverage}% · E {item.embeddingCoverage}%
+                    </span>
+                  </td>
+                  <td><ChapterList chapters={item.missingChapters} /></td>
+                  <td><code>{item.checksum}</code></td>
+                  <td>
+                    <button
+                      type="button"
+                      className="table-action"
+                      disabled={status?.state === 'saving'}
+                      onClick={() => onDownload(item)}
+                    >
+                      下载 {item.bookTitle} package
+                    </button>
+                  </td>
+                  <td><OperationInline status={status} /></td>
+                </tr>
+              )
+            })}
           </tbody>
         </table>
       </section>
@@ -528,7 +710,17 @@ function PackagesPage({ packages }: { packages: AdminPackage[] }) {
   )
 }
 
-function AudioPage({ audio }: { audio: AdminAudio[] }) {
+function AudioPage({
+  audio,
+  operationStatus,
+  onRefresh,
+  onDelete,
+}: {
+  audio: AdminAudio[]
+  operationStatus: Record<string, OperationStatus>
+  onRefresh: (item: AdminAudio) => void
+  onDelete: (item: AdminAudio) => void
+}) {
   const missingTotal = audio.reduce((sum, item) => sum + Math.max(0, item.chapterCount - item.availableChapters), 0)
   const downloads = audio.reduce((sum, item) => sum + item.downloads24h, 0)
   const averageCoverage = audio.length > 0
@@ -561,23 +753,49 @@ function AudioPage({ audio }: { audio: AdminAudio[] }) {
               <th>声音</th>
               <th>最近生成</th>
               <th>24h 下载</th>
+              <th>操作</th>
+              <th>操作状态</th>
             </tr>
           </thead>
           <tbody>
-            {audio.map((item) => (
-              <tr key={item.id}>
-                <td><strong>{item.bookTitle}</strong></td>
-                <td><Badge>{audioStatusNames[item.status]}</Badge></td>
-                <td>{item.coverage}%</td>
-                <td>{item.availableChapters}/{item.chapterCount}</td>
-                <td><ChapterList chapters={item.missingChapters} /></td>
-                <td>{item.totalDuration}</td>
-                <td>{formatSizeMb(item.sizeMb)}</td>
-                <td>{item.voice}</td>
-                <td>{item.lastGeneratedAt}</td>
-                <td>{formatCount(item.downloads24h)}</td>
-              </tr>
-            ))}
+            {audio.map((item) => {
+              const status = operationStatus[item.id]
+              return (
+                <tr key={item.id}>
+                  <td><strong>{item.bookTitle}</strong></td>
+                  <td><Badge>{audioStatusNames[item.status]}</Badge></td>
+                  <td>{item.coverage}%</td>
+                  <td>{item.availableChapters}/{item.chapterCount}</td>
+                  <td><ChapterList chapters={item.missingChapters} /></td>
+                  <td>{item.totalDuration}</td>
+                  <td>{formatSizeMb(item.sizeMb)}</td>
+                  <td>{item.voice}</td>
+                  <td>{item.lastGeneratedAt}</td>
+                  <td>{formatCount(item.downloads24h)}</td>
+                  <td>
+                    <div className="table-action-group">
+                      <button
+                        type="button"
+                        className="table-action"
+                        disabled={status?.state === 'saving'}
+                        onClick={() => onRefresh(item)}
+                      >
+                        刷新 {item.bookTitle} 音频状态
+                      </button>
+                      <button
+                        type="button"
+                        className="table-action danger"
+                        disabled={status?.state === 'saving'}
+                        onClick={() => onDelete(item)}
+                      >
+                        清理 {item.bookTitle} 音频
+                      </button>
+                    </div>
+                  </td>
+                  <td><OperationInline status={status} /></td>
+                </tr>
+              )
+            })}
           </tbody>
         </table>
       </section>
@@ -641,9 +859,13 @@ function RequestLogsPage({ requestLogs }: { requestLogs: AdminRequestLog[] }) {
 function DeviceDrawer({
   device,
   onUpdate,
+  operationStatus,
+  retryAction,
 }: {
   device: AdminDevice | null
   onUpdate: (deviceId: string, patch: Partial<AdminDevice>) => void
+  operationStatus?: OperationStatus
+  retryAction?: RetryAction
 }) {
   if (!device) {
     return <aside className="drawer empty">选择一台设备查看验证码、连接信息和授权角色。</aside>
@@ -662,12 +884,14 @@ function DeviceDrawer({
         <select
           value={device.role}
           onChange={(event) => onUpdate(device.id, { role: event.target.value as DeviceRole })}
+          disabled={operationStatus?.state === 'saving'}
         >
           <option value="default">普通</option>
           <option value="trusted">受信</option>
           <option value="disabled">禁用</option>
         </select>
       </label>
+      <OperationNote status={operationStatus} retryAction={retryAction} />
 
       <p className="current-state">当前角色：{roleNames[device.role]}</p>
 
@@ -724,6 +948,25 @@ function StatusCode({ code }: { code: number }) {
   return <span className={`status-code ${tone}`}>{code}</span>
 }
 
+function OperationInline({ status }: { status?: OperationStatus }) {
+  if (!status) return <span className="muted">待操作</span>
+  return <span className={`operation-status ${status.state}`}>{status.message}</span>
+}
+
+function OperationNote({ status, retryAction }: { status?: OperationStatus; retryAction?: RetryAction }) {
+  if (!status) return null
+  return (
+    <div className={`operation-note ${status.state}`}>
+      <span>{status.message}</span>
+      {retryAction && (
+        <button type="button" onClick={retryAction.run}>
+          {retryAction.label}
+        </button>
+      )}
+    </div>
+  )
+}
+
 function formatSizeMb(sizeMb: number) {
   return sizeMb >= 1024 ? `${(sizeMb / 1024).toFixed(1)} GB` : `${sizeMb.toFixed(1)} MB`
 }
@@ -747,6 +990,7 @@ const audioStatusNames: Record<AdminAudio['status'], string> = {
 function SettingsPage({
   adminToken,
   dataSource,
+  connectionStatus,
   isRefreshing,
   loadMessage,
   onRefresh,
@@ -754,6 +998,7 @@ function SettingsPage({
 }: {
   adminToken: string
   dataSource: AdminDashboardData['source']
+  connectionStatus: ConnectionStatus
   isRefreshing: boolean
   loadMessage: string
   onRefresh: () => void
@@ -776,7 +1021,7 @@ function SettingsPage({
       >
         <div className="panel-header">
           <h2>后台访问</h2>
-          <span>{dataSource === 'api' ? '实时数据' : 'Mock 数据'}</span>
+          <span>{connectionTitle(connectionStatus, dataSource)}</span>
         </div>
 
         <label className="field">
@@ -806,8 +1051,10 @@ function SettingsPage({
         </div>
 
         <dl className="detail-list">
+          <div><dt>连接状态</dt><dd>{connectionTitle(connectionStatus, dataSource)}</dd></div>
           <div><dt>数据来源</dt><dd>{dataSource === 'api' ? 'Gateway 管理 API' : '本地 mock 数据'}</dd></div>
           <div><dt>Token 状态</dt><dd>{adminToken ? '已保存' : '未设置'}</dd></div>
+          <div><dt>处理建议</dt><dd>{connectionStatus === 'unauthorized' ? '需要有效管理员 Token' : '可刷新验证最新状态'}</dd></div>
           <div><dt>存储键</dt><dd><code>{adminTokenStorageKey}</code></dd></div>
         </dl>
 
@@ -827,6 +1074,44 @@ function readStoredAdminToken() {
   } catch {
     return ''
   }
+}
+
+function connectionMessage(data: AdminDashboardData) {
+  if (data.status === 'unauthorized') return '未授权：管理员 Token 无效或缺失'
+  if (data.status === 'unavailable') return 'API 不可用，正在显示 mock 数据'
+  if (data.status === 'partial') return `部分后台接口失败：${data.failedSections.join('、')} 已回退到可用数据`
+  if (data.status === 'mock') return 'API 不可用，正在显示 mock 数据'
+  return '已连接 Gateway 管理 API'
+}
+
+function connectionTitle(status: ConnectionStatus, source: AdminDashboardData['source']) {
+  if (status === 'unauthorized') return '未授权'
+  if (status === 'partial') return '部分可用'
+  if (status === 'unavailable' || status === 'mock') return 'Mock 数据'
+  return source === 'api' ? '实时数据' : 'Mock 数据'
+}
+
+function omitKey<T>(record: Record<string, T>, key: string) {
+  const next = { ...record }
+  delete next[key]
+  return next
+}
+
+function isLocalDemoEdit(status: ConnectionStatus, token: string) {
+  return !token && (status === 'mock' || status === 'unavailable')
+}
+
+function savePackageBlob(item: AdminPackage, packageBlob: Blob) {
+  if (navigator.userAgent.toLowerCase().includes('jsdom')) return
+  if (typeof URL.createObjectURL !== 'function') return
+  const objectUrl = URL.createObjectURL(packageBlob)
+  const link = document.createElement('a')
+  link.href = objectUrl
+  link.download = `${item.bookId}-${item.version}.zip`
+  document.body.appendChild(link)
+  link.click()
+  link.remove()
+  URL.revokeObjectURL(objectUrl)
 }
 
 export default App

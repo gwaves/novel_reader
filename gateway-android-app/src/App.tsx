@@ -415,6 +415,7 @@ function App() {
   )
   const visibilityNotice = libraryVisibilityNotice(gatewaySession, books.length)
   const syncBlockedReason = gatewaySyncBlockedReason(gatewaySession)
+  const cloudSyncBlocked = Boolean(syncBlockedReason)
   const visibleStatusMessage = shouldShowGlobalStatusMessage(message) ? message : ''
   const previousChapter = currentChapterPosition > 0 ? chapters[currentChapterPosition - 1] : null
   const nextChapter =
@@ -443,10 +444,20 @@ function App() {
   const playbackEngineTouchedRef = useRef(false)
   const deviceMetadata = useMemo(() => getDeviceMetadata(appVersion), [])
   const audioSyncCancelRequestedRef = useRef(false)
+  const gatewaySessionRef = useRef<GatewaySession | null>(gatewaySession)
+  const cloudBookCountRef = useRef(books.length)
 
   useEffect(() => {
     localStorage.setItem(settingsKey, JSON.stringify(settings))
   }, [settings])
+
+  useEffect(() => {
+    gatewaySessionRef.current = gatewaySession
+  }, [gatewaySession])
+
+  useEffect(() => {
+    cloudBookCountRef.current = books.length
+  }, [books.length])
 
   useEffect(() => {
     localStorage.setItem(readerSettingsKey, JSON.stringify(readerSettings))
@@ -623,20 +634,42 @@ function App() {
     }
   }, [audioUrl])
 
-  async function refreshBooks() {
-    const blockedReason = gatewaySyncBlockedReason(gatewaySession)
-    if (blockedReason) {
-      setConnectionState('error')
-      setLibrarySyncState({ status: 'blocked', message: blockedReason })
-      setMessage(blockedReason)
-      return
-    }
+  async function refreshBooks(
+    options: {
+      session?: GatewaySession
+      roleNotice?: string | null
+      previousSession?: GatewaySession | null
+      previousBookCount?: number
+    } = {},
+  ) {
+    const previousSession = options.previousSession ?? gatewaySessionRef.current
+    const previousBookCount = options.previousBookCount ?? cloudBookCountRef.current
+    let activeSession = options.session ?? gatewaySessionRef.current
+    let activeRoleNotice = options.roleNotice ?? null
     setLoadingBooks(true)
     setLibrarySyncState({ status: 'syncing' })
     setMessage('')
     try {
+      if (!options.session) {
+        const refreshedSession = await fetchAuthenticatedSession()
+        activeSession = refreshedSession
+        if (refreshedSession.auth.role === 'disabled') {
+          activeRoleNotice = applyGatewaySession(refreshedSession, previousBookCount, previousBookCount)
+        }
+      }
+      const blockedReason = gatewaySyncBlockedReason(activeSession)
+      if (blockedReason) {
+        setConnectionState('error')
+        setLibrarySyncState({ status: 'blocked', message: blockedReason })
+        setMessage(activeRoleNotice ? `${activeRoleNotice} ${blockedReason}` : blockedReason)
+        return
+      }
       const response = await gatewayFetch(settings, '/mobile/books')
       const nextBooks = Array.isArray(response.books) ? (response.books as BookSummary[]) : []
+      if (activeSession) {
+        activeRoleNotice = roleChangeNotice(previousSession, activeSession, previousBookCount, nextBooks.length)
+        if (!options.session) applyGatewaySession(activeSession, previousBookCount, nextBooks.length)
+      }
       setBooks(nextBooks)
       void refreshBookAudioCounts(nextBooks)
       await refreshLocalLibrary()
@@ -644,7 +677,7 @@ function App() {
       refreshCacheSummaries()
       setConnectionState('connected')
       setLibrarySyncState({ status: 'synced', at: new Date().toISOString(), bookCount: nextBooks.length })
-      setMessage(`云端书库 ${nextBooks.length} 本`)
+      setMessage(activeRoleNotice ?? `云端书库 ${nextBooks.length} 本`)
     } catch (error) {
       const blockedMessage = blockedGatewaySyncMessage(error)
       if (blockedMessage) {
@@ -684,21 +717,20 @@ function App() {
     setConnectionState('checking')
     setMessage('')
     try {
-      const session = normalizeGatewaySession(await gatewayFetch(settings, '/auth/session'))
-      if (!session?.authenticated) {
-        throw createGatewayError({ error: { code: 'device_unauthorized', statusCode: 403 } })
-      }
-      setGatewaySession(session)
+      const previousSession = gatewaySessionRef.current
+      const previousBookCount = cloudBookCountRef.current
+      const session = await fetchAuthenticatedSession()
+      const roleNotice = applyGatewaySession(session, previousBookCount, previousBookCount)
       if (session.auth.role === 'disabled') {
         setConnectionState('error')
-        const blockedMessage = errorMessage(createGatewayError({ error: { code: 'device_disabled', statusCode: 403 } }))
+        const blockedMessage = gatewaySyncBlockedReason(session) ?? errorMessage(createGatewayError({ error: { code: 'device_disabled', statusCode: 403 } }))
         setLibrarySyncState({ status: 'blocked', message: blockedMessage })
-        setMessage(blockedMessage)
+        setMessage(roleNotice ? `${roleNotice} ${blockedMessage}` : blockedMessage)
         return
       }
       setConnectionState('connected')
-      setMessage(`授权状态：${deviceRoleLabel(session.auth.role)}`)
-      await refreshBooks()
+      setMessage(roleNotice ?? `授权状态：${deviceRoleLabel(session.auth.role)}`)
+      await refreshBooks({ session, roleNotice, previousSession, previousBookCount })
     } catch (error) {
       setConnectionState('error')
       setMessage(errorMessage(error))
@@ -743,6 +775,12 @@ function App() {
         restorePendingScroll()
         setLoadingPackage(false)
         void refreshAudio(bookId, false)
+        return
+      }
+
+      if (!localCacheReadableWhenDisabled(gatewaySessionRef.current, Boolean(cachedPackage)) && gatewaySessionRef.current?.auth.role === 'disabled') {
+        setConnectionState('error')
+        setMessage('设备已禁用，本地没有可读缓存。本地缓存仍可读，云端同步已禁用。')
         return
       }
 
@@ -809,7 +847,7 @@ function App() {
   async function syncFullPackage(bookId: string) {
     if (!Capacitor.isNativePlatform()) return
     if (fullPackageStatus === 'downloading' || fullPackageStatus === 'importing') return
-    const blockedReason = gatewaySyncBlockedReason(gatewaySession)
+    const blockedReason = cloudActionBlockedReason(gatewaySessionRef.current, '下载完整包')
     if (blockedReason) {
       setConnectionState('error')
       setMessage(blockedReason)
@@ -866,7 +904,7 @@ function App() {
 
   async function addCloudBookToShelf(bookId: string) {
     if (addingBookId) return
-    const blockedReason = gatewaySyncBlockedReason(gatewaySession)
+    const blockedReason = cloudActionBlockedReason(gatewaySessionRef.current, '加入书架')
     if (blockedReason) {
       setConnectionState('error')
       setMessage(blockedReason)
@@ -906,6 +944,13 @@ function App() {
 
   async function refreshAudio(bookId = selectedBookId, showMessage = true) {
     if (!bookId) return
+    const blockedReason = cloudActionBlockedReason(gatewaySessionRef.current, '刷新 MP3')
+    if (blockedReason) {
+      setConnectionState('error')
+      if (showMessage) setMessage(blockedReason)
+      await refreshCachedAudioIds(bookId)
+      return
+    }
     setLoadingAudio(true)
     try {
       const response = await gatewayFetch(settings, `/mobile/books/${encodeURIComponent(bookId)}/audio`)
@@ -1011,6 +1056,12 @@ function App() {
 
   async function syncCurrentBookAudio() {
     if (!selectedBookId) return
+    const blockedReason = cloudActionBlockedReason(gatewaySessionRef.current, '下载 MP3')
+    if (blockedReason) {
+      setConnectionState('error')
+      setMessage(blockedReason)
+      return
+    }
     const bookId = selectedBookId
     const chaptersToSync = await ensureAudioCatalog(bookId)
     if (chaptersToSync.length === 0) {
@@ -1033,6 +1084,12 @@ function App() {
   async function syncCurrentBookAudioRange(limit: number | 'current' | 'all') {
     if (!selectedBookId) return
     const bookId = selectedBookId
+    const blockedReason = cloudActionBlockedReason(gatewaySessionRef.current, '下载 MP3')
+    if (blockedReason) {
+      setConnectionState('error')
+      setMessage(blockedReason)
+      return
+    }
     try {
       const catalog = await ensureAudioCatalog(bookId)
       if (catalog.length === 0) {
@@ -1063,6 +1120,12 @@ function App() {
   }
 
   async function syncBookAudioChapters(bookId: string, chaptersToSync: AudioChapter[], label: string) {
+    const blockedReason = cloudActionBlockedReason(gatewaySessionRef.current, '下载 MP3')
+    if (blockedReason) {
+      setConnectionState('error')
+      setMessage(blockedReason)
+      return
+    }
     setLoadingAudio(true)
     audioSyncCancelRequestedRef.current = false
     setAudioSyncBookId(bookId)
@@ -1108,9 +1171,24 @@ function App() {
 
   function openMp3Manager() {
     setMp3ManagerOpen(true)
-    if (selectedBookId && audioCatalogBookId !== selectedBookId) {
+    if (selectedBookId && audioCatalogBookId !== selectedBookId && !cloudSyncBlocked) {
       void refreshAudio(selectedBookId, false)
     }
+  }
+
+  async function fetchAuthenticatedSession() {
+    const session = normalizeGatewaySession(await gatewayFetch(settings, '/auth/session'))
+    if (!session?.authenticated) {
+      throw createGatewayError({ error: { code: 'device_unauthorized', statusCode: 403 } })
+    }
+    return session
+  }
+
+  function applyGatewaySession(session: GatewaySession, previousBookCount: number, nextBookCount: number) {
+    const notice = roleChangeNotice(gatewaySessionRef.current, session, previousBookCount, nextBookCount)
+    gatewaySessionRef.current = session
+    setGatewaySession(session)
+    return notice
   }
 
   function refreshCacheSummaries() {
@@ -2217,7 +2295,7 @@ function App() {
                   className="secondary-button full-width-button"
                   type="button"
                   onClick={openMp3Manager}
-                  disabled={!selectedBookId || Boolean(syncBlockedReason) || loadingAudio}
+                  disabled={!selectedBookId || loadingAudio}
                 >
                   {visibleAudioSyncProgress ? `同步音频 ${visibleAudioSyncProgress.done}/${visibleAudioSyncProgress.total}` : 'MP3 管理'}
                 </button>
@@ -2679,22 +2757,23 @@ function App() {
                 <strong>{visibleAudioSyncProgress.done}/{visibleAudioSyncProgress.total}</strong>
               </div>
             ) : null}
+            {syncBlockedReason ? <div className="visibility-notice role-disabled">{syncBlockedReason}</div> : null}
             <div className="mp3-action-list">
               {visibleAudioSyncProgress ? (
                 <button className="danger-button" type="button" onClick={stopAudioSync}>
                   停止同步
                 </button>
               ) : null}
-              <button type="button" onClick={() => void syncCurrentBookAudioRange('current')} disabled={!selectedBookId || !currentChapter || loadingAudio}>
+              <button type="button" onClick={() => void syncCurrentBookAudioRange('current')} disabled={!selectedBookId || !currentChapter || loadingAudio || cloudSyncBlocked}>
                 当前章节
               </button>
-              <button type="button" onClick={() => void syncCurrentBookAudioRange(10)} disabled={!selectedBookId || !currentChapter || loadingAudio}>
+              <button type="button" onClick={() => void syncCurrentBookAudioRange(10)} disabled={!selectedBookId || !currentChapter || loadingAudio || cloudSyncBlocked}>
                 当前起 10 章
               </button>
-              <button type="button" onClick={() => void syncCurrentBookAudioRange(30)} disabled={!selectedBookId || !currentChapter || loadingAudio}>
+              <button type="button" onClick={() => void syncCurrentBookAudioRange(30)} disabled={!selectedBookId || !currentChapter || loadingAudio || cloudSyncBlocked}>
                 当前起 30 章
               </button>
-              <button type="button" onClick={() => void syncCurrentBookAudioRange('all')} disabled={!selectedBookId || loadingAudio}>
+              <button type="button" onClick={() => void syncCurrentBookAudioRange('all')} disabled={!selectedBookId || loadingAudio || cloudSyncBlocked}>
                 全部未缓存
               </button>
               <button
@@ -4346,16 +4425,43 @@ function fullPackageLabel(cache: FullPackageCache | null, status: FullPackageSta
 
 export function libraryVisibilityNotice(session: GatewaySession | null, bookCount: number) {
   if (!session) return '刷新授权状态后会显示当前设备可见范围。'
-  if (session.auth.role === 'disabled') return '设备已禁用，不能同步云端书库。请在管理后台启用后再刷新授权状态。'
+  if (session.auth.role === 'disabled') return '设备已禁用，本地缓存仍可读，云端同步已禁用。请在管理后台启用后再刷新授权状态。'
   if (session.auth.role === 'trusted') {
     return `受信设备可看到默认书库和受信书库，当前云端可见 ${bookCount} 本。`
   }
+  if (bookCount === 0) return '普通设备仅默认书库；如果后台只有受信书，当前设备不会显示为服务器没数据。'
   return `普通设备仅显示默认书库，当前云端可见 ${bookCount} 本；后台可将设备设为受信后显示更多书。`
 }
 
 export function gatewaySyncBlockedReason(session: GatewaySession | null) {
-  if (session?.auth.role === 'disabled') return '设备已禁用，不能同步云端书库。'
+  if (session?.auth.role === 'disabled') return '设备已禁用，本地缓存仍可读，云端同步已禁用。'
   return null
+}
+
+export function cloudActionBlockedReason(session: GatewaySession | null, action: string) {
+  if (session?.auth.role === 'disabled') return `设备已禁用，不能${action}。本地缓存仍可读，云端同步已禁用。`
+  return null
+}
+
+export function localCacheReadableWhenDisabled(session: GatewaySession | null, hasLocalCache: boolean) {
+  return session?.auth.role !== 'disabled' || hasLocalCache
+}
+
+export function roleChangeNotice(previousSession: GatewaySession | null, nextSession: GatewaySession | null, previousBookCount: number, nextBookCount: number) {
+  const previousRole = previousSession?.auth.role
+  const nextRole = nextSession?.auth.role
+  if (!previousRole || !nextRole || previousRole === nextRole) return null
+  if (previousRole === 'default' && nextRole === 'trusted') {
+    const countPhrase =
+      nextBookCount > previousBookCount
+        ? `，可见书从 ${previousBookCount} 本增加到 ${nextBookCount} 本`
+        : `，当前云端可见 ${nextBookCount} 本`
+    return `授权已更新：受信设备可看到默认书库和受信书库${countPhrase}。`
+  }
+  if (nextRole === 'disabled') {
+    return '授权已更新：设备已禁用。本地缓存仍可读，云端同步已禁用。'
+  }
+  return `授权已更新：当前角色为${deviceRoleLabel(nextRole)}。`
 }
 
 export function blockedGatewaySyncMessage(error: unknown) {

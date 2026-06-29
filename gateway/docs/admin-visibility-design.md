@@ -31,7 +31,7 @@ Gateway 现在已经能向移动端提供书库、单书数据包、音频清单
 | `trusted` | 管理后台手动授权后的受信设备 | `default`、`trusted` |
 | `disabled` | 被禁用设备 | 不能访问受保护移动端 API |
 
-第一版不通过 token 区分设备可见性。Token 只证明“可以连接 Gateway”，设备角色决定“能看到什么”。
+第一版通过 token 区分调用方语义：管理端使用 admin token，移动端和 `/auth/session` 使用 mobile token。Token 只证明“可以调用对应 API 面”，设备角色仍然决定移动端“能看到什么”。
 
 ### 书籍可见范围
 
@@ -120,7 +120,7 @@ Gateway 现在已经能向移动端提供书库、单书数据包、音频清单
 移动端受保护请求继续带 bearer token，并增加稳定设备信息：
 
 ```text
-Authorization: Bearer <token>
+Authorization: Bearer <GATEWAY_MOBILE_ACCESS_TOKEN>
 X-Device-Id: <stable-device-id>
 X-Device-Name: <user-visible-device-name>
 X-Device-Model: <model>
@@ -133,6 +133,14 @@ X-App-Version: <version>
 ## API 设计
 
 ### 鉴权与设备
+
+支持三类静态 token 配置：
+
+- `GATEWAY_ADMIN_ACCESS_TOKEN`：管理端 `/admin/*` 和后台 AI/RAG 操作使用。
+- `GATEWAY_MOBILE_ACCESS_TOKEN`：`/auth/*` 和 `/mobile/*` 使用。
+- `GATEWAY_DEV_ACCESS_TOKEN`：开发兼容回退；未设置 admin/mobile token 时分别作为对应 token 使用。
+
+当 admin/mobile token 都独立设置后，admin token 不能调用 mobile/session API，mobile token 也不能调用 admin API。
 
 ```text
 GET /auth/session
@@ -219,6 +227,8 @@ GET /admin/books/:bookId/package/download
 ```text
 GET /admin/packages
 GET /admin/audio
+POST /admin/books/:bookId/audio/refresh
+DELETE /admin/books/:bookId/audio
 GET /admin/requests
 ```
 
@@ -263,6 +273,45 @@ GET /admin/requests
       "updatedAt": "2026-06-29T11:40:00.000Z"
     }
   ]
+}
+```
+
+`POST /admin/books/:bookId/audio/refresh` 不触发真实 TTS 生产，只重新读取当前音频清单、包章节和文件状态，返回单书 summary：
+
+```json
+{
+  "schemaVersion": 1,
+  "refreshedAt": "2026-06-29T12:00:00.000Z",
+  "audio": {
+    "bookId": "book-id",
+    "title": "书名",
+    "chapterCount": 120,
+    "audioChapterCount": 96,
+    "missingChapterCount": 24,
+    "missingChapterIds": ["chapter-097"],
+    "coverage": 0.8,
+    "totalSizeBytes": 1887436800
+  }
+}
+```
+
+`DELETE /admin/books/:bookId/audio` 清理该书 `GATEWAY_AUDIO_DIR/books/<bookId>/audio.json` 音频清单/文件索引，不删除实际 MP3 文件，并返回清理结果以及清理后的单书音频 summary：
+
+```json
+{
+  "schemaVersion": 1,
+  "clearedAt": "2026-06-29T12:00:00.000Z",
+  "cleanup": {
+    "bookId": "book-id",
+    "removed": true,
+    "deletedFileCount": 1,
+    "deletedFiles": ["audio.json"]
+  },
+  "audio": {
+    "bookId": "book-id",
+    "audioChapterCount": 0,
+    "missingChapterCount": 120
+  }
 }
 ```
 

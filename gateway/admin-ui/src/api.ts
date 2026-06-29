@@ -130,50 +130,54 @@ export type AdminDashboardData = {
   overviewMetrics: typeof overviewMetrics
   recentEvents: typeof recentEvents
   source: 'api' | 'mock'
+  status: 'ok' | 'mock' | 'unauthorized' | 'unavailable' | 'partial'
+  failedSections: string[]
 }
 
 export const adminTokenStorageKey = 'novel-reader-gateway-admin-token'
 
 export async function loadAdminDashboardData(fetcher: typeof fetch = fetch): Promise<AdminDashboardData> {
-  try {
-    const [
-      booksResponse,
-      devicesResponse,
-      metricsResponse,
-      eventsResponse,
-      packagesResponse,
-      audioResponse,
-      requestsResponse,
-    ] = await Promise.all([
-      adminFetch<{ books?: GatewayBook[] }>('/admin/books', fetcher),
-      adminFetch<{ devices?: GatewayDevice[] }>('/admin/devices', fetcher),
-      adminFetch<GatewayMetrics>('/admin/metrics', fetcher),
-      adminFetch<GatewayEvents>('/admin/events', fetcher),
-      adminFetch<{ packages?: GatewayPackage[] }>('/admin/packages', fetcher),
-      adminFetch<{ audio?: GatewayAudio[] }>('/admin/audio', fetcher),
-      adminFetch<{ requests?: GatewayRequestLog[] }>('/admin/requests', fetcher),
-    ])
-    return {
-      books: Array.isArray(booksResponse.books) ? booksResponse.books.map(mapBook) : [],
-      devices: Array.isArray(devicesResponse.devices) ? devicesResponse.devices.map(mapDevice) : [],
-      packages: Array.isArray(packagesResponse.packages) ? packagesResponse.packages.map(mapPackage) : [],
-      audio: Array.isArray(audioResponse.audio) ? audioResponse.audio.map(mapAudio) : [],
-      requestLogs: Array.isArray(requestsResponse.requests) ? requestsResponse.requests.map(mapRequestLog) : [],
-      overviewMetrics: mapMetrics(metricsResponse),
-      recentEvents: mapEvents(eventsResponse),
-      source: 'api',
-    }
-  } catch {
-    return {
-      books: initialBooks,
-      devices: initialDevices,
-      packages: initialPackages,
-      audio: initialAudio,
-      requestLogs: initialRequestLogs,
-      overviewMetrics,
-      recentEvents,
-      source: 'mock',
-    }
+  const sections = await Promise.allSettled([
+    adminFetch<{ books?: GatewayBook[] }>('/admin/books', fetcher),
+    adminFetch<{ devices?: GatewayDevice[] }>('/admin/devices', fetcher),
+    adminFetch<GatewayMetrics>('/admin/metrics', fetcher),
+    adminFetch<GatewayEvents>('/admin/events', fetcher),
+    adminFetch<{ packages?: GatewayPackage[] }>('/admin/packages', fetcher),
+    adminFetch<{ audio?: GatewayAudio[] }>('/admin/audio', fetcher),
+    adminFetch<{ requests?: GatewayRequestLog[] }>('/admin/requests', fetcher),
+  ])
+
+  if (sections.some((section) => section.status === 'rejected' && isAdminApiError(section.reason, 'unauthorized'))) {
+    return mockDashboardData('unauthorized', 'api')
+  }
+
+  if (sections.every((section) => section.status === 'rejected' && isAdminApiError(section.reason, 'unavailable'))) {
+    return mockDashboardData('unavailable', 'mock')
+  }
+
+  const [booksResult, devicesResult, metricsResult, eventsResult, packagesResult, audioResult, requestsResult] = sections
+  const failedSections = sections.flatMap((section, index) => section.status === 'rejected' ? [sectionNames[index]] : [])
+  const status: AdminDashboardData['status'] = failedSections.length > 0 ? 'partial' : 'ok'
+
+  const booksResponse = valueOr(booksResult, { books: initialBooks })
+  const devicesResponse = valueOr(devicesResult, { devices: initialDevices })
+  const metricsResponse = valueOr(metricsResult, null)
+  const eventsResponse = valueOr(eventsResult, null)
+  const packagesResponse = valueOr(packagesResult, { packages: initialPackages })
+  const audioResponse = valueOr(audioResult, { audio: initialAudio })
+  const requestsResponse = valueOr(requestsResult, { requests: initialRequestLogs })
+
+  return {
+    books: Array.isArray(booksResponse.books) ? booksResponse.books.map(mapBookLike) : [],
+    devices: Array.isArray(devicesResponse.devices) ? devicesResponse.devices.map(mapDeviceLike) : [],
+    packages: Array.isArray(packagesResponse.packages) ? packagesResponse.packages.map(mapPackageLike) : [],
+    audio: Array.isArray(audioResponse.audio) ? audioResponse.audio.map(mapAudioLike) : [],
+    requestLogs: Array.isArray(requestsResponse.requests) ? requestsResponse.requests.map(mapRequestLogLike) : [],
+    overviewMetrics: metricsResponse ? mapMetrics(metricsResponse) : overviewMetrics,
+    recentEvents: eventsResponse ? mapEvents(eventsResponse) : recentEvents,
+    source: 'api',
+    status,
+    failedSections,
   }
 }
 
@@ -198,21 +202,94 @@ export async function patchDeviceRole(deviceId: string, role: DeviceRole, fetche
   })
 }
 
-async function adminFetch<T = unknown>(path: string, fetcher: typeof fetch, init: RequestInit = {}): Promise<T> {
+export async function downloadPackage(bookId: string, fetcher: typeof fetch = fetch) {
+  return adminFetch<Blob>(`/admin/books/${encodeURIComponent(bookId)}/package/download`, fetcher, {}, 'blob')
+}
+
+export async function refreshBookAudio(bookId: string, fetcher: typeof fetch = fetch) {
+  const response = await adminFetch<{ audio?: GatewayAudio | AdminAudio }>(`/admin/books/${encodeURIComponent(bookId)}/audio/refresh`, fetcher, {
+    method: 'POST',
+  })
+  return response.audio ? mapAudioLike(response.audio) : null
+}
+
+export async function deleteBookAudio(bookId: string, fetcher: typeof fetch = fetch) {
+  const response = await adminFetch<{ audio?: GatewayAudio | AdminAudio }>(`/admin/books/${encodeURIComponent(bookId)}/audio`, fetcher, {
+    method: 'DELETE',
+  })
+  return response.audio ? mapAudioLike(response.audio) : null
+}
+
+export function adminErrorLabel(error: unknown) {
+  if (isAdminApiError(error, 'unauthorized')) return '未授权'
+  if (isAdminApiError(error, 'unavailable')) return '服务不可用'
+  if (error instanceof AdminApiError && error.status >= 500) return '服务不可用'
+  return '请求失败'
+}
+
+async function adminFetch<T = unknown>(
+  path: string,
+  fetcher: typeof fetch,
+  init: RequestInit = {},
+  responseType: 'json' | 'blob' = 'json',
+): Promise<T> {
   const headers = new Headers(init.headers)
   headers.set('accept', 'application/json')
   if (init.body) headers.set('content-type', 'application/json')
   const token = readAdminToken()
   if (token) headers.set('authorization', `Bearer ${token}`)
 
-  const response = await fetcher(path, {
-    ...init,
-    headers,
-  })
-  if (!response.ok) {
-    throw new Error(`Gateway admin API ${response.status}`)
+  let response: Response
+  try {
+    response = await fetcher(path, {
+      ...init,
+      headers,
+    })
+  } catch (error) {
+    throw new AdminApiError('Gateway admin API unavailable', 'unavailable', 0, error)
   }
+  if (!response.ok) {
+    const kind = response.status === 401 || response.status === 403 ? 'unauthorized' : 'http'
+    throw new AdminApiError(`Gateway admin API ${response.status}`, kind, response.status)
+  }
+  if (responseType === 'blob') return response.blob() as Promise<T>
   return response.json() as Promise<T>
+}
+
+class AdminApiError extends Error {
+  constructor(
+    message: string,
+    readonly kind: 'unauthorized' | 'unavailable' | 'http',
+    readonly status: number,
+    readonly cause?: unknown,
+  ) {
+    super(message)
+  }
+}
+
+function isAdminApiError(error: unknown, kind: AdminApiError['kind']) {
+  return error instanceof AdminApiError && error.kind === kind
+}
+
+const sectionNames = ['书籍', '设备', '指标', '事件', '数据包', '音频', '请求日志']
+
+function mockDashboardData(status: AdminDashboardData['status'], source: AdminDashboardData['source']): AdminDashboardData {
+  return {
+    books: status === 'unauthorized' ? [] : initialBooks,
+    devices: status === 'unauthorized' ? [] : initialDevices,
+    packages: status === 'unauthorized' ? [] : initialPackages,
+    audio: status === 'unauthorized' ? [] : initialAudio,
+    requestLogs: status === 'unauthorized' ? [] : initialRequestLogs,
+    overviewMetrics: status === 'unauthorized' ? [] : overviewMetrics,
+    recentEvents: status === 'unauthorized' ? [] : recentEvents,
+    source,
+    status,
+    failedSections: status === 'partial' ? [] : sectionNames,
+  }
+}
+
+function valueOr<T, F>(result: PromiseSettledResult<T>, fallback: F): T | F {
+  return result.status === 'fulfilled' ? result.value : fallback
 }
 
 function readAdminToken() {
@@ -320,6 +397,62 @@ function mapRequestLog(log: GatewayRequestLog): AdminRequestLog {
     deviceId: readString(log.deviceId, '-'),
     ip: readString(log.ip, '-'),
   }
+}
+
+function mapBookLike(book: GatewayBook | AdminBook): AdminBook {
+  if ('coverage' in book && 'packageUpdatedAt' in book) return book
+  return mapBook(book)
+}
+
+function mapDeviceLike(device: GatewayDevice | AdminDevice): AdminDevice {
+  if ('pairingCode' in device && 'recentRequests' in device) return device
+  return mapDevice(device)
+}
+
+function mapPackageLike(item: GatewayPackage | AdminPackage): AdminPackage {
+  if (isAdminPackage(item)) return item
+  return mapPackage(item)
+}
+
+function mapAudioLike(item: GatewayAudio | AdminAudio): AdminAudio {
+  if (isAdminAudio(item)) {
+    return {
+      ...item,
+      status: normalizeAudioStatus(item.status, item.chapterCount, item.availableChapters),
+      coverage: ratioToPercent(item.coverage),
+    }
+  }
+  return mapAudio(item)
+}
+
+function mapRequestLogLike(log: GatewayRequestLog | AdminRequestLog): AdminRequestLog {
+  if (isAdminRequestLog(log)) return log
+  return mapRequestLog(log)
+}
+
+function isAdminPackage(item: GatewayPackage | AdminPackage): item is AdminPackage {
+  return typeof item.id === 'string'
+    && typeof item.bookId === 'string'
+    && typeof item.bookTitle === 'string'
+    && typeof item.sizeMb === 'number'
+    && Array.isArray(item.missingChapters)
+}
+
+function isAdminAudio(item: GatewayAudio | AdminAudio): item is AdminAudio {
+  return typeof item.id === 'string'
+    && typeof item.bookId === 'string'
+    && typeof item.bookTitle === 'string'
+    && typeof item.chapterCount === 'number'
+    && typeof item.availableChapters === 'number'
+    && Array.isArray(item.missingChapters)
+}
+
+function isAdminRequestLog(log: GatewayRequestLog | AdminRequestLog): log is AdminRequestLog {
+  return typeof log.id === 'string'
+    && typeof log.time === 'string'
+    && typeof log.statusCode === 'number'
+    && typeof log.durationMs === 'number'
+    && typeof log.deviceName === 'string'
 }
 
 function mapMetrics(metrics: GatewayMetrics): typeof overviewMetrics {
