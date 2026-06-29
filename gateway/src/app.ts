@@ -1,9 +1,12 @@
 import cors from '@fastify/cors'
 import helmet from '@fastify/helmet'
 import rateLimit from '@fastify/rate-limit'
-import Fastify, { type FastifyError, type FastifyRequest } from 'fastify'
+import Fastify, { type FastifyError, type FastifyReply, type FastifyRequest } from 'fastify'
 import { randomUUID } from 'node:crypto'
-import { basename } from 'node:path'
+import { createReadStream } from 'node:fs'
+import { stat } from 'node:fs/promises'
+import { extname, join, normalize, relative, basename } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { requireGatewayAuth } from './auth.js'
 import { openAudioFile, readAudioCatalog, readAudioManifest } from './audio-store.js'
 import { buildCapabilities } from './capabilities.js'
@@ -104,6 +107,12 @@ export function buildGatewayApp(config: GatewayConfig = loadConfig()) {
   }))
 
   app.get('/capabilities', async () => buildCapabilities(config))
+
+  app.get('/admin/ui', async (_request, reply) => serveAdminUiFile(config, reply, 'index.html'))
+  app.get<{ Params: { '*': string } }>('/admin/ui/*', async (request, reply) => {
+    const requestedPath = request.params['*'] || 'index.html'
+    return serveAdminUiFile(config, reply, requestedPath)
+  })
 
   app.get('/auth/session', async (request) => {
     const auth = requireGatewayAuth(config, request)
@@ -338,6 +347,71 @@ export function buildGatewayApp(config: GatewayConfig = loadConfig()) {
   )
 
   return app
+}
+
+async function serveAdminUiFile(config: GatewayConfig, reply: FastifyReply, requestedPath: string) {
+  const adminUiDir = config.adminUiDir ?? defaultAdminUiDir()
+  const safePath = resolveAdminUiPath(adminUiDir, requestedPath)
+  const filePath = safePath ?? join(adminUiDir, 'index.html')
+  const existingPath = await existingFilePath(filePath, join(adminUiDir, 'index.html'))
+  if (!existingPath) {
+    throw new GatewayHttpError(404, 'admin_ui_not_found', 'Gateway admin UI build output was not found.')
+  }
+
+  const fileStat = await stat(existingPath)
+  return reply
+    .header('content-type', contentTypeForPath(existingPath))
+    .header('content-length', fileStat.size)
+    .send(createReadStream(existingPath))
+}
+
+function defaultAdminUiDir() {
+  return fileURLToPath(new URL('../admin-ui/dist', import.meta.url))
+}
+
+function resolveAdminUiPath(adminUiDir: string, requestedPath: string) {
+  const normalizedPath = normalize(requestedPath).replace(/^(\.\.(\/|\\|$))+/, '')
+  const filePath = join(adminUiDir, normalizedPath || 'index.html')
+  const relativePath = relative(adminUiDir, filePath)
+  if (relativePath.startsWith('..') || relativePath === '' || relativePath.includes(`..${separatorForPath(relativePath)}`)) {
+    return null
+  }
+  return filePath
+}
+
+async function existingFilePath(filePath: string, fallbackPath: string) {
+  if (await isFile(filePath)) return filePath
+  if (!extname(filePath) && await isFile(fallbackPath)) return fallbackPath
+  return null
+}
+
+async function isFile(path: string) {
+  try {
+    return (await stat(path)).isFile()
+  } catch {
+    return false
+  }
+}
+
+function contentTypeForPath(path: string) {
+  switch (extname(path)) {
+    case '.html':
+      return 'text/html; charset=utf-8'
+    case '.js':
+      return 'text/javascript; charset=utf-8'
+    case '.css':
+      return 'text/css; charset=utf-8'
+    case '.json':
+      return 'application/json; charset=utf-8'
+    case '.svg':
+      return 'image/svg+xml'
+    default:
+      return 'application/octet-stream'
+  }
+}
+
+function separatorForPath(path: string) {
+  return path.includes('\\') ? '\\' : '/'
 }
 
 type MobileDeviceContext = {

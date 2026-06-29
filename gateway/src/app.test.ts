@@ -114,6 +114,59 @@ describe('gateway app', () => {
     })
   })
 
+  it('serves the admin UI under /admin/ui without shadowing admin APIs', async () => {
+    const dataDir = await makeDataDir()
+    const adminUiDir = await makeDataDir()
+    await writeFile(join(adminUiDir, 'index.html'), '<!doctype html><title>Gateway Admin</title>', 'utf8')
+    await writeFile(join(adminUiDir, 'app.css'), 'body{color:#111}', 'utf8')
+    await writeFile(
+      join(dataDir, 'books.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        books: [],
+      }),
+      'utf8',
+    )
+    const app = buildTestApp({
+      GATEWAY_DEV_ACCESS_TOKEN: 'dev-token',
+      GATEWAY_DATA_DIR: dataDir,
+      GATEWAY_ADMIN_UI_DIR: adminUiDir,
+    })
+    const htmlResponse = await app.inject({
+      method: 'GET',
+      url: '/admin/ui',
+    })
+    const cssResponse = await app.inject({
+      method: 'GET',
+      url: '/admin/ui/app.css',
+    })
+    const spaResponse = await app.inject({
+      method: 'GET',
+      url: '/admin/ui/books',
+    })
+    const apiResponse = await app.inject({
+      method: 'GET',
+      url: '/admin/books',
+      headers: {
+        authorization: 'Bearer dev-token',
+      },
+    })
+
+    expect(htmlResponse.statusCode).toBe(200)
+    expect(htmlResponse.headers['content-type']).toBe('text/html; charset=utf-8')
+    expect(htmlResponse.body).toContain('Gateway Admin')
+    expect(cssResponse.statusCode).toBe(200)
+    expect(cssResponse.headers['content-type']).toBe('text/css; charset=utf-8')
+    expect(cssResponse.body).toBe('body{color:#111}')
+    expect(spaResponse.statusCode).toBe(200)
+    expect(spaResponse.body).toContain('Gateway Admin')
+    expect(apiResponse.statusCode).toBe(200)
+    expect(apiResponse.json()).toMatchObject({
+      schemaVersion: 1,
+      books: [],
+    })
+  })
+
   it('reports Ollama embeddings as configured without an API key', async () => {
     const app = buildTestApp({
       GATEWAY_DEV_ACCESS_TOKEN: 'dev-token',

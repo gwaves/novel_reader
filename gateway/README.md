@@ -37,6 +37,19 @@ npm run build
 npm run test
 ```
 
+管理后台 UI 位于 `gateway/admin-ui/`，构建后由 Gateway 服务挂载到 `/admin/ui`，不会覆盖 `/admin/books` 等 JSON 管理 API：
+
+```bash
+npm run gateway:admin-ui:build
+npm run gateway:dev
+```
+
+后台页面会从同源 `/admin/books` 和 `/admin/devices` 读取真实数据；API 暂时沿用 Gateway bearer token。浏览器本地可把 token 写入 `localStorage`：
+
+```js
+localStorage.setItem('novel-reader-gateway-admin-token', '<GATEWAY_DEV_ACCESS_TOKEN>')
+```
+
 可复制 `.env.example` 中的变量到部署环境。Phase 1 已提供：
 
 - `GET /health`
@@ -48,6 +61,12 @@ npm run test
 - `GET /mobile/books/:bookId`（受保护，返回单书摘要）
 - `GET /mobile/books/:bookId/package`（受保护，返回移动端完整数据包）
 - `PUT /admin/books/:bookId/package`（受保护，导入 PC 端导出的移动数据包）
+- `GET /admin/books`（受保护，返回后台全量书库视图）
+- `PATCH /admin/books/:bookId/visibility`（受保护，更新书籍可见范围）
+- `PATCH /admin/books/:bookId/labels`（受保护，更新书籍内容标签）
+- `GET /admin/devices`（受保护，返回已登记设备）
+- `PATCH /admin/devices/:deviceId`（受保护，更新设备名称或角色）
+- `GET /admin/ui`（内网管理后台静态入口）
 - `POST /ai/chat`（受保护，转发 OpenAI-compatible chat completions）
 - `POST /ai/embeddings`（受保护，转发 OpenAI-compatible embeddings）
 - `GET /mobile/books/:bookId/audio`（受保护，返回本地 MP3 清单）

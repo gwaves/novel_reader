@@ -1,4 +1,11 @@
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
+import {
+  loadAdminDashboardData,
+  patchBookLabels,
+  patchBookVisibility,
+  patchDeviceRole,
+  type AdminDashboardData,
+} from './api'
 import {
   AdminBook,
   AdminDevice,
@@ -32,6 +39,8 @@ function App() {
   const [activeView, setActiveView] = useState<ViewKey>('overview')
   const [books, setBooks] = useState(initialBooks)
   const [devices, setDevices] = useState(initialDevices)
+  const [dataSource, setDataSource] = useState<AdminDashboardData['source']>('mock')
+  const [loadMessage, setLoadMessage] = useState('正在连接 Gateway 管理 API')
   const [selectedBookId, setSelectedBookId] = useState<string | null>(null)
   const [selectedDeviceId, setSelectedDeviceId] = useState<string | null>(null)
 
@@ -44,14 +53,31 @@ function App() {
     [devices, selectedDeviceId],
   )
 
+  useEffect(() => {
+    let cancelled = false
+    void loadAdminDashboardData().then((data) => {
+      if (cancelled) return
+      setBooks(data.books)
+      setDevices(data.devices)
+      setDataSource(data.source)
+      setLoadMessage(data.source === 'api' ? '已连接 Gateway 管理 API' : 'API 不可用，正在显示 mock 数据')
+    })
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
   const updateBook = (bookId: string, patch: Partial<AdminBook>) => {
     setBooks((current) => current.map((book) => (book.id === bookId ? { ...book, ...patch } : book)))
+    if (patch.visibility) void patchBookVisibility(bookId, patch.visibility).catch(() => setLoadMessage('可见范围更新未同步到 Gateway'))
+    if (patch.labels) void patchBookLabels(bookId, patch.labels).catch(() => setLoadMessage('标签更新未同步到 Gateway'))
   }
 
   const updateDevice = (deviceId: string, patch: Partial<AdminDevice>) => {
     setDevices((current) =>
       current.map((device) => (device.id === deviceId ? { ...device, ...patch } : device)),
     )
+    if (patch.role) void patchDeviceRole(deviceId, patch.role).catch(() => setLoadMessage('设备角色更新未同步到 Gateway'))
   }
 
   const openView = (view: ViewKey) => {
@@ -89,13 +115,13 @@ function App() {
         <header className="topbar">
           <div>
             <h1>Novel Reader Gateway</h1>
-            <p>内网运维后台 · mock 数据预览</p>
+            <p>内网运维后台 · {loadMessage}</p>
           </div>
           <div className="status-strip" aria-label="顶部状态栏">
             <StatusPill label="环境" value="local" />
             <StatusPill label="状态" value="健康" tone="ok" />
             <StatusPill label="刷新" value="5s" />
-            <StatusPill label="管理员" value="已连接" tone="ok" />
+            <StatusPill label="数据" value={dataSource === 'api' ? '实时' : 'Mock'} tone={dataSource === 'api' ? 'ok' : undefined} />
           </div>
         </header>
 

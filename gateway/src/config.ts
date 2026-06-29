@@ -17,6 +17,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     ),
     GATEWAY_DATA_DIR: readString(env, 'GATEWAY_DATA_DIR', join(homedir(), '.novel_reader_gateway')),
     GATEWAY_AUDIO_DIR: readOptionalString(env, 'GATEWAY_AUDIO_DIR'),
+    GATEWAY_ADMIN_UI_DIR: readOptionalString(env, 'GATEWAY_ADMIN_UI_DIR'),
     GATEWAY_MAX_BODY_BYTES: readInteger(env, 'GATEWAY_MAX_BODY_BYTES', 50 * 1024 * 1024, { min: 1024 }),
     GATEWAY_DEV_ACCESS_TOKEN: readOptionalString(env, 'GATEWAY_DEV_ACCESS_TOKEN'),
     GATEWAY_AUTH_TOKEN_SECRET: readOptionalString(env, 'GATEWAY_AUTH_TOKEN_SECRET'),
@@ -51,6 +52,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     logLevel: parsed.GATEWAY_LOG_LEVEL,
     dataDir: parsed.GATEWAY_DATA_DIR,
     audioDir: parsed.GATEWAY_AUDIO_DIR ?? join(parsed.GATEWAY_DATA_DIR, 'audio'),
+    adminUiDir: parsed.GATEWAY_ADMIN_UI_DIR,
     maxBodyBytes: parsed.GATEWAY_MAX_BODY_BYTES,
     auth: {
       devAccessToken: parsed.GATEWAY_DEV_ACCESS_TOKEN,

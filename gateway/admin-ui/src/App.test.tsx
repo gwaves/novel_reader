@@ -1,6 +1,11 @@
 import { render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
+import { afterEach, vi } from 'vitest'
 import App from './App'
+
+afterEach(() => {
+  vi.restoreAllMocks()
+})
 
 describe('Gateway 管理后台 UI', () => {
   it('展示总览指标、内容健康和最近事件', () => {
@@ -13,6 +18,62 @@ describe('Gateway 管理后台 UI', () => {
     expect(screen.getByText('内容健康')).toBeInTheDocument()
     expect(screen.getByText('最近事件')).toBeInTheDocument()
     expect(screen.getByText('导入《烬鳞纪》数据包成功')).toBeInTheDocument()
+  })
+
+  it('从 Gateway 管理 API 加载书籍和设备数据', async () => {
+    vi.spyOn(window, 'fetch').mockImplementation(async (input) => {
+      const url = String(input)
+      if (url === '/admin/books') {
+        return jsonResponse({
+          books: [
+            {
+              id: 'api-book',
+              title: '接口书籍',
+              author: '接口作者',
+              chapterCount: 10,
+              updatedAt: '2026-06-29T12:00:00.000Z',
+              visibility: 'trusted',
+              labels: ['private'],
+              summaryCoverage: 0.8,
+              kgCoverage: 0.7,
+              embeddingCoverage: 0.6,
+              audioChapterCount: 5,
+            },
+          ],
+        })
+      }
+      if (url === '/admin/devices') {
+        return jsonResponse({
+          devices: [
+            {
+              id: 'api-device',
+              name: '接口平板',
+              model: 'Android Tablet',
+              platform: 'android',
+              appVersion: '0.1.0',
+              pairingCode: '112233',
+              role: 'trusted',
+              firstSeenAt: '2026-06-29T10:00:00.000Z',
+              lastSeenAt: '2026-06-29T12:00:00.000Z',
+              lastIp: '192.168.88.66',
+            },
+          ],
+        })
+      }
+      return jsonResponse({}, false, 404)
+    })
+
+    const user = userEvent.setup()
+    render(<App />)
+
+    expect(await screen.findByText(/已连接 Gateway 管理 API/)).toBeInTheDocument()
+    expect(screen.getByText('实时')).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: '书籍' }))
+    expect(screen.getByRole('row', { name: /接口书籍 接口作者 trusted/ })).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: '设备' }))
+    expect(screen.getByRole('row', { name: /接口平板 112233 受信 192\.168\.88\.66/ })).toBeInTheDocument()
   })
 
   it('书籍列表展示可见范围和标签，并在详情抽屉同步编辑状态', async () => {
@@ -55,3 +116,11 @@ describe('Gateway 管理后台 UI', () => {
     expect(within(row).getByText('受信')).toBeInTheDocument()
   })
 })
+
+function jsonResponse(body: unknown, ok = true, status = 200) {
+  return {
+    ok,
+    status,
+    json: async () => body,
+  } as Response
+}
