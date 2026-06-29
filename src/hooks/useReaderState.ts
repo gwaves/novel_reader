@@ -1158,7 +1158,7 @@ function buildChapterTitleRepairPrompt(anomalies: ChapterTitleAnomaly[], chapter
     {
       "chapterIndex": 25,
       "isAnomaly": true,
-      "fixedTitle": "第二十五回　镇元仙赶捉取经僧　孙行者大闹五庄观",
+      "fixedTitle": "第二十五回\u3000镇元仙赶捉取经僧\u3000孙行者大闹五庄观",
       "contentPrefix": "却说他兄弟三众，到了殿上",
       "confidence": 0.95,
       "reason": "从“却说”开始进入章回小说正文叙述"

@@ -44,32 +44,32 @@ describe('chapter splitting', () => {
 
   it('keeps prose out of a long classic chapter heading line', () => {
     const chapters = splitChapters(`
-第二十五回　镇元仙赶捉取经僧　孙行者大闹五庄观却说他兄弟三众，到了殿上，对师父道："饭将熟了，叫我们怎的？"
+第二十五回\u3000镇元仙赶捉取经僧\u3000孙行者大闹五庄观却说他兄弟三众，到了殿上，对师父道："饭将熟了，叫我们怎的？"
 三藏道："徒弟，不是问饭。"
 
-第二十六回　孙悟空三岛求方　观世音甘泉活树
+第二十六回\u3000孙悟空三岛求方\u3000观世音甘泉活树
 诗曰：处世须存心上刃。
 `)
 
     expect(chapters).toHaveLength(2)
-    expect(chapters[0].title).toBe('第二十五回　镇元仙赶捉取经僧　孙行者大闹五庄观')
+    expect(chapters[0].title).toBe('第二十五回\u3000镇元仙赶捉取经僧\u3000孙行者大闹五庄观')
     expect(chapters[0].content).toContain('却说他兄弟三众，到了殿上')
     expect(chapters[0].content).not.toContain('第二十五回')
   })
 
   it('detects title lines that should be reviewed by the language model', () => {
     const anomalies = detectChapterTitleAnomalies(`
-第二十五回　镇元仙赶捉取经僧　孙行者大闹五庄观却说他兄弟三众，到了殿上，对师父道："饭将熟了，叫我们怎的？"
+第二十五回\u3000镇元仙赶捉取经僧\u3000孙行者大闹五庄观却说他兄弟三众，到了殿上，对师父道："饭将熟了，叫我们怎的？"
 三藏道："徒弟，不是问饭。"
 
-第二十六回　孙悟空三岛求方　观世音甘泉活树
+第二十六回\u3000孙悟空三岛求方\u3000观世音甘泉活树
 诗曰：处世须存心上刃。
 `)
 
     expect(anomalies).toHaveLength(1)
     expect(anomalies[0]).toMatchObject({
       chapterIndex: 1,
-      suspectedTitle: '第二十五回　镇元仙赶捉取经僧　孙行者大闹五庄观',
+      suspectedTitle: '第二十五回\u3000镇元仙赶捉取经僧\u3000孙行者大闹五庄观',
       suspectedContentPrefix: expect.stringContaining('却说他兄弟三众'),
     })
   })

@@ -430,7 +430,7 @@ function App() {
     if (!pendingChapterId || currentChapter?.id !== pendingChapterId) return
     pendingAutoPlayChapterIdRef.current = null
     if (!currentAudio) {
-      setMessage('下一章暂无 MP3')
+      window.setTimeout(() => setMessage('下一章暂无 MP3'), 0)
       return
     }
     void playCurrentAudio({ autoplay: true })
