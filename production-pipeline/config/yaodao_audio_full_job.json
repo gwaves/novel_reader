@@ -1,0 +1,40 @@
+{
+  "bookId": "9679077f-2288-4bc7-9080-854784fc7f94",
+  "title": "妖刀记",
+  "mainDbPath": "~/.novel_reader/novel_reader.sqlite",
+  "source": {
+    "type": "main-db"
+  },
+  "stages": [
+    "audio",
+    "package"
+  ],
+  "llm": {
+    "provider": "openai-compatible",
+    "baseUrl": "http://192.168.88.24:30000/v1",
+    "apiKey": "dummy",
+    "model": "qwen3.6-27b",
+    "concurrency": 4,
+    "retries": 3,
+    "timeoutMs": 300000,
+    "scheduler": {
+      "borrowIdle": true,
+      "weights": {
+        "audio": 4
+      }
+    }
+  },
+  "audio": {
+    "ttsConfig": "tmp/production-pipeline/yaodao-tts-director.config.json",
+    "ttsOutRoot": "tmp/production-audio/yaodao-full-20260630",
+    "batchSize": 1,
+    "directorConcurrency": 4,
+    "llmChapters": 1,
+    "minBatchSize": 1,
+    "ttsConcurrency": 8,
+    "ttsChapters": 1,
+    "controlFile": "production-pipeline/config/yaodao_audio_control.json",
+    "resume": true,
+    "strict": true
+  }
+}

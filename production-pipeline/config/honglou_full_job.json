@@ -1,0 +1,60 @@
+{
+  "bookId": "file-505c9ffdd00063074ec8e3bf",
+  "title": "红楼梦",
+  "mainDbPath": "~/.novel_reader/novel_reader.sqlite",
+  "source": {
+    "type": "main-db"
+  },
+  "stages": [
+    "summary",
+    "kg",
+    "embedding",
+    "audio",
+    "package",
+    "publish",
+    "verify"
+  ],
+  "llm": {
+    "provider": "openai-compatible",
+    "baseUrl": "http://192.168.88.24:30000/v1",
+    "apiKey": "dummy",
+    "model": "qwen3.6-27b",
+    "concurrency": 10,
+    "retries": 3,
+    "timeoutMs": 300000,
+    "scheduler": {
+      "borrowIdle": true,
+      "weights": {
+        "summary": 3,
+        "kg": 3,
+        "audio": 4
+      }
+    }
+  },
+  "embedding": {
+    "provider": "ollama",
+    "baseUrl": "http://192.168.88.100:11434",
+    "model": "qwen3-embedding:8b",
+    "concurrency": 16,
+    "retries": 5,
+    "timeoutMs": 300000
+  },
+  "audio": {
+    "ttsConfig": "~/.novel_reader/tts-director.config.json",
+    "ttsOutRoot": "tmp/production-audio/honglou-full",
+    "llmChapters": 1,
+    "ttsConcurrency": 30,
+    "ttsChapters": 1,
+    "resume": true,
+    "strict": true
+  },
+  "publish": {
+    "dryRun": false
+  },
+  "gateway": {
+    "host": "192.168.88.100",
+    "user": "gwaves",
+    "root": "/home/gwaves/novel-reader-gateway",
+    "url": "http://192.168.88.100:6180"
+  }
+}
