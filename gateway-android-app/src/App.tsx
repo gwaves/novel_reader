@@ -1573,10 +1573,10 @@ function App() {
       setRagResults(results)
       setRagStatus(`检索完成，召回 ${results.length} 个相关章节。`)
     } catch (error) {
-      setRagError(errorMessage(error) || '搜索失败。')
       const fallbackResults = searchRagPackage(bookPackage, query)
       setRagResults(fallbackResults)
-      setRagStatus(`Gateway embedding 检索失败，已用关键词检索兜底，召回 ${fallbackResults.length} 个相关章节。`)
+      setRagError('')
+      setRagStatus(ragFallbackStatus(error, fallbackResults.length))
     } finally {
       setRagIsSearching(false)
     }
@@ -1596,7 +1596,7 @@ function App() {
       setRagAnswer(response.answer)
       setRagStatus('答案已生成。')
     } catch (error) {
-      setRagError(errorMessage(error) || '生成答案失败。')
+      setRagError(gatewayUserFacingError(error) || '生成答案失败。')
       setRagStatus('')
     } finally {
       setRagIsGeneratingAnswer(false)
@@ -4232,6 +4232,17 @@ function audioCacheKey(bookId: string, chapterId: string) {
 
 function audioDownloadQueueKey(bookId: string, chapterId: string) {
   return `${bookId}:${chapterId}`
+}
+
+export function gatewayUserFacingError(error: unknown) {
+  const message = errorMessage(error)
+  if (/bearer token is invalid/i.test(message)) return 'Gateway Token 无效，请在设置页检查 Token 后重试。'
+  return message
+}
+
+export function ragFallbackStatus(error: unknown, fallbackCount: number) {
+  const reason = gatewayUserFacingError(error).replace(/[。.]$/, '')
+  return `Gateway embedding 检索失败${reason ? `：${reason}` : ''}；已自动改用本地关键词检索，召回 ${fallbackCount} 个相关章节。`
 }
 
 export function resolveCurrentAudio(

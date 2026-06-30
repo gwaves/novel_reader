@@ -13,6 +13,8 @@
 - Gateway Android 的 MP3 管理面板新增章节缓存明细，逐章显示“已缓存 / 未缓存 / 无音频”并高亮当前章节，避免只能看到缓存总数却无法判断具体哪些章节已下载；未缓存但有音频的章节现在可单独加入后台下载队列，实现选集缓存。
 - Gateway Android 移动端版本号统一到 `0.2.0`：Web App 内版本、Gateway 请求头、Android `versionName/versionCode` 和 APK 文件名都从移动端 `package.json` 派生，安装和发包时可以区分不同版本。
 - Gateway Android 安装显示名称改为“AI小说助手”，Android 资源名和 Capacitor `appName` 已同步。
+- Gateway Android 搜索页修正 embedding 失败后的错误展示：Gateway embedding 鉴权失败但本地关键词兜底成功时，不再显示红色底层错误；`Bearer token is invalid.` 会转换为中文 Token 检查提示。
+- Gateway AI RAG 路由鉴权修正：移动端实际使用的 `/ai/search` 和 `/ai/rag-answer` 改为 mobile device auth，并按设备可见书库校验 `bookId`；保留 `/ai/chat` 和 `/ai/embeddings` 为 admin 上游代理接口，避免受信移动设备在生成 RAG 答案时被 admin token 校验误挡。
 - 本轮按 TDD 多 Agent 并行推进：Gateway 后端新增 `/admin/packages`、`/admin/audio`、`/admin/requests` 并补测试；admin-ui 的数据包、音频、请求日志页已从占位改为真实表格视图并兼容真实后端字段；Gateway Android 设置/书库页补强设备 ID、Pairing Code、角色/授权、可见范围和禁用态阻断提示。
 - 下一轮开发计划：继续采用测试驱动和多 Agent 并行，目标做到真实验证前的三步闭环。第一步补后台操作闭环，包含 package 下载/重新导入状态、音频清理/刷新状态、书籍/设备操作的保存中/失败回滚/确认提示；第二步补真实安全边界，将 admin 与 mobile 鉴权语义分开，并让 admin-ui 区分未授权、服务不可用和单接口失败，避免误回退 mock；第三步补移动端角色变化体验，明确 default/trusted/disabled 变化后的书库刷新、缓存可读策略和禁用态错误提示。最终真机和真实部署验证由用户执行。
 - 三步开发已按测试驱动完成：Gateway 后端新增后台 package 下载、音频刷新和音频清单清理接口，并引入 `GATEWAY_ADMIN_ACCESS_TOKEN` / `GATEWAY_MOBILE_ACCESS_TOKEN` 与 dev token fallback；admin-ui 增加数据包下载、音频刷新/清理、书籍/设备保存中/失败回滚/重试，以及未授权/不可用/部分失败状态；Gateway Android 增加角色变化提示，禁用后阻断云端操作但保留本地缓存阅读和清理能力。代码层面已通过 Gateway、admin-ui、Gateway Android 测试和构建，剩余真实部署/真机验证由用户执行。

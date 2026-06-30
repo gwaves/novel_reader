@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
-import { buildAudioChapterStatusRows, resolveCurrentAudio, type AudioChapter } from './App'
+import { buildAudioChapterStatusRows, gatewayUserFacingError, ragFallbackStatus, resolveCurrentAudio, type AudioChapter } from './App'
+import { createGatewayError } from './deviceIdentity'
 
 const cachedChapter: AudioChapter = {
   chapterId: 'chapter-46',
@@ -51,5 +52,21 @@ describe('reader audio playback availability', () => {
       expect.objectContaining({ chapterId: 'chapter-46', cached: true, hasAudio: true, isCurrent: true, audioChapter: expect.objectContaining({ chapterId: 'chapter-46' }) }),
       expect.objectContaining({ chapterId: 'chapter-47', cached: false, hasAudio: false, isCurrent: false, audioChapter: null }),
     ])
+  })
+})
+
+describe('RAG search fallback messaging', () => {
+  it('uses a friendly token message when Gateway embedding fails and local search is used', () => {
+    const error = createGatewayError({
+      error: {
+        message: 'Bearer token is invalid.',
+        statusCode: 401,
+      },
+    })
+
+    expect(gatewayUserFacingError(error)).toBe('Gateway Token 无效，请在设置页检查 Token 后重试。')
+    expect(ragFallbackStatus(error, 2)).toBe(
+      'Gateway embedding 检索失败：Gateway Token 无效，请在设置页检查 Token 后重试；已自动改用本地关键词检索，召回 2 个相关章节。',
+    )
   })
 })

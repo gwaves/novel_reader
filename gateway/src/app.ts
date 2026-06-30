@@ -351,7 +351,7 @@ export function buildGatewayApp(config: GatewayConfig = loadConfig()) {
   })
 
   app.post<{ Body: unknown }>('/ai/search', async (request) => {
-    requireAdminAuth(config, request)
+    const mobileAuth = await requireMobileDevice(config, request)
     if (!isRecord(request.body)) {
       throw new GatewayHttpError(400, 'invalid_search_request', 'Search request body must be an object.')
     }
@@ -362,6 +362,7 @@ export function buildGatewayApp(config: GatewayConfig = loadConfig()) {
       throw new GatewayHttpError(400, 'invalid_search_request', 'Search request must include bookId and query.')
     }
 
+    await readVisibleBookSummary(config, bookId, mobileAuth.allowedVisibilities)
     const [bookPackage, queryEmbedding] = await Promise.all([
       readBookPackage(config, bookId),
       createEmbedding(config, query),
@@ -377,7 +378,7 @@ export function buildGatewayApp(config: GatewayConfig = loadConfig()) {
   })
 
   app.post<{ Body: unknown }>('/ai/rag-answer', async (request) => {
-    requireAdminAuth(config, request)
+    const mobileAuth = await requireMobileDevice(config, request)
     if (!isRecord(request.body)) {
       throw new GatewayHttpError(400, 'invalid_rag_answer_request', 'RAG answer request body must be an object.')
     }
@@ -388,6 +389,7 @@ export function buildGatewayApp(config: GatewayConfig = loadConfig()) {
       throw new GatewayHttpError(400, 'invalid_rag_answer_request', 'RAG answer request must include bookId and query.')
     }
 
+    await readVisibleBookSummary(config, bookId, mobileAuth.allowedVisibilities)
     const [bookPackage, queryEmbedding] = await Promise.all([
       readBookPackage(config, bookId),
       createEmbedding(config, query),

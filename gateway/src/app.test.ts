@@ -2132,6 +2132,90 @@ describe('gateway app', () => {
     )
   })
 
+  it('allows mobile devices to run scoped RAG search with the mobile token', async () => {
+    const dataDir = await makeDataDir()
+    await mkdir(join(dataDir, 'books', 'book-a'), { recursive: true })
+    await writeFile(
+      join(dataDir, 'books.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        books: [
+          {
+            id: 'book-a',
+            title: '默认书',
+            chapterCount: 1,
+            updatedAt: '2026-06-30T00:00:00.000Z',
+            visibility: 'default',
+          },
+        ],
+      }),
+      'utf8',
+    )
+    await writeFile(
+      join(dataDir, 'books', 'book-a', 'package.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        book: {
+          id: 'book-a',
+          title: '默认书',
+          chapterCount: 1,
+          updatedAt: '2026-06-30T00:00:00.000Z',
+          visibility: 'default',
+        },
+        chapters: [{ id: 'chapter-1', title: '第一章', index: 1 }],
+        embeddings: {
+          chunks: [{ chapterId: 'chapter-1', chapterIndex: 1, text: '耿照和阿傻相遇。', embedding: [0.1, 0.2] }],
+        },
+      }),
+      'utf8',
+    )
+    const fetchMock = vi.fn(async () => jsonResponse({ data: [{ embedding: [0.1, 0.2] }] }))
+    vi.stubGlobal('fetch', fetchMock)
+    const app = buildTestApp({
+      GATEWAY_ADMIN_ACCESS_TOKEN: 'admin-token',
+      GATEWAY_MOBILE_ACCESS_TOKEN: 'mobile-token',
+      GATEWAY_DATA_DIR: dataDir,
+      GATEWAY_EMBEDDING_BASE_URL: 'https://embedding.example.test/v1',
+      GATEWAY_EMBEDDING_API_KEY: 'embedding-secret',
+      GATEWAY_EMBEDDING_MODEL: 'text-embedding-test',
+    })
+
+    const mobileResponse = await app.inject({
+      method: 'POST',
+      url: '/ai/search',
+      headers: {
+        authorization: 'Bearer mobile-token',
+        'x-device-id': 'device-a',
+        'x-device-name': '客厅平板',
+      },
+      payload: {
+        bookId: 'book-a',
+        query: '耿照',
+      },
+    })
+    const adminResponse = await app.inject({
+      method: 'POST',
+      url: '/ai/search',
+      headers: {
+        authorization: 'Bearer admin-token',
+        'x-device-id': 'device-a',
+        'x-device-name': '客厅平板',
+      },
+      payload: {
+        bookId: 'book-a',
+        query: '耿照',
+      },
+    })
+
+    expect(mobileResponse.statusCode).toBe(200)
+    expect(mobileResponse.json()).toMatchObject({
+      bookId: 'book-a',
+      results: [expect.objectContaining({ chapterId: 'chapter-1' })],
+    })
+    expect(adminResponse.statusCode).toBe(401)
+    expect(adminResponse.json().error).toMatchObject({ code: 'invalid_token' })
+  })
+
   it('returns stable errors when OpenAI-compatible upstreams are not configured', async () => {
     const app = buildTestApp({
       GATEWAY_DEV_ACCESS_TOKEN: 'dev-token',
