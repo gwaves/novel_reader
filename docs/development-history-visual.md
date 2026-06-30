@@ -6,50 +6,63 @@
 
 ## 1. 阶段总览
 
-```mermaid
-timeline
-    title novel_reader 开发进展主线
-    2026-06-14 : v0.1.0 / v0.2.0
-               : 阅读器基础、模型并发、章节导航
-    2026-06-15 : 本地数据库与知识图谱基础
-               : 实体、关系、扫描任务、移动阅读布局雏形
-    2026-06-17 : v0.3.0
-               : KG 编辑、合并、删除、默认并发 10
-               : PR #1 / #2 / #4 到 #9
-    2026-06-18 : KG 复审与稳定性
-               : 低置信度队列、扫描索引、停止/续扫修复、批量概要
-    2026-06-19 : v0.5.0
-               : 图谱纠错、重扫预览、图可视化、RAG 搜索、数据库备份
-               : PR #12 到 #18
-    2026-06-20 : 0.6.0
-               : EPUB 导入、阅读 UX、全局共指、离线数据导入、长章节 embedding
-               : PR #19 到 #25
-    2026-06-21 : 移动端与开源流程
-               : Android App、项目发现性、demo 截图、核心 smoke 测试
-               : PR #26 到 #30
-    2026-06-22 : 0.7.0
-               : 章节懒加载、进度恢复、本地状态快照
-               : PR #31 到 #33
-    2026-06-23 : Android MP3 与离线 TTS
-               : MP3 同步、播放时间轴、生产文档
-               : PR #34 到 #38
-    2026-06-24 : v0.7.1
-               : Gateway 方向启动
-               : cloud gateway 设计前置
-    2026-06-25 : Gateway 服务骨架
-               : 鉴权、移动书库 API、Gateway Android shell
-    2026-06-26 : PR #39
-               : Cloud Gateway 与 Gateway Android App 合入
-               : 包发布、音频发布、真机连接、缓存与阅读进度
-    2026-06-27 : PR #40 到 #42
-               : 内容生产流水线、TTS 并发、Gateway 移动阅读/RAG/MP3 修复
-    2026-06-28 : production-pipeline v2
-               : stage 化、publish/verify、job doctor、日志与控制台
-    2026-06-29 : PR #43 / #44
-               : 生产流水线 v2 合入、Gateway Admin 可见性与运维后台
-    2026-06-30 : 0.8.0 / gateway-android-v0.2.0
-               : Android 发布流、Admin 运维修复、system-opt 正规化阶段
-```
+<style>
+.history-timeline {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 14px;
+  margin: 20px 0 28px;
+}
+
+.history-milestone {
+  min-height: 0;
+  border: 1px solid #d6dbe8;
+  border-radius: 8px;
+  padding: 12px 14px;
+  background: #f8fafc;
+  box-sizing: border-box;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.history-milestone strong {
+  display: block;
+  margin-bottom: 6px;
+  color: #111827;
+}
+
+.history-milestone span {
+  display: block;
+  margin-bottom: 6px;
+  color: #374151;
+  font-weight: 600;
+}
+
+.history-milestone p {
+  margin: 0;
+  color: #4b5563;
+  line-height: 1.45;
+}
+</style>
+
+<div class="history-timeline">
+  <div class="history-milestone"><strong>2026-06-14</strong><span>v0.1.0 / v0.2.0</span><p>阅读器基础、模型并发、章节导航。</p></div>
+  <div class="history-milestone"><strong>2026-06-15</strong><span>本地数据库与知识图谱基础</span><p>实体、关系、扫描任务、移动阅读布局雏形。</p></div>
+  <div class="history-milestone"><strong>2026-06-17</strong><span>v0.3.0</span><p>KG 编辑、合并、删除、默认并发 10；PR #1 / #2 / #4 到 #9。</p></div>
+  <div class="history-milestone"><strong>2026-06-18</strong><span>KG 复审与稳定性</span><p>低置信度队列、扫描索引、停止/续扫修复、批量概要。</p></div>
+  <div class="history-milestone"><strong>2026-06-19</strong><span>v0.5.0</span><p>图谱纠错、重扫预览、图可视化、RAG 搜索、数据库备份；PR #12 到 #18。</p></div>
+  <div class="history-milestone"><strong>2026-06-20</strong><span>0.6.0</span><p>EPUB 导入、阅读 UX、全局共指、离线数据导入、长章节 embedding；PR #19 到 #25。</p></div>
+  <div class="history-milestone"><strong>2026-06-21</strong><span>移动端与开源流程</span><p>Android App、项目发现性、demo 截图、核心 smoke 测试；PR #26 到 #30。</p></div>
+  <div class="history-milestone"><strong>2026-06-22</strong><span>0.7.0</span><p>章节懒加载、进度恢复、本地状态快照；PR #31 到 #33。</p></div>
+  <div class="history-milestone"><strong>2026-06-23</strong><span>Android MP3 与离线 TTS</span><p>MP3 同步、播放时间轴、生产文档；PR #34 到 #38。</p></div>
+  <div class="history-milestone"><strong>2026-06-24</strong><span>v0.7.1</span><p>Gateway 方向启动，cloud gateway 设计前置。</p></div>
+  <div class="history-milestone"><strong>2026-06-25</strong><span>Gateway 服务骨架</span><p>鉴权、移动书库 API、Gateway Android shell。</p></div>
+  <div class="history-milestone"><strong>2026-06-26</strong><span>PR #39</span><p>Cloud Gateway 与 Gateway Android App 合入；包发布、音频发布、真机连接、缓存与阅读进度。</p></div>
+  <div class="history-milestone"><strong>2026-06-27</strong><span>PR #40 到 #42</span><p>内容生产流水线、TTS 并发、Gateway 移动阅读/RAG/MP3 修复。</p></div>
+  <div class="history-milestone"><strong>2026-06-28</strong><span>production-pipeline v2</span><p>stage 化、publish/verify、job doctor、日志与控制台。</p></div>
+  <div class="history-milestone"><strong>2026-06-29</strong><span>PR #43 / #44</span><p>生产流水线 v2 合入、Gateway Admin 可见性与运维后台。</p></div>
+  <div class="history-milestone"><strong>2026-06-30</strong><span>0.8.0 / gateway-android-v0.2.0</span><p>Android 发布流、Admin 运维修复、system-opt 正规化阶段。</p></div>
+</div>
 
 ## 2. 主线 PR 演进图
 
