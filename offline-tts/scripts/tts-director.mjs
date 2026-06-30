@@ -53,6 +53,7 @@ Novel Reader 离线多角色 TTS 导演脚本工具
   --tts-concurrency <number>   batch-pipeline 单章 TTS 片段并发，默认取 tts.concurrency
   --tts-chapters <number>      batch-pipeline 同时进行 TTS 的章节数，默认 2
   --control-file <path>        batch-pipeline 运行中轮询 JSON 文件，动态调整并发
+  --adaptive-tts               batch-pipeline 启用基于重试率的 TTS 自适应并发；默认严格按控制文件执行
   --no-adaptive-tts            batch-pipeline 禁用基于重试率的 TTS 自适应并发
 
 示例:
@@ -1793,7 +1794,7 @@ async function runBatchPipeline(config, args) {
   const llmChapterConcurrency = args['llm-chapters']
     ? Math.max(1, Math.floor(Number(args['llm-chapters'])))
     : 1
-  const adaptiveTts = args['no-adaptive-tts'] !== true
+  const adaptiveTts = args['adaptive-tts'] === true && args['no-adaptive-tts'] !== true
   let currentTtsConcurrency = ttsConcurrency
   let lastConfiguredTtsConcurrency = ttsConcurrency
   let lastConfiguredDirectorConcurrency = initialDirectorConcurrency
@@ -1826,7 +1827,7 @@ async function runBatchPipeline(config, args) {
 
   console.log(`🚂 批量流水线启动：章节 ${chapters.join(', ')}`)
   console.log(`   LLM 阶段：章节并发 ${llmChapterConcurrency}，单章批次并发 ${initialDirectorConcurrency}，batchSize ${initialBatchSize}`)
-  console.log(`   TTS 阶段：章节并发 ${ttsChapterConcurrency}，单章片段并发 ${ttsConcurrency}${adaptiveTts ? `，自适应起始 ${currentTtsConcurrency}` : ''}`)
+  console.log(`   TTS 阶段：章节并发 ${ttsChapterConcurrency}，单章片段并发 ${ttsConcurrency}${adaptiveTts ? `，自适应起始 ${currentTtsConcurrency}` : '，严格按控制文件执行'}`)
   if (runtimeControl.path) console.log(`   并发控制文件：${runtimeControl.path}`)
   if (resume) console.log('   断点续跑：已完成 MP3 会跳过，已通过校验脚本会复用。')
 

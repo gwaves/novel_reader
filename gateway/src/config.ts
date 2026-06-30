@@ -17,6 +17,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     ),
     GATEWAY_DATA_DIR: readString(env, 'GATEWAY_DATA_DIR', join(homedir(), '.novel_reader_gateway')),
     GATEWAY_AUDIO_DIR: readOptionalString(env, 'GATEWAY_AUDIO_DIR'),
+    GATEWAY_DOWNLOADS_DIR: readOptionalString(env, 'GATEWAY_DOWNLOADS_DIR'),
     GATEWAY_ADMIN_UI_DIR: readOptionalString(env, 'GATEWAY_ADMIN_UI_DIR'),
     GATEWAY_MAX_BODY_BYTES: readInteger(env, 'GATEWAY_MAX_BODY_BYTES', 50 * 1024 * 1024, { min: 1024 }),
     GATEWAY_DEV_ACCESS_TOKEN: readOptionalString(env, 'GATEWAY_DEV_ACCESS_TOKEN'),
@@ -45,6 +46,19 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
   const corsOrigins = parsed.GATEWAY_CORS_ORIGINS.split(',')
     .map((origin) => origin.trim())
     .filter(Boolean)
+  const isProduction = parsed.GATEWAY_ENV === 'production'
+  if (isProduction) {
+    if (!parsed.GATEWAY_ADMIN_ACCESS_TOKEN || !parsed.GATEWAY_MOBILE_ACCESS_TOKEN) {
+      throw new Error(
+        'Production Gateway requires GATEWAY_ADMIN_ACCESS_TOKEN and GATEWAY_MOBILE_ACCESS_TOKEN. GATEWAY_DEV_ACCESS_TOKEN is development-only and is not used as a production fallback.',
+      )
+    }
+    if (corsOrigins.some((origin) => origin === '*')) {
+      throw new Error('Production Gateway does not allow wildcard GATEWAY_CORS_ORIGINS. Use explicit origins or leave it empty.')
+    }
+  }
+  const adminAccessToken = parsed.GATEWAY_ADMIN_ACCESS_TOKEN ?? (isProduction ? undefined : parsed.GATEWAY_DEV_ACCESS_TOKEN)
+  const mobileAccessToken = parsed.GATEWAY_MOBILE_ACCESS_TOKEN ?? (isProduction ? undefined : parsed.GATEWAY_DEV_ACCESS_TOKEN)
 
   return {
     host: parsed.GATEWAY_HOST,
@@ -54,12 +68,13 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     logLevel: parsed.GATEWAY_LOG_LEVEL,
     dataDir: parsed.GATEWAY_DATA_DIR,
     audioDir: parsed.GATEWAY_AUDIO_DIR ?? join(parsed.GATEWAY_DATA_DIR, 'audio'),
+    downloadsDir: parsed.GATEWAY_DOWNLOADS_DIR ?? join(parsed.GATEWAY_DATA_DIR, 'downloads'),
     adminUiDir: parsed.GATEWAY_ADMIN_UI_DIR,
     maxBodyBytes: parsed.GATEWAY_MAX_BODY_BYTES,
     auth: {
       devAccessToken: parsed.GATEWAY_DEV_ACCESS_TOKEN,
-      adminAccessToken: parsed.GATEWAY_ADMIN_ACCESS_TOKEN ?? parsed.GATEWAY_DEV_ACCESS_TOKEN,
-      mobileAccessToken: parsed.GATEWAY_MOBILE_ACCESS_TOKEN ?? parsed.GATEWAY_DEV_ACCESS_TOKEN,
+      adminAccessToken,
+      mobileAccessToken,
       tokenSecretConfigured: Boolean(parsed.GATEWAY_AUTH_TOKEN_SECRET),
     },
     cors: {

@@ -2,11 +2,11 @@
 
 [English](README.en.md) | [中文](README.md)
 
-Offline-first novel reader with EPUB import, RAG search, knowledge graph extraction, and an Android companion app.
+Offline-first novel reader with EPUB import, RAG search, knowledge graph extraction, and a Gateway-based Android companion app.
 
 ![Novel Reader Assistant visual](src/assets/hero.png)
 
-Novel Reader Assistant is built for long web novels where remembering every character, item, faction, and plot thread becomes part of the reading work. It keeps your library in a local SQLite database, lets local or OpenAI-compatible models summarize chapters, builds a searchable story knowledge graph, and syncs PC-generated book packages to Android for offline reading.
+Novel Reader Assistant is built for long web novels where remembering every character, item, faction, and plot thread becomes part of the reading work. It keeps your library in a local SQLite database, lets local or OpenAI-compatible models summarize chapters, builds a searchable story knowledge graph, and publishes PC-generated book packages through Gateway for Android offline reading and MP3 playback.
 
 ## Real UI Preview
 
@@ -40,7 +40,7 @@ You can reach the core experience in about five minutes:
 - **Knowledge graph extraction**: track characters, factions, items, skills, locations, beasts, events, and relations with evidence links.
 - **Graph cleanup workflow**: review low-confidence entities, merge duplicates, split mistakes, replay saved JSON, and export JSON or GraphML.
 - **Flexible model setup**: use Ollama or OpenAI-compatible endpoints for generation and embeddings, with separate validation and profiles.
-- **Android companion app**: sync full book packages over LAN, then read chapters, summaries, and graph data offline on Android.
+- **Gateway Android companion app**: use Gateway to sync book packages, RAG/AI, and MP3 audio, then read and play cached content offline on Android.
 - **Offline batch scanner**: run summary and knowledge graph jobs outside the browser with resumable CLI workflows.
 
 ## Quick Start
@@ -69,52 +69,46 @@ The SQLite database is stored at:
 - Build and inspect a knowledge graph with filters, evidence search, graph visualization, and review queues.
 - Run RAG search across chapter summaries, body chunks, and knowledge graph matches.
 - Export or restore the full local SQLite database from the web UI.
-- Build an Android debug APK from the `mobile-app` workspace.
+- Build and publish a Gateway Android debug APK from the `gateway-android-app` workspace.
 
 ## Documentation
 
 - [Development Guide](docs/development.md)
 - [开发文档（中文）](docs/development.zh-CN.md)
 - [Backend API Reference](docs/backend-api.md)
-- [Mobile API Contract](mobile-app/docs/api.md)
-- [Android App Guide](mobile-app/docs/android.md)
+- [Gateway Android App Guide](gateway-android-app/README.md)
+- [Gateway Deployment Guide](gateway/docs/deployment.md)
 - [Knowledge Graph Roadmap](docs/knowledge-graph-roadmap.md)
 - [Current Progress](docs/current_progress.md) (Chinese)
 
-## Android Mobile App
+## Gateway Android Mobile App
 
-Start the PC API on a LAN-reachable address:
-
-```bash
-NOVEL_READER_API_HOST=0.0.0.0 npm run api
-```
-
-In the Android app, use the PC LAN URL, for example:
-
-```text
-http://192.168.x.x:5174
-```
-
-Build a debug APK from the mobile workspace:
+Start or connect to a Gateway service. For self-hosted deployment, see [Gateway Deployment Guide](gateway/docs/deployment.md). For local development:
 
 ```bash
-cd mobile-app
-npm install
-npm run android:sync
-cd android
-JAVA_HOME=/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home \
-PATH="/opt/homebrew/opt/openjdk@21/bin:$PATH" \
-ANDROID_HOME=/opt/homebrew/share/android-commandlinetools \
-./gradlew assembleDebug
+npm run gateway:dev
 ```
 
-APK output:
+The Android app workspace is `gateway-android-app`:
+
+```bash
+npm --prefix gateway-android-app install
+npm run gateway-android:android:build
+```
+
+Debug APK output:
 
 ```text
-mobile-app/android/app/build/outputs/apk/debug/app-debug.apk
+gateway-android-app/android/app/build/outputs/apk/debug/novel_gateway-v<versionName>-debug.apk
 ```
 
-See [mobile-app/docs/android.md](mobile-app/docs/android.md) for Android build, LAN HTTP sync, and status-bar safe-area notes.
+Publish it to the Gateway downloads directory:
+
+```bash
+npm run gateway:publish-android-apk
+```
+
+The stable download URL is `/downloads/ai_novel_reader.apk`. The old `mobile-app/` LAN-sync client is deprecated and kept only as historical reference.
 
 ## Development
 

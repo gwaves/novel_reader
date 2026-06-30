@@ -1,5 +1,22 @@
 apply plugin: 'com.android.application'
 
+import groovy.json.JsonSlurper
+
+def appPackageJson = new JsonSlurper().parse(file('../../package.json'))
+def appBuildInfoFile = file('../../build-info.json')
+def appBuildInfo = appBuildInfoFile.exists() ? new JsonSlurper().parse(appBuildInfoFile) : [:]
+def mobileVersionName = (appBuildInfo.versionName ?: appPackageJson.version) as String
+def mobileVersionParts = mobileVersionName.tokenize('.').collect { part ->
+    def numericPart = (part =~ /^\d+/)
+    numericPart ? numericPart[0].toInteger() : 0
+}
+while (mobileVersionParts.size() < 3) {
+    mobileVersionParts.add(0)
+}
+def mobileVersionCode = appBuildInfo.versionCode instanceof Number
+    ? appBuildInfo.versionCode.toInteger()
+    : mobileVersionParts[0] * 10000 + mobileVersionParts[1] * 100 + mobileVersionParts[2]
+
 android {
     namespace = "com.gwaves.novelreader.gateway"
     compileSdk = rootProject.ext.compileSdkVersion
@@ -7,8 +24,8 @@ android {
         applicationId "com.gwaves.novelreader.gateway"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 1
-        versionName "1.0"
+        versionCode mobileVersionCode
+        versionName mobileVersionName
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         aaptOptions {
              // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.
@@ -35,7 +52,7 @@ android {
     }
     applicationVariants.all { variant ->
         variant.outputs.all {
-            outputFileName = "novel_gateway.apk"
+            outputFileName = "novel_gateway-v${mobileVersionName}-${variant.name}.apk"
         }
     }
 }

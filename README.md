@@ -2,7 +2,7 @@
 
 [English](README.en.md) | [中文](README.md)
 
-本地优先的小说阅读器，支持 EPUB 导入、RAG 智能搜索、知识图谱抽取和 Android 移动端同步。
+本地优先的小说阅读器，支持 EPUB 导入、RAG 智能搜索、知识图谱抽取和 Gateway Android 移动端。
 
 ![小说阅读助手视觉图](src/assets/hero.png)
 
@@ -40,7 +40,7 @@
 - **知识图谱抽取**：自动整理人物、门派、道具、功法、地点、灵兽、事件和关系，并保留证据。
 - **图谱清理工作流**：支持低置信度复审、实体合并/拆分、关系维护、saved JSON 重放、JSON/GraphML 导出。
 - **多模型配置**：可配置 Ollama 或 OpenAI-compatible 模型，生成模型和 embedding 模型分开校验。
-- **Android 移动端**：PC 端生成完整书籍数据包，移动端局域网同步后可离线阅读章节、概要和图谱数据。
+- **Gateway Android 移动端**：通过 Gateway 同步书库、阅读数据包、RAG 和 MP3 缓存，支持离线阅读与音频播放。
 - **离线批处理 CLI**：在浏览器外批量生成概要或图谱，支持中断续扫和结果导回。
 
 ## 目录
@@ -60,6 +60,7 @@
   - [7. 数据库备份与恢复](#7-数据库备份与恢复)
   - [8. 离线扫描器 CLI](#8-离线扫描器-cli)
 - [开发与部署](#开发与部署)
+- [质量、测试与运维规划](#质量测试与运维规划)
 - [项目结构](#项目结构)
 - [注意事项](#注意事项)
 
@@ -73,7 +74,7 @@
 - **多模型配置**：同时配置本地 Ollama 与多个兼容 OpenAI 的外部模型，并为生成模型和 embedding 模型分别校验。
 - **离线扫描器**：在浏览器外批量处理概要或知识图谱任务，支持中断续扫并导回主数据库。
 - **数据本地存储与备份**：导入的章节、阅读进度、概要、设置、知识图谱、embedding 全部持久化到本地 SQLite，并支持浏览器内导出/恢复完整数据库。
-- **Android 移动端**：`mobile-app` 提供独立 Android/Capacitor 应用，可在同一局域网从 PC 端同步完整书籍数据包，离线阅读章节、概要和图谱数据；移动端不生成书籍 embedding，消费 PC 已生成的数据。
+- **Gateway Android 移动端**：`gateway-android-app` 是当前维护的 Android/Capacitor 应用，通过 Gateway 获取书库、单书 package、RAG 检索和 MP3 音频；本地缓存后可离线阅读与播放。旧 `mobile-app/` 已进入退役状态，仅作为历史实现保留。
 
 ## 快速开始
 
@@ -95,40 +96,34 @@ npm run dev
 ~/.novel_reader/novel_reader.sqlite
 ```
 
-### Android 移动端快速体验
+### Gateway Android 移动端快速体验
 
-PC 端作为移动端同步服务时，需要监听局域网地址：
-
-```bash
-NOVEL_READER_API_HOST=0.0.0.0 npm run api
-```
-
-移动端 App 中填写电脑局域网地址，例如：
-
-```text
-http://192.168.x.x:5174
-```
-
-Android 调试包位于 `mobile-app` workspace：
+先启动或连接 Gateway 服务。自托管部署见 [Gateway 部署说明](gateway/docs/deployment.md)，本地开发可运行：
 
 ```bash
-cd mobile-app
-npm install
-npm run android:sync
-cd android
-JAVA_HOME=/opt/homebrew/opt/openjdk@21/libexec/openjdk.jdk/Contents/Home \
-PATH="/opt/homebrew/opt/openjdk@21/bin:$PATH" \
-ANDROID_HOME=/opt/homebrew/share/android-commandlinetools \
-./gradlew assembleDebug
+npm run gateway:dev
 ```
 
-生成的 APK：
+Android App 工程位于 `gateway-android-app`：
+
+```bash
+npm --prefix gateway-android-app install
+npm run gateway-android:android:build
+```
+
+生成的 debug APK 位于：
 
 ```text
-mobile-app/android/app/build/outputs/apk/debug/app-debug.apk
+gateway-android-app/android/app/build/outputs/apk/debug/novel_gateway-v<versionName>-debug.apk
 ```
 
-更多 Android 构建、HTTP 局域网同步和状态栏适配说明见 [mobile-app/docs/android.md](mobile-app/docs/android.md)。
+发布到 Gateway 下载目录：
+
+```bash
+npm run gateway:publish-android-apk
+```
+
+发布后固定下载地址为 `/downloads/ai_novel_reader.apk`。更多说明见 [gateway-android-app/README.md](gateway-android-app/README.md) 与 [Gateway 部署说明](gateway/docs/deployment.md)。
 
 ## 详细功能使用说明
 
@@ -357,10 +352,12 @@ node scripts/offline-scanner.mjs bundle <bookId>
 
 更多开发资料：
 
+- [产品功能说明书](docs/product-spec.md)
+- [正规化测试与运维规划](docs/quality-ops-roadmap.md)
 - [开发文档](docs/development.zh-CN.md)
 - [Backend API Reference](docs/backend-api.md)
-- [移动端 API 契约](mobile-app/docs/api.md)
-- [Android App 构建说明](mobile-app/docs/android.md)
+- [Gateway Android App 构建说明](gateway-android-app/README.md)
+- [Gateway 部署说明](gateway/docs/deployment.md)
 - [知识图谱路线图](docs/knowledge-graph-roadmap.md)
 - [当前开发进展](docs/current_progress.md)
 
@@ -376,6 +373,18 @@ node scripts/offline-scanner.mjs bundle <bookId>
 | `npm run reader:build` | 先构建再预览 |
 | `npm run lint` | 运行 ESLint |
 | `npm run preview` | `reader` 的别名 |
+
+## 质量、测试与运维规划
+
+当前系统已从快速功能开发进入正规化阶段。后续开发以 [产品功能说明书](docs/product-spec.md) 为功能基线，以 [正规化测试与运维规划](docs/quality-ops-roadmap.md) 为执行顺序，逐步补齐测试用例矩阵、系统性 Code Review、监控指标、运维手册和发布检查。
+
+第一批工作重点：
+
+- 建立覆盖 PC 阅读器、AI 概要、知识图谱、RAG、production-pipeline、Gateway、Admin UI 和 Gateway Android App 的测试用例矩阵。
+- 标注现有自动化覆盖、手工验证边界和真机验证边界。
+- 优先自动化鉴权/可见性、数据一致性、发布验证和移动端缓存/进度类高风险用例。
+- 按模块开展 Code Review，并把发现的问题回填到测试矩阵和运维规划。
+- 补齐 Gateway 与 production-pipeline 的指标、事件、日志、发布验证和故障排查手册。
 
 ### 环境变量
 
@@ -449,7 +458,8 @@ novel_reader/
 │   ├── local-db-server.mjs # SQLite REST API 服务
 │   ├── offline-scanner.mjs # 离线批量扫描器 CLI
 │   └── offline-scanner/    # 扫描器模块（config、db、llm、scanner）
-├── mobile-app/             # 独立 Android 移动端 workspace（Capacitor + React）
+├── gateway-android-app/    # 当前维护的 Gateway Android App（Capacitor + React）
+├── mobile-app/             # 旧局域网同步移动端，已退役，仅保留历史参考
 ├── src/                    # React 前端
 │   ├── main.tsx            # 入口（桌面/移动路由）
 │   ├── App.tsx             # 桌面端主 UI

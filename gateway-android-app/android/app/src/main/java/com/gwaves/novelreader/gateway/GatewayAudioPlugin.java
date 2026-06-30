@@ -1,5 +1,8 @@
 package com.gwaves.novelreader.gateway;
 
+import android.content.Intent;
+import android.net.Uri;
+import androidx.core.content.FileProvider;
 import com.getcapacitor.JSObject;
 import com.getcapacitor.Plugin;
 import com.getcapacitor.PluginCall;
@@ -164,6 +167,82 @@ public class GatewayAudioPlugin extends Plugin {
             tempFile.delete();
           }
           call.reject(error.getMessage() == null ? "Package download failed." : error.getMessage(), error);
+        } finally {
+          if (connection != null) {
+            connection.disconnect();
+          }
+        }
+      }
+    );
+  }
+
+  @PluginMethod
+  public void downloadAndInstallApk(PluginCall call) {
+    String url = call.getString("url");
+    String fileName = call.getString("fileName", "ai_novel_reader.apk");
+
+    if (url == null) {
+      call.reject("Missing downloadAndInstallApk parameters.");
+      return;
+    }
+
+    getBridge().execute(
+      () -> {
+        HttpURLConnection connection = null;
+        File tempFile = null;
+        try {
+          File updateDir = new File(getContext().getCacheDir(), "updates");
+          if (!updateDir.exists() && !updateDir.mkdirs()) {
+            throw new IllegalStateException("Unable to create update cache directory.");
+          }
+
+          String safeFileName = safeSegment(fileName);
+          if (!safeFileName.endsWith(".apk")) safeFileName = safeFileName + ".apk";
+          File targetFile = new File(updateDir, safeFileName);
+          tempFile = new File(updateDir, safeFileName + ".tmp");
+
+          connection = (HttpURLConnection) new URL(url).openConnection();
+          connection.setConnectTimeout(15000);
+          connection.setReadTimeout(600000);
+
+          int status = connection.getResponseCode();
+          if (status < 200 || status >= 300) {
+            throw new IllegalStateException("Gateway HTTP " + status);
+          }
+
+          long sizeBytes = 0;
+          byte[] buffer = new byte[1024 * 256];
+          try (InputStream input = connection.getInputStream(); FileOutputStream output = new FileOutputStream(tempFile, false)) {
+            int read;
+            while ((read = input.read(buffer)) != -1) {
+              output.write(buffer, 0, read);
+              sizeBytes += read;
+            }
+          }
+
+          if (targetFile.exists() && !targetFile.delete()) {
+            throw new IllegalStateException("Unable to replace update APK.");
+          }
+          if (!tempFile.renameTo(targetFile)) {
+            throw new IllegalStateException("Unable to finish update APK.");
+          }
+
+          Uri apkUri = FileProvider.getUriForFile(getContext(), getContext().getPackageName() + ".fileprovider", targetFile);
+          Intent installIntent = new Intent(Intent.ACTION_VIEW);
+          installIntent.setDataAndType(apkUri, "application/vnd.android.package-archive");
+          installIntent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+          installIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+          getContext().startActivity(installIntent);
+
+          JSObject result = new JSObject();
+          result.put("filePath", targetFile.getAbsolutePath());
+          result.put("sizeBytes", sizeBytes);
+          call.resolve(result);
+        } catch (Exception error) {
+          if (tempFile != null && tempFile.exists()) {
+            tempFile.delete();
+          }
+          call.reject(error.getMessage() == null ? "APK update failed." : error.getMessage(), error);
         } finally {
           if (connection != null) {
             connection.disconnect();

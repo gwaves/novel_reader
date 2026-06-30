@@ -1,7 +1,7 @@
 <?xml version='1.0' encoding='utf-8'?>
 <resources>
-    <string name="app_name">Novel Gateway</string>
-    <string name="title_activity_main">Novel Gateway</string>
+    <string name="app_name">AI小说助手</string>
+    <string name="title_activity_main">AI小说助手</string>
     <string name="package_name">com.gwaves.novelreader.gateway</string>
     <string name="custom_url_scheme">com.gwaves.novelreader.gateway</string>
 </resources>

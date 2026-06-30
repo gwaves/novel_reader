@@ -79,7 +79,8 @@ novel_reader/
 │   ├── local-db-server.mjs # SQLite REST API server
 │   ├── offline-scanner.mjs # Offline batch scanner CLI
 │   └── offline-scanner/    # Scanner modules (config, db, llm, scanner)
-├── mobile-app/             # Independent Android mobile workspace (planned)
+├── gateway-android-app/    # Current maintained Gateway Android App
+├── mobile-app/             # Legacy LAN-sync mobile app, deprecated and kept for reference
 ├── src/                    # React frontend
 │   ├── main.tsx            # Entry point (desktop / mobile routing)
 │   ├── App.tsx             # Main desktop UI
@@ -144,14 +145,14 @@ RAG search combines summary embeddings, chapter chunk embeddings, and knowledge 
 - The current web desktop UI and `/mobile` route can still generate embeddings, search, and ask the configured generation model to answer from retrieved results.
 - The independent Android mobile app must not generate book, chapter, or chunk embeddings. It consumes PC-generated embeddings synced into local mobile storage.
 
-## Independent Mobile Support Plan
+## Mobile Support Status
 
-The detailed Android mobile plan lives in [`../mobile-app/development-plan.md`](../mobile-app/development-plan.md). In that architecture, the PC app is the data production and sync service, not a runtime dependency after the phone leaves the home LAN.
+The maintained Android mobile client is now [`../gateway-android-app`](../gateway-android-app). It uses Gateway for the library, book packages, RAG/AI, and MP3 audio, then caches data locally for offline reading and playback. The older [`../mobile-app`](../mobile-app) LAN-sync client is deprecated and kept only as historical reference.
 
-PC responsibilities:
+The PC/Gateway production path still owns:
 
 - Keep owning book import, chapter splitting, summary generation, knowledge graph extraction, entity cleanup, summary embeddings, and chapter chunk embeddings.
-- Expose `/api/mobile/*` read APIs so the mobile app can pull complete book packages while on the same LAN.
+- Expose `/api/mobile/*` and Gateway publishing scripts so Gateway can import complete book packages.
 - Include books, chapters, summaries, graph entities, graph relations, evidence rows, `summary_embeddings`, and `chapter_chunk_embeddings` in exported mobile packages.
 - Exclude LLM API keys, sensitive desktop model configuration fields, and unnecessary desktop UI state from mobile packages.
 - Optionally accept reading progress from mobile later; Phase 1 should prioritize one-way PC -> mobile sync.

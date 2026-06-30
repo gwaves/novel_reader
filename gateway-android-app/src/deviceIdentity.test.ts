@@ -85,6 +85,22 @@ describe('device identity', () => {
     })
   })
 
+  it('uses the app version fallback when metadata does not provide one', () => {
+    expect(
+      buildGatewayHeaders(
+        {
+          baseUrl: 'https://gateway.example',
+          token: 'token',
+          deviceName: 'Android Phone',
+          deviceId: 'device-123',
+        },
+        {},
+      ),
+    ).toMatchObject({
+      'X-App-Version': '0.2.0',
+    })
+  })
+
   it('normalizes session auth details and role labels', () => {
     const session = normalizeGatewaySession({
       authenticated: true,

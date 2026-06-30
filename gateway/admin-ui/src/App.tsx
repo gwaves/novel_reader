@@ -2,9 +2,11 @@ import { useEffect, useMemo, useState } from 'react'
 import {
   adminErrorLabel,
   adminTokenStorageKey,
+  deleteBook,
   deleteBookAudio,
   downloadPackage,
   loadAdminDashboardData,
+  loadAdminOverviewData,
   patchBookLabels,
   patchBookVisibility,
   patchDeviceRole,
@@ -15,17 +17,14 @@ import {
   AdminAudio,
   AdminBook,
   AdminDevice,
+  AdminDownloadTrendBucket,
   AdminPackage,
+  AdminRequestTrendBucket,
   AdminRequestLog,
+  AdminSystemSummary,
   ContentLabel,
   DeviceRole,
   Visibility,
-  contentHealth,
-  initialAudio,
-  initialBooks,
-  initialDevices,
-  initialPackages,
-  initialRequestLogs,
   labelNames,
   labelOptions,
   overviewMetrics as mockOverviewMetrics,
@@ -35,7 +34,7 @@ import {
 } from './mockData'
 
 type ViewKey = 'overview' | 'books' | 'packages' | 'audio' | 'devices' | 'logs' | 'settings'
-type ConnectionStatus = AdminDashboardData['status']
+type ConnectionStatus = AdminDashboardData['status'] | 'loading'
 type OperationState = 'idle' | 'saving' | 'success' | 'failed'
 type OperationStatus = {
   state: OperationState
@@ -58,15 +57,18 @@ const navItems: Array<{ key: ViewKey; label: string }> = [
 
 function App() {
   const [activeView, setActiveView] = useState<ViewKey>('overview')
-  const [books, setBooks] = useState(initialBooks)
-  const [devices, setDevices] = useState(initialDevices)
-  const [packages, setPackages] = useState(initialPackages)
-  const [audio, setAudio] = useState(initialAudio)
-  const [requestLogs, setRequestLogs] = useState(initialRequestLogs)
-  const [metrics, setMetrics] = useState(mockOverviewMetrics)
-  const [events, setEvents] = useState(mockRecentEvents)
-  const [dataSource, setDataSource] = useState<AdminDashboardData['source']>('mock')
-  const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>('mock')
+  const [books, setBooks] = useState<AdminBook[]>([])
+  const [devices, setDevices] = useState<AdminDevice[]>([])
+  const [packages, setPackages] = useState<AdminPackage[]>([])
+  const [audio, setAudio] = useState<AdminAudio[]>([])
+  const [requestLogs, setRequestLogs] = useState<AdminRequestLog[]>([])
+  const [metrics, setMetrics] = useState<typeof mockOverviewMetrics>([])
+  const [events, setEvents] = useState<typeof mockRecentEvents>([])
+  const [requestTrend, setRequestTrend] = useState<AdminRequestTrendBucket[]>([])
+  const [downloadTrend, setDownloadTrend] = useState<AdminDownloadTrendBucket[]>([])
+  const [systemSummary, setSystemSummary] = useState<AdminSystemSummary>(emptySystemSummary())
+  const [dataSource, setDataSource] = useState<AdminDashboardData['source']>('api')
+  const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>('loading')
   const [loadMessage, setLoadMessage] = useState('正在连接 Gateway 管理 API')
   const [selectedBookId, setSelectedBookId] = useState<string | null>(null)
   const [selectedDeviceId, setSelectedDeviceId] = useState<string | null>(null)
@@ -87,6 +89,8 @@ function App() {
     () => devices.find((device) => device.id === selectedDeviceId) ?? null,
     [devices, selectedDeviceId],
   )
+  const hasLoadedDetailData = books.length > 0 || devices.length > 0 || packages.length > 0 || audio.length > 0 || requestLogs.length > 0
+  const isInitialLoading = connectionStatus === 'loading' || (connectionStatus === 'partial' && activeView !== 'overview' && !hasLoadedDetailData)
 
   const applyDashboardData = (data: AdminDashboardData) => {
     setBooks(data.books)
@@ -96,6 +100,9 @@ function App() {
     setRequestLogs(data.requestLogs)
     setMetrics(data.overviewMetrics)
     setEvents(data.recentEvents)
+    setRequestTrend(data.requestTrend)
+    setDownloadTrend(data.downloadTrend)
+    setSystemSummary(data.systemSummary)
     setDataSource(data.source)
     setConnectionStatus(data.status)
     setLoadMessage(connectionMessage(data))
@@ -104,6 +111,10 @@ function App() {
   const refreshDashboardData = async () => {
     setIsRefreshing(true)
     setLoadMessage('正在连接 Gateway 管理 API')
+    if (books.length === 0 && devices.length === 0 && packages.length === 0 && audio.length === 0) {
+      setConnectionStatus('loading')
+      setDataSource('api')
+    }
     const data = await loadAdminDashboardData()
     applyDashboardData(data)
     setIsRefreshing(false)
@@ -111,6 +122,31 @@ function App() {
 
   useEffect(() => {
     let cancelled = false
+    void loadAdminOverviewData().then((data) => {
+      if (cancelled) return
+      setMetrics(data.overviewMetrics)
+      setEvents(data.recentEvents)
+      setRequestTrend(data.requestTrend)
+      setDownloadTrend(data.downloadTrend)
+      setSystemSummary(data.systemSummary)
+      setDataSource(data.source)
+      setConnectionStatus(data.status === 'ok' ? 'partial' : data.status)
+      setLoadMessage(data.status === 'ok' ? '总览已加载，正在加载后台明细' : connectionMessage({
+        books: [],
+        devices: [],
+        packages: [],
+        audio: [],
+        requestLogs: [],
+        overviewMetrics: data.overviewMetrics,
+        recentEvents: data.recentEvents,
+        requestTrend: data.requestTrend,
+        downloadTrend: data.downloadTrend,
+        systemSummary: data.systemSummary,
+        source: data.source,
+        status: data.status,
+        failedSections: data.failedSections,
+      }))
+    })
     void loadAdminDashboardData().then((data) => {
       if (!cancelled) applyDashboardData(data)
     })
@@ -151,6 +187,36 @@ function App() {
   const updateBook = (bookId: string, patch: Partial<AdminBook>) => {
     if (patch.visibility) void saveBookPatch(bookId, patch, `${bookId}:visibility`, '可见范围')
     if (patch.labels) void saveBookPatch(bookId, patch, `${bookId}:labels`, '标签')
+  }
+
+  const handleDeleteBook = async (book: AdminBook) => {
+    if (!window.confirm(`确认删除《${book.title}》？这会同时删除 package、音频和相关清单。`)) return
+    const operationKey = `${book.id}:delete`
+    setBookOperationStatus((current) => ({ ...current, [operationKey]: { state: 'saving', message: '删除中' } }))
+    if (isLocalDemoEdit(connectionStatus, adminToken)) {
+      removeBookRows(book.id)
+      setLoadMessage('已删除书籍')
+      setBookOperationStatus((current) => ({ ...current, [operationKey]: { state: 'success', message: '本地已删除' } }))
+      return
+    }
+    try {
+      await deleteBook(book.id)
+      removeBookRows(book.id)
+      setLoadMessage('已删除书籍')
+      setBookOperationStatus((current) => ({ ...current, [operationKey]: { state: 'success', message: '已删除书籍' } }))
+    } catch (error) {
+      setBookOperationStatus((current) => ({
+        ...current,
+        [operationKey]: { state: 'failed', message: `删除失败：${adminErrorLabel(error)}` },
+      }))
+    }
+  }
+
+  const removeBookRows = (bookId: string) => {
+    setBooks((current) => current.filter((book) => book.id !== bookId))
+    setPackages((current) => current.filter((item) => item.bookId !== bookId))
+    setAudio((current) => current.filter((item) => item.bookId !== bookId))
+    setSelectedBookId((current) => (current === bookId ? null : current))
   }
 
   const saveDevicePatch = async (deviceId: string, patch: Partial<AdminDevice>, operationKey: string) => {
@@ -284,21 +350,41 @@ function App() {
             <StatusPill label="环境" value="local" />
             <StatusPill label="状态" value="健康" tone="ok" />
             <StatusPill label="刷新" value="5s" />
-            <StatusPill label="数据" value={dataSource === 'api' ? '实时' : 'Mock'} tone={dataSource === 'api' ? 'ok' : undefined} />
+            <StatusPill
+              label="数据"
+              value={isInitialLoading ? '连接中' : dataSource === 'api' ? '实时' : 'Mock'}
+              tone={!isInitialLoading && dataSource === 'api' ? 'ok' : undefined}
+            />
           </div>
         </header>
 
         <main className="content">
-          {activeView === 'overview' && <Overview metrics={metrics} events={events} />}
-          {activeView === 'books' && (
+          {isInitialLoading && activeView !== 'settings' && <LoadingPanel title={navTitle(activeView)} />}
+          {!isInitialLoading && activeView === 'overview' && (
+            <Overview
+              metrics={metrics}
+              events={events}
+              requestTrend={requestTrend}
+              downloadTrend={downloadTrend}
+              books={books}
+              packages={packages}
+              audio={audio}
+              devices={devices}
+              systemSummary={systemSummary}
+              detailLoaded={hasLoadedDetailData}
+            />
+          )}
+          {!isInitialLoading && activeView === 'books' && (
             <BooksPage
               books={books}
               selectedBook={selectedBook}
               onSelect={setSelectedBookId}
               onUpdate={updateBook}
+              onDelete={handleDeleteBook}
               operationStatus={selectedBook ? {
                 visibility: bookOperationStatus[`${selectedBook.id}:visibility`],
                 labels: bookOperationStatus[`${selectedBook.id}:labels`],
+                delete: bookOperationStatus[`${selectedBook.id}:delete`],
               } : {}}
               retryActions={selectedBook ? {
                 visibility: bookRetryActions[`${selectedBook.id}:visibility`],
@@ -306,7 +392,7 @@ function App() {
               } : {}}
             />
           )}
-          {activeView === 'devices' && (
+          {!isInitialLoading && activeView === 'devices' && (
             <DevicesPage
               devices={devices}
               selectedDevice={selectedDevice}
@@ -316,10 +402,10 @@ function App() {
               retryAction={selectedDevice ? deviceRetryActions[`${selectedDevice.id}:role`] : undefined}
             />
           )}
-          {activeView === 'packages' && (
+          {!isInitialLoading && activeView === 'packages' && (
             <PackagesPage packages={packages} operationStatus={packageOperationStatus} onDownload={handleDownloadPackage} />
           )}
-          {activeView === 'audio' && (
+          {!isInitialLoading && activeView === 'audio' && (
             <AudioPage
               audio={audio}
               operationStatus={audioOperationStatus}
@@ -327,7 +413,7 @@ function App() {
               onDelete={handleDeleteBookAudio}
             />
           )}
-          {activeView === 'logs' && <RequestLogsPage requestLogs={requestLogs} />}
+          {!isInitialLoading && activeView === 'logs' && <RequestLogsPage requestLogs={requestLogs} />}
           {activeView === 'settings' && (
             <SettingsPage
               key={adminToken}
@@ -355,7 +441,40 @@ function StatusPill({ label, value, tone }: { label: string; value: string; tone
   )
 }
 
-function Overview({ metrics, events }: { metrics: typeof mockOverviewMetrics; events: typeof mockRecentEvents }) {
+function LoadingPanel({ title }: { title: string }) {
+  return (
+    <section className="panel loading-panel" aria-label={`${title}加载状态`}>
+      <h2>{title}</h2>
+      <p>正在加载后台数据</p>
+    </section>
+  )
+}
+
+function Overview({
+  metrics,
+  events,
+  requestTrend,
+  downloadTrend,
+  books,
+  packages,
+  audio,
+  devices,
+  systemSummary,
+  detailLoaded,
+}: {
+  metrics: typeof mockOverviewMetrics
+  events: typeof mockRecentEvents
+  requestTrend: AdminRequestTrendBucket[]
+  downloadTrend: AdminDownloadTrendBucket[]
+  books: AdminBook[]
+  packages: AdminPackage[]
+  audio: AdminAudio[]
+  devices: AdminDevice[]
+  systemSummary: AdminSystemSummary
+  detailLoaded: boolean
+}) {
+  const healthItems = buildContentHealth(books, packages, audio, detailLoaded)
+  const deviceText = buildDeviceSummary(devices, detailLoaded)
   return (
     <section className="view-stack" aria-label="总览">
       <div className="metric-grid">
@@ -370,18 +489,20 @@ function Overview({ metrics, events }: { metrics: typeof mockOverviewMetrics; ev
 
       <div className="summary-row">
         <div className="system-summary">
-          <strong>CPU / 内存 / 磁盘</strong>
-          <span>22% · 68 MB heap · 数据目录 4.8 GB</span>
+          <strong>运行 / 内存 / 数据目录</strong>
+          <span>
+            运行 {formatDuration(systemSummary.uptimeSeconds)} · heap {formatBytes(systemSummary.heapUsedBytes)} · RSS {formatBytes(systemSummary.rssBytes)} · 数据目录 {formatBytes(systemSummary.dataDirBytes)}
+          </span>
         </div>
         <div className="system-summary">
           <strong>在线设备</strong>
-          <span>3 台 · 受信 1 台 · 禁用 1 台</span>
+          <span>{deviceText}</span>
         </div>
       </div>
 
       <div className="chart-grid">
-        <TrendPanel title="请求趋势" legend="请求 / 错误 / P95" bars={[64, 72, 55, 88, 70, 92, 76]} />
-        <TrendPanel title="下载趋势" legend="package / audio" bars={[20, 34, 50, 48, 72, 61, 84]} />
+        <RequestTrendPanel buckets={requestTrend} />
+        <DownloadTrendPanel buckets={downloadTrend} />
       </div>
 
       <section className="panel">
@@ -390,7 +511,7 @@ function Overview({ metrics, events }: { metrics: typeof mockOverviewMetrics; ev
           <span>滚动窗口</span>
         </div>
         <div className="health-grid">
-          {contentHealth.map((item) => (
+          {healthItems.map((item) => (
             <div key={item.label}>
               <span>{item.label}</span>
               <strong>{item.value}</strong>
@@ -404,33 +525,138 @@ function Overview({ metrics, events }: { metrics: typeof mockOverviewMetrics; ev
           <h2>最近事件</h2>
           <span>最近 30 分钟</span>
         </div>
-        <ol className="event-list">
-          {events.map((event) => (
-            <li key={`${event.time}-${event.text}`} className={event.level}>
-              <time>{event.time}</time>
-              <span>{event.text}</span>
-            </li>
-          ))}
-        </ol>
+        {events.length > 0 ? (
+          <ol className="event-list">
+            {events.map((event) => (
+              <li key={`${event.time}-${event.text}`} className={event.level}>
+                <time>{event.time}</time>
+                <span>{event.text}</span>
+              </li>
+            ))}
+          </ol>
+        ) : (
+          <p className="empty-state">最近 30 分钟暂无事件</p>
+        )}
       </section>
     </section>
   )
 }
 
-function TrendPanel({ title, legend, bars }: { title: string; legend: string; bars: number[] }) {
+function RequestTrendPanel({ buckets }: { buckets: AdminRequestTrendBucket[] }) {
+  const maxValue = Math.max(1, ...buckets.map((bucket) => Math.max(bucket.requestCount, bucket.errorCount, bucket.p95Ms)))
+  const hasData = buckets.some((bucket) => bucket.requestCount > 0 || bucket.errorCount > 0 || bucket.p95Ms > 0)
   return (
     <section className="panel trend-panel">
       <div className="panel-header">
-        <h2>{title}</h2>
-        <span>{legend}</span>
+        <h2>请求趋势</h2>
+        <span>最近 60 分钟 · 请求 / 错误 / P95</span>
       </div>
-      <div className="bars" aria-hidden="true">
-        {bars.map((height, index) => (
-          <span key={`${height}-${index}`} style={{ height: `${height}%` }} />
-        ))}
-      </div>
+      {hasData ? (
+        <div className="bars trend-bars" aria-label="最近 60 分钟请求趋势">
+          {buckets.map((bucket) => (
+            <span
+              key={bucket.label}
+              className="bar-group"
+              title={`${bucket.label} 请求 ${bucket.requestCount} / 错误 ${bucket.errorCount} / P95 ${bucket.p95Ms}ms`}
+            >
+              <i className="bar request" style={{ height: `${barHeight(bucket.requestCount, maxValue)}%` }} />
+              <i className="bar error" style={{ height: `${barHeight(bucket.errorCount, maxValue)}%` }} />
+              <i className="bar p95" style={{ height: `${barHeight(bucket.p95Ms, maxValue)}%` }} />
+            </span>
+          ))}
+        </div>
+      ) : (
+        <p className="empty-trend">最近 60 分钟暂无请求数据</p>
+      )}
     </section>
   )
+}
+
+function DownloadTrendPanel({ buckets }: { buckets: AdminDownloadTrendBucket[] }) {
+  const maxValue = Math.max(1, ...buckets.map((bucket) => Math.max(bucket.packageDownloads, bucket.audioDownloads)))
+  const hasData = buckets.some((bucket) => bucket.packageDownloads > 0 || bucket.audioDownloads > 0)
+  return (
+    <section className="panel trend-panel">
+      <div className="panel-header">
+        <h2>下载趋势</h2>
+        <span>最近 60 分钟 · package / audio</span>
+      </div>
+      {hasData ? (
+        <div className="bars trend-bars" aria-label="最近 60 分钟下载趋势">
+          {buckets.map((bucket) => (
+            <span
+              key={bucket.label}
+              className="bar-group"
+              title={`${bucket.label} package ${bucket.packageDownloads} / audio ${bucket.audioDownloads}`}
+            >
+              <i className="bar package" style={{ height: `${barHeight(bucket.packageDownloads, maxValue)}%` }} />
+              <i className="bar audio" style={{ height: `${barHeight(bucket.audioDownloads, maxValue)}%` }} />
+            </span>
+          ))}
+        </div>
+      ) : (
+        <p className="empty-trend">最近 60 分钟暂无下载数据</p>
+      )}
+    </section>
+  )
+}
+
+function barHeight(value: number, maxValue: number) {
+  if (value <= 0) return 0
+  return Math.max(6, Math.round((value / maxValue) * 100))
+}
+
+function buildDeviceSummary(devices: AdminDevice[], detailLoaded: boolean) {
+  if (!detailLoaded) return '正在加载'
+  const trustedCount = devices.filter((device) => device.role === 'trusted').length
+  const disabledCount = devices.filter((device) => device.role === 'disabled').length
+  return `${devices.length} 台 · 受信 ${trustedCount} 台 · 禁用 ${disabledCount} 台`
+}
+
+function formatBytes(bytes: number) {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '-'
+  const units = ['B', 'KB', 'MB', 'GB', 'TB']
+  let value = bytes
+  let unitIndex = 0
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024
+    unitIndex += 1
+  }
+  return `${value.toFixed(unitIndex === 0 ? 0 : 1)} ${units[unitIndex]}`
+}
+
+function formatDuration(seconds: number) {
+  if (!Number.isFinite(seconds) || seconds <= 0) return '-'
+  const hours = Math.floor(seconds / 3600)
+  const minutes = Math.floor((seconds % 3600) / 60)
+  if (hours > 0) return `${hours}h ${minutes}m`
+  if (minutes > 0) return `${minutes}m`
+  return `${Math.floor(seconds)}s`
+}
+
+function buildContentHealth(books: AdminBook[], packages: AdminPackage[], audio: AdminAudio[], detailLoaded: boolean) {
+  if (!detailLoaded) {
+    return [
+      { label: '书籍', value: '加载中' },
+      { label: '受限', value: '加载中' },
+      { label: '隐藏', value: '加载中' },
+      { label: '缺音频章节', value: '加载中' },
+      { label: '异常数据包', value: '加载中' },
+    ]
+  }
+
+  const restrictedCount = books.filter((book) => book.visibility !== 'default').length
+  const hiddenCount = books.filter((book) => book.visibility === 'hidden').length
+  const missingAudioChapters = audio.reduce((sum, item) => sum + Math.max(0, item.chapterCount - item.availableChapters), 0)
+  const badPackageCount = packages.filter((item) => item.status !== 'ready').length
+
+  return [
+    { label: '书籍', value: `${books.length} 本` },
+    { label: '受限', value: `${restrictedCount} 本` },
+    { label: '隐藏', value: `${hiddenCount} 本` },
+    { label: '缺音频章节', value: `${missingAudioChapters}` },
+    { label: '异常数据包', value: `${badPackageCount}` },
+  ]
 }
 
 function BooksPage({
@@ -438,6 +664,7 @@ function BooksPage({
   selectedBook,
   onSelect,
   onUpdate,
+  onDelete,
   operationStatus,
   retryActions,
 }: {
@@ -445,7 +672,8 @@ function BooksPage({
   selectedBook: AdminBook | null
   onSelect: (bookId: string) => void
   onUpdate: (bookId: string, patch: Partial<AdminBook>) => void
-  operationStatus: Partial<Record<'visibility' | 'labels', OperationStatus>>
+  onDelete: (book: AdminBook) => void
+  operationStatus: Partial<Record<'visibility' | 'labels' | 'delete', OperationStatus>>
   retryActions: Partial<Record<'visibility' | 'labels', RetryAction>>
 }) {
   return (
@@ -478,13 +706,13 @@ function BooksPage({
               >
                 <td><strong>{book.title}</strong></td>
                 <td>{book.author}</td>
-                <td><Badge>{book.visibility}</Badge></td>
+                <td><Badge tone={book.visibility}>{book.visibility}</Badge></td>
                 <td><LabelList labels={book.labels} /></td>
                 <td>{book.chapterCount}</td>
                 <td>{book.packageUpdatedAt}</td>
                 <td>
                   <span className="coverage">
-                    S {book.coverage.summary}% · KG {book.coverage.kg}% · E {book.coverage.embedding}%
+                    S {formatCoverage(book.coverage.summary)} · KG {formatCoverage(book.coverage.kg)} · E {formatCoverage(book.coverage.embedding)}
                   </span>
                 </td>
                 <td>{book.audioCoverage}%</td>
@@ -495,7 +723,13 @@ function BooksPage({
         </table>
       </div>
 
-      <BookDrawer book={selectedBook} onUpdate={onUpdate} operationStatus={operationStatus} retryActions={retryActions} />
+      <BookDrawer
+        book={selectedBook}
+        onUpdate={onUpdate}
+        onDelete={onDelete}
+        operationStatus={operationStatus}
+        retryActions={retryActions}
+      />
     </section>
   )
 }
@@ -503,12 +737,14 @@ function BooksPage({
 function BookDrawer({
   book,
   onUpdate,
+  onDelete,
   operationStatus,
   retryActions,
 }: {
   book: AdminBook | null
   onUpdate: (bookId: string, patch: Partial<AdminBook>) => void
-  operationStatus: Partial<Record<'visibility' | 'labels', OperationStatus>>
+  onDelete: (book: AdminBook) => void
+  operationStatus: Partial<Record<'visibility' | 'labels' | 'delete', OperationStatus>>
   retryActions: Partial<Record<'visibility' | 'labels', RetryAction>>
 }) {
   if (!book) {
@@ -574,6 +810,19 @@ function BookDrawer({
         <button type="button">下载 package</button>
         <button type="button">上传替换</button>
       </div>
+
+      <div className="danger-zone">
+        <strong>危险操作</strong>
+        <button
+          type="button"
+          className="danger-button"
+          disabled={operationStatus.delete?.state === 'saving'}
+          onClick={() => onDelete(book)}
+        >
+          删除 {book.title}
+        </button>
+        <OperationNote status={operationStatus.delete} />
+      </div>
     </aside>
   )
 }
@@ -619,7 +868,7 @@ function DevicesPage({
               >
                 <td><strong>{device.name}</strong></td>
                 <td><code>{device.pairingCode}</code></td>
-                <td><Badge>{roleNames[device.role]}</Badge></td>
+                <td><Badge tone={device.role}>{roleNames[device.role]}</Badge></td>
                 <td>{device.lastIp}</td>
                 <td>{device.lastSeenAt}</td>
               </tr>
@@ -642,14 +891,20 @@ function PackagesPage({
   operationStatus: Record<string, OperationStatus>
   onDownload: (item: AdminPackage) => void
 }) {
-  const totalMissing = packages.reduce((sum, item) => sum + item.missingChapters.length, 0)
+  const missingSummaries = packages
+    .map((item) => packageMissingSummary(item))
+    .filter((item) => item.count > 0)
+  const totalMissing = missingSummaries.reduce((sum, item) => sum + item.count, 0)
+  const missingTooltip = missingSummaries.length > 0
+    ? missingSummaries.map((item) => `${item.title}：${item.detail}`).join('\n')
+    : '无缺失数据'
   const readyCount = packages.filter((item) => item.status === 'ready').length
 
   return (
     <section className="view-stack" aria-label="数据包">
       <div className="operation-summary">
         <SummaryTile label="数据包" value={`${packages.length} 个`} note={`${readyCount} 个可发布`} />
-        <SummaryTile label="缺失章节" value={`${totalMissing} 章`} note="按 package 校验结果" />
+        <SummaryTile label="缺失章节" value={`${totalMissing} 章`} note="悬停查看明细" title={missingTooltip} />
         <SummaryTile label="异常状态" value={`${packages.length - readyCount} 个`} note="warning / failed" />
       </div>
 
@@ -685,10 +940,10 @@ function PackagesPage({
                   <td>{item.updatedAt}</td>
                   <td>
                     <span className="coverage">
-                      S {item.summaryCoverage}% · KG {item.kgCoverage}% · E {item.embeddingCoverage}%
+                      S {formatCoverage(item.summaryCoverage)} · KG {formatCoverage(item.kgCoverage)} · E {formatCoverage(item.embeddingCoverage)}
                     </span>
                   </td>
-                  <td><ChapterList chapters={item.missingChapters} /></td>
+                  <td><PackageMissingCell item={item} /></td>
                   <td><code>{item.checksum}</code></td>
                   <td>
                     <button
@@ -922,17 +1177,50 @@ function LabelList({ labels }: { labels: ContentLabel[] }) {
   )
 }
 
-function Badge({ children }: { children: React.ReactNode }) {
-  return <span className="badge">{children}</span>
+function Badge({ children, tone }: { children: React.ReactNode; tone?: Visibility | DeviceRole }) {
+  return <span className={`badge ${tone ? `badge-${tone}` : ''}`}>{children}</span>
 }
 
-function SummaryTile({ label, value, note }: { label: string; value: string; note: string }) {
+function SummaryTile({ label, value, note, title }: { label: string; value: string; note: string; title?: string }) {
   return (
-    <div className="system-summary">
+    <div className="system-summary" title={title}>
       <strong>{label}</strong>
       <span>{value} · {note}</span>
     </div>
   )
+}
+
+function PackageMissingCell({ item }: { item: AdminPackage }) {
+  const summary = packageMissingSummary(item)
+  if (summary.count === 0) return <span className="muted">无</span>
+  return (
+    <span className="missing-cell" title={summary.detail}>
+      {summary.count} 章
+    </span>
+  )
+}
+
+function packageMissingSummary(item: AdminPackage) {
+  const coverageMissingCounts = [
+    missingCountFromCoverage(item.chapterCount, item.summaryCoverage),
+    missingCountFromCoverage(item.chapterCount, item.kgCoverage),
+    missingCountFromCoverage(item.chapterCount, item.embeddingCoverage),
+  ]
+  const count = Math.max(item.missingChapters.length, ...coverageMissingCounts)
+  const details = item.validationIssues.length > 0
+    ? item.validationIssues
+    : item.missingChapters.map((chapter) => typeof chapter === 'number' ? `第 ${chapter} 章` : String(chapter))
+  return {
+    title: item.bookTitle,
+    count,
+    detail: details.length > 0 ? details.join('；') : '无缺失数据',
+  }
+}
+
+function missingCountFromCoverage(chapterCount: number, coverage: number | null) {
+  if (chapterCount <= 0 || coverage === null || coverage >= 100) return 0
+  const ratio = Math.max(0, Math.min(100, coverage)) / 100
+  return Math.max(0, Math.round(chapterCount * (1 - ratio)))
 }
 
 function ChapterList({ chapters }: { chapters: Array<number | string> }) {
@@ -1082,10 +1370,15 @@ function connectionMessage(data: AdminDashboardData) {
 }
 
 function connectionTitle(status: ConnectionStatus, source: AdminDashboardData['source']) {
+  if (status === 'loading') return '连接中'
   if (status === 'unauthorized') return '未授权'
   if (status === 'partial') return '部分可用'
   if (status === 'unavailable' || status === 'mock') return 'Mock 数据'
   return source === 'api' ? '实时数据' : 'Mock 数据'
+}
+
+function navTitle(view: ViewKey) {
+  return navItems.find((item) => item.key === view)?.label ?? '后台数据'
 }
 
 function omitKey<T>(record: Record<string, T>, key: string) {
@@ -1096,6 +1389,19 @@ function omitKey<T>(record: Record<string, T>, key: string) {
 
 function isLocalDemoEdit(status: ConnectionStatus, token: string) {
   return !token && (status === 'mock' || status === 'unavailable')
+}
+
+function emptySystemSummary(): AdminSystemSummary {
+  return {
+    uptimeSeconds: 0,
+    rssBytes: 0,
+    heapUsedBytes: 0,
+    dataDirBytes: 0,
+  }
+}
+
+function formatCoverage(value: number | null) {
+  return value === null ? '-' : `${value}%`
 }
 
 function savePackageBlob(item: AdminPackage, packageBlob: Blob) {

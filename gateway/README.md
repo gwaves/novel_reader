@@ -55,6 +55,7 @@ localStorage.setItem('novel-reader-gateway-admin-token', '<GATEWAY_ADMIN_ACCESS_
 - `GET /health`
 - `GET /version`
 - `GET /capabilities`
+- `GET /downloads/ai_novel_reader.apk`（公开下载最新版 Android APK）
 - `GET /auth/session`（受保护，用于验证 bearer token）
 - `GET /auth/devices`（受保护，查看已登记设备）
 - `GET /mobile/books`（受保护，返回 Gateway 书库索引）
@@ -63,12 +64,13 @@ localStorage.setItem('novel-reader-gateway-admin-token', '<GATEWAY_ADMIN_ACCESS_
 - `PUT /admin/books/:bookId/package`（受保护，导入 PC 端导出的移动数据包）
 - `GET /admin/books/:bookId/package/download`（受保护，下载后台完整数据包）
 - `GET /admin/books`（受保护，返回后台全量书库视图）
+- `DELETE /admin/books/:bookId`（受保护，从书库索引删除该书，并递归删除对应 package 与音频目录）
 - `PATCH /admin/books/:bookId/visibility`（受保护，更新书籍可见范围）
 - `PATCH /admin/books/:bookId/labels`（受保护，更新书籍内容标签）
 - `GET /admin/packages`（受保护，返回数据包状态）
 - `GET /admin/audio`（受保护，返回音频覆盖状态）
 - `POST /admin/books/:bookId/audio/refresh`（受保护，重新读取音频状态）
-- `DELETE /admin/books/:bookId/audio`（受保护，清理该书音频清单索引，不删除 MP3 文件）
+- `DELETE /admin/books/:bookId/audio`（受保护，递归删除该书本地音频目录，包括 `audio.json`、MP3 和 manifest）
 - `GET /admin/devices`（受保护，返回已登记设备）
 - `PATCH /admin/devices/:deviceId`（受保护，更新设备名称或角色）
 - `GET /admin/metrics`（受保护，返回请求量、错误率、P95 和下载统计）
@@ -86,7 +88,8 @@ localStorage.setItem('novel-reader-gateway-admin-token', '<GATEWAY_ADMIN_ACCESS_
 
 - `GATEWAY_ADMIN_ACCESS_TOKEN`：用于 `/admin/*` 和后台 AI/RAG 转发接口。
 - `GATEWAY_MOBILE_ACCESS_TOKEN`：用于 `/auth/*` 和 `/mobile/*`。
-- `GATEWAY_DEV_ACCESS_TOKEN`：兼容旧开发流程；当 admin/mobile token 未配置时作为 fallback。
+- `GATEWAY_DEV_ACCESS_TOKEN`：兼容旧开发流程；仅在非生产环境作为 fallback。
+- `GATEWAY_ENV=production` 时必须显式设置 `GATEWAY_ADMIN_ACCESS_TOKEN` 和 `GATEWAY_MOBILE_ACCESS_TOKEN`，不会回退到 dev token。
 
 受保护接口需要携带：
 
@@ -142,6 +145,15 @@ npm run gateway:publish-package -- \
 
 脚本默认读取 `NOVEL_READER_API_BASE_URL`、`GATEWAY_BASE_URL`、`GATEWAY_DEV_ACCESS_TOKEN` 和 `NOVEL_READER_SYNC_TOKEN`。如果已经有导出的 JSON 文件，也可以用 `--source-file path/to/package.json` 跳过本地 API；`--dry-run` 可只校验不上传。
 
+Android 客户端 APK 可以发布到 Gateway 的公开下载目录。Gateway 默认从 `GATEWAY_DATA_DIR/downloads` 提供 `/downloads/*` 静态下载，也可以用 `GATEWAY_DOWNLOADS_DIR` 指定目录：
+
+```bash
+npm run gateway-android:android:build
+npm run gateway:publish-android-apk
+```
+
+发布后最新版固定地址为 `/downloads/ai_novel_reader.apk`，同时保留版本文件 `/downloads/ai_novel_reader-v<versionName>.apk`，并写入 `/downloads/android-app.json` 供后续检查当前版本、构建号和 commit。`versionName` 来自 Gateway Android 构建信息，例如 `0.2.0+build.228.g3fcfd98db346`。
+
 AI chat 转发第一版支持 OpenAI-compatible 接口。`POST /ai/chat` 转发到 `<GATEWAY_AI_BASE_URL>/chat/completions`。Embedding 转发支持 OpenAI-compatible 和 Ollama：默认 `GATEWAY_EMBEDDING_PROVIDER=openai-compatible` 时转发到 `<GATEWAY_EMBEDDING_BASE_URL>/embeddings`；设置 `GATEWAY_EMBEDDING_PROVIDER=ollama` 时转发到 `<GATEWAY_EMBEDDING_BASE_URL>/api/embeddings`，例如 `http://192.168.88.100:11434` + `qwen3-embedding:8b`。如果请求体未指定 `model`，Gateway 会分别注入 `GATEWAY_AI_MODEL` 或 `GATEWAY_EMBEDDING_MODEL`。
 
 本地 MP3 第一版从 `GATEWAY_AUDIO_DIR/books/<bookId>/audio.json` 读取清单，音频文件与 `audio.json` 放在同一目录或其子目录。清单格式：
@@ -178,7 +190,15 @@ npm run gateway:publish-audio -- \
 
 脚本会扫描 `<source-root>/chNNN-full/audio/chapter.mp3` 和 `manifest.json`，根据本地移动数据包章节序号匹配真实 `chapterId`，复制到 `GATEWAY_AUDIO_DIR/books/<bookId>/`，并生成 `audio.json`。可以用 `--package-file path/to/package.json` 跳过本地 API，或用 `--dry-run` 只检查映射结果。
 
-如果 Gateway 跑在远端机器上，可以在本地整理完音频目录后直接同步到远端挂载目录。例如家里网关机器 `192.168.88.100` 的 compose 挂载了 `~/novel-reader-gateway/audio:/audio:ro`：
+公网部署后可以执行安全 smoke 检查：
+
+```bash
+npm run gateway:security-smoke
+```
+
+脚本默认检查 `https://novel.gwaves.net:8888`，可通过 `GATEWAY_SECURITY_BASE_URL`、`GATEWAY_SECURITY_IP_URL` 和 `GATEWAY_SECURITY_HOST` 覆盖目标。
+
+如果 Gateway 跑在远端机器上，可以在本地整理完音频目录后直接同步到远端挂载目录。例如家里网关机器 `192.168.88.100` 的 compose 挂载了 `~/novel-reader-gateway/audio:/audio`，以便管理后台可以清理重建单书音频目录：
 
 ```bash
 npm run gateway:publish-audio -- \
@@ -191,4 +211,4 @@ npm run gateway:publish-audio -- \
 
 需要指定 SSH 用户或端口时，增加 `--remote-user <user>` 和 `--remote-ssh-port <port>`；脚本会把 `books/<bookId>/` 同步到远端，并默认删除远端该书目录里已经不存在的旧文件。
 
-未配置 AI、embedding 或对象存储时，`/capabilities` 会明确返回对应能力不可用，而不是在运行时崩溃。
+未配置 AI、embedding 或对象存储时，`/capabilities` 会返回公开可见的能力可用性；认证模式、token 配置状态和限流细节不会从匿名公网接口暴露。

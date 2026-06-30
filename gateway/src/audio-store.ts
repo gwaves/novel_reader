@@ -1,6 +1,6 @@
 import { createReadStream } from 'node:fs'
-import { readFile, rm, stat } from 'node:fs/promises'
-import { join, resolve } from 'node:path'
+import { readdir, readFile, rm, stat } from 'node:fs/promises'
+import { join, relative, resolve } from 'node:path'
 import type { GatewayConfig } from './config.js'
 import { GatewayHttpError } from './errors.js'
 import type { GatewayBookSummary } from './data-store.js'
@@ -134,9 +134,10 @@ export async function summarizeBookAudio(
 }
 
 export async function deleteBookAudio(config: GatewayConfig, bookId: string): Promise<GatewayAudioCleanupResult> {
-  const audioCatalogPath = resolve(config.audioDir, 'books', bookId, 'audio.json')
+  const bookAudioDir = resolveSafeBookAudioDir(config, bookId)
+  const deletedFiles = await listAudioFiles(bookAudioDir)
   try {
-    await rm(audioCatalogPath, { force: false })
+    await rm(bookAudioDir, { recursive: true, force: false })
   } catch (error) {
     if (isNodeError(error) && error.code === 'ENOENT') {
       return {
@@ -152,8 +153,8 @@ export async function deleteBookAudio(config: GatewayConfig, bookId: string): Pr
   return {
     bookId,
     removed: true,
-    deletedFileCount: 1,
-    deletedFiles: ['audio.json'],
+    deletedFileCount: deletedFiles.length,
+    deletedFiles,
   }
 }
 
@@ -229,12 +230,42 @@ function isSafeRelativePath(fileName: string) {
 }
 
 function resolveSafeAudioPath(config: GatewayConfig, bookId: string, fileName: string) {
-  const bookAudioDir = resolve(config.audioDir, 'books', bookId)
+  const bookAudioDir = resolveSafeBookAudioDir(config, bookId)
   const filePath = resolve(bookAudioDir, fileName)
   if (!filePath.startsWith(`${bookAudioDir}/`)) {
     throw new GatewayHttpError(500, 'audio_catalog_invalid', 'Gateway audio file path is invalid.')
   }
   return filePath
+}
+
+function resolveSafeBookAudioDir(config: GatewayConfig, bookId: string) {
+  const audioBooksDir = resolve(config.audioDir, 'books')
+  const bookAudioDir = resolve(audioBooksDir, bookId)
+  const pathFromAudioBooks = relative(audioBooksDir, bookAudioDir)
+  if (!pathFromAudioBooks || pathFromAudioBooks.startsWith('..') || resolve(pathFromAudioBooks) === pathFromAudioBooks) {
+    throw new GatewayHttpError(500, 'audio_catalog_invalid', 'Gateway audio book path is invalid.')
+  }
+  return bookAudioDir
+}
+
+async function listAudioFiles(bookAudioDir: string) {
+  try {
+    return (await listFilesRecursive(bookAudioDir)).sort((left, right) => left.localeCompare(right))
+  } catch (error) {
+    if (isNodeError(error) && error.code === 'ENOENT') return []
+    throw error
+  }
+}
+
+async function listFilesRecursive(rootDir: string, currentDir: string = rootDir): Promise<string[]> {
+  const entries = await readdir(currentDir, { withFileTypes: true })
+  const nested = await Promise.all(entries.map(async (entry) => {
+    const fullPath = join(currentDir, entry.name)
+    if (entry.isDirectory()) return listFilesRecursive(rootDir, fullPath)
+    if (!entry.isFile()) return []
+    return [relative(rootDir, fullPath)]
+  }))
+  return nested.flat()
 }
 
 async function statAudioFile(filePath: string) {

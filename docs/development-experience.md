@@ -107,7 +107,7 @@
 建议后续移动端改动的最小验证流程：
 - `npm run gateway-android:build`
 - `npm run gateway-android:android:build`
-- `adb install -r gateway-android-app/android/app/build/outputs/apk/debug/novel_gateway.apk`
+- `adb install -r gateway-android-app/android/app/build/outputs/apk/debug/novel_gateway-v<version>-debug.apk`
 - 真机至少验证：启动自动连接、书库切换、阅读进度、Audio 列表、当前章节播放。
 - 涉及缓存时额外验证：覆盖安装、强停重启、清数据或清 WebView 缓存后的表现。
 

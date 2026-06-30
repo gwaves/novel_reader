@@ -12,6 +12,8 @@ dist
 dist-ssr
 *.local
 tmp/
+gateway-android-app/build-info.json
+gateway-android-app/src/generated/buildInfo.ts
 mobile-app/android-backups/
 *.bak-*
 
