@@ -1617,6 +1617,22 @@ button:disabled {
   }
 }
 
+@media (orientation: landscape) and (min-width: 900px) and (min-height: 600px) {
+  .app-shell {
+    max-width: none;
+    padding-left: max(24px, env(safe-area-inset-left));
+    padding-right: max(24px, env(safe-area-inset-right));
+  }
+
+  .reader-page {
+    width: min(100%, 1180px);
+  }
+
+  .reader-card {
+    padding: 22px 28px;
+  }
+}
+
 .bottom-nav {
   display: grid;
   grid-template-columns: repeat(4, minmax(0, 1fr));
