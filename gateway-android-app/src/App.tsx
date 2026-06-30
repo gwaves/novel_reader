@@ -1,3 +1,4 @@
+/* eslint-disable react-refresh/only-export-components */
 import { type CSSProperties, type MouseEvent, useEffect, useMemo, useRef, useState } from 'react'
 import { Capacitor, CapacitorHttp, registerPlugin, type PluginListenerHandle } from '@capacitor/core'
 import {
