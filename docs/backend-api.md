@@ -1139,11 +1139,11 @@ Error response when embeddings are not ready:
 
 The API requires at least 80% embedding coverage for the selected model before search.
 
-## Mobile Sync APIs
+## Legacy Mobile Sync APIs
 
-These endpoints are the PC-side contract for the independent Android app under `mobile-app/`. They are designed for LAN sync: the mobile app pulls complete PC-generated data while it can reach the PC, then reads and searches its local SQLite copy while away from the LAN.
+These endpoints are the legacy PC-side contract for the deprecated Android app under `mobile-app/`. They were designed for LAN sync: the mobile app pulled complete PC-generated data while it could reach the PC, then read and searched its local SQLite copy while away from the LAN. The maintained Android client is now `gateway-android-app`, which consumes Gateway `/mobile/*`, `/ai/*`, and audio endpoints instead.
 
-The mobile app must not generate book, chapter, summary, or chunk embeddings. Mobile packages include PC-generated `summary_embeddings` and `chapter_chunk_embeddings` as read-only synced assets.
+The legacy mobile app must not generate book, chapter, summary, or chunk embeddings. Mobile packages include PC-generated `summary_embeddings` and `chapter_chunk_embeddings` as read-only synced assets.
 
 ### Authentication
 

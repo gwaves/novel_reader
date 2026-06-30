@@ -32,6 +32,7 @@
     "gateway:admin-ui:test": "npm --prefix gateway run admin-ui:test",
     "gateway:publish-audio": "node gateway/scripts/publish-audio.mjs",
     "gateway:publish-package": "node gateway/scripts/publish-package.mjs",
+    "gateway:publish-android-apk": "node gateway/scripts/publish-android-apk.mjs",
     "production-pipeline": "node production-pipeline/src/cli.mjs",
     "production-pipeline:console": "node production-pipeline/src/service.mjs",
     "production-pipeline:console:dev": "node --watch production-pipeline/src/service.mjs",

@@ -29,6 +29,7 @@ import {
 } from './libraryState'
 import { createSpeechChapter, type SpeechSegment } from './speechSegments'
 import { NovelReaderTts, type TtsVoice } from './ttsPlugin'
+import { buildInfo } from './generated/buildInfo'
 
 type BookPackage = {
   schemaVersion: 1
@@ -123,8 +124,27 @@ type NativeAudioPlugin = {
   }): Promise<FullPackageImportStats & { metadataPath?: string }>
   clearAudioCache(options: { bookId: string }): Promise<{ deletedBytes?: number }>
   clearPackageCache(options: { bookId: string }): Promise<{ deletedBytes?: number }>
+  downloadAndInstallApk(options: { url: string; fileName?: string }): Promise<{ filePath: string; sizeBytes: number }>
   addListener(eventName: 'packageSyncProgress', listenerFunc: (event: PackageSyncProgress) => void): Promise<PluginListenerHandle>
 }
+
+type AppUpdateManifest = {
+  versionName: string
+  versionCode: number
+  buildNumber?: number
+  gitCommit?: string
+  latestUrl: string
+  latestFileName?: string
+  publishedAt?: string
+}
+
+type AppUpdateState =
+  | { status: 'idle'; manifest?: AppUpdateManifest; message?: string }
+  | { status: 'checking'; manifest?: AppUpdateManifest; message?: string }
+  | { status: 'available'; manifest: AppUpdateManifest; message: string }
+  | { status: 'current'; manifest?: AppUpdateManifest; message: string }
+  | { status: 'downloading'; manifest: AppUpdateManifest; message: string }
+  | { status: 'error'; manifest?: AppUpdateManifest; message: string }
 
 type AudioTimelineEntry = {
   id?: string
@@ -169,12 +189,19 @@ type SpeechPlaybackState =
   | { status: 'paused'; segmentIndex: number; segmentId: string }
   | { status: 'error'; message: string }
 
-type ReadingProgress = {
+export type ReadingProgress = {
   bookId: string
   chapterId: string
   scrollY: number
   updatedAt: string
 }
+
+export type ReadingProgressStore = {
+  schemaVersion: 2
+  books: Record<string, ReadingProgress>
+}
+
+type ReadingProgressStorage = Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>
 
 type FullPackageCache = {
   bookId: string
@@ -267,7 +294,7 @@ const packageCacheStoreName = 'book-packages'
 const legacyAudioCacheStoreName = 'chapter-audio'
 const defaultGatewayBaseUrl = import.meta.env.VITE_GATEWAY_DEFAULT_BASE_URL ?? 'https://novel.gwaves.net:8888'
 const defaultGatewayToken = import.meta.env.VITE_GATEWAY_DEFAULT_TOKEN ?? '123456'
-const appVersion = import.meta.env.VITE_APP_VERSION ?? '0.2.0'
+const appVersion = buildInfo.versionName
 const NativeAudio = registerPlugin<NativeAudioPlugin>('GatewayAudio')
 const TTS_RATE_PRESETS = [0.75, 1, 1.25, 1.5, 2, 3] as const
 const MIN_TTS_RATE = 0.5
@@ -304,11 +331,12 @@ function App() {
   const [ttsSettings, setTtsSettings] = useState<TtsSettings>(() => loadTtsSettings())
   const [connectionState, setConnectionState] = useState<ConnectionState>('idle')
   const [message, setMessage] = useState('')
+  const [appUpdateState, setAppUpdateState] = useState<AppUpdateState>({ status: 'idle' })
   const [gatewaySession, setGatewaySession] = useState<GatewaySession | null>(null)
   const [librarySyncState, setLibrarySyncState] = useState<GatewayLibrarySyncState>({ status: 'never' })
   const [books, setBooks] = useState<BookSummary[]>([])
   const [localBooks, setLocalBooks] = useState<BookSummary[]>([])
-  const [selectedBookId, setSelectedBookId] = useState<string | null>(() => loadReadingProgress()?.bookId ?? loadFullPackageCache()?.bookId ?? null)
+  const [selectedBookId, setSelectedBookId] = useState<string | null>(() => loadLatestReadingProgress()?.bookId ?? loadFullPackageCache()?.bookId ?? null)
   const [bookPackage, setBookPackage] = useState<BookPackage | null>(null)
   const [currentChapterId, setCurrentChapterId] = useState<string | null>(null)
   const [audioChapters, setAudioChapters] = useState<AudioChapter[]>([])
@@ -747,6 +775,64 @@ function App() {
     }
   }
 
+  async function checkAppUpdate() {
+    setAppUpdateState((current) => ({ status: 'checking', manifest: current.manifest, message: '正在检查更新...' }))
+    try {
+      const manifest = normalizeAppUpdateManifest(await gatewayPublicFetch(settings, '/downloads/android-app.json'))
+      if (!manifest) throw new Error('更新清单格式无效。')
+      if (manifest.versionCode > buildInfo.versionCode) {
+        setAppUpdateState({
+          status: 'available',
+          manifest,
+          message: `发现新版本 ${manifest.versionName}`,
+        })
+        return
+      }
+      setAppUpdateState({
+        status: 'current',
+        manifest,
+        message: `已是最新版本 ${buildInfo.versionName}`,
+      })
+    } catch (error) {
+      setAppUpdateState((current) => ({
+        status: 'error',
+        manifest: current.manifest,
+        message: errorMessage(error) || '检查更新失败。',
+      }))
+    }
+  }
+
+  async function installAppUpdate(manifest: AppUpdateManifest) {
+    const updateUrl = absoluteGatewayUrl(settings, manifest.latestUrl)
+    setAppUpdateState({ status: 'downloading', manifest, message: `正在下载 ${manifest.versionName}...` })
+    try {
+      if (Capacitor.isNativePlatform()) {
+        await NativeAudio.downloadAndInstallApk({
+          url: updateUrl,
+          fileName: manifest.latestFileName || 'ai_novel_reader.apk',
+        })
+        setAppUpdateState({
+          status: 'available',
+          manifest,
+          message: '安装包已下载，已打开系统安装确认。',
+        })
+        return
+      }
+      window.location.href = updateUrl
+      setAppUpdateState({
+        status: 'available',
+        manifest,
+        message: '已打开下载链接。',
+      })
+    } catch (error) {
+      setAppUpdateState({
+        status: 'error',
+        manifest,
+        message: errorMessage(error) || '下载安装包失败。',
+      })
+    }
+  }
+
   useEffect(() => {
     if (autoConnectAttemptedRef.current || !isGatewayConfigured(settings)) return
     autoConnectAttemptedRef.current = true
@@ -754,6 +840,7 @@ function App() {
   }, [settings])
 
   async function openBook(bookId: string, options: { restoreProgress?: ReadingProgress | null } = {}) {
+    const restoreProgress = options.restoreProgress ?? loadReadingProgress(bookId)
     setSelectedBookId(bookId)
     const cachedFullPackage = loadFullPackageCache(bookId)
     setFullPackageCache(cachedFullPackage)
@@ -773,14 +860,14 @@ function App() {
       if (cachedPackage) {
         const cachedChapters = packageChapters(cachedPackage)
         const restoredChapterId =
-          options.restoreProgress?.bookId === bookId && cachedChapters.some((chapter) => chapter.id === options.restoreProgress?.chapterId)
-            ? options.restoreProgress.chapterId
+          restoreProgress?.bookId === bookId && cachedChapters.some((chapter) => chapter.id === restoreProgress?.chapterId)
+            ? restoreProgress.chapterId
             : null
         setBookPackage(cachedPackage)
         setCurrentChapterId(restoredChapterId ?? cachedChapters[0]?.id ?? null)
         setMessage('已打开本地书')
         await refreshCachedAudioIds(bookId)
-        pendingRestoreScrollRef.current = restoredChapterId ? options.restoreProgress?.scrollY ?? 0 : 0
+        pendingRestoreScrollRef.current = restoredChapterId ? restoreProgress?.scrollY ?? 0 : 0
         setTab('reader')
         restorePendingScroll()
         setLoadingPackage(false)
@@ -798,8 +885,8 @@ function App() {
       const nextPackage = normalizeBookPackage(response.package)
       const nextChapters = packageChapters(nextPackage)
       const restoredChapterId =
-        options.restoreProgress?.bookId === bookId && nextChapters.some((chapter) => chapter.id === options.restoreProgress?.chapterId)
-          ? options.restoreProgress.chapterId
+        restoreProgress?.bookId === bookId && nextChapters.some((chapter) => chapter.id === restoreProgress?.chapterId)
+          ? restoreProgress.chapterId
           : null
       setBookPackage(nextPackage)
       setCurrentChapterId(restoredChapterId ?? nextChapters[0]?.id ?? null)
@@ -807,7 +894,7 @@ function App() {
       setMessage(cached ? '数据包已加载' : '数据包已加载，缓存空间不足')
       await refreshAudio(bookId, false)
       await refreshCachedAudioIds(bookId)
-      pendingRestoreScrollRef.current = restoredChapterId ? options.restoreProgress?.scrollY ?? 0 : 0
+      pendingRestoreScrollRef.current = restoredChapterId ? restoreProgress?.scrollY ?? 0 : 0
       setTab('reader')
       restorePendingScroll()
     } catch (error) {
@@ -818,15 +905,15 @@ function App() {
       const cachedPackage = await loadCachedBookPackage(bookId)
       const cachedChapters = packageChapters(cachedPackage)
       const restoredChapterId =
-        options.restoreProgress?.bookId === bookId && cachedChapters.some((chapter) => chapter.id === options.restoreProgress?.chapterId)
-          ? options.restoreProgress.chapterId
+        restoreProgress?.bookId === bookId && cachedChapters.some((chapter) => chapter.id === restoreProgress?.chapterId)
+          ? restoreProgress.chapterId
           : null
       setBookPackage(cachedPackage)
       setCurrentChapterId(restoredChapterId ?? cachedChapters[0]?.id ?? null)
       setMessage(cachedPackage ? `已使用本地缓存：${errorMessage(error)}` : errorMessage(error))
       await refreshCachedAudioIds(bookId)
       if (cachedPackage) {
-        pendingRestoreScrollRef.current = restoredChapterId ? options.restoreProgress?.scrollY ?? 0 : 0
+        pendingRestoreScrollRef.current = restoredChapterId ? restoreProgress?.scrollY ?? 0 : 0
         setTab('reader')
         restorePendingScroll()
       }
@@ -1314,8 +1401,7 @@ function App() {
       removeFullPackageCache(bookId)
       await deleteBookPackageFromIndexedDb(bookId)
       localStorage.removeItem(`${packageCachePrefix}${bookId}`)
-      const progress = loadReadingProgress()
-      if (progress?.bookId === bookId) localStorage.removeItem(readingProgressKey)
+      removeReadingProgress(bookId)
       if (bookId === selectedBookId) {
         setSelectedBookId(null)
         setBookPackage(null)
@@ -1605,7 +1691,7 @@ function App() {
 
   async function restoreLastReadingFromCache() {
     if (autoRestoreAttemptedRef.current) return
-    const progress = loadReadingProgress()
+    const progress = loadLatestReadingProgress()
     if (!progress) return
 
     const cachedPackage = await loadCachedBookPackage(progress.bookId)
@@ -1645,6 +1731,11 @@ function App() {
       persistReadingProgress(selectedBookId, currentChapterId, scrollY)
     }
 
+    if (nextTab === 'reader' && selectedBookId && (!bookPackage || bookPackage.book.id !== selectedBookId)) {
+      void openBook(selectedBookId, { restoreProgress: loadReadingProgress(selectedBookId) })
+      return
+    }
+
     if (nextTab === 'reader') {
       prepareReaderScrollRestore()
     }
@@ -1657,7 +1748,7 @@ function App() {
 
   function prepareReaderScrollRestore() {
     if (!selectedBookId) return
-    const progress = loadReadingProgress()
+    const progress = loadReadingProgress(selectedBookId)
     if (!progress || progress.bookId !== selectedBookId) return
 
     const canRestoreChapter = chapters.some((chapter) => chapter.id === progress.chapterId)
@@ -2561,6 +2652,30 @@ function App() {
       ) : (
         <section className="settings-page" hidden={tab !== 'settings'}>
           <section className="settings-panel">
+            <div className="app-version-card">
+              <div>
+                <span>AI小说助手</span>
+                <strong>{buildInfo.versionName}</strong>
+              </div>
+              <dl>
+                <div>
+                  <dt>构建号</dt>
+                  <dd>{buildInfo.buildNumber}</dd>
+                </div>
+                <div>
+                  <dt>Version Code</dt>
+                  <dd>{buildInfo.versionCode}</dd>
+                </div>
+                <div>
+                  <dt>提交</dt>
+                  <dd>{`${buildInfo.gitCommit}${buildInfo.dirty ? ' · dirty' : ''}`}</dd>
+                </div>
+                <div>
+                  <dt>构建时间</dt>
+                  <dd>{formatBuildTime(buildInfo.buildTime)}</dd>
+                </div>
+              </dl>
+            </div>
             <label>
               <span>Gateway</span>
               <input
@@ -2774,6 +2889,50 @@ function App() {
                 <dd>{displayCachedAudioChapterCount}/{displayCloudAudioChapterCount} 章已缓存</dd>
               </div>
             </dl>
+          </section>
+
+          <section className="app-update-panel">
+            <div className="section-title">
+              <h2>应用更新</h2>
+              <span>{appUpdateStatusLabel(appUpdateState)}</span>
+            </div>
+            <dl>
+              <div>
+                <dt>当前版本</dt>
+                <dd>{buildInfo.versionName}</dd>
+              </div>
+              <div>
+                <dt>当前 Version Code</dt>
+                <dd>{buildInfo.versionCode}</dd>
+              </div>
+              <div>
+                <dt>线上版本</dt>
+                <dd>{appUpdateState.manifest?.versionName ?? '未检查'}</dd>
+              </div>
+              <div>
+                <dt>线上 Version Code</dt>
+                <dd>{appUpdateState.manifest?.versionCode ?? '未检查'}</dd>
+              </div>
+            </dl>
+            {appUpdateState.message ? <p className={`update-message update-${appUpdateState.status}`}>{appUpdateState.message}</p> : null}
+            <div className="settings-actions">
+              <button
+                className="secondary-button"
+                type="button"
+                onClick={() => void checkAppUpdate()}
+                disabled={appUpdateState.status === 'checking' || appUpdateState.status === 'downloading'}
+              >
+                {appUpdateState.status === 'checking' ? '检查中' : '检查更新'}
+              </button>
+              <button
+                className="primary-button"
+                type="button"
+                onClick={() => appUpdateState.manifest ? void installAppUpdate(appUpdateState.manifest) : undefined}
+                disabled={appUpdateState.status !== 'available'}
+              >
+                {appUpdateState.status === 'downloading' ? '下载中' : '下载并安装'}
+              </button>
+            </div>
           </section>
         </section>
       )}
@@ -3614,6 +3773,38 @@ async function gatewayFetch(settings: GatewaySettings, path: string) {
   return body as Record<string, unknown>
 }
 
+async function gatewayPublicFetch(settings: GatewaySettings, path: string) {
+  const url = absoluteGatewayUrl(settings, path)
+  if (Capacitor.isNativePlatform()) {
+    const response = await CapacitorHttp.get({
+      readTimeout: 120000,
+      connectTimeout: 15000,
+      url,
+    })
+    const body = typeof response.data === 'string' ? parseJsonBody(response.data) : response.data
+    if (response.status < 200 || response.status >= 300) {
+      throw createGatewayError(body, `Gateway HTTP ${response.status}`, response.status)
+    }
+    return body as Record<string, unknown>
+  }
+
+  const response = await fetch(url)
+  const body = (await response.json().catch(() => ({}))) as { error?: { message?: string } }
+  if (!response.ok) {
+    throw createGatewayError(body, `Gateway HTTP ${response.status}`, response.status)
+  }
+  return body as Record<string, unknown>
+}
+
+function absoluteGatewayUrl(settings: GatewaySettings, pathOrUrl: string) {
+  if (/^https?:\/\//i.test(pathOrUrl)) return pathOrUrl
+  const baseUrl = settings.baseUrl.trim().replace(/\/+$/, '')
+  if (!baseUrl || baseUrl === 'https:') {
+    throw new Error('请填写 Gateway 地址')
+  }
+  return `${baseUrl}${pathOrUrl.startsWith('/') ? pathOrUrl : `/${pathOrUrl}`}`
+}
+
 async function gatewayPost(settings: GatewaySettings, path: string, data: Record<string, unknown>) {
   const baseUrl = settings.baseUrl.trim().replace(/\/+$/, '')
   if (!baseUrl || baseUrl === 'https:') {
@@ -3775,7 +3966,7 @@ function loadFullPackageCache(bookId?: string | null): FullPackageCache | null {
   const index = loadFullPackageCacheIndex()
   if (bookId) return index[bookId] ?? null
 
-  const progress = loadReadingProgress()
+  const progress = loadLatestReadingProgress()
   if (progress?.bookId && index[progress.bookId]) return index[progress.bookId]
 
   const indexedCaches = Object.values(index).sort((left, right) => Date.parse(right.importedAt || right.cachedAt) - Date.parse(left.importedAt || left.cachedAt))
@@ -3929,26 +4120,87 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string)
   })
 }
 
-function loadReadingProgress(): ReadingProgress | null {
-  try {
-    const parsed = JSON.parse(localStorage.getItem(readingProgressKey) || 'null') as Partial<ReadingProgress> | null
-    if (!parsed || typeof parsed.bookId !== 'string' || typeof parsed.chapterId !== 'string') return null
-    return {
-      bookId: parsed.bookId,
-      chapterId: parsed.chapterId,
-      scrollY: typeof parsed.scrollY === 'number' && Number.isFinite(parsed.scrollY) ? Math.max(0, parsed.scrollY) : 0,
-      updatedAt: typeof parsed.updatedAt === 'string' ? parsed.updatedAt : new Date().toISOString(),
-    }
-  } catch {
-    return null
+export function normalizeReadingProgress(value: unknown): ReadingProgress | null {
+  if (!isRecord(value) || typeof value.bookId !== 'string' || typeof value.chapterId !== 'string') return null
+  return {
+    bookId: value.bookId,
+    chapterId: value.chapterId,
+    scrollY: typeof value.scrollY === 'number' && Number.isFinite(value.scrollY) ? Math.max(0, value.scrollY) : 0,
+    updatedAt: typeof value.updatedAt === 'string' ? value.updatedAt : new Date().toISOString(),
   }
+}
+
+export function normalizeReadingProgressStore(value: unknown): ReadingProgressStore {
+  const store: ReadingProgressStore = { schemaVersion: 2, books: {} }
+  const legacyProgress = normalizeReadingProgress(value)
+  if (legacyProgress) {
+    store.books[legacyProgress.bookId] = legacyProgress
+    return store
+  }
+
+  if (!isRecord(value) || value.schemaVersion !== 2 || !isRecord(value.books)) return store
+
+  for (const progressValue of Object.values(value.books)) {
+    const progress = normalizeReadingProgress(progressValue)
+    if (progress) store.books[progress.bookId] = progress
+  }
+  return store
+}
+
+export function loadReadingProgressFromStorage(storage: Pick<ReadingProgressStorage, 'getItem'>, bookId: string): ReadingProgress | null {
+  return loadReadingProgressStoreFromStorage(storage).books[bookId] ?? null
+}
+
+export function loadLatestReadingProgressFromStorage(storage: Pick<ReadingProgressStorage, 'getItem'>): ReadingProgress | null {
+  const store = loadReadingProgressStoreFromStorage(storage)
+  return Object.values(store.books).sort((left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt))[0] ?? null
+}
+
+export function saveReadingProgressToStorage(storage: Pick<ReadingProgressStorage, 'getItem' | 'setItem'>, progress: ReadingProgress) {
+  const store = loadReadingProgressStoreFromStorage(storage)
+  store.books[progress.bookId] = progress
+  storage.setItem(readingProgressKey, JSON.stringify(store))
+}
+
+export function removeReadingProgressFromStorage(storage: ReadingProgressStorage, bookId: string) {
+  const store = loadReadingProgressStoreFromStorage(storage)
+  delete store.books[bookId]
+  if (Object.keys(store.books).length) {
+    storage.setItem(readingProgressKey, JSON.stringify(store))
+  } else {
+    storage.removeItem(readingProgressKey)
+  }
+}
+
+function loadReadingProgressStoreFromStorage(storage: Pick<ReadingProgressStorage, 'getItem'>): ReadingProgressStore {
+  try {
+    return normalizeReadingProgressStore(JSON.parse(storage.getItem(readingProgressKey) || 'null'))
+  } catch {
+    return { schemaVersion: 2, books: {} }
+  }
+}
+
+function loadReadingProgress(bookId: string): ReadingProgress | null {
+  return loadReadingProgressFromStorage(localStorage, bookId)
+}
+
+function loadLatestReadingProgress(): ReadingProgress | null {
+  return loadLatestReadingProgressFromStorage(localStorage)
 }
 
 function saveReadingProgress(progress: ReadingProgress) {
   try {
-    localStorage.setItem(readingProgressKey, JSON.stringify(progress))
+    saveReadingProgressToStorage(localStorage, progress)
   } catch {
     // Best effort; reading should continue even if the WebView storage is full.
+  }
+}
+
+function removeReadingProgress(bookId: string) {
+  try {
+    removeReadingProgressFromStorage(localStorage, bookId)
+  } catch {
+    // Best effort; stale progress is harmless and can be overwritten later.
   }
 }
 
@@ -4428,6 +4680,36 @@ function readOptionalInteger(value: unknown) {
   return typeof value === 'number' && Number.isInteger(value) ? value : undefined
 }
 
+function readNonEmptyString(value: unknown) {
+  return typeof value === 'string' && value.trim() ? value.trim() : ''
+}
+
+function normalizeAppUpdateManifest(value: unknown): AppUpdateManifest | null {
+  if (!isRecord(value)) return null
+  const versionName = readNonEmptyString(value.versionName) || readNonEmptyString(value.version)
+  const latestUrl = readNonEmptyString(value.latestUrl)
+  const versionCode = readOptionalInteger(value.versionCode)
+  if (!versionName || !latestUrl || typeof versionCode !== 'number') return null
+  return {
+    versionName,
+    versionCode,
+    buildNumber: readOptionalInteger(value.buildNumber),
+    gitCommit: readNonEmptyString(value.gitCommit) || undefined,
+    latestUrl,
+    latestFileName: readNonEmptyString(value.latestFileName) || undefined,
+    publishedAt: readNonEmptyString(value.publishedAt) || undefined,
+  }
+}
+
+function appUpdateStatusLabel(state: AppUpdateState) {
+  if (state.status === 'checking') return '检查中'
+  if (state.status === 'available') return '有新版本'
+  if (state.status === 'current') return '已是最新'
+  if (state.status === 'downloading') return '下载中'
+  if (state.status === 'error') return '检查失败'
+  return '未检查'
+}
+
 function normalizeFullPackageImportStats(value: unknown): FullPackageImportStats | undefined {
   if (!isRecord(value)) return undefined
   const graph = isRecord(value.knowledgeGraph) ? value.knowledgeGraph : undefined
@@ -4562,6 +4844,18 @@ function formatDuration(durationMs?: number) {
   const minutes = Math.floor(totalSeconds / 60)
   const seconds = totalSeconds % 60
   return `${minutes}:${String(seconds).padStart(2, '0')}`
+}
+
+function formatBuildTime(value: string) {
+  const time = Date.parse(value)
+  if (!Number.isFinite(time)) return value || 'unknown'
+  return new Date(time).toLocaleString('zh-CN', {
+    hour12: false,
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  })
 }
 
 function formatBytes(sizeBytes?: number) {

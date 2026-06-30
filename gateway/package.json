@@ -11,6 +11,7 @@
     "admin-ui:test": "npm --prefix admin-ui run test",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/server.js",
+    "publish-android-apk": "node scripts/publish-android-apk.mjs",
     "security-smoke": "bash scripts/security-smoke.sh",
     "test": "vitest run",
     "typecheck": "tsc -p tsconfig.json --noEmit"

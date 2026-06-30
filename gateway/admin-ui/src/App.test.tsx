@@ -22,6 +22,20 @@ describe('Gateway 管理后台 UI', () => {
     expect(screen.getByText('导入《烬鳞纪》数据包成功')).toBeInTheDocument()
   })
 
+  it('Gateway API 返回空事件时不回退到 mock 最近事件', async () => {
+    vi.spyOn(window, 'fetch').mockImplementation(async (input) => {
+      const url = String(input)
+      if (url === '/admin/metrics') return jsonResponse({ requests: {}, downloads: {}, trends: { requests: [], downloads: [] } })
+      if (url === '/admin/events') return jsonResponse({ events: [] })
+      return jsonResponse({}, false, 503)
+    })
+
+    render(<App />)
+
+    expect(await screen.findByText('最近 30 分钟暂无事件')).toBeInTheDocument()
+    expect(screen.queryByText('导入《烬鳞纪》数据包成功')).not.toBeInTheDocument()
+  })
+
   it('初次连接 Gateway API 时不在书籍页闪现 mock 数据', async () => {
     vi.spyOn(window, 'fetch').mockImplementation(async () => new Promise<Response>(() => {}))
 
@@ -88,6 +102,12 @@ describe('Gateway 管理后台 UI', () => {
             packageLast24Hours: 2,
             audioLast24Hours: 9,
           },
+          process: {
+            uptimeSeconds: 3600,
+            heapUsedBytes: 64 * 1024 * 1024,
+            rssBytes: 96 * 1024 * 1024,
+            dataDirBytes: 342 * 1024 * 1024,
+          },
         })
       }
       if (url === '/admin/events') {
@@ -116,6 +136,16 @@ describe('Gateway 管理后台 UI', () => {
               summaryCoverage: 80,
               kgCoverage: 70,
               embeddingCoverage: 60,
+            },
+            {
+              bookId: 'legacy-package',
+              title: '旧数据包',
+              importStatus: 'imported',
+              sizeBytes: 1024,
+              updatedAt: '2026-06-29T12:09:00.000Z',
+              importedAt: '2026-06-29T12:09:00.000Z',
+              chapterCount: 1,
+              packageChapterCount: 1,
             },
           ],
         })
@@ -162,15 +192,26 @@ describe('Gateway 管理后台 UI', () => {
     expect(screen.getByText('12.5%')).toBeInTheDocument()
     expect(screen.getByText('20:34')).toBeInTheDocument()
     expect(screen.getByText('接口事件')).toBeInTheDocument()
+    expect(screen.getByText('运行 / 内存 / 数据目录').closest('div')).toHaveTextContent('运行 1h 0m · heap 64.0 MB · RSS 96.0 MB · 数据目录 342.0 MB')
+    expect(screen.getByText('在线设备').closest('div')).toHaveTextContent('1 台 · 受信 1 台 · 禁用 0 台')
+    const healthPanel = screen.getByRole('heading', { name: '内容健康' }).closest('section')!
+    expect(within(healthPanel).getByText('书籍').closest('div')).toHaveTextContent('1 本')
+    expect(within(healthPanel).getByText('受限').closest('div')).toHaveTextContent('1 本')
+    expect(within(healthPanel).getByText('隐藏').closest('div')).toHaveTextContent('0 本')
+    expect(within(healthPanel).getByText('缺音频章节').closest('div')).toHaveTextContent('4')
+    expect(within(healthPanel).getByText('异常数据包').closest('div')).toHaveTextContent('0')
 
     await user.click(screen.getByRole('button', { name: '书籍' }))
     expect(screen.getByRole('row', { name: /接口书籍 接口作者 trusted/ })).toBeInTheDocument()
+    expect(screen.getByText('S 80% · KG 70% · E 60%')).toBeInTheDocument()
 
     await user.click(screen.getByRole('button', { name: '设备' }))
     expect(screen.getByRole('row', { name: /接口平板 112233 受信 192\.168\.88\.66/ })).toBeInTheDocument()
 
     await user.click(screen.getByRole('button', { name: '数据包' }))
     expect(screen.getByRole('row', { name: /接口书籍 2026-06-29 20:10 可发布 12\.5 MB/ })).toBeInTheDocument()
+    expect(screen.getByText('S 80% · KG 70% · E 60%')).toBeInTheDocument()
+    expect(screen.getByText('S - · KG - · E -')).toBeInTheDocument()
 
     await user.click(screen.getByRole('button', { name: '音频' }))
     expect(screen.getByRole('row', { name: /接口书籍 部分缺失 60% 6\/10/ })).toBeInTheDocument()
@@ -189,7 +230,10 @@ describe('Gateway 管理后台 UI', () => {
     await user.click(screen.getByRole('button', { name: '数据包' }))
     expect(screen.getByRole('heading', { name: '数据包' })).toBeInTheDocument()
     expect(screen.getByRole('row', { name: /夜航档案 2026\.06\.27-1820 需复查 18\.6 MB/ })).toBeInTheDocument()
-    expect(screen.getByText('第 7 章、第 19 章、第 33 章')).toBeInTheDocument()
+    const packageMissingSummary = screen.getAllByText('缺失章节')[0].closest('div')!
+    expect(packageMissingSummary).toHaveTextContent('51 章')
+    expect(packageMissingSummary).toHaveAttribute('title', expect.stringContaining('夜航档案：章节文件缺失 3 章'))
+    expect(document.querySelector('[title="章节文件缺失 3 章；Summary 缺 7 章；KG 缺 18 章；Embedding 缺 13 章"]')).toHaveTextContent('18 章')
 
     await user.click(screen.getByRole('button', { name: '音频' }))
     expect(screen.getByRole('heading', { name: '音频' })).toBeInTheDocument()
@@ -476,7 +520,7 @@ describe('Gateway 管理后台 UI', () => {
     await user.click(screen.getByRole('button', { name: '删除 待删除书' }))
 
     expect(confirmSpy).toHaveBeenCalledWith('确认删除《待删除书》？这会同时删除 package、音频和相关清单。')
-    expect(await screen.findByText('已删除书籍')).toBeInTheDocument()
+    expect(await screen.findByText(/已删除书籍/)).toBeInTheDocument()
     expect(screen.queryByRole('row', { name: /待删除书/ })).not.toBeInTheDocument()
     expect(screen.getByRole('row', { name: /保留书/ })).toBeInTheDocument()
     expect(authHeaders).toContain('/admin/books/delete-book:DELETE:Bearer delete-token')

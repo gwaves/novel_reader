@@ -3,7 +3,9 @@ apply plugin: 'com.android.application'
 import groovy.json.JsonSlurper
 
 def appPackageJson = new JsonSlurper().parse(file('../../package.json'))
-def mobileVersionName = appPackageJson.version as String
+def appBuildInfoFile = file('../../build-info.json')
+def appBuildInfo = appBuildInfoFile.exists() ? new JsonSlurper().parse(appBuildInfoFile) : [:]
+def mobileVersionName = (appBuildInfo.versionName ?: appPackageJson.version) as String
 def mobileVersionParts = mobileVersionName.tokenize('.').collect { part ->
     def numericPart = (part =~ /^\d+/)
     numericPart ? numericPart[0].toInteger() : 0
@@ -11,7 +13,9 @@ def mobileVersionParts = mobileVersionName.tokenize('.').collect { part ->
 while (mobileVersionParts.size() < 3) {
     mobileVersionParts.add(0)
 }
-def mobileVersionCode = mobileVersionParts[0] * 10000 + mobileVersionParts[1] * 100 + mobileVersionParts[2]
+def mobileVersionCode = appBuildInfo.versionCode instanceof Number
+    ? appBuildInfo.versionCode.toInteger()
+    : mobileVersionParts[0] * 10000 + mobileVersionParts[1] * 100 + mobileVersionParts[2]
 
 android {
     namespace = "com.gwaves.novelreader.gateway"

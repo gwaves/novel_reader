@@ -3,7 +3,10 @@ import {
   type AdminDevice,
   type AdminAudio,
   type AdminPackage,
+  type AdminDownloadTrendBucket,
+  type AdminRequestTrendBucket,
   type AdminRequestLog,
+  type AdminSystemSummary,
   type ContentLabel,
   type DeviceRole,
   type Visibility,
@@ -55,6 +58,25 @@ type GatewayMetrics = {
   downloads?: {
     packageLast24Hours?: number
     audioLast24Hours?: number
+  }
+  process?: {
+    uptimeSeconds?: number
+    rssBytes?: number
+    heapUsedBytes?: number
+    dataDirBytes?: number
+  }
+  trends?: {
+    requests?: Array<{
+      startAt?: string
+      requestCount?: number
+      errorCount?: number
+      p95Ms?: number
+    }>
+    downloads?: Array<{
+      startAt?: string
+      packageDownloads?: number
+      audioDownloads?: number
+    }>
   }
 }
 
@@ -131,6 +153,9 @@ export type AdminDashboardData = {
   requestLogs: AdminRequestLog[]
   overviewMetrics: typeof overviewMetrics
   recentEvents: typeof recentEvents
+  requestTrend: AdminRequestTrendBucket[]
+  downloadTrend: AdminDownloadTrendBucket[]
+  systemSummary: AdminSystemSummary
   source: 'api' | 'mock'
   status: 'ok' | 'mock' | 'unauthorized' | 'unavailable' | 'partial'
   failedSections: string[]
@@ -177,8 +202,57 @@ export async function loadAdminDashboardData(fetcher: typeof fetch = fetch): Pro
     requestLogs: Array.isArray(requestsResponse.requests) ? requestsResponse.requests.map(mapRequestLogLike) : [],
     overviewMetrics: metricsResponse ? mapMetrics(metricsResponse) : overviewMetrics,
     recentEvents: eventsResponse ? mapEvents(eventsResponse) : recentEvents,
+    requestTrend: metricsResponse ? mapRequestTrend(metricsResponse) : [],
+    downloadTrend: metricsResponse ? mapDownloadTrend(metricsResponse) : [],
+    systemSummary: metricsResponse ? mapSystemSummary(metricsResponse) : emptySystemSummary,
     source: 'api',
     status,
+    failedSections,
+  }
+}
+
+export async function loadAdminOverviewData(fetcher: typeof fetch = fetch): Promise<Pick<AdminDashboardData, 'overviewMetrics' | 'recentEvents' | 'requestTrend' | 'downloadTrend' | 'systemSummary' | 'source' | 'status' | 'failedSections'>> {
+  const sections = await Promise.allSettled([
+    adminFetch<GatewayMetrics>('/admin/metrics', fetcher),
+    adminFetch<GatewayEvents>('/admin/events', fetcher),
+  ])
+
+  if (sections.some((section) => section.status === 'rejected' && isAdminApiError(section.reason, 'unauthorized'))) {
+    return {
+      overviewMetrics,
+      recentEvents,
+      requestTrend: [],
+      downloadTrend: [],
+      systemSummary: emptySystemSummary,
+      source: 'api',
+      status: 'unauthorized',
+      failedSections: ['metrics', 'events'],
+    }
+  }
+
+  if (sections.every((section) => section.status === 'rejected' && isAdminApiError(section.reason, 'unavailable'))) {
+    return {
+      overviewMetrics,
+      recentEvents,
+      requestTrend: [],
+      downloadTrend: [],
+      systemSummary: emptySystemSummary,
+      source: 'mock',
+      status: 'unavailable',
+      failedSections: ['metrics', 'events'],
+    }
+  }
+
+  const [metricsResult, eventsResult] = sections
+  const failedSections = sections.flatMap((section, index) => section.status === 'rejected' ? [['metrics', 'events'][index]] : [])
+  return {
+    overviewMetrics: metricsResult.status === 'fulfilled' ? mapMetrics(metricsResult.value) : overviewMetrics,
+    recentEvents: eventsResult.status === 'fulfilled' ? mapEvents(eventsResult.value) : recentEvents,
+    requestTrend: metricsResult.status === 'fulfilled' ? mapRequestTrend(metricsResult.value) : [],
+    downloadTrend: metricsResult.status === 'fulfilled' ? mapDownloadTrend(metricsResult.value) : [],
+    systemSummary: metricsResult.status === 'fulfilled' ? mapSystemSummary(metricsResult.value) : emptySystemSummary,
+    source: 'api',
+    status: failedSections.length > 0 ? 'partial' : 'ok',
     failedSections,
   }
 }
@@ -280,6 +354,12 @@ function isAdminApiError(error: unknown, kind: AdminApiError['kind']) {
 }
 
 const sectionNames = ['书籍', '设备', '指标', '事件', '数据包', '音频', '请求日志']
+const emptySystemSummary: AdminSystemSummary = {
+  uptimeSeconds: 0,
+  rssBytes: 0,
+  heapUsedBytes: 0,
+  dataDirBytes: 0,
+}
 
 function mockDashboardData(status: AdminDashboardData['status'], source: AdminDashboardData['source']): AdminDashboardData {
   return {
@@ -290,6 +370,9 @@ function mockDashboardData(status: AdminDashboardData['status'], source: AdminDa
     requestLogs: status === 'unauthorized' ? [] : initialRequestLogs,
     overviewMetrics: status === 'unauthorized' ? [] : overviewMetrics,
     recentEvents: status === 'unauthorized' ? [] : recentEvents,
+    requestTrend: [],
+    downloadTrend: [],
+    systemSummary: emptySystemSummary,
     source,
     status,
     failedSections: status === 'partial' ? [] : sectionNames,
@@ -320,9 +403,9 @@ function mapBook(book: GatewayBook): AdminBook {
     chapterCount,
     packageUpdatedAt: formatDate(book.updatedAt),
     coverage: {
-      summary: ratioToPercent(book.summaryCoverage),
-      kg: ratioToPercent(book.kgCoverage),
-      embedding: ratioToPercent(book.embeddingCoverage),
+      summary: optionalRatioToPercent(book.summaryCoverage),
+      kg: optionalRatioToPercent(book.kgCoverage),
+      embedding: optionalRatioToPercent(book.embeddingCoverage),
     },
     audioCoverage: chapterCount > 0 ? Math.round((audioChapterCount / chapterCount) * 100) : 0,
     recentDownloads: 0,
@@ -352,6 +435,11 @@ function mapPackage(item: GatewayPackage): AdminPackage {
   const importedAt = readString(item.importedAt, '')
   const updatedAt = readString(item.updatedAt, '')
   const version = readString(item.version, importedAt || updatedAt || 'latest')
+  const chapterCount = readNumber(item.chapterCount)
+  const missingChapters = normalizeChapterList(item.missingChapters)
+  const summaryCoverage = optionalRatioToPercent(item.summaryCoverage)
+  const kgCoverage = optionalRatioToPercent(item.kgCoverage)
+  const embeddingCoverage = optionalRatioToPercent(item.embeddingCoverage)
   return {
     id: readString(item.id, `${readString(item.bookId, 'package')}-${version}`),
     bookId: readString(item.bookId, 'unknown-book'),
@@ -360,11 +448,18 @@ function mapPackage(item: GatewayPackage): AdminPackage {
     status: normalizePackageStatus(item.status ?? item.importStatus),
     sizeMb: readNumber(item.sizeMb) || bytesToMb(item.sizeBytes),
     updatedAt: formatDate(updatedAt || importedAt),
-    chapterCount: readNumber(item.chapterCount),
-    summaryCoverage: ratioToPercent(item.summaryCoverage),
-    kgCoverage: ratioToPercent(item.kgCoverage),
-    embeddingCoverage: ratioToPercent(item.embeddingCoverage),
-    missingChapters: normalizeChapterList(item.missingChapters),
+    chapterCount,
+    summaryCoverage,
+    kgCoverage,
+    embeddingCoverage,
+    missingChapters,
+    validationIssues: buildPackageValidationIssues({
+      chapterCount,
+      missingChapters,
+      summaryCoverage,
+      kgCoverage,
+      embeddingCoverage,
+    }),
     checksum: readString(item.checksum, readString(item.errorCode, '-')),
   }
 }
@@ -478,8 +573,36 @@ function mapMetrics(metrics: GatewayMetrics): typeof overviewMetrics {
   ]
 }
 
+function mapRequestTrend(metrics: GatewayMetrics): AdminRequestTrendBucket[] {
+  if (!Array.isArray(metrics.trends?.requests)) return []
+  return metrics.trends.requests.map((bucket) => ({
+    label: formatTime(bucket.startAt),
+    requestCount: readNumber(bucket.requestCount),
+    errorCount: readNumber(bucket.errorCount),
+    p95Ms: readNumber(bucket.p95Ms),
+  }))
+}
+
+function mapDownloadTrend(metrics: GatewayMetrics): AdminDownloadTrendBucket[] {
+  if (!Array.isArray(metrics.trends?.downloads)) return []
+  return metrics.trends.downloads.map((bucket) => ({
+    label: formatTime(bucket.startAt),
+    packageDownloads: readNumber(bucket.packageDownloads),
+    audioDownloads: readNumber(bucket.audioDownloads),
+  }))
+}
+
+function mapSystemSummary(metrics: GatewayMetrics): AdminSystemSummary {
+  return {
+    uptimeSeconds: readNumber(metrics.process?.uptimeSeconds),
+    rssBytes: readNumber(metrics.process?.rssBytes),
+    heapUsedBytes: readNumber(metrics.process?.heapUsedBytes),
+    dataDirBytes: readNumber(metrics.process?.dataDirBytes),
+  }
+}
+
 function mapEvents(payload: GatewayEvents): typeof recentEvents {
-  if (!Array.isArray(payload.events) || payload.events.length === 0) return recentEvents
+  if (!Array.isArray(payload.events) || payload.events.length === 0) return []
   return payload.events.slice(0, 8).map((event) => ({
     time: formatTime(event.time),
     level: event.level ?? 'info',
@@ -491,6 +614,41 @@ function normalizePackageStatus(value: unknown): AdminPackage['status'] {
   if (value === 'imported') return 'ready'
   if (value === 'missing' || value === 'invalid') return 'failed'
   return value === 'warning' || value === 'failed' ? value : 'ready'
+}
+
+function buildPackageValidationIssues({
+  chapterCount,
+  missingChapters,
+  summaryCoverage,
+  kgCoverage,
+  embeddingCoverage,
+}: {
+  chapterCount: number
+  missingChapters: Array<number | string>
+  summaryCoverage: number | null
+  kgCoverage: number | null
+  embeddingCoverage: number | null
+}) {
+  const issues: string[] = []
+  if (missingChapters.length > 0) issues.push(`章节文件缺失 ${missingChapters.length} 章`)
+  const coverageItems = [
+    ['Summary', summaryCoverage],
+    ['KG', kgCoverage],
+    ['Embedding', embeddingCoverage],
+  ] as const
+
+  for (const [label, coverage] of coverageItems) {
+    const missingCount = missingCountFromCoverage(chapterCount, coverage)
+    if (missingCount > 0) issues.push(`${label} 缺 ${missingCount} 章`)
+  }
+
+  return issues
+}
+
+function missingCountFromCoverage(chapterCount: number, coverage: number | null) {
+  if (chapterCount <= 0 || coverage === null || coverage >= 100) return 0
+  const ratio = Math.max(0, Math.min(100, coverage)) / 100
+  return Math.max(0, Math.round(chapterCount * (1 - ratio)))
 }
 
 function normalizeAudioStatus(value: unknown, chapterCount = 0, availableChapters = 0): AdminAudio['status'] {
@@ -518,6 +676,11 @@ function normalizeLabels(value: unknown): ContentLabel[] {
 function ratioToPercent(value: unknown) {
   const number = readNumber(value)
   return number <= 1 ? Math.round(number * 100) : Math.round(number)
+}
+
+function optionalRatioToPercent(value: unknown) {
+  if (typeof value !== 'number' || !Number.isFinite(value)) return null
+  return ratioToPercent(value)
 }
 
 function readNumber(value: unknown) {

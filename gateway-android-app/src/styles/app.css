@@ -296,6 +296,55 @@ button:disabled {
   background: #f3f6f9;
 }
 
+.app-version-card {
+  display: grid;
+  gap: 12px;
+  border: 1px solid #b9cbd6;
+  border-left: 4px solid #2f6f73;
+  border-radius: 8px;
+  background: #f7fbfb;
+  padding: 12px;
+}
+
+.app-version-card > div:first-child {
+  display: grid;
+  gap: 4px;
+}
+
+.app-version-card span {
+  color: #53616f;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.app-version-card strong {
+  color: #17202a;
+  font-size: 16px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+.app-version-card dl {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin: 0;
+}
+
+.app-version-card dt {
+  color: #667584;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.app-version-card dd {
+  margin: 3px 0 0;
+  color: #17202a;
+  font-size: 13px;
+  font-weight: 800;
+  overflow-wrap: anywhere;
+}
+
 .device-identity-card {
   display: grid;
   gap: 12px;
@@ -382,6 +431,53 @@ button:disabled {
 
 .cache-manager .section-title button {
   flex: 0 0 auto;
+}
+
+.app-update-panel {
+  display: grid;
+  grid-column: 1 / -1;
+  gap: 12px;
+  border: 1px solid #d9e1e8;
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 14px;
+}
+
+.app-update-panel dl {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin: 0;
+}
+
+.app-update-panel dt {
+  color: #667584;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.app-update-panel dd {
+  margin: 3px 0 0;
+  color: #17202a;
+  font-size: 13px;
+  font-weight: 800;
+  overflow-wrap: anywhere;
+}
+
+.update-message {
+  margin: 0;
+  border-radius: 8px;
+  background: #eef5f5;
+  color: #2f6f73;
+  padding: 10px 12px;
+  font-size: 13px;
+  font-weight: 800;
+  line-height: 1.5;
+}
+
+.update-error {
+  background: #fde6e1;
+  color: #9a3324;
 }
 
 .cache-book-list {

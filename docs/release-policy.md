@@ -31,5 +31,5 @@ Draft releases are fine while preparing notes, but a published release should po
 
 ## Notes
 
-- Android APKs are not currently attached to releases. If that changes, include build provenance and the exact source commit.
+- Gateway Android APKs are published through the Gateway downloads flow as `/downloads/ai_novel_reader.apk`; release notes should include the Android `versionName`, `versionCode`, build number, and source commit. If APKs are attached to GitHub Releases later, include build provenance and the exact source commit.
 - Any database migration or local data compatibility concern should be called out in the release notes.

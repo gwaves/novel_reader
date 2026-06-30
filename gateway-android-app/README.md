@@ -1,6 +1,6 @@
 # Novel Gateway Android App
 
-这是面向 Gateway 云端服务的新 Android 客户端工程。它与现有 `mobile-app/` 分离，后续 Gateway 移动端能力都应优先在本目录开发，避免影响旧移动端。
+这是面向 Gateway 云端服务的当前 Android 客户端工程。后续 Gateway 移动端能力都应优先在本目录开发；旧 `mobile-app/` 局域网同步客户端已退役，仅作为历史实现保留。
 
 ## 当前能力
 
@@ -43,7 +43,17 @@ npm run gateway-android:android:build
 产物路径：
 
 ```text
-gateway-android-app/android/app/build/outputs/apk/debug/novel_gateway.apk
+gateway-android-app/android/app/build/outputs/apk/debug/novel_gateway-v<version>-debug.apk
 ```
 
-该 App 使用独立包名 `com.gwaves.novelreader.gateway`，不会覆盖旧 `mobile-app/` 生成的 Android 应用。
+发布到 Gateway 下载目录：
+
+```bash
+npm run gateway:publish-android-apk
+```
+
+发布后固定下载名为 `ai_novel_reader.apk`，对应 URL 为 `/downloads/ai_novel_reader.apk`。
+
+版本号规则见 [docs/versioning.md](docs/versioning.md)。App 内、Android 安装信息、Gateway 请求头和 `/downloads/android-app.json` 都使用同一份构建信息。
+
+该 App 使用独立包名 `com.gwaves.novelreader.gateway`。

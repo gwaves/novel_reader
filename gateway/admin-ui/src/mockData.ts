@@ -11,9 +11,9 @@ export type AdminBook = {
   chapterCount: number
   packageUpdatedAt: string
   coverage: {
-    summary: number
-    kg: number
-    embedding: number
+    summary: number | null
+    kg: number | null
+    embedding: number | null
   }
   audioCoverage: number
   recentDownloads: number
@@ -30,10 +30,11 @@ export type AdminPackage = {
   sizeMb: number
   updatedAt: string
   chapterCount: number
-  summaryCoverage: number
-  kgCoverage: number
-  embeddingCoverage: number
+  summaryCoverage: number | null
+  kgCoverage: number | null
+  embeddingCoverage: number | null
   missingChapters: Array<number | string>
+  validationIssues: string[]
   checksum: string
 }
 
@@ -80,6 +81,26 @@ export type AdminRequestLog = {
   ip: string
 }
 
+export type AdminRequestTrendBucket = {
+  label: string
+  requestCount: number
+  errorCount: number
+  p95Ms: number
+}
+
+export type AdminDownloadTrendBucket = {
+  label: string
+  packageDownloads: number
+  audioDownloads: number
+}
+
+export type AdminSystemSummary = {
+  uptimeSeconds: number
+  rssBytes: number
+  heapUsedBytes: number
+  dataDirBytes: number
+}
+
 export const visibilityOptions: Visibility[] = ['default', 'trusted', 'admin', 'hidden']
 
 export const labelNames: Record<ContentLabel, string> = {
@@ -105,14 +126,6 @@ export const overviewMetrics = [
   { label: '下载次数', value: '842', note: '音频 834 / 数据包 8' },
 ]
 
-export const contentHealth = [
-  { label: '书籍', value: '12 本' },
-  { label: '受限', value: '3 本' },
-  { label: '隐藏', value: '1 本' },
-  { label: '缺音频章节', value: '28' },
-  { label: '异常数据包', value: '1' },
-]
-
 export const recentEvents = [
   { time: '10:22', level: 'info', text: '导入《烬鳞纪》数据包成功' },
   { time: '10:18', level: 'warn', text: '/mobile/books/jinlin/audio 返回 404' },
@@ -134,6 +147,7 @@ export const initialPackages: AdminPackage[] = [
     kgCoverage: 88,
     embeddingCoverage: 94,
     missingChapters: [],
+    validationIssues: ['Summary 缺 7 章', 'KG 缺 22 章', 'Embedding 缺 11 章'],
     checksum: 'sha256:8f2c1a',
   },
   {
@@ -149,6 +163,7 @@ export const initialPackages: AdminPackage[] = [
     kgCoverage: 56,
     embeddingCoverage: 68,
     missingChapters: [7, 19, 33],
+    validationIssues: ['章节文件缺失 3 章', 'Summary 缺 7 章', 'KG 缺 18 章', 'Embedding 缺 13 章'],
     checksum: 'sha256:91bb03',
   },
   {
@@ -164,6 +179,7 @@ export const initialPackages: AdminPackage[] = [
     kgCoverage: 40,
     embeddingCoverage: 55,
     missingChapters: [3, 4, 5, 6],
+    validationIssues: ['章节文件缺失 4 章', 'Summary 缺 7 章', 'KG 缺 11 章', 'Embedding 缺 8 章'],
     checksum: 'sha256:pending',
   },
 ]

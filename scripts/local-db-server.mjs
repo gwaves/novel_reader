@@ -3228,6 +3228,30 @@ function getMobileBookPackage(bookId, options = {}) {
     embeddedChunks: 0,
   }
   const mobileBook = mapMobileBook(listRow)
+  const chapters = embeddingsOnly ? [] : listMobileChaptersStatement.all(bookId)
+  const summaries = embeddingsOnly ? [] : listMobileSummariesStatement.all(bookId).map(mapMobileSummary)
+  const knowledgeGraph = {
+    entities: embeddingsOnly ? [] : listMobileEntitiesStatement.all(bookId).map(mapMobileEntity),
+    entityMentions: embeddingsOnly ? [] : listMobileEntityMentionsStatement.all(bookId),
+    relations: embeddingsOnly ? [] : listMobileRelationsStatement.all(bookId),
+    relationMentions: embeddingsOnly ? [] : listMobileRelationMentionsStatement.all(bookId),
+  }
+  const summaryEmbeddings = includeEmbeddings
+    ? (
+        chapterIndexEnd == null
+          ? listMobileSummaryEmbeddingsStatement.all(bookId)
+          : listMobileSummaryEmbeddingsRangeStatement.all(bookId, chapterIndexStart, chapterIndexEnd)
+      ).map(mapMobileEmbedding)
+    : []
+  const chunkEmbeddings = includeEmbeddings
+    ? (
+        chapterIndexEnd == null
+          ? listMobileChunkEmbeddingsStatement.all(bookId)
+          : listMobileChunkEmbeddingsRangeStatement.all(bookId, chapterIndexStart, chapterIndexEnd)
+      ).map(mapMobileEmbedding)
+    : []
+  const chapterCount = Number(bookRow.chapterCount) || chapters.length
+  const embeddingCoverage = buildMobileEmbeddingCoverage(summaryEmbeddings, chunkEmbeddings, chapterCount, summaries.length)
   const payload = {
     schemaVersion: mobileSchemaVersion,
     packageVersion: mobileBook.packageVersion,
@@ -3236,32 +3260,19 @@ function getMobileBookPackage(bookId, options = {}) {
       id: bookRow.id,
       title: bookRow.title,
       importedAt: bookRow.importedAt,
-      chapterCount: Number(bookRow.chapterCount) || 0,
+      chapterCount,
       wordCount: Number(bookRow.wordCount) || 0,
+      summaryCoverage: ratio(summaries.length, chapterCount),
+      kgCoverage: buildMobileKgCoverage(knowledgeGraph, chapterCount),
+      embeddingCoverage: embeddingCoverage.summary.coverage,
     },
-    chapters: embeddingsOnly ? [] : listMobileChaptersStatement.all(bookId),
-    summaries: embeddingsOnly ? [] : listMobileSummariesStatement.all(bookId).map(mapMobileSummary),
-    knowledgeGraph: {
-      entities: embeddingsOnly ? [] : listMobileEntitiesStatement.all(bookId).map(mapMobileEntity),
-      entityMentions: embeddingsOnly ? [] : listMobileEntityMentionsStatement.all(bookId),
-      relations: embeddingsOnly ? [] : listMobileRelationsStatement.all(bookId),
-      relationMentions: embeddingsOnly ? [] : listMobileRelationMentionsStatement.all(bookId),
-    },
+    chapters,
+    summaries,
+    knowledgeGraph,
     embeddings: {
-      summaries: includeEmbeddings
-        ? (
-            chapterIndexEnd == null
-              ? listMobileSummaryEmbeddingsStatement.all(bookId)
-              : listMobileSummaryEmbeddingsRangeStatement.all(bookId, chapterIndexStart, chapterIndexEnd)
-          ).map(mapMobileEmbedding)
-        : [],
-      chunks: includeEmbeddings
-        ? (
-            chapterIndexEnd == null
-              ? listMobileChunkEmbeddingsStatement.all(bookId)
-              : listMobileChunkEmbeddingsRangeStatement.all(bookId, chapterIndexStart, chapterIndexEnd)
-          ).map(mapMobileEmbedding)
-        : [],
+      coverage: embeddingCoverage,
+      summaries: summaryEmbeddings,
+      chunks: chunkEmbeddings,
     },
     integrity: {
       contentHash: null,
@@ -3270,6 +3281,66 @@ function getMobileBookPackage(bookId, options = {}) {
   }
   payload.integrity.contentHash = createMobileContentHash(payload)
   return payload
+}
+
+function buildMobileEmbeddingCoverage(summaryEmbeddings, chunkEmbeddings, totalChapters, totalSummaries) {
+  const summaryChapterIds = uniqueChapterIds(summaryEmbeddings)
+  const chunkChapterIds = uniqueChapterIds(chunkEmbeddings)
+  return {
+    summary: {
+      embeddedSummaries: summaryEmbeddings.length,
+      embeddedChapters: summaryChapterIds.size,
+      totalSummaries,
+      totalChapters,
+      coverage: ratio(summaryChapterIds.size, totalChapters),
+      availableSummaryCoverage: ratio(summaryEmbeddings.length, totalSummaries),
+      models: embeddingModelStats(summaryEmbeddings),
+    },
+    chunks: {
+      embeddedChunks: chunkEmbeddings.length,
+      embeddedChapters: chunkChapterIds.size,
+      totalChapters,
+      coverage: ratio(chunkChapterIds.size, totalChapters),
+      models: embeddingModelStats(chunkEmbeddings),
+    },
+  }
+}
+
+function buildMobileKgCoverage(knowledgeGraph, totalChapters) {
+  const chapterIds = new Set([
+    ...uniqueChapterIds(knowledgeGraph.entityMentions),
+    ...uniqueChapterIds(knowledgeGraph.relationMentions),
+  ])
+  return ratio(chapterIds.size, totalChapters)
+}
+
+function uniqueChapterIds(items) {
+  const chapterIds = new Set()
+  if (!Array.isArray(items)) return chapterIds
+  for (const item of items) {
+    const chapterId = item?.chapterId
+    if (typeof chapterId === 'string' && chapterId.trim()) chapterIds.add(chapterId.trim())
+    if (Number.isInteger(chapterId)) chapterIds.add(String(chapterId))
+  }
+  return chapterIds
+}
+
+function embeddingModelStats(items) {
+  const stats = new Map()
+  for (const item of Array.isArray(items) ? items : []) {
+    const model = typeof item?.model === 'string' ? item.model : ''
+    const dimension = Number(item?.dimension) || 0
+    const key = `${model}\u0000${dimension}`
+    const current = stats.get(key) ?? { model, dimension, count: 0 }
+    current.count += 1
+    stats.set(key, current)
+  }
+  return Array.from(stats.values()).sort((left, right) => right.count - left.count || left.model.localeCompare(right.model))
+}
+
+function ratio(done, total) {
+  if (!Number.isFinite(done) || !Number.isFinite(total) || total <= 0) return 0
+  return Math.max(0, Math.min(1, done / total))
 }
 
 function mapReviewEntity(row) {

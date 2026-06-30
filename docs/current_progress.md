@@ -1,3 +1,10 @@
+2026-06-30 更新：进入正规化测试与可运维性建设阶段。
+- 快速功能开发阶段基本收束，后续主线调整为“产品功能规格 -> 测试用例矩阵 -> 系统性 Code Review -> 可观测性/运维能力 -> 发布治理”。
+- 新增 `docs/product-spec.md`，把 PC 阅读器、AI 概要、知识图谱、RAG、production-pipeline、Gateway、Admin UI、Gateway Android App 和历史移动端边界整理为正式产品功能说明书。
+- 新增 `docs/quality-ops-roadmap.md`，记录正规化阶段的里程碑、交付物、验收标准和推荐执行顺序。
+- README 已增加产品规格、测试与运维规划入口，并补充下一阶段质量建设重点。
+- 下一步优先编写 `docs/test-case-matrix.md`：按功能域拆出正向、失败路径、风险等级、自动化层级、现有覆盖和真机/真实 Gateway 验证边界。
+
 2026-06-29 更新：Gateway 管理后台与书库可见性大 feature 已开分支设计。
 - 新增分支 `codex/gateway-admin-visibility`，用于集中开发 Gateway 管理后台、设备角色授权、书籍标签/可见范围和移动端设备识别。
 - 新增设计文档 `gateway/docs/admin-visibility-design.md`，明确普通/受信/禁用设备角色，默认/受信/管理员/隐藏书籍可见范围，以及书籍内容标签和可见范围分离的原则。
@@ -12,9 +19,12 @@
 - Gateway Android 修正已缓存 MP3 的播放面板显示：当前章音频现在会优先匹配服务端音频目录，并在目录未加载或离线时回退到本机 MP3 缓存索引，避免已下载章节仍显示“当前章节暂无缓存 MP3”；播放引擎文案已从“云端 MP3”改为“缓存 MP3”，避免误解为在线播放。
 - Gateway Android 的 MP3 管理面板新增章节缓存明细，逐章显示“已缓存 / 未缓存 / 无音频”并高亮当前章节，避免只能看到缓存总数却无法判断具体哪些章节已下载；未缓存但有音频的章节现在可单独加入后台下载队列，实现选集缓存。
 - Gateway Android 移动端版本号统一到 `0.2.0`：Web App 内版本、Gateway 请求头、Android `versionName/versionCode` 和 APK 文件名都从移动端 `package.json` 派生，安装和发包时可以区分不同版本。
+- Gateway Android 版本号管理升级：新增自动构建信息生成，`versionName` 统一为 `baseVersion+build.<buildNumber>.g<commit>`，`versionCode` 按基础版本和构建号计算；设置页顶部展示版本、构建号、Version Code、commit 和构建时间，APK 发布元数据也写入同一套信息。
 - Gateway Android 安装显示名称改为“AI小说助手”，Android 资源名和 Capacitor `appName` 已同步。
 - Gateway Android 搜索页修正 embedding 失败后的错误展示：Gateway embedding 鉴权失败但本地关键词兜底成功时，不再显示红色底层错误；`Bearer token is invalid.` 会转换为中文 Token 检查提示。
 - Gateway AI RAG 路由鉴权修正：移动端实际使用的 `/ai/search` 和 `/ai/rag-answer` 改为 mobile device auth，并按设备可见书库校验 `bookId`；保留 `/ai/chat` 和 `/ai/embeddings` 为 admin 上游代理接口，避免受信移动设备在生成 RAG 答案时被 admin token 校验误挡。
+- Gateway Android 修正书库到阅读页的选中态：在书库选中一本书后点击底部“阅读”，如果当前还没有加载该书数据包，会自动打开选中的本地书，避免阅读页显示“请选择一本书”。
+- 移动端维护入口已收束到 `gateway-android-app/`：旧 `mobile-app/` 局域网同步客户端进入退役状态，仅保留历史参考；README、开发文档、贡献指南和 Gateway 计划已改为默认指向 Gateway Android。
 - 本轮按 TDD 多 Agent 并行推进：Gateway 后端新增 `/admin/packages`、`/admin/audio`、`/admin/requests` 并补测试；admin-ui 的数据包、音频、请求日志页已从占位改为真实表格视图并兼容真实后端字段；Gateway Android 设置/书库页补强设备 ID、Pairing Code、角色/授权、可见范围和禁用态阻断提示。
 - 下一轮开发计划：继续采用测试驱动和多 Agent 并行，目标做到真实验证前的三步闭环。第一步补后台操作闭环，包含 package 下载/重新导入状态、音频清理/刷新状态、书籍/设备操作的保存中/失败回滚/确认提示；第二步补真实安全边界，将 admin 与 mobile 鉴权语义分开，并让 admin-ui 区分未授权、服务不可用和单接口失败，避免误回退 mock；第三步补移动端角色变化体验，明确 default/trusted/disabled 变化后的书库刷新、缓存可读策略和禁用态错误提示。最终真机和真实部署验证由用户执行。
 - 三步开发已按测试驱动完成：Gateway 后端新增后台 package 下载、音频刷新和音频清单清理接口，并引入 `GATEWAY_ADMIN_ACCESS_TOKEN` / `GATEWAY_MOBILE_ACCESS_TOKEN` 与 dev token fallback；admin-ui 增加数据包下载、音频刷新/清理、书籍/设备保存中/失败回滚/重试，以及未授权/不可用/部分失败状态；Gateway Android 增加角色变化提示，禁用后阻断云端操作但保留本地缓存阅读和清理能力。代码层面已通过 Gateway、admin-ui、Gateway Android 测试和构建，剩余真实部署/真机验证由用户执行。
@@ -333,10 +343,57 @@ SQLite 图谱表
 - `gateway-android-app/android/` 已通过 Capacitor 生成独立 Android 原生工程，包名为 `com.gwaves.novelreader.gateway`，不会覆盖旧 `mobile-app/`。
 - 新增根脚本 `npm run gateway-android:android:build`，用于构建 Gateway Android debug APK。
 - Android Manifest 已显式允许 HTTP cleartext，便于连接自建 Gateway、公网映射或开发期内网地址。
-- APK 输出名定制为 `novel_gateway.apk`，产物路径为 `gateway-android-app/android/app/build/outputs/apk/debug/novel_gateway.apk`。
+- APK 输出名已改为带版本号的 `novel_gateway-v<version>-debug.apk`，产物路径为 `gateway-android-app/android/app/build/outputs/apk/debug/novel_gateway-v<version>-debug.apk`。
 
 2026-06-26 更新：Gateway Android 真机连接问题已修复。
 - 新 `gateway-android-app/` 在 Android 真机上访问 `http://127.0.0.1:6180` 时已改用 Capacitor 原生 `CapacitorHttp`，避免 WebView `fetch` 对 HTTP/localhost 的限制导致 `fail to fetch`。
 - Gateway 本机测试 token 已改为 `123456`，便于手机端验证。
 - 本机 Gateway 已通过 macOS LaunchAgent `com.gwaves.novel-reader-gateway` 保活，配置监听 `0.0.0.0:6180`，数据目录为 `~/.novel_reader_gateway`。
 - 真机通过 `adb reverse tcp:6180 tcp:6180` 访问 Gateway，日志已确认 `/auth/session` 和 `/mobile/books` 返回 200，手机端可看到《妖刀记》和《三国演义》。
+
+2026-06-30 更新：Gateway Android 阅读进度改为按书保存。
+- 移动端阅读进度从单个“当前书”记录升级为按 `bookId` 分开的进度表，每本书独立保存章节和滚动位置，支持多本书混读。
+- 旧版单书进度会在读取/写入时兼容迁移，不会丢失用户原有的最近阅读位置。
+- 删除本地书籍时只清理该书的阅读进度，不影响其他书的章节恢复。
+
+2026-06-30 更新：Gateway 增加 Android APK 下载发布能力。
+- Gateway 新增公开 `/downloads/*` 静态下载目录，默认目录为 `GATEWAY_DATA_DIR/downloads`，可通过 `GATEWAY_DOWNLOADS_DIR` 覆盖。
+- 新增 `gateway/scripts/publish-android-apk.mjs` 和根脚本 `npm run gateway:publish-android-apk`，会把最新 Android APK 发布为固定文件名 `ai_novel_reader.apk`，同时保留版本化文件与 `android-app.json`。
+- 访问 `/downloads/ai_novel_reader.apk` 即可下载当前编译发布的最新版 Android 安装包。
+
+2026-06-30 更新：Gateway Android 应用内检查更新已完成。
+- 设置页底部新增“应用更新”区域，展示当前版本、线上版本、Version Code，并支持手动检查更新。
+- App 会读取 Gateway `/downloads/android-app.json`，当线上 `versionCode` 大于本机 `versionCode` 时显示“下载并安装”。
+- Android 原生插件新增 APK 下载与系统安装确认能力，下载固定使用 Gateway `/downloads/ai_novel_reader.apk`；系统仍会要求用户确认安装，符合 Android 安全限制。
+- 已发布线上 build 230 到 Gateway 下载目录，并在测试设备保留 build 229，用于从 App 内验证检查更新链路。
+
+2026-06-30 更新：Gateway Admin 数据包覆盖率显示已修复。
+- `/admin/packages` 现在会返回 summary、KG、embedding 覆盖率；缺少显式字段时会从 package 的 summaries、knowledgeGraph mentions、embeddings.coverage 或旧格式 embeddings 数组派生。
+- `/admin/books` 也会复用同一套 package 覆盖率结果，避免书籍页继续读取 `books.json` 的陈旧覆盖率。
+- Admin UI 书籍列表和数据包列表不再把缺失覆盖率字段误显示为 0%，未知值显示为 `-`，真实 0% 仍保留。
+- 已部署到 192.168.88.100，并验证线上 `/admin/books` 和 `/admin/packages` 返回金麟外传、大唐双龙传、妖刀记、三国演义和西游记为 S/KG/E 全 100%。
+
+2026-06-30 更新：Gateway Admin 首屏加载优化已完成。
+- Gateway 后端为 package 元数据增加按文件 size/mtime 的内存缓存，并复用并发中的解析 Promise，避免 `/admin/books`、`/admin/packages`、`/admin/audio` 在同一次刷新中重复解析大型 embedding package JSON。
+- Admin UI 首屏先加载总览依赖的 `/admin/metrics` 和 `/admin/events`，总览可先显示，再后台补齐书籍、数据包、音频和请求日志明细。
+- 线上验证：冷缓存下重接口约 1.16s，热缓存下 `/admin/books` 约 6ms、`/admin/packages` 约 3ms、`/admin/audio` 约 17ms；总览依赖接口约 1-20ms。
+
+2026-06-30 更新：Gateway Admin 总览趋势图改为真实数据。
+- `/admin/metrics` 新增最近 60 分钟、每 5 分钟一桶的请求趋势和下载趋势数据。
+- Admin UI 移除总览页硬编码趋势柱状图，改为渲染真实请求数、错误数、P95、package 下载和 audio 下载；无数据时显示暂无数据。
+- 已部署到 192.168.88.100，并验证线上 `/admin/metrics` 返回 12 个真实 request/download buckets。
+
+2026-06-30 更新：Gateway Admin 最近事件去除真实接口下的 mock 回退。
+- Admin UI 的最近事件列表在 `/admin/events` 返回空数组时显示“最近 30 分钟暂无事件”，不再回退到演示 mock 事件。
+- mock 事件仅保留在 API 完全不可用的 demo fallback 场景。
+- 已部署到 192.168.88.100，并验证线上 `/admin/events` 当前返回空数组。
+
+2026-06-30 更新：Gateway Admin 内容健康改为真实数据。
+- Admin UI 总览页“内容健康”不再使用 `mockData` 静态值，改为根据实时 `/admin/books`、`/admin/packages`、`/admin/audio` 结果计算。
+- 当前计算口径：书籍总数、非 default 可见范围书籍数、hidden 书籍数、缺音频章节总数、非 ready 数据包数。
+- 已部署到 192.168.88.100，并验证线上当前值为 8 本、受限 3 本、隐藏 0 本、缺音频章节 348、异常数据包 0。
+
+2026-06-30 更新：Gateway Admin 系统和设备摘要改为真实数据。
+- `/admin/metrics` 新增 `process.dataDirBytes`，由 Gateway 实时扫描数据目录大小；Admin UI 不再显示硬编码 CPU/磁盘示例值。
+- 总览页“运行 / 内存 / 数据目录”改为显示 Gateway uptime、heap、RSS 和数据目录大小；“在线设备”改为根据 `/admin/devices` 统计总设备、受信设备和禁用设备。
+- 已部署到 192.168.88.100，并验证线上当前返回 `dataDirBytes=357949331`、设备 3 台、受信 2 台、禁用 0 台。

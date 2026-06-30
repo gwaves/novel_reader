@@ -4,8 +4,12 @@
   "version": "0.2.0",
   "type": "module",
   "scripts": {
+    "version:generate": "node scripts/generate-build-info.mjs",
+    "predev": "npm run version:generate",
     "dev": "vite",
+    "prebuild": "npm run version:generate",
     "build": "tsc -p tsconfig.json --noEmit && vite build",
+    "pretest": "npm run version:generate",
     "test": "vitest run src/*.test.ts",
     "preview": "vite preview",
     "android:add": "npx cap add android",

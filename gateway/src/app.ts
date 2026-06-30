@@ -4,7 +4,7 @@ import rateLimit from '@fastify/rate-limit'
 import Fastify, { type FastifyError, type FastifyReply, type FastifyRequest } from 'fastify'
 import { randomUUID } from 'node:crypto'
 import { createReadStream } from 'node:fs'
-import { stat } from 'node:fs/promises'
+import { readdir, stat } from 'node:fs/promises'
 import { extname, join, normalize, relative, basename } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { requireAdminAuth, requireMobileAuth } from './auth.js'
@@ -17,7 +17,9 @@ import {
   openBookPackageFile,
   readBookCatalog,
   readBookPackage,
+  readBookPackageChapterIds,
   readBookPackageStatuses,
+  readBookPackageStatusesForBooks,
   readBookSummary,
   updateBookLabels,
   updateBookVisibility,
@@ -125,6 +127,11 @@ export function buildGatewayApp(config: GatewayConfig = loadConfig()) {
 
   app.get('/capabilities', async () => buildCapabilities())
 
+  app.get<{ Params: { '*': string } }>('/downloads/*', async (request, reply) => {
+    const requestedPath = request.params['*'] || ''
+    return serveDownloadFile(config, reply, requestedPath)
+  })
+
   app.get('/admin/ui', async (_request, reply) => serveAdminUiFile(config, reply, 'index.html'))
   app.get<{ Params: { '*': string } }>('/admin/ui/*', async (request, reply) => {
     const requestedPath = request.params['*'] || 'index.html'
@@ -204,10 +211,23 @@ export function buildGatewayApp(config: GatewayConfig = loadConfig()) {
   app.get('/admin/books', async (request) => {
     requireAdminAuth(config, request)
     const catalog = await readBookCatalog(config)
+    const [books, packageStatuses] = await Promise.all([
+      withAudioChapterCounts(config, catalog.books),
+      readBookPackageStatusesForBooks(config, catalog.books),
+    ])
+    const packageStatusByBookId = new Map(packageStatuses.map((status) => [status.bookId, status]))
     return {
       schemaVersion: catalog.schemaVersion,
       generatedAt: new Date().toISOString(),
-      books: await withAudioChapterCounts(config, catalog.books),
+      books: books.map((book) => {
+        const packageStatus = packageStatusByBookId.get(book.id)
+        return {
+          ...book,
+          summaryCoverage: packageStatus?.summaryCoverage ?? book.summaryCoverage,
+          kgCoverage: packageStatus?.kgCoverage ?? book.kgCoverage,
+          embeddingCoverage: packageStatus?.embeddingCoverage ?? book.embeddingCoverage,
+        }
+      }),
     }
   })
 
@@ -315,7 +335,11 @@ export function buildGatewayApp(config: GatewayConfig = loadConfig()) {
 
   app.get('/admin/metrics', async (request) => {
     requireAdminAuth(config, request)
-    return metrics.snapshot(await readBookCatalog(config))
+    const [catalog, dataDirBytes] = await Promise.all([
+      readBookCatalog(config),
+      directorySize(config.dataDir),
+    ])
+    return metrics.snapshot(catalog, { dataDirBytes })
   })
 
   app.get('/admin/events', async (request) => {
@@ -460,6 +484,20 @@ async function serveAdminUiFile(config: GatewayConfig, reply: FastifyReply, requ
     .send(createReadStream(existingPath))
 }
 
+async function serveDownloadFile(config: GatewayConfig, reply: FastifyReply, requestedPath: string) {
+  const safePath = resolveStaticPath(config.downloadsDir, requestedPath)
+  if (!safePath || !(await isFile(safePath))) {
+    throw new GatewayHttpError(404, 'download_not_found', 'Gateway download file was not found.')
+  }
+
+  const fileStat = await stat(safePath)
+  return reply
+    .header('content-type', contentTypeForPath(safePath))
+    .header('content-length', fileStat.size)
+    .header('content-disposition', `attachment; filename="${basename(safePath)}"`)
+    .send(createReadStream(safePath))
+}
+
 function defaultAdminUiDir() {
   return fileURLToPath(new URL('../admin-ui/dist', import.meta.url))
 }
@@ -469,6 +507,16 @@ function resolveAdminUiPath(adminUiDir: string, requestedPath: string) {
   const filePath = join(adminUiDir, normalizedPath || 'index.html')
   const relativePath = relative(adminUiDir, filePath)
   if (relativePath.startsWith('..') || relativePath === '' || relativePath.includes(`..${separatorForPath(relativePath)}`)) {
+    return null
+  }
+  return filePath
+}
+
+function resolveStaticPath(rootDir: string, requestedPath: string) {
+  const normalizedPath = normalize(requestedPath).replace(/^(\/|\\)+/, '')
+  const filePath = join(rootDir, normalizedPath)
+  const relativePath = relative(rootDir, filePath)
+  if (!relativePath || relativePath.startsWith('..') || relativePath.includes(`..${separatorForPath(relativePath)}`)) {
     return null
   }
   return filePath
@@ -498,6 +546,8 @@ function contentTypeForPath(path: string) {
       return 'text/css; charset=utf-8'
     case '.json':
       return 'application/json; charset=utf-8'
+    case '.apk':
+      return 'application/vnd.android.package-archive'
     case '.svg':
       return 'image/svg+xml'
     default:
@@ -559,6 +609,19 @@ function canReadBook(allowedVisibilities: Array<GatewayBookSummary['visibility']
   return allowedVisibilities.includes(book.visibility)
 }
 
+async function directorySize(path: string): Promise<number> {
+  try {
+    const entryStat = await stat(path)
+    if (!entryStat.isDirectory()) return entryStat.size
+    const entries = await readdir(path, { withFileTypes: true })
+    const sizes = await Promise.all(entries.map((entry) => directorySize(join(path, entry.name))))
+    return sizes.reduce((sum, size) => sum + size, 0)
+  } catch (error) {
+    if (isNodeError(error) && error.code === 'ENOENT') return 0
+    throw error
+  }
+}
+
 async function withAudioChapterCounts(config: GatewayConfig, books: GatewayBookSummary[]) {
   return Promise.all(books.map((book) => withAudioChapterCount(config, book)))
 }
@@ -572,17 +635,7 @@ async function withAudioChapterCount(config: GatewayConfig, book: GatewayBookSum
 }
 
 async function readPackageChapterIds(config: GatewayConfig, bookId: string) {
-  try {
-    const bookPackage = await readBookPackage(config, bookId)
-    const chapters = Array.isArray(bookPackage.chapters) ? bookPackage.chapters : []
-    return chapters
-      .filter(isRecord)
-      .map((chapter) => readNonEmptyString(chapter.id) ?? readNonEmptyString(chapter.chapterId))
-      .filter((chapterId): chapterId is string => Boolean(chapterId))
-  } catch (error) {
-    if (isGatewayHttpError(error)) return []
-    throw error
-  }
+  return readBookPackageChapterIds(config, bookId)
 }
 
 function buildReaderPackage(bookPackage: Awaited<ReturnType<typeof readBookPackage>>) {
@@ -785,6 +838,10 @@ function readSearchLimit(value: unknown) {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
+}
+
+function isNodeError(error: unknown): error is NodeJS.ErrnoException {
+  return error instanceof Error && 'code' in error
 }
 
 function normalizeError(error: FastifyError | Error) {

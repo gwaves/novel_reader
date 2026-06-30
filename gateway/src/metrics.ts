@@ -29,6 +29,8 @@ type GatewayEvent = {
 
 const minuteMs = 60_000
 const dayMs = 24 * 60 * minuteMs
+const trendBucketMs = 5 * minuteMs
+const trendBucketCount = 12
 
 export function createGatewayMetrics() {
   const startedAt = Date.now()
@@ -63,7 +65,7 @@ export function createGatewayMetrics() {
     }
   }
 
-  function snapshot(catalog: GatewayBookCatalog) {
+  function snapshot(catalog: GatewayBookCatalog, system: { dataDirBytes?: number } = {}) {
     const now = Date.now()
     trimSamples(samples, now)
     const lastMinute = filterSince(samples, now - minuteMs)
@@ -81,6 +83,7 @@ export function createGatewayMetrics() {
         uptimeSeconds: Math.round((now - startedAt) / 1000),
         rssBytes: process.memoryUsage().rss,
         heapUsedBytes: process.memoryUsage().heapUsed,
+        dataDirBytes: system.dataDirBytes ?? 0,
       },
       requests: {
         lastMinute: lastMinute.length,
@@ -94,6 +97,7 @@ export function createGatewayMetrics() {
         audioLast24Hours: audioDownloads.length,
         topBooks: buildTopBooks(last24Hours, catalog),
       },
+      trends: buildTrends(samples, now),
     }
   }
 
@@ -218,4 +222,54 @@ function buildTopBooks(samples: RequestSample[], catalog: GatewayBookCatalog) {
   return Array.from(stats.values())
     .sort((left, right) => right.audioDownloads + right.packageDownloads - (left.audioDownloads + left.packageDownloads))
     .slice(0, 10)
+}
+
+function buildTrends(samples: RequestSample[], now: number) {
+  const bucketStart = Math.floor(now / trendBucketMs) * trendBucketMs - (trendBucketCount - 1) * trendBucketMs
+  const requestBuckets = Array.from({ length: trendBucketCount }, (_, index) => {
+    const start = bucketStart + index * trendBucketMs
+    return {
+      start,
+      requestCount: 0,
+      errorCount: 0,
+      durations: [] as number[],
+    }
+  })
+  const downloadBuckets = Array.from({ length: trendBucketCount }, (_, index) => {
+    const start = bucketStart + index * trendBucketMs
+    return {
+      start,
+      packageDownloads: 0,
+      audioDownloads: 0,
+    }
+  })
+
+  for (const sample of samples) {
+    const index = Math.floor((sample.time - bucketStart) / trendBucketMs)
+    if (index < 0 || index >= trendBucketCount) continue
+
+    const requestBucket = requestBuckets[index]
+    requestBucket.requestCount += 1
+    if (sample.statusCode >= 400) requestBucket.errorCount += 1
+    requestBucket.durations.push(sample.durationMs)
+
+    const downloadBucket = downloadBuckets[index]
+    if (sample.downloadKind === 'package') downloadBucket.packageDownloads += 1
+    if (sample.downloadKind === 'audio') downloadBucket.audioDownloads += 1
+  }
+
+  return {
+    bucketMinutes: trendBucketMs / minuteMs,
+    requests: requestBuckets.map((bucket) => ({
+      startAt: new Date(bucket.start).toISOString(),
+      requestCount: bucket.requestCount,
+      errorCount: bucket.errorCount,
+      p95Ms: percentile(bucket.durations.sort((left, right) => left - right), 0.95),
+    })),
+    downloads: downloadBuckets.map((bucket) => ({
+      startAt: new Date(bucket.start).toISOString(),
+      packageDownloads: bucket.packageDownloads,
+      audioDownloads: bucket.audioDownloads,
+    })),
+  }
 }

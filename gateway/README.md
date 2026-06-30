@@ -55,6 +55,7 @@ localStorage.setItem('novel-reader-gateway-admin-token', '<GATEWAY_ADMIN_ACCESS_
 - `GET /health`
 - `GET /version`
 - `GET /capabilities`
+- `GET /downloads/ai_novel_reader.apk`（公开下载最新版 Android APK）
 - `GET /auth/session`（受保护，用于验证 bearer token）
 - `GET /auth/devices`（受保护，查看已登记设备）
 - `GET /mobile/books`（受保护，返回 Gateway 书库索引）
@@ -143,6 +144,15 @@ npm run gateway:publish-package -- \
 ```
 
 脚本默认读取 `NOVEL_READER_API_BASE_URL`、`GATEWAY_BASE_URL`、`GATEWAY_DEV_ACCESS_TOKEN` 和 `NOVEL_READER_SYNC_TOKEN`。如果已经有导出的 JSON 文件，也可以用 `--source-file path/to/package.json` 跳过本地 API；`--dry-run` 可只校验不上传。
+
+Android 客户端 APK 可以发布到 Gateway 的公开下载目录。Gateway 默认从 `GATEWAY_DATA_DIR/downloads` 提供 `/downloads/*` 静态下载，也可以用 `GATEWAY_DOWNLOADS_DIR` 指定目录：
+
+```bash
+npm run gateway-android:android:build
+npm run gateway:publish-android-apk
+```
+
+发布后最新版固定地址为 `/downloads/ai_novel_reader.apk`，同时保留版本文件 `/downloads/ai_novel_reader-v<versionName>.apk`，并写入 `/downloads/android-app.json` 供后续检查当前版本、构建号和 commit。`versionName` 来自 Gateway Android 构建信息，例如 `0.2.0+build.228.g3fcfd98db346`。
 
 AI chat 转发第一版支持 OpenAI-compatible 接口。`POST /ai/chat` 转发到 `<GATEWAY_AI_BASE_URL>/chat/completions`。Embedding 转发支持 OpenAI-compatible 和 Ollama：默认 `GATEWAY_EMBEDDING_PROVIDER=openai-compatible` 时转发到 `<GATEWAY_EMBEDDING_BASE_URL>/embeddings`；设置 `GATEWAY_EMBEDDING_PROVIDER=ollama` 时转发到 `<GATEWAY_EMBEDDING_BASE_URL>/api/embeddings`，例如 `http://192.168.88.100:11434` + `qwen3-embedding:8b`。如果请求体未指定 `model`，Gateway 会分别注入 `GATEWAY_AI_MODEL` 或 `GATEWAY_EMBEDDING_MODEL`。
 

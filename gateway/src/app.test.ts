@@ -49,6 +49,42 @@ describe('gateway app', () => {
     })
   }, 15000)
 
+  it('serves published Android APK downloads', async () => {
+    const downloadsDir = await makeDataDir()
+    await writeFile(join(downloadsDir, 'ai_novel_reader.apk'), 'apk bytes')
+    const app = buildTestApp({
+      GATEWAY_DOWNLOADS_DIR: downloadsDir,
+    })
+
+    const response = await app.inject({
+      method: 'GET',
+      url: '/downloads/ai_novel_reader.apk',
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect(response.headers['content-type']).toBe('application/vnd.android.package-archive')
+    expect(response.headers['content-disposition']).toBe('attachment; filename="ai_novel_reader.apk"')
+    expect(response.body).toBe('apk bytes')
+  })
+
+  it('does not allow downloads path traversal', async () => {
+    const dataDir = await makeDataDir()
+    const downloadsDir = join(dataDir, 'downloads')
+    await mkdir(downloadsDir, { recursive: true })
+    await writeFile(join(dataDir, 'books.json'), 'outside secret')
+    const app = buildTestApp({
+      GATEWAY_DOWNLOADS_DIR: downloadsDir,
+    })
+
+    const response = await app.inject({
+      method: 'GET',
+      url: '/downloads/%2e%2e/books.json',
+    })
+
+    expect(response.statusCode).toBe(404)
+    expect(response.body).not.toContain('outside secret')
+  })
+
   it('reports unavailable optional capabilities when upstreams are not configured', async () => {
     const app = buildTestApp()
     const response = await app.inject({
@@ -375,6 +411,71 @@ describe('gateway app', () => {
 
     expect(adminResponse.statusCode).toBe(200)
     expect(mobileResponse.statusCode).toBe(200)
+  })
+
+  it('enriches admin books with package-derived coverage', async () => {
+    const dataDir = await makeDataDir()
+    await writeFile(
+      join(dataDir, 'books.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        books: [
+          {
+            id: 'book-ready',
+            title: '已有包',
+            chapterCount: 2,
+            updatedAt: '2026-06-25T00:00:00.000Z',
+          },
+        ],
+      }),
+      'utf8',
+    )
+    await mkdir(join(dataDir, 'books', 'book-ready'), { recursive: true })
+    await writeFile(
+      join(dataDir, 'books', 'book-ready', 'package.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        generatedAt: '2026-06-26T00:00:00.000Z',
+        book: {
+          id: 'book-ready',
+          title: '已有包',
+          chapterCount: 2,
+          updatedAt: '2026-06-25T00:00:00.000Z',
+        },
+        chapters: [{ id: 'chapter-1' }, { id: 'chapter-2' }],
+        summaries: [{ chapterId: 'chapter-1' }, { chapterId: 'chapter-2' }],
+        knowledgeGraph: {
+          entityMentions: [{ chapterId: 'chapter-1' }, { chapterId: 'chapter-2' }],
+          relationMentions: [],
+        },
+        embeddings: {
+          chunks: [{ chapterId: 'chapter-1' }],
+        },
+      }),
+      'utf8',
+    )
+    const app = buildTestApp({
+      GATEWAY_DEV_ACCESS_TOKEN: 'dev-token',
+      GATEWAY_DATA_DIR: dataDir,
+    })
+
+    const response = await app.inject({
+      method: 'GET',
+      url: '/admin/books',
+      headers: { authorization: 'Bearer dev-token' },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect(response.json()).toMatchObject({
+      books: [
+        {
+          id: 'book-ready',
+          summaryCoverage: 1,
+          kgCoverage: 1,
+          embeddingCoverage: 0.5,
+        },
+      ],
+    })
   })
 
   it('records device names from protected session requests', async () => {
@@ -1075,6 +1176,14 @@ describe('gateway app', () => {
           updatedAt: '2026-06-25T00:00:00.000Z',
         },
         chapters: [{ id: 'chapter-1' }, { id: 'chapter-2' }],
+        summaries: [{ chapterId: 'chapter-1' }, { chapterId: 'chapter-2' }],
+        knowledgeGraph: {
+          entityMentions: [{ chapterId: 'chapter-1' }, { chapterId: 'chapter-2' }],
+          relationMentions: [],
+        },
+        embeddings: {
+          chunks: [{ chapterId: 'chapter-1' }],
+        },
       }),
       'utf8',
     )
@@ -1101,6 +1210,9 @@ describe('gateway app', () => {
           importStatus: 'imported',
           chapterCount: 2,
           packageChapterCount: 2,
+          summaryCoverage: 1,
+          kgCoverage: 1,
+          embeddingCoverage: 0.5,
           importedAt: '2026-06-26T00:00:00.000Z',
           sizeBytes: expect.any(Number),
           updatedAt: expect.any(String),

@@ -29,13 +29,15 @@ npm run lint
 npm run build
 ```
 
-For Android changes, also run the mobile workspace checks that match your change:
+For Android changes, run the workspace checks that match your change. Gateway Android is the default maintained mobile client:
 
 ```bash
-cd mobile-app
-npm install
-npm run build
+npm --prefix gateway-android-app install
+npm --prefix gateway-android-app run test
+npm --prefix gateway-android-app run build
 ```
+
+The legacy `mobile-app/` LAN-sync client is deprecated and kept for historical reference; only run its checks when intentionally touching that legacy workspace.
 
 ## Pull Request Notes
 

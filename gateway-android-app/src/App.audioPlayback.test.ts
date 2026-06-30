@@ -1,5 +1,15 @@
 import { describe, expect, it } from 'vitest'
-import { buildAudioChapterStatusRows, gatewayUserFacingError, ragFallbackStatus, resolveCurrentAudio, type AudioChapter } from './App'
+import {
+  buildAudioChapterStatusRows,
+  gatewayUserFacingError,
+  loadLatestReadingProgressFromStorage,
+  loadReadingProgressFromStorage,
+  ragFallbackStatus,
+  removeReadingProgressFromStorage,
+  resolveCurrentAudio,
+  saveReadingProgressToStorage,
+  type AudioChapter,
+} from './App'
 import { createGatewayError } from './deviceIdentity'
 
 const cachedChapter: AudioChapter = {
@@ -70,3 +80,81 @@ describe('RAG search fallback messaging', () => {
     )
   })
 })
+
+describe('reading progress storage', () => {
+  it('loads legacy single-book progress by book id', () => {
+    const storage = createMemoryStorage({
+      'novel-reader-gateway-reading-progress': JSON.stringify({
+        bookId: 'book-a',
+        chapterId: 'chapter-2',
+        scrollY: 42,
+        updatedAt: '2026-06-30T01:00:00.000Z',
+      }),
+    })
+
+    expect(loadReadingProgressFromStorage(storage, 'book-a')).toEqual(
+      expect.objectContaining({ bookId: 'book-a', chapterId: 'chapter-2', scrollY: 42 }),
+    )
+    expect(loadReadingProgressFromStorage(storage, 'book-b')).toBeNull()
+  })
+
+  it('keeps separate progress for multiple books', () => {
+    const storage = createMemoryStorage()
+
+    saveReadingProgressToStorage(storage, {
+      bookId: 'book-a',
+      chapterId: 'chapter-8',
+      scrollY: 120,
+      updatedAt: '2026-06-30T01:00:00.000Z',
+    })
+    saveReadingProgressToStorage(storage, {
+      bookId: 'book-b',
+      chapterId: 'chapter-3',
+      scrollY: 12,
+      updatedAt: '2026-06-30T02:00:00.000Z',
+    })
+
+    expect(loadReadingProgressFromStorage(storage, 'book-a')).toEqual(
+      expect.objectContaining({ bookId: 'book-a', chapterId: 'chapter-8', scrollY: 120 }),
+    )
+    expect(loadReadingProgressFromStorage(storage, 'book-b')).toEqual(
+      expect.objectContaining({ bookId: 'book-b', chapterId: 'chapter-3', scrollY: 12 }),
+    )
+    expect(loadLatestReadingProgressFromStorage(storage)).toEqual(expect.objectContaining({ bookId: 'book-b' }))
+  })
+
+  it('removes only the deleted book progress', () => {
+    const storage = createMemoryStorage()
+
+    saveReadingProgressToStorage(storage, {
+      bookId: 'book-a',
+      chapterId: 'chapter-8',
+      scrollY: 120,
+      updatedAt: '2026-06-30T01:00:00.000Z',
+    })
+    saveReadingProgressToStorage(storage, {
+      bookId: 'book-b',
+      chapterId: 'chapter-3',
+      scrollY: 12,
+      updatedAt: '2026-06-30T02:00:00.000Z',
+    })
+
+    removeReadingProgressFromStorage(storage, 'book-a')
+
+    expect(loadReadingProgressFromStorage(storage, 'book-a')).toBeNull()
+    expect(loadReadingProgressFromStorage(storage, 'book-b')).toEqual(expect.objectContaining({ chapterId: 'chapter-3' }))
+  })
+})
+
+function createMemoryStorage(initial: Record<string, string> = {}) {
+  const values = new Map(Object.entries(initial))
+  return {
+    getItem: (key: string) => values.get(key) ?? null,
+    setItem: (key: string, value: string) => {
+      values.set(key, value)
+    },
+    removeItem: (key: string) => {
+      values.delete(key)
+    },
+  }
+}
