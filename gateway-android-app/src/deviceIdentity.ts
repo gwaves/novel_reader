@@ -44,6 +44,7 @@ export class GatewayError extends Error {
 const fallbackDeviceName = 'Android Phone'
 const fallbackDeviceModel = 'Unknown Android Device'
 const fallbackDevicePlatform = 'android'
+const fallbackAppVersion = '0.2.0'
 
 export function loadGatewaySettings(
   storage: StorageLike,
@@ -90,7 +91,7 @@ export function buildGatewayHeaders(
     'X-Device-Name': settings.deviceName.trim() || fallbackDeviceName,
     'X-Device-Model': readNonEmptyString(metadata.model) || fallbackDeviceModel,
     'X-Device-Platform': readNonEmptyString(metadata.platform) || fallbackDevicePlatform,
-    'X-App-Version': readNonEmptyString(metadata.appVersion) || '0.1.0',
+    'X-App-Version': readNonEmptyString(metadata.appVersion) || fallbackAppVersion,
     ...extraHeaders,
   }
 }
