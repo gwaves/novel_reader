@@ -10,7 +10,6 @@ export default defineConfig([
     'dist',
     'gateway/dist',
     'gateway-android-app/dist',
-    'mobile-app/android/app/build',
     'gateway-android-app/android/app/build',
   ]),
   {

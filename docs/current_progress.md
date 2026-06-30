@@ -1,10 +1,530 @@
+2026-07-01 更新：PC 阅读偏好刷新持久化回归测试补齐。
+- 根据 `docs/test-case-matrix.md` 补齐 `PC-READ-002`：修改阅读页字号、行高、内容宽度、段距和主题后，刷新页面再继续阅读时，控件值和阅读区样式必须保持上次偏好。
+- 增强 `tests/e2e/core-flows.spec.ts` 的本地 SQLite mock：`/api/state` 现在会在测试进程内记住 `PUT` 写入的 state，reload 后按真实本地数据库语义返回；针对该用例补充 `/api/books/:id/chapters` 与 `library-state` mock，覆盖刷新水合路径。
+- 新增 `persists reader preferences after page reload` Playwright 用例：导入 TXT、通过真实阅读页控件修改偏好、等待保存 payload 确认包含最终偏好和书籍，再 reload、点击“继续阅读”，断言 range/select 值、夜间主题 class 和正文 `font-size`。
+- 已运行 `npx playwright test tests/e2e/core-flows.spec.ts --grep "persists reader preferences"`，目标用例通过。
+- 已运行 `npx playwright test tests/e2e/core-flows.spec.ts`，结果 1 个测试文件、9 个用例全部通过。
+- `docs/test-case-matrix.md` 已把 `PC-READ-002` 标记为 Existing。
+- 剩余真实 Gateway 治理缺口仍是：带真实 URL/token/bookId 执行 `gateway:ops-metrics-smoke`，以及在测试 Gateway 上执行回滚 `--apply` 演练并记录结果。
+
+2026-07-01 更新：Gateway Android RAG 搜索成功与兜底回归测试补齐。
+- 根据 `docs/test-case-matrix.md` 补齐 `AND-RAG-001`：受信设备访问可见书籍时，Android 端必须能调用 Gateway embedding 搜索/答案生成；embedding 失败时改用本地关键词兜底，并显示中文状态而不是红底误报。
+- 导出 `gateway-android-app/src/App.tsx` 中既有 `searchGatewayRag()` 与 `gatewayGenerateRagAnswer()` helper，便于单元测试直接覆盖 Gateway 调用契约，不改变运行时业务逻辑。
+- 扩展 `gateway-android-app/src/App.audioPlayback.test.ts`：新增 `/ai/search` 成功路径测试，断言 mobile token/device headers、`bookId/query/limit` 请求体、结果归一化和无效 `chapterId` 过滤。
+- 同文件新增 `/ai/rag-answer` 成功路径测试，断言答案生成请求体、鉴权 headers、答案文本和 citation 过滤；保留既有 token 失败时 `ragFallbackStatus()` 中文兜底提示测试。
+- 已运行 `npm --prefix gateway-android-app run test`，结果 5 个测试文件、32 个用例全部通过。
+- `docs/test-case-matrix.md` 已把 `AND-RAG-001` 标记为 Existing。
+- 剩余真实 Gateway 治理缺口仍是：带真实 URL/token/bookId 执行 `gateway:ops-metrics-smoke`，以及在测试 Gateway 上执行回滚 `--apply` 演练并记录结果。
+
+2026-07-01 更新：TXT GB18030 导入自动识别回归测试补齐。
+- 根据 `docs/test-case-matrix.md` 补齐 `PC-IMPORT-002`：GB18030 编码 TXT 导入时，系统必须自动 fallback 解码，不需要用户手动选择编码，章节标题和正文不能出现乱码。
+- `decodeTextFile()` 优先使用现代 `File.arrayBuffer()`，旧环境再回退 `FileReader`；解码逻辑抽到 `decodeTextBuffer()`，保留 UTF-16 BOM 识别、UTF-8 fatal 校验和 GB18030 fallback。
+- 导出 `parseImportedBook()` 供单元测试直接覆盖真实导入解析路径。
+- 扩展 `tests/unit/useReaderState.test.ts`：使用真实 GB18030 字节构造 TXT `File`，断言导入标题、两章标题和中文正文均正确。
+- 已运行 `npx vitest run tests/unit/useReaderState.test.ts --reporter=dot`，结果 1 个测试文件、21 个用例全部通过。
+- 已运行 `npm run test:unit`，结果 2 个测试文件、23 个用例全部通过。
+- 已运行 `npm run build`，TypeScript 与 Vite build 通过；仅保留既有 chunk size 提示。
+- `docs/test-case-matrix.md` 已把 `PC-IMPORT-002` 标记为 Existing。
+
+2026-07-01 更新：Admin UI 数据包覆盖率未知显示回归测试补齐。
+- 根据 `docs/test-case-matrix.md` 补齐 `ADMIN-PKG-001`：数据包页必须正确显示 summary/KG/embedding 覆盖率；当 Gateway package 缺少 coverage 元数据时，UI 必须显示 `-`，不能误当成 0% 或缺失章节。
+- 扩展 `gateway/admin-ui/src/App.test.tsx`：在真实 API mock 的数据包页中定位“旧数据包”行，断言覆盖率显示 `S - · KG - · E -`，并且缺失章节显示“无”。
+- 已运行 `npm --prefix gateway/admin-ui run test`，结果 1 个测试文件、17 个用例全部通过。
+- `docs/test-case-matrix.md` 已把 `ADMIN-PKG-001` 标记为 Existing。
+
+2026-07-01 更新：Production Pipeline doctor 缺配置聚合回归测试补齐。
+- 根据 `docs/test-case-matrix.md` 补齐 `PIPE-JOB-001`：job doctor 遇到缺 `bookId`、`stages`、模型配置、publish target 或 verify token 时，必须在一次 preflight 中尽量聚合输出明确缺项，而不是因为首个 parse/hydrate 错误提前停止。
+- 增强 `production-pipeline/src/cli.mjs`：doctor 使用宽松的 `hydrateDoctorJobConfig()`，只在 import source 文件真实存在时推导 bookId；缺 source 或缺 bookId 时继续进入 preflight，收集后续 stage/publish/verify 缺项。
+- doctor 的 `job.stages` 检查改为基于原始 job 是否显式声明 stages，不受 run 阶段历史默认 `package` 的行为影响。
+- 扩展 `production-pipeline/test/import.test.mjs`：新增缺配置 doctor 回归，断言文本输出和 JSON 输出都包含 `job.bookId`、`job.stages`、`stage.summary.config`、`publish.target`、`verify.gatewayToken` 等失败项。
+- 复核同一测试套件中已有 LLM scheduler 回归，覆盖并发权重、排队、borrowIdle 禁用和 audio 共享池调度；`docs/test-case-matrix.md` 已把 `PIPE-SCHED-001` 一并校正为 Existing。
+- 已运行 `node --test --test-name-pattern="reports missing job fields" production-pipeline/test/import.test.mjs`，目标用例通过。
+- 已运行 `node --test --test-name-pattern="preflights|merges gateway defaults" production-pipeline/test/import.test.mjs`，doctor/gateway merge 相关 3 个用例通过。
+- 已运行 `node --test production-pipeline/test/import.test.mjs`，结果 1 个测试套件、35 个用例全部通过。
+- `docs/test-case-matrix.md` 已把 `PIPE-JOB-001` 与 `PIPE-SCHED-001` 标记为 Existing。
+
+2026-07-01 更新：Gateway audio catalog book-level summary 回归测试补齐。
+- 根据 `docs/test-case-matrix.md` 补齐 `GW-AUDIO-001`：mobile audio catalog 除章节音频清单外，还必须返回 book-level summary，便于移动端和运维判断音频覆盖率、缺失章节和总大小。
+- 增强 `/mobile/books/:bookId/audio`：响应保留原有 `chapters`，新增 `summary`，包含 `bookId`、`chapterCount`、`audioChapterCount`、`missingChapterCount`、`missingChapterIds`、`coverage` 和 `totalSizeBytes`。
+- `readBookPackageChapterIds()` 对 package 文件缺失降级为空数组，避免“有书但暂未发布 package”的 audio catalog 请求被 summary 计算误伤为 500。
+- 扩展 `gateway/src/app.test.ts`：构造 2 章 package 和 1 章音频，断言 audio catalog summary 报告缺失 `chapter-2`、覆盖率 0.5 和真实 MP3 大小。
+- 顺手修复 `gateway/src/app.test.ts` 中既有 fetch mock 类型问题，移除 `RequestInfo` 和错误的三参 `jsonResponse()` 调用，使 Gateway build 重新成为可用门禁。
+- 已运行 `npm --prefix gateway run build`，TypeScript 编译通过。
+- 已运行 `npm --prefix gateway run test`，结果 1 个测试文件、59 个用例全部通过。
+- `docs/test-case-matrix.md` 已把 `GW-AUDIO-001` 标记为 Existing。
+
+2026-07-01 更新：Gateway package 下载与未知书籍错误回归测试补齐。
+- 根据 `docs/test-case-matrix.md` 补齐 `GW-BOOK-002` 与 `GW-BOOK-003`：mobile package download 必须受 mobile token 保护，返回完整 package JSON、正确下载文件名和 content length；未知 bookId 的 package download 必须返回稳定 `book_not_found`。
+- 扩展 `gateway/src/app.test.ts`：新增 protected mobile package download 回归，确认未授权返回 401、授权后返回 `book-a-package-full.json`，且完整 JSON 保留 embeddings/chunks；新增 unknown package download 回归，确认 404 error code 为 `book_not_found`。
+- 已运行 `npm --prefix gateway run test`，结果 1 个测试文件、59 个用例全部通过。
+- 曾尝试 `npm --prefix gateway run test -- --runInBand`，Vitest 不支持该 Jest 参数，命令被拒绝；后续以项目标准 Gateway test 命令作为有效验证。
+- `docs/test-case-matrix.md` 已把 `GW-BOOK-002` 与 `GW-BOOK-003` 标记为 Existing。
+- 剩余真实 Gateway 治理缺口仍是：带真实 URL/token/bookId 执行 `gateway:ops-metrics-smoke`，以及在测试 Gateway 上执行回滚 `--apply` 演练并记录结果。
+
+2026-07-01 更新：Gateway 发布回滚脚本落地。
+- 根据 `docs/test-case-matrix.md` 推进 `OPS-ROLLBACK-001`：新增 `gateway/scripts/rollback-release.mjs`，统一覆盖 package、audio、APK 三类发布回滚。
+- 脚本默认 dry-run；只有追加 `--apply` 才会写入 Gateway 或替换本地 Gateway 目录，避免误触生产回滚。
+- package 回滚会校验备份 package 的 `schemaVersion` 和 `book.id`，再通过 Gateway admin `PUT /admin/books/:bookId/package` 恢复。
+- audio 回滚会校验备份 book audio 目录存在 `audio.json`，再替换 `GATEWAY_AUDIO_DIR/books/<bookId>`；执行后仍需 admin audio refresh 和 coverage 验收。
+- APK 回滚会把 versioned APK 恢复为 `ai_novel_reader.apk`，并恢复或改写 `android-app.json` 的 latest/versioned 元数据。
+- 新增 npm 入口：根项目 `npm run gateway:rollback-release` 与 `gateway/` 内 `npm run rollback-release`。
+- `docs/operations-runbook.md` 的“回滚”章节已改成 package/audio/APK 可执行命令；`docs/release-checklist.md` 要求发布前 dry-run 对应回滚命令。
+- `docs/test-case-matrix.md` 已把 `OPS-ROLLBACK-001` 标记为 `Ops Script + Real Exercise | Partial`；剩余缺口是真实 Gateway 回滚演练记录。
+- 本轮检查当前 shell 与仓库内 Gateway env 文件，只发现 `gateway/.env.example`，没有可用的真实 Gateway URL/token；因此未执行真实 Gateway 指标 smoke 或回滚 `--apply` 演练。
+- 下一步建议执行一次受控演练：先 dry-run package/audio/APK 回滚输入，再在测试 Gateway 上追加 `--apply` 并记录 verify、audio refresh、APK 元数据/真机结果。
+
+2026-07-01 更新：Gateway 运维指标定位 smoke 脚本落地。
+- 根据 `docs/test-case-matrix.md` 推进 `OPS-METRIC-001`：新增 `gateway/scripts/ops-metrics-smoke.mjs`，用于真实 Gateway 上制造 401、404、package download、可选 audio download 和可选 5xx，再检查 `/admin/metrics`、`/admin/events`、`/admin/requests` 是否能定位 route、status、bookId 和 downloadKind。
+- 新增 npm 入口：根项目 `npm run gateway:ops-metrics-smoke` 与 `gateway/` 内 `npm run ops-metrics-smoke`。
+- `docs/operations-runbook.md` 新增“指标定位验收”，给出真实 Gateway smoke 命令、可选 5xx 参数和验收点；`docs/release-checklist.md` 的 Gateway 发布验收改为要求运行该 smoke。
+- 已运行 `node --check gateway/scripts/ops-metrics-smoke.mjs`，脚本语法检查通过。
+- 已运行 `npm run gateway:ops-metrics-smoke`（无参数），确认脚本返回 Usage 并以失败码退出，避免误打真实环境。
+- 已运行 `npm --prefix gateway run test`，结果 1 个测试文件、57 个用例全部通过。
+- 曾运行 `npm --prefix gateway run typecheck`，当前失败在既有 `src/app.test.ts` 的 `RequestInfo`/参数类型问题，和本次脚本变更无关；未作为本轮通过项。
+- `docs/test-case-matrix.md` 已把 `OPS-METRIC-001` 从 Ops Gap 推进为 Partial；剩余缺口是真实 Gateway 带真实 token/bookId 的 smoke 执行记录。
+- 下一步建议继续补治理项：真实 Gateway 执行 `gateway:ops-metrics-smoke` 并记录结果，或补发布回滚脚本/演练记录。
+
+2026-07-01 更新：RAG 跨章节检索 UI 回归测试落地。
+- 根据 `docs/test-case-matrix.md` 补齐 `RAG-SEARCH-001`：跨章节 RAG 搜索必须在 UI 返回多个相关章节、原文片段、匹配类型和实体增强结果。
+- 扩展 `tests/e2e/core-flows.spec.ts`：测试内 mock `/api/rag/search` 返回第 1 章和第 3 章两条结果，并返回 `entityMatches` 中的“林青”；UI 断言覆盖“识别到实体”、`相关章节（2）`、两个章节按钮、`混合/实体`匹配类型、两章概要和原文 snippet。
+- 已运行 `npx playwright test tests/e2e/core-flows.spec.ts --grep "cross-chapter RAG"`，结果 chromium 目标用例通过。
+- 已运行 `npm run test:unit`，结果 2 个测试文件、22 个用例全部通过。
+- 已运行 `npm run build`，TypeScript 与 Vite build 通过；仅保留既有 chunk size 提示。
+- `docs/test-case-matrix.md` 已把 `RAG-SEARCH-001` 标记为 Existing。
+- 下一步建议转向剩余治理项：运维指标真实接入，或发布回滚脚本/演练记录。
+
+2026-07-01 更新：AI 当前页概要生成失败项可见回归测试落地。
+- 根据 `docs/test-case-matrix.md` 补齐 `AI-SUMMARY-002`：当前分页范围内可以批量生成缺失概要；部分章节生成失败时，成功章节继续写入，失败章节名称必须留在页面上可见。
+- `runMissingSummaryBatch()` 新增可选 `onFailure` 回调，不改变原返回结构；当前页生成路径用它收集失败章节标题。
+- `useReaderState()` 新增 `generateMissingSummariesForCurrentPage()`、`generatingPageSummaries`、`pageSummaryProgress` 和 `pageSummaryFailures`；阅读页章节分页栏新增“生成当前页概要”按钮、进度文案和失败章节列表。
+- 扩展 `tests/unit/useReaderState.test.ts`：批量概要单章失败测试现在断言 `onFailure` 收到失败章节 `c2`。
+- 扩展 `tests/e2e/core-flows.spec.ts`：当前页 3 章中 mock 第 2 次 `/api/generate` 返回 503，验证页面显示“当前页生成结束，成功 2 章，失败 1 章。”和“失败章节：第二章 雨夜传书”，并确认第 1/3 章标记“已概要”、第 2 章未误标。
+- 已运行 `npx playwright test tests/e2e/core-flows.spec.ts --grep "failed chapters"`，结果 chromium 目标用例通过。
+- 已运行 `npx vitest run tests/unit/useReaderState.test.ts --reporter=dot`，结果 1 个测试文件、20 个用例全部通过。
+- 已运行 `npm run test:unit`，结果 2 个测试文件、22 个用例全部通过。
+- 已运行 `npm run build`，TypeScript 与 Vite build 通过；仅保留既有 chunk size 提示。
+- `docs/test-case-matrix.md` 已把 `AI-SUMMARY-002` 标记为 Existing。
+- 下一步建议继续补 P1/P2：RAG 跨章节检索 UI 覆盖，或运维指标/回滚演练记录。
+
+2026-07-01 更新：RAG 成功答案来源展示回归测试落地。
+- 根据 `docs/test-case-matrix.md` 补齐 `RAG-ANSWER-001`：基于 mocked 检索结果生成答案时，页面必须展示 AI 回答，并继续保留相关章节来源。
+- 扩展 `tests/e2e/core-flows.spec.ts`：智能搜索先返回 mocked RAG 结果，再 mock Ollama `/api/generate` 成功返回引用“第 1 章”的答案；测试同时验证 prompt 包含召回章节和概要上下文。
+- 浏览器断言覆盖“AI 回答”区块、答案正文、`相关章节（1）`、来源章节按钮和原召回概要仍可见，避免答案生成后丢失来源。
+- 已运行 `npx playwright test tests/e2e/core-flows.spec.ts --grep "generates a RAG answer"`，结果 chromium 目标用例通过。
+- 已运行 `npm run test:unit`，结果 2 个测试文件、22 个用例全部通过。
+- 已运行 `npm run build`，TypeScript 与 Vite build 通过；仅保留既有 chunk size 提示。
+- `docs/test-case-matrix.md` 已把 `RAG-ANSWER-001` 标记为 Existing。
+- 下一步建议继续补 P1/P2：AI 当前页概要失败项可见，或 RAG 跨章节检索 UI 覆盖。
+
+2026-07-01 更新：AI 全书缺失概要批量生成回归测试落地。
+- 根据 `docs/test-case-matrix.md` 补齐 `AI-SUMMARY-003`：全书缺失概要批量生成必须从书架入口触发，按章节调用 mocked LLM，写回全部缺失概要；大批量生成前必须有确认文案。
+- 新增 `buildMissingSummaryBatchConfirmation()`：50 章以内不弹确认，超过 50 章时返回包含总章数、缺失章数、模型调用次数和 token 成本提示的确认文案；`generateMissingSummariesForBook()` 复用该 helper。
+- 扩展 `tests/unit/useReaderState.test.ts`：验证 50 章不确认、51 章会生成确认文案，并保留既有“默认跳过已有概要”的覆盖策略测试。
+- 扩展 `tests/e2e/core-flows.spec.ts`：导入 3 章 TXT，回到书架点击当前书“生成概要 (3)”，mock Ollama 对 3 次 `/api/generate` 返回概要 JSON，验证按钮收敛为“概要已生成”、书卡概要数为 3 章，并确认三次 prompt 分别对应第一/二/三章。
+- 已运行 `npx playwright test tests/e2e/core-flows.spec.ts --grep "generates missing summaries"`，结果 chromium 目标用例通过。
+- 已运行 `npx vitest run tests/unit/useReaderState.test.ts --reporter=dot`，结果 1 个测试文件、20 个用例全部通过。
+- 已运行 `npm run test:unit`，结果 2 个测试文件、22 个用例全部通过。
+- 已运行 `npm run build`，TypeScript 与 Vite build 通过；仅保留既有 chunk size 提示。
+- `docs/test-case-matrix.md` 已把 `AI-SUMMARY-003` 标记为 Existing。
+- 下一步建议继续补 P1/P2：AI 当前页概要失败项可见，或 RAG 成功答案来源展示。
+
+2026-07-01 更新：AI 单章概要生成回归测试落地。
+- 根据 `docs/test-case-matrix.md` 补齐 `AI-SUMMARY-001`：已配置 mocked LLM 时，当前阅读章节可以单独生成概要，并写回当前书的章节概要状态。
+- 新增 `applyChapterSummary()`：把单章概要写入指定书籍，并同步当前 active book 的 `summaries`；批量概要写回也复用该 helper，避免单章/批量路径分叉。
+- `useReaderState()` 新增 `generateSummaryForChapter()` 与 `generatingChapterId`；阅读页 AI 辅助栏在当前章缺概要时显示“生成本章概要”按钮，生成中禁用。
+- 导出并测试 `generateWithOpenAICompatible()`：mock `/chat/completions` 返回 summary JSON，验证请求携带模型、Bearer token、`response_format: json_object`、禁用 thinking 参数，并解析为 `generatedBy: openai` 的 Summary。
+- 扩展 `tests/unit/useReaderState.test.ts`：验证单章概要只写入目标书目标章节，不影响其他书同名章节。
+- 扩展 `tests/e2e/core-flows.spec.ts`：导入 TXT 后点击“生成本章概要”，mock Ollama `/api/generate` 返回 Summary JSON，验证侧栏展示一句话、详细概要、要点和跳读建议。
+- 已运行 `npx playwright test tests/e2e/core-flows.spec.ts --grep "generates the current chapter summary"`，结果 chromium 目标用例通过。
+- 已运行 `npx vitest run tests/unit/useReaderState.test.ts --reporter=dot`，结果 1 个测试文件、19 个用例全部通过。
+- 已运行 `npm run test:unit`，结果 2 个测试文件、21 个用例全部通过。
+- 已运行 `npm run build`，TypeScript 与 Vite build 通过；仅保留既有 chunk size 提示。
+- `docs/test-case-matrix.md` 已把 `AI-SUMMARY-001` 标记为 Existing。
+- 下一步建议继续补 P1/P2：AI 概要当前页/全书批量主流程，或 RAG 成功答案来源展示。
+
+2026-07-01 更新：AI 概要覆盖策略回归测试落地。
+- 根据 `docs/test-case-matrix.md` 补齐 `AI-SUMMARY-005`：章节已有概要时，批量概要默认不能覆盖已有结果；只有显式传入覆盖选项时才允许重跑已有章节。
+- 新增 `selectSummaryGenerationChapters()`：默认只选择缺失概要的章节，`overwriteExisting: true` 时选择全量章节；`generateMissingSummariesForBook()` 继续使用默认安全策略。
+- 扩展 `tests/unit/useReaderState.test.ts`：构造 3 章和 1 条既有概要，验证默认只返回 `c2/c3`，显式覆盖才返回 `c1/c2/c3`。
+- 已运行 `npx vitest run tests/unit/useReaderState.test.ts --reporter=dot`，结果 1 个测试文件、17 个用例全部通过。
+- 已运行 `npm run test:unit`，结果 2 个测试文件、19 个用例全部通过。
+- 已运行 `npm run build`，TypeScript 与 Vite build 通过；仅保留既有 chunk size 提示。
+- `docs/test-case-matrix.md` 已把 `AI-SUMMARY-005` 标记为 Existing。
+- 下一步建议继续补 P1：AI 概要单章/全书批量主流程，或 RAG 成功答案来源展示。
+
+2026-07-01 更新：RAG 答案生成失败状态回归测试落地。
+- 根据 `docs/test-case-matrix.md` 推进 `RAG-ANSWER-002`：LLM 生成答案失败时，必须提示错误，同时保留已经召回的章节结果和实体匹配。
+- 新增 `src/ragAnswer.ts`：抽出 RAG 搜索结果/实体类型、答案 prompt 构建、OpenAI/Ollama answer 调用，以及 `createRagAnswerUpdate()` 状态 helper。
+- `src/App.tsx` 的 RAG “生成答案”按钮改为调用 `createRagAnswerUpdate()`；失败时写入 `ragError`，但继续回填原 `ragResults` 与 `ragEntityMatches`，避免检索结果被清空。
+- 新增 `tests/unit/ragAnswer.test.ts`：mock OpenAI answer generator 抛出 `503 upstream timeout`，验证返回错误文案、answer 为空、检索结果和实体匹配引用保持不变；同时验证 prompt 按章节顺序包含 snippet 和相关实体别名。
+- 扩展 `tests/e2e/core-flows.spec.ts`：智能搜索拿到 mocked RAG 结果后点击“生成答案”，mock Ollama `/api/generate` 返回 503，验证页面同时保留错误提示、相关章节标题和结果列表。
+- 已运行 `npx vitest run tests/unit/ragAnswer.test.ts --reporter=dot`，结果 1 个测试文件、2 个用例全部通过。
+- 已运行 `npx playwright test tests/e2e/core-flows.spec.ts --grep "opens smart search"`，结果 chromium 目标用例通过。
+- 已运行 `npm run test:unit`，结果 2 个测试文件、18 个用例全部通过。
+- 已运行 `npm run build`，TypeScript 与 Vite build 通过；仅保留既有 chunk size 提示。
+- `docs/test-case-matrix.md` 已把 `RAG-ANSWER-002` 标记为 Existing。
+- 下一步建议继续补 P1：RAG 成功答案来源展示，或 AI 概要单章/批量覆盖策略。
+
+2026-07-01 更新：RAG summary/chunk embedding 生成回归测试落地。
+- 根据 `docs/test-case-matrix.md` 补齐 `RAG-EMB-002`：批量生成 embedding 时必须同时写入章节概要向量和正文 chunk 向量，并保留模型与维度信息。
+- 扩展 `tests/api/local-db-server.test.mjs`：准备两章概要，调用 `/api/rag/embeddings/batch` 的 OpenAI-compatible mocked embedding 服务，验证 summary completed、chunk completed、provider 请求模型名和无失败项。
+- 测试继续调用 `/api/rag/embeddings/status` 并直接读取 SQLite，确认 `summary_embeddings` 与 `chapter_chunk_embeddings` 各写入 2 条，维度为 3，缺失章节和缺失 chunk 均为 0。
+- 已运行 `npm run local-db:test`，结果 3 个测试套件、15 个用例全部通过。
+- `docs/test-case-matrix.md` 已把 `RAG-EMB-002` 标记为 Existing。
+- 下一步建议继续补 P1：RAG 答案失败路径，或 AI 概要单章/批量覆盖策略。
+
+2026-07-01 更新：RAG 图谱实体增强回归测试落地。
+- 根据 `docs/test-case-matrix.md` 补齐 `RAG-SEARCH-002`：查询命中实体别名时，RAG 搜索结果必须返回对应章节证据，并在 `entityMatches` 与章节 `matchedEntities` 中映射回主实体。
+- 扩展 `tests/api/local-db-server.test.mjs`：准备两章概要、mock OpenAI-compatible embedding 服务和章节 KG extraction，用“少年林青”别名发起搜索，验证主实体“林青”、别名、第一章结果、snippet 与 graph/entity match type。
+- 搜索前先调用 `/api/rag/embeddings/batch` 生成 summary/chunk embedding，覆盖 RAG readiness 门槛后的正常图谱增强路径。
+- 已运行 `npm run local-db:test`，结果 3 个测试套件、14 个用例全部通过。
+- `docs/test-case-matrix.md` 已把 `RAG-SEARCH-002` 标记为 Existing。
+- 下一步建议继续补 P1：RAG embedding 生成、RAG 答案失败路径，或 AI 概要单章/批量覆盖策略。
+
+2026-07-01 更新：AI 批量概要单章失败回归测试落地。
+- 根据 `docs/test-case-matrix.md` 补齐 `AI-SUMMARY-004`：批量生成概要时，单章 LLM 失败不能中断整批任务，已成功章节必须继续写入，并向 UI 进度报告成功/失败数量。
+- 重构 `src/hooks/useReaderState.ts`：抽出 `runMissingSummaryBatch()`，保留原有并发调度和进度文案，hook 继续负责写入对应书籍的 summaries。
+- 扩展 `tests/unit/useReaderState.test.ts`：构造 3 个缺失章节、并发 2，其中第 2 章 mock 失败；测试验证 3 章都被尝试，成功章节 1/3 被写入，失败计数为 1，最终进度显示“失败 1 章”。
+- 已运行 `npx vitest run tests/unit/useReaderState.test.ts --reporter=dot`，结果 1 个测试文件、16 个用例全部通过。
+- 已运行 `npm run test:unit`，结果 1 个测试文件、16 个用例全部通过。
+- 已运行 `npm run build`，TypeScript 与 Vite build 通过；仅保留既有 chunk size 提示。
+- `docs/test-case-matrix.md` 已把 `AI-SUMMARY-004` 标记为 Existing。
+- 下一步建议继续补 P1：RAG 图谱增强，或 AI 概要单章/批量覆盖策略。
+
+2026-07-01 更新：AI 模型配置成功路径回归测试落地。
+- 根据 `docs/test-case-matrix.md` 补齐 `AI-CONFIG-001` 与 `AI-CONFIG-002`：保存模型配置前必须分别验证 LLM 与 embedding 配置，成功时才能进入保存流程。
+- 扩展 `tests/unit/useReaderState.test.ts`：新增 Ollama 成功路径，验证 `validateModelConfig()` 会调用本地 Ollama `/api/generate`，并继续调用 embedding validate，且请求体会 trim 模型名和 baseUrl。
+- 新增 OpenAI-compatible 成功路径，验证 chat `/chat/completions` 会携带 Bearer token、`response_format: json_object`、禁用 thinking 的参数，并继续验证 embedding 模型。
+- 已运行 `npx vitest run tests/unit/useReaderState.test.ts --reporter=dot`，结果 1 个测试文件、15 个用例全部通过。
+- 已运行 `npm run test:unit`，结果 1 个测试文件、15 个用例全部通过。
+- `docs/test-case-matrix.md` 已把 `AI-CONFIG-001` 与 `AI-CONFIG-002` 标记为 Existing。
+- 下一步建议继续补 P1：RAG 图谱增强，或 AI 概要单章/批量覆盖策略。
+
+2026-07-01 更新：AI 模型配置错误提示回归测试落地。
+- 根据 `docs/test-case-matrix.md` 补齐 `AI-CONFIG-003`：错误 URL、错误 token、embedding 维度不匹配时，保存模型配置前必须给出明确阶段和原因，不能把不可用配置当成成功。
+- 增强 `src/hooks/useReaderState.ts`：LLM Ollama/OpenAI-compatible 网络失败现在包装为 `[LLM]` 前缀的中文连接错误；embedding 验证服务网络失败包装为 `[Embedding]` 前缀的中文连接错误。
+- 扩展 `tests/unit/useReaderState.test.ts`：mock `fetch` 覆盖 OpenAI-compatible Base URL 连接失败、token 401、embedding 维度不匹配三种失败路径，并确认 token 失败不会继续进入 embedding 校验。
+- 验证过程中发现当前 `node_modules/vite` 缺少 `misc/true.js`，导致 Vitest 启动失败；已用 `npm ci --ignore-scripts` 干净重装依赖恢复工具链，未改动 lockfile。
+- 已运行 `npx vitest run tests/unit/useReaderState.test.ts --reporter=dot`，结果 1 个测试文件、13 个用例全部通过。
+- 已运行 `npm run test:unit`，结果 1 个测试文件、13 个用例全部通过。
+- `docs/test-case-matrix.md` 已把 `AI-CONFIG-003` 标记为 Existing。
+- 下一步建议继续补 P1：AI 配置成功路径/概要失败路径，或 RAG 图谱增强。
+
+2026-07-01 更新：Production Pipeline audio 独立 stage 回归测试落地。
+- 根据 `docs/test-case-matrix.md` 补齐 `PIPE-STAGE-004`：job 只配置 `audio` stage 时，流水线必须能用 mocked TTS director 独立产出 MP3、manifest 和 Gateway `audio.json`，并正确记录 parent/child run 元数据。
+- 扩展 `production-pipeline/test/import.test.mjs`：导入两章样例书后运行仅包含 `audio` 的 job，使用 fake director 生成两章音频和 manifest。
+- 测试验证 stdout、parent `run.json`、audio child `run.json`、child log、Gateway audio catalog、timeline version、duration、MP3 文件和 TTS source root。
+- 已运行 `node --test --test-name-pattern="runs audio as an independent job stage" production-pipeline/test/import.test.mjs`，目标用例通过。
+- 已运行 `node --test production-pipeline/test/import.test.mjs`，结果 1 个测试套件、34 个用例全部通过。
+- `docs/test-case-matrix.md` 已把 `PIPE-STAGE-004` 标记为 Existing；production-pipeline summary/KG/embedding/audio 独立 stage P1 自动化已全部补齐。
+- 下一步建议继续补 P1：AI 配置/概要失败路径，或 RAG 图谱增强。
+
+2026-07-01 更新：Production Pipeline embedding 独立 stage 回归测试落地。
+- 根据 `docs/test-case-matrix.md` 补齐 `PIPE-STAGE-003`：job 只配置 `embedding` stage 时，流水线必须展开为 `chunkEmbedding` 与 `summaryEmbedding`，并分别记录 child run 与 embedding report。
+- 扩展 `production-pipeline/test/import.test.mjs`：导入两章样例书并预置概要后，运行仅包含 `embedding` 的 job，使用 mock OpenAI-compatible embedding 服务生成 summary/chunk 向量。
+- 测试验证 stdout、parent `run.json`、chunk/summary child `run.json`、两份 `artifacts/embedding-report.json` 的 mode/计数，并直接读取 SQLite 确认 summary 与 chunk embedding 各写入 2 条。
+- 已运行 `node --test --test-name-pattern="runs embedding as independent job stages" production-pipeline/test/import.test.mjs`，目标用例通过。
+- 已运行 `node --test --test-name-pattern="runs audio with initial parallel stages even when it follows embedding in the job" production-pipeline/test/import.test.mjs`，用于复核一次既有偶发失败的并行 audio 用例，结果通过。
+- 已运行 `node --test production-pipeline/test/import.test.mjs`，结果 1 个测试套件、33 个用例全部通过。
+- `docs/test-case-matrix.md` 已把 `PIPE-STAGE-003` 标记为 Existing。
+- 下一步建议继续补 P1：production-pipeline audio 独立 stage，或 AI 配置/概要失败路径。
+
+2026-07-01 更新：Production Pipeline KG 独立 stage 回归测试落地。
+- 根据 `docs/test-case-matrix.md` 补齐 `PIPE-STAGE-002`：job 只配置 `kg` stage 时，流水线必须能独立完成知识图谱生成，并正确记录 parent/child run 元数据和 KG report。
+- 扩展 `production-pipeline/test/import.test.mjs`：导入两章样例书后运行仅包含 `kg` 的 job，使用 mock OpenAI-compatible chat 服务返回实体和关系 JSON。
+- 测试验证 stdout、parent `run.json`、KG child `run.json`、child log 元数据和 `artifacts/kg-report.json`，并直接读取 SQLite 确认两章 extraction、实体和关系已写入。
+- 已运行 `node --test --test-name-pattern="runs kg as an independent job stage" production-pipeline/test/import.test.mjs`，目标用例通过。
+- 已运行 `node --test production-pipeline/test/import.test.mjs`，结果 1 个测试套件、32 个用例全部通过。
+- `docs/test-case-matrix.md` 已把 `PIPE-STAGE-002` 标记为 Existing。
+- 下一步建议继续补 P1：production-pipeline embedding/audio 独立 stage，或 AI 配置/概要失败路径。
+
+2026-07-01 更新：Production Pipeline summary 独立 stage 回归测试落地。
+- 根据 `docs/test-case-matrix.md` 补齐 `PIPE-STAGE-001`：job 只配置 `summary` stage 时，流水线必须能独立完成概要生成，并正确记录 parent/child run 元数据。
+- 扩展 `production-pipeline/test/import.test.mjs`：导入两章样例书后运行仅包含 `summary` 的 job，使用 mock OpenAI-compatible chat 服务生成概要。
+- 测试验证 stdout、parent `run.json`、summary child `run.json`、child log 元数据和 `artifacts/summary-report.json`，并直接读取 SQLite `summaries` 表确认两章概要已写入。
+- 已运行 `node --test --test-name-pattern="runs summary as an independent job stage" production-pipeline/test/import.test.mjs`，目标用例通过。
+- 已运行 `node --test production-pipeline/test/import.test.mjs`，结果 1 个测试套件、31 个用例全部通过。
+- 曾尝试运行 `npm run production-pipeline:test`，`book-ingest`、`embedding-utils`、`import` 三个套件已通过，但全量命令在 `production-pipeline/test/service.test.mjs` 无进一步输出后悬挂，已结束该测试进程；本次新增用例不依赖该 service 套件。
+- `docs/test-case-matrix.md` 已把 `PIPE-STAGE-001` 标记为 Existing。
+- 下一步建议继续补 P1：production-pipeline KG/embedding/audio 独立 stage，或 AI 配置/概要失败路径。
+
+2026-07-01 更新：RAG embedding 覆盖率不足阻断搜索回归测试落地。
+- 根据 `docs/test-case-matrix.md` 补齐 `RAG-EMB-003`：embedding 覆盖率不足时，RAG 搜索必须明确提示先生成 embedding，不能继续调用 embedding provider 或返回误导性搜索结果。
+- 扩展 `tests/api/local-db-server.test.mjs`：新增 `local RAG search readiness API` suite，使用真实本地 API 保存一本 2 章样例书，但不生成任何 summary embedding。
+- 测试调用 `POST /api/rag/search` 时传入 mock OpenAI-compatible embedding 服务，验证响应为 409、`code=EMBEDDINGS_NOT_READY`、`embeddedCount=0`、`totalChapters=2`，并断言 mock embedding 服务没有收到任何请求。
+- 已运行 `npm run local-db:test`，结果 3 个测试套件、13 个用例全部通过。
+- `docs/test-case-matrix.md` 已把 `RAG-EMB-003` 标记为 Existing。
+- 下一步建议继续补 P1：production-pipeline KG/embedding/audio 独立 stage，或 AI 配置/概要失败路径。
+
+2026-07-01 更新：知识图谱全局共指候选回归测试落地。
+- 根据 `docs/test-case-matrix.md` 补齐 `KG-COREF-001`：存在疑似同一人物实体时，`/api/kg/coreference/components` 必须正确生成候选组件，且不把无关人物或组织混入候选。
+- 扩展 `tests/api/local-db-server.test.mjs`：复用“南宫婉/精灵少女/韩立/掩月宗”场景，单独调用 coreference components API，不启动 LLM resolve job。
+- 测试验证候选组件只有一组，成员为“南宫婉 + 精灵少女”，双方 aliases 互相指向；“韩立”和“掩月宗”不会进入该组件。
+- 已运行 `npm run local-db:test`，结果 2 个测试套件、12 个用例全部通过。
+- `docs/test-case-matrix.md` 已把 `KG-COREF-001` 标记为 Existing。
+- 下一步建议继续补 P1：production-pipeline KG/embedding/audio 独立 stage，或 AI 配置/概要失败路径。
+
+2026-07-01 更新：知识图谱 saved JSON 重放回归测试落地。
+- 根据 `docs/test-case-matrix.md` 补齐 `KG-SCAN-006`：已有 raw extraction 时，系统必须能不调用模型，直接用保存的 JSON 重建局部章节图谱。
+- 扩展 `tests/api/local-db-server.test.mjs`：先保存一章 KG extraction，再删除“林青”实体制造局部图谱缺失，确认相关关系同步消失但 raw extraction 仍可读取。
+- 测试随后把 `GET /api/kg/chapters/:chapterId/extraction` 返回的 saved JSON 重新 `PUT` 回同一章节，验证“林青/白衣客/阿梨/青州”和两条关系全部恢复，raw extraction 内容保持一致，model 更新为重放来源标识。
+- 测试继续用 `node:sqlite` 检查 entity mention、relation mention 和 relation endpoint 无孤儿引用。
+- 已运行 `npm run local-db:test`，结果 2 个测试套件、11 个用例全部通过。
+- `docs/test-case-matrix.md` 已把 `KG-SCAN-006` 标记为 Existing。
+- 下一步建议继续补 P1：production-pipeline KG/embedding/audio 独立 stage，或 AI 配置/概要失败路径。
+
+2026-07-01 更新：正规化治理文档与 Android 更新 P2 自动化补齐。
+- 新增 `docs/code-review-checklist.md`，把 PC/API、知识图谱、production-pipeline、Gateway、Admin UI、Gateway Android 的系统性 review 重点固化为可执行 checklist。
+- 新增 `docs/operations-runbook.md`，覆盖真实 Gateway 健康检查、package/audio/APK 发布后验收、公网安全、常见故障分诊和回滚记录模板。
+- 新增 `docs/release-checklist.md`，把发布前自动化、真实 Gateway 验收、APK 真机验收、公网安全和回滚准备串成固定发布流程。
+- Gateway Android 更新逻辑抽出 `normalizeAppUpdateManifest()`、`resolveAppUpdateManifest()` 和 `appUpdateStatusLabel()`，新增 `gateway-android-app/src/App.update.test.ts` 覆盖 `AND-UPDATE-002`：线上 `versionCode` 等于或低于本机时显示“已是最新”，只有严格更高才提供安装入口。
+- `docs/test-case-matrix.md` 已把 `AND-UPDATE-002` 与 `OPS-RUNBOOK-001` 标记为 Existing，把 `OPS-ROLLBACK-001` 从 Ops Gap 推进为 Partial；`docs/quality-ops-roadmap.md` 已标记 Code Review checklist、runbook 和 release checklist 第一版完成。
+- 下一步建议继续把剩余 P1 Planned 自动化往前推：AI 配置/概要失败、production-pipeline KG/embedding/audio 独立 stage、RAG 图谱增强；运维侧继续把 `OPS-METRIC-001` 和 `OPS-ROLLBACK-001` 从文档治理推进到真实指标/演练。
+
+2026-07-01 更新：Production Pipeline verify 增加发布后书库可见性校验。
+- 补齐最后一个 P0 Planned `OPS-PUBLISH-001` 的可执行验证路径：publish 完成后，verify 会交叉校验 Admin 书目、mobile session 可见范围和 `/mobile/books` 书库结果。
+- 增强 `production-pipeline/src/cli.mjs`：提供 `--gateway-admin-token` 时，verify 会读取 `GET /admin/books`，用它代表远端 `books.json` 的 HTTP 权威视图；同时读取 `GET /auth/session` 获取当前 mobile token 的 `allowedVisibilities`。
+- verify 报告新增 `adminBooks.bookListed`、`mobileSession.allowedVisibilities`、`library.visibilityConsistent` 检查，确认远端 catalog 已包含目标书，并且目标书 visibility 与当前设备在 `/mobile/books` 中的可见/不可见状态一致。
+- fake Gateway 回归已模拟 Admin 书目、mobile session、mobile library、package、audio、admin refresh 全链路；目标 verify 用例现在断言 29 个检查全部通过。
+- 已运行 `npm run production-pipeline:test`，结果 4 个测试套件、48 个用例全部通过。
+- `docs/test-case-matrix.md` 已把 `OPS-PUBLISH-001` 标记为 Existing；真实远端执行时需要使用目标设备对应的 mobile token 和 admin token。
+
+2026-07-01 更新：Production Pipeline verify 增加 Admin audio refresh 运维校验。
+- 在 `PIPE-VERIFY-002` 的基础上继续推进 `OPS-PUBLISH-002`：发布 audio 后，提供 admin token 的 verify 会主动调用 Gateway admin refresh，并校验 Admin 音频汇总与本次 run 的 `audio.json` 一致。
+- 增强 `production-pipeline/src/cli.mjs`：新增 `--gateway-admin-token` / `verify.gatewayAdminToken` 可选参数；传入后执行 `POST /admin/books/:bookId/audio/refresh` 与 `GET /admin/audio`。
+- verify 报告新增 `adminAudio.refresh.*` 与 `adminAudio.list.*` 检查，覆盖 bookId、audioChapterCount、missingChapterCount、totalSizeBytes 和 Admin 列表可见性。
+- 扩展 fake Gateway 回归，模拟 mobile/admin 双 token，确认 verify 同时访问 mobile audio manifest/download 和 admin audio refresh/list。
+- 已运行 `npm run production-pipeline:test`，结果 4 个测试套件、48 个用例全部通过。
+- `docs/test-case-matrix.md` 已把 `OPS-PUBLISH-002` 标记为 Existing；真实远端执行时仍需要提供真实 `--gateway-url`、mobile token 与 admin token。
+
+2026-07-01 更新：Production Pipeline Gateway audio verify 回归测试落地。
+- 根据 `docs/test-case-matrix.md` 补齐 `PIPE-VERIFY-002` 的自动化契约层：verify 阶段发布后访问 Gateway audio API 时，必须校验 audio catalog 章节、manifest、MP3 下载、duration 和 size。
+- 增强 `production-pipeline/src/cli.mjs`：`verify` 现在逐章比较远端 `/mobile/books/:bookId/audio` 返回的 `durationMs`、`sizeBytes` 与本次 run 产出的 `audio.json` 是否一致；抽样下载 MP3 后继续校验实际下载字节数等于 `sizeBytes`。
+- 扩展 `production-pipeline/test/import.test.mjs` 的 fake Gateway verify 回归：记录 `/manifest` 与 `/download` 请求，报告中断言 `audio.durationMs.*`、`audio.sizeBytes.*`、`audio.manifestTimelineVersion.*`、`audio.download.*`、`audio.downloadSize.*` 全部通过。
+- 已运行 `node --test --test-name-pattern="verifies Gateway package output" production-pipeline/test/import.test.mjs`，目标用例通过。
+- 已运行 `npm run production-pipeline:test`，结果 4 个测试套件、48 个用例全部通过。
+- `docs/test-case-matrix.md` 已把 `PIPE-VERIFY-002` 标记为 Existing；真实远端 audio rsync 后的 Admin refresh 一致性仍保留在 `OPS-PUBLISH-002`。
+
+2026-07-01 更新：知识图谱 LLM 共指合并回归测试落地。
+- 根据 `docs/test-case-matrix.md` 补齐 `KG-COREF-002`：共指合并必须只合并 mocked LLM 明确判断为同一身份的实体，不能误合并其他人物，并且合并后关系冲突要可控收敛。
+- 扩展 `tests/api/local-db-server.test.mjs`：启动本地 mock OpenAI-compatible `/chat/completions` 服务，驱动真实 `/api/kg/coreference/resolve` 异步 job、JSON 响应解析和事务合并路径。
+- 测试构造“南宫婉/精灵少女”共享别名形成候选组件，同时保留“韩立”作为不应合并的人物；mock LLM 只返回“南宫婉 + 精灵少女” cluster。
+- 测试验证 job 完成、LLM 请求携带 Bearer token 与 json_object response_format；合并后实体只剩“南宫婉/掩月宗/韩立”，“南宫婉” aliases 包含“精灵少女”，mentions 覆盖两章。
+- 测试继续验证“南宫婉 -> 掩月宗”冲突关系合并为一条并保留两章 evidence，“韩立 -> 掩月宗”独立保留，底层 KG 表无孤儿引用。
+- 已运行 `npm run local-db:test`，结果 2 个测试套件、10 个用例全部通过。
+- `docs/test-case-matrix.md` 已把 `KG-COREF-002` 标记为 Existing。
+
+2026-07-01 更新：知识图谱覆盖重扫预览回归测试落地。
+- 根据 `docs/test-case-matrix.md` 补齐 `KG-SCAN-005`：覆盖重扫前必须先展示新增/删除/不变 diff，预览阶段不能写入实体、关系或 raw extraction，只有确认应用后才替换章节图谱。
+- 扩展 `tests/api/local-db-server.test.mjs`：先保存一章初始 KG extraction，再向 `/api/kg/chapters/:chapterId/extraction/diff` 提交替换 extraction。
+- 测试验证 diff summary 正确报告实体新增 1、删除 2、不变 2，关系新增 1、删除 1、不变 1，并列出新增“夜枭”、删除“阿梨/青州”、新增“夜枭 -> 林青”、删除“阿梨 -> 青州”。
+- 测试继续验证 diff 调用后图谱实体/关系列表和已保存 raw extraction/model 完全不变；随后 PUT 应用同一 extraction 后，图谱才替换为“林青/白衣客/夜枭”和两条新关系。
+- 已运行 `npm run local-db:test`，结果 2 个测试套件、9 个用例全部通过。
+- `docs/test-case-matrix.md` 已把 `KG-SCAN-005` 标记为 Existing。
+
+2026-07-01 更新：知识图谱复审队列批量操作回归测试落地。
+- 根据 `docs/test-case-matrix.md` 补齐 `KG-REVIEW-002`：复审队列批量 approved/ignored/delete 必须正确改变状态或删除对象，且删除实体/关系后不能留下 KG 坏引用。
+- 扩展 `tests/api/local-db-server.test.mjs`：通过真实本地 API 写入低置信度、描述缺失、单章出现和可疑别名的 KG extraction，生成实体与关系复审队列。
+- 测试验证批量标记 entity approved 与 relation ignored 后，对象仍可访问但从复审队列消失，底层 `review_status` 分别写为 `approved` / `ignored`。
+- 测试继续验证批量删除 relation 后详情返回 404，批量删除 entity 后详情返回 404，并用 `node:sqlite` 检查 entity mention、relation mention 和 relation endpoint 无孤儿引用。
+- 已运行 `npm run local-db:test`，结果 2 个测试套件、8 个用例全部通过。
+- `docs/test-case-matrix.md` 已把 `KG-REVIEW-002` 标记为 Existing。
+
+2026-07-01 更新：知识图谱实体拆分数据一致性回归测试落地。
+- 根据 `docs/test-case-matrix.md` 补齐 `KG-ENTITY-003`：实体拆分后，新旧实体的 aliases、章节提及、first/last seen 和关系证据必须保持一致，且底层 KG 表不能留下孤儿引用。
+- 扩展 `tests/api/local-db-server.test.mjs`：通过真实本地 API 写入两章 KG extraction，让“林青”拥有跨章出现与跨章关系，再把第二章 mention、源别名“青衣少年”和连接“白衣客”的关系拆到新实体。
+- 测试验证源实体只保留第一章且移除被拆别名，新实体只拥有第二章 mention 与新别名，关系端点整体迁移到新实体，关系 evidence 仍覆盖两章。
+- 测试继续用 `node:sqlite` 检查 entity mention、relation mention 和 relation endpoint 无坏引用。
+- 已运行 `npm run local-db:test`，结果 2 个测试套件、7 个用例全部通过。
+- `docs/test-case-matrix.md` 已把 `KG-ENTITY-003` 标记为 Existing。
+
+2026-06-30 更新：知识图谱实体合并数据一致性回归测试落地。
+- 根据 `docs/test-case-matrix.md` 补齐 `KG-ENTITY-002`：实体合并后必须迁移 aliases、章节提及和相关关系，且不能留下孤儿数据。
+- 扩展 `tests/api/local-db-server.test.mjs`：通过真实本地 API 写入两章 KG extraction，再把“少年林青”合并到“林青”。
+- 测试验证合并响应返回目标实体，目标 aliases 包含源实体名和源别名，源实体详情变为 404，目标实体提及覆盖 `c1`/`c2`，目标到“白衣客”的关系保留并带有两章证据。
+- 测试继续用 `node:sqlite` 检查底层 KG 表无坏引用。
+- 已运行 `npm run local-db:test`，结果 2 个测试套件、6 个用例全部通过。
+- `docs/test-case-matrix.md` 已把 `KG-ENTITY-002` 标记为 Existing。
+
+2026-06-30 更新：知识图谱关系端点切换完整性回归测试落地。
+- 根据 `docs/test-case-matrix.md` 补齐 `KG-REL-002`：修改关系 source/target 时必须拒绝自环、拒绝跨书端点，并在变更后与既有关系冲突时合并证据。
+- 扩展 `tests/api/local-db-server.test.mjs`：同一真实本地 API 场景中写入两本书的 KG extraction，验证自环关系更新返回 400，跨书端点返回 400。
+- 新增冲突合并回归：把“林青 -> 白衣客”关系改为“阿梨 -> 青州”且类型与既有关系相同，API 返回既有关系 id，旧关系变为 404，合并后的关系保留两条 evidence。
+- 测试继续用 `node:sqlite` 检查底层表无 entity mention、relation mention 或 relation endpoint 孤儿引用。
+- 已运行 `npm run local-db:test`，结果 2 个测试套件、5 个用例全部通过。
+- `docs/test-case-matrix.md` 已把 `KG-REL-002` 标记为 Existing。
+
+2026-06-30 更新：知识图谱实体删除级联完整性回归测试落地。
+- 根据 `docs/test-case-matrix.md` 补齐 `KG-ENTITY-004`：删除实体后，实体提及、连接关系、关系证据和关系端点都不能留下孤儿引用。
+- 扩展 `tests/api/local-db-server.test.mjs`：通过真实本地 API 写入一章 KG extraction，生成 4 个实体和 2 条关系；删除“林青”实体后，API 只保留无关的“阿梨 -> 青州”关系。
+- 测试进一步用 `node:sqlite` 直接检查底层表：被删实体的 mention 计数为 0，连接该实体的 relation 计数为 0，`kg_entity_mentions`、`kg_relation_mentions`、`kg_relations` 均无坏引用。
+- 已运行 `npm run local-db:test`，结果 2 个测试套件、4 个用例全部通过。
+- `docs/test-case-matrix.md` 已把 `KG-ENTITY-004` 标记为 Existing。
+
+2026-06-30 更新：PC 本地数据库备份/恢复安全回归测试落地。
+- 根据 `docs/test-case-matrix.md` 补齐 `PC-DATA-001`、`PC-DATA-002`、`PC-DATA-003`：本地 SQLite 必须可完整导出，恢复前必须备份当前库，非法 SQLite 上传不能进入待恢复状态。
+- 新增 `tests/api/local-db-server.test.mjs`，通过临时数据目录和随机端口启动真实 `scripts/local-db-server.mjs`，用 HTTP 调用 `/api/database/export` 与 `/api/database/import`。
+- 导出回归会先写入包含书籍、章节和概要的样例 state，再下载 `.sqlite`，用 `node:sqlite` 打开导出文件并校验 `PRAGMA integrity_check`、`books`、`chapters`、`summaries` 数据。
+- 恢复回归使用有效 SQLite 上传，校验响应 `requiresRestart: true`，当前数据库备份文件存在，`novel_reader.restore-pending.sqlite` 已创建且可通过 SQLite integrity check。
+- 非法恢复回归上传非 SQLite 字节，校验返回 400、不创建 pending restore，当前 `/api/state` 仍能读到原书架。
+- 新增 `npm run local-db:test` 脚本；已运行 `npm run local-db:test`，结果 1 个测试套件、3 个用例全部通过；已运行 `npm run build`，TypeScript 与 Vite build 通过。
+- `docs/test-case-matrix.md` 已把 `PC-DATA-001`、`PC-DATA-002`、`PC-DATA-003` 标记为 Existing。
+
+2026-06-30 更新：PC 阅读器多书阅读进度隔离回归落地。
+- 根据 `docs/test-case-matrix.md` 补齐 `PC-READ-001`：PC 本地阅读器在两本书章节 ID 相同的情况下，章节滚动位置必须按书隔离。
+- 新增 `chapterScrollPositionKey()` 与 `readChapterScrollPosition()`，读写统一使用 `bookId:chapterId`；读取时保留旧版单 `chapterId` key 的兼容回退，避免升级后丢失历史阅读位置。
+- 新增 unit 回归：同为 `c1` 的 `book-a` 与 `book-b` 分别恢复 120/240，第三本书可回退旧 key，缺失章节返回 0。
+- 新增 E2E 回归：导入两本章节标题相同的 TXT，分别滚到不同位置，切回两本书后各自恢复独立 scrollTop。
+- 已运行 `npm run test:unit`，结果 1 个测试文件、10 个用例全部通过；已运行 `npm run test:e2e`，结果 3 个 Chromium 用例全部通过；已运行 `npm run build`，TypeScript 与 Vite build 通过。
+- `docs/test-case-matrix.md` 已把 `PC-READ-001` 标记为 Existing。
+
+2026-06-30 更新：Production Pipeline Gateway package verify 状态对齐。
+- 复核 `PIPE-VERIFY-001`：`production-pipeline/test/import.test.mjs` 已有 `verifies Gateway package output against a published Gateway API` 回归，使用本地假 Gateway 校验 verify 命令的 API 契约。
+- 该测试覆盖 `/health`、`/mobile/books`、`/mobile/books/:bookId/package?include=full`、章节顺序、summary 数量、embedding coverage、knowledgeGraph 数量、verify report 和 run.json verify 状态。
+- 本轮已运行 `npm run production-pipeline:test`，结果 4 个测试套件、48 个用例全部通过。
+- `docs/test-case-matrix.md` 已把 `PIPE-VERIFY-001` 标记为 Existing；真实远端发布可见性仍由 `OPS-PUBLISH-001` 保留为独立 Ops 验证项。
+
+2026-06-30 更新：Production Pipeline publish 合并目录回归测试补强。
+- 根据 `docs/test-case-matrix.md` 补齐 `PIPE-PUBLISH-002`：本地 Gateway publish 写入 `books.json` 时必须保留其他书，并替换同 `bookId` 的旧条目。
+- 扩展 production-pipeline job/resume 回归：目标 Gateway data 目录预置 `old-book` 和旧版 `sample-book`；真实本地 publish 后，artifact 与目标目录中的 `books.json` 都只保留一个 `sample-book`，标题更新为新 package 的“样书”，`old-book` 不被覆盖。
+- 同一用例还确认 `books/sample-book/package.json` 被实际写入目标目录，避免只验证 dry-run artifact。
+- 已运行 `node --test --test-name-pattern="runs a job config and resumes|resumes a failed job" production-pipeline/test/import.test.mjs`，2 个相关用例通过。
+- 已运行 `npm run production-pipeline:test`，结果 4 个测试套件、48 个用例全部通过。
+- `docs/test-case-matrix.md` 已把 `PIPE-PUBLISH-002` 标记为 Existing。
+
+2026-06-30 更新：Production Pipeline 失败续跑回归测试落地。
+- 根据 `docs/test-case-matrix.md` 补齐 `PIPE-RESUME-001`：生产流水线阶段失败后，resume 必须跳过已完成阶段，只重试失败阶段。
+- 新增 production-pipeline 回归：`package` 阶段先完成，`publish` 因目标 `gatewayDataDir` 被占用为普通文件而失败；修复目标目录后执行 `resume`，断言输出 `skip: package already completed`、不再次 `completed: package`、`publish` 重试成功并写出 Gateway package。
+- 测试同时校验失败 run 的 `run.json` 状态为 failed、package child run 路径保持不变、resume 后父 run 变为 completed。
+- 已运行 `node --test --test-name-pattern="resumes|skipping completed" production-pipeline/test/import.test.mjs`，2 个 resume 用例通过。
+- 已运行 `npm run production-pipeline:test`，结果 4 个测试套件、48 个用例全部通过。
+- `docs/test-case-matrix.md` 已把 `PIPE-RESUME-001` 标记为 Existing。
+
+2026-06-30 更新：Gateway Android 音频状态按书隔离测试落地。
+- 根据 `docs/test-case-matrix.md` 补齐 `AND-AUDIO-001`：Android 音频目录、缓存数和同步进度必须按当前 `bookId` 隔离，避免不同书同名章节互相串状态。
+- 新增音频缓存存储回归：同为 `chapter-1` 的 `book-a` 与 `book-b` 会分别写入 `bookId:chapterId` 缓存 key，读取音频元数据、章节元数据和已缓存章节数时只返回目标书的数据。
+- 收紧缓存索引读取：空 `filePath` 或结构损坏的记录不会进入 `loadAudioCacheIndexFromStorage()`，避免 UI 把不可播放的残留记录计为已缓存。
+- 已运行 `npm --prefix gateway-android-app run test`，结果 4 个测试文件、24 个用例全部通过；已运行 `npm --prefix gateway-android-app run build`，TypeScript 与 Vite build 通过。
+- `docs/test-case-matrix.md` 已把 `AND-AUDIO-001` 标记为 Existing。
+- 下一步建议继续 Android 更新/连接类测试，或转向 `PIPE-RESUME-001` 补生产流水线失败续跑。
+
+2026-06-30 更新：Gateway Android 按书阅读进度测试状态对齐。
+- 复核 `AND-READ-001`：`gateway-android-app/src/App.audioPlayback.test.ts` 已覆盖旧版单书进度读取、多本书章节/滚动位置隔离、删除单书只清理该书进度。
+- 当前实现使用 `novel-reader-gateway-reading-progress` 的 `schemaVersion: 2` 多书进度表，`openBook()` 会按 `bookId` 读取对应章节和滚动位置，避免多书混读互相覆盖。
+- 已运行 `npm --prefix gateway-android-app run test`，结果 4 个测试文件、22 个用例全部通过。
+- `docs/test-case-matrix.md` 已把 `AND-READ-001` 标记为 Existing。
+- 下一步建议继续 Android P0：`AND-AUDIO-001`，验证音频目录、缓存数和同步进度按书隔离。
+
+2026-06-30 更新：小说 App 下载二维码生成。
+- 生成独立矢量二维码 `docs/novel-app-download-qr.svg`，编码固定下载地址 `https://novel.gwaves.net:8888/downloads/ai_novel_reader.apk`，可用于文档粘贴、打印或手机扫码。
+- 已用 `curl -L -I` 验证下载地址当前返回 `200`，`content-type` 为 `application/vnd.android.package-archive`，并带 `content-disposition: attachment; filename="ai_novel_reader.apk"`。
+
+2026-06-30 更新：Admin 音频覆盖与操作状态回归测试落地。
+- 根据 `docs/test-case-matrix.md` 补齐 `ADMIN-AUDIO-001` 与 `ADMIN-AUDIO-002`：Admin UI 音频页必须正确映射完整、部分缺失、全缺失状态，并完整展示刷新/清理操作成功与失败状态。
+- 新增 Admin UI 音频映射回归：真实 `/admin/audio` 返回 ready/partial/missing 三类 summary 时，音频页显示平均覆盖率、缺音频章节、章节进度、缺失章节列表、大小、声音和下载数。
+- 扩展音频操作回归：刷新成功后行状态变为完整；清理前必须确认，清理成功后行状态变为缺失；后续刷新失败显示 `刷新失败：服务不可用`，按钮恢复可再次操作。
+- 已运行 `npm --prefix gateway/admin-ui run test`，结果 1 个测试文件、17 个用例全部通过。
+- `docs/test-case-matrix.md` 已把 `ADMIN-AUDIO-001`、`ADMIN-AUDIO-002` 标记为 Existing。
+- 下一步建议转向 Android 或生产流水线用例：`AND-READ-001` / `AND-AUDIO-001` 或 `PIPE-RESUME-001`，补齐移动端和生产恢复的 P0 自动化。
+
+2026-06-30 更新：Admin 数据包下载/重新导入回归测试落地。
+- 根据 `docs/test-case-matrix.md` 补齐 `ADMIN-PKG-002`：Admin UI 数据包行需要覆盖下载、重新导入、成功刷新、失败提示和管理员 Token 携带。
+- 新增 `importBookPackage` 管理端 API helper，Admin UI 数据包页新增 package JSON 文件重新导入入口；上传后调用 `PUT /admin/books/:bookId/package`，成功后刷新完整 dashboard 数据并保留行级“重新导入完成”状态，失败时显示 `重新导入失败`。
+- 修正重新导入成功后 package 版本变化导致操作状态丢失的问题：重新导入状态以稳定 `bookId` 作为 key，刷新后的新 package 行仍能显示成功/失败状态。
+- 扩展 Admin UI 回归：验证下载成功/失败状态和管理员 Token；验证重新导入成功后 package 行刷新到新版本；验证无效 JSON 显示 `重新导入失败：JSON 无效`。
+- 已运行 `npm --prefix gateway/admin-ui run test`，结果 1 个测试文件、16 个用例全部通过。
+- `docs/test-case-matrix.md` 已把 `ADMIN-PKG-002` 标记为 Existing。
+- 下一步建议转向 Android 或生产流水线用例：`AND-READ-001` / `AND-AUDIO-001` 或 `PIPE-RESUME-001`，补齐移动端和生产恢复的 P0 自动化。
+
+2026-06-30 更新：Admin 总览真实数据回归测试落地。
+- 根据 `docs/test-case-matrix.md` 补齐 `ADMIN-DASH-001`：Gateway API 可用时，Admin UI 总览必须使用真实 metrics、events、books、devices、packages 和 audio 数据，不混入 mock 总览内容。
+- 扩展 Admin UI 回归：真实 `/admin/metrics` 返回请求/下载趋势后，总览渲染 5 分钟 bucket 的请求、错误、P95、package/audio 下载数据；系统摘要显示真实 uptime/heap/RSS/dataDir；设备摘要显示真实设备数、受信数、禁用数；内容健康来自真实书籍、数据包和音频覆盖；最近事件显示接口事件且不显示 mock 事件。
+- 已运行 `npm --prefix gateway/admin-ui run test`，结果 1 个测试文件、15 个用例全部通过。
+- `docs/test-case-matrix.md` 已把 `ADMIN-DASH-001` 标记为 Existing。
+- 下一步建议转向 Android 或生产流水线用例：`AND-READ-001` / `AND-AUDIO-001` 或 `PIPE-RESUME-001`，补齐移动端和生产恢复的 P0 自动化。
+
+2026-06-30 更新：Gateway metrics/events 可观测性回归测试落地。
+- 根据 `docs/test-case-matrix.md` 补齐 `GW-METRICS-001` 与 `GW-EVENTS-001`：Gateway 必须从真实请求、下载和错误事件生成 `/admin/metrics` 趋势桶与 `/admin/events` 事件列表。
+- 扩展 Gateway API 回归：产生 package 下载、MP3 下载和 404 请求后，`/admin/metrics` 返回 12 个 5 分钟 request/download buckets，最后一个 bucket 统计 package/audio 下载和错误请求；`downloads.topBooks` 同时包含 package/audio 下载计数。
+- 新增空事件回归：新的 Gateway 实例在没有值得记录的请求前，`/admin/events` 返回空数组；结合 Admin UI 既有空事件测试，`ADMIN-DASH-002` 也已具备端到端回归证据。
+- 已运行 `npm --prefix gateway run test`，结果 1 个测试文件、57 个用例全部通过。
+- `docs/test-case-matrix.md` 已把 `GW-METRICS-001`、`GW-EVENTS-001`、`ADMIN-DASH-002` 标记为 Existing。
+- 下一步建议转向 Android 或生产流水线用例：`AND-READ-001` / `AND-AUDIO-001` 或 `PIPE-RESUME-001`，补齐移动端和生产恢复的 P0 自动化。
+
+2026-06-30 更新：Gateway 音频刷新/清理运维回归测试落地。
+- 根据 `docs/test-case-matrix.md` 补齐 `GW-AUDIO-003`：admin 音频刷新/清理接口必须同时反映文件系统变化和 `/admin/audio` 汇总状态。
+- 扩展 Gateway API 回归：`POST /admin/books/:bookId/audio/refresh` 返回缺失章节和音频大小；`DELETE /admin/books/:bookId/audio` 删除 `audio.json` 与 MP3 文件，并返回清理明细；清理后再次 refresh 与 `/admin/audio` 都显示音频章节数为 0、缺失章节为全量章节、覆盖率为 0、总大小为 0。
+- 已运行 `npm --prefix gateway run test`，结果 1 个测试文件、56 个用例全部通过。
+- `docs/test-case-matrix.md` 已把 `GW-AUDIO-003` 标记为 Existing。
+- 下一步建议转向 Android 或生产流水线用例：`AND-READ-001` / `AND-AUDIO-001` 或 `PIPE-RESUME-001`，补齐移动端和生产恢复的 P0 自动化。
+
+2026-06-30 更新：Gateway 生产 token 与 dev fallback 边界回归测试落地。
+- 根据 `docs/test-case-matrix.md` 补齐 `GW-AUTH-002` 与 `GW-AUTH-003`：生产环境必须显式配置 admin/mobile token，开发 token fallback 只能用于非生产环境。
+- 扩展 Gateway 配置回归：`GATEWAY_ENV=production` 时缺 admin token、缺 mobile token、或只给 `GATEWAY_DEV_ACCESS_TOKEN` 都会拒绝启动。
+- 新增生产 scoped-auth 回归：生产环境即使配置了 `GATEWAY_DEV_ACCESS_TOKEN`，admin/mobile 路由也只接受专用 token，dev token 返回 `invalid_token`；非生产环境仍允许 dev token 同时覆盖 admin/mobile scoped auth。
+- 已运行 `npm --prefix gateway run test`，结果 1 个测试文件、56 个用例全部通过。
+- `docs/test-case-matrix.md` 已把 `GW-AUTH-002`、`GW-AUTH-003` 标记为 Existing。
+- 下一步建议转向 Android 或生产流水线用例：`AND-READ-001` / `AND-AUDIO-001` 或 `PIPE-RESUME-001`，补齐移动端和生产恢复的 P0 自动化。
+
+2026-06-30 更新：Admin 删除书籍联动回归测试落地。
+- 根据 `docs/test-case-matrix.md` 继续补齐 `ADMIN-BOOK-002`：管理后台删除整本书必须确认，并且成功后书籍列表、数据包列表和音频列表同步移除。
+- 扩展 Admin UI 回归：删除前先确认数据包页和音频页存在目标书；在书籍详情确认删除后，书籍列表移除目标书并保留其他书；切换到数据包和音频页后目标书行也不存在，摘要变为 0。
+- Gateway 后端已有 `deletes a catalog book together with its package and audio files` 回归，覆盖 DELETE 鉴权、目录清理、catalog 移除和移动端不可见。
+- 已运行 `npm --prefix gateway/admin-ui run test`，结果 1 个测试文件、15 个用例全部通过；已运行 `npm --prefix gateway run test`，结果 1 个测试文件、54 个用例全部通过。
+- `docs/test-case-matrix.md` 已把 `ADMIN-BOOK-002` 标记为 Existing。
+- 下一步建议转向 Android 或生产流水线用例：`AND-READ-001` / `AND-AUDIO-001` 或 `PIPE-RESUME-001`，补齐移动端和生产恢复的 P0 自动化。
+
+2026-06-30 更新：Gateway admin AI 代理安全回归测试落地。
+- 根据 `docs/test-case-matrix.md` 继续补齐 `GW-AI-002`：`/ai/chat` 与 `/ai/embeddings` 属于 admin 上游代理接口，只允许 admin token 调用，并且不能在错误响应中暴露上游 API key。
+- 新增 Gateway API 回归：mobile token 调用 `/ai/chat` 和 `/ai/embeddings` 均返回 `invalid_token`；admin token 触发上游 401 时，Gateway 返回稳定的 `ai_upstream_error` / `embedding_upstream_error`，响应体不包含 `GATEWAY_AI_API_KEY` 或 `GATEWAY_EMBEDDING_API_KEY` 对应密钥。
+- 已运行 `npm --prefix gateway run test`，结果 1 个测试文件、54 个用例全部通过。
+- `docs/test-case-matrix.md` 已把 `GW-AI-002` 标记为 Existing。
+- 下一步建议转向 Android 或生产流水线用例：`AND-READ-001` / `AND-AUDIO-001` 或 `PIPE-RESUME-001`，补齐移动端和生产恢复的 P0 自动化。
+
+2026-06-30 更新：Admin 设备角色修改回归测试落地。
+- 根据 `docs/test-case-matrix.md` 继续补齐 `ADMIN-DEVICE-001`：管理后台修改设备角色时必须有保存中状态、失败回滚、重试入口，并和移动端授权语义保持一致。
+- 新增 Admin UI 回归：设备角色从普通改为禁用时先进入保存中并禁用选择框；第一次 PATCH 失败后列表和详情都回滚到普通；点击“重试保存设备角色”后第二次 PATCH 成功，列表和详情同步显示禁用，并校验请求携带管理员 Token。
+- Gateway 后端已有 `enforces patched device roles on mobile APIs` 回归，覆盖 Admin PATCH 为 trusted 后移动书库可见 trusted/default，PATCH 为 disabled 后移动 API 返回 `device_disabled`。
+- 已运行 `npm --prefix gateway/admin-ui run test`，结果 1 个测试文件、15 个用例全部通过。
+- `docs/test-case-matrix.md` 已把 `ADMIN-DEVICE-001` 标记为 Existing。
+- 下一步建议转向 Android 或生产流水线用例：`AND-READ-001` / `AND-AUDIO-001` 或 `PIPE-RESUME-001`，补齐移动端和生产恢复的 P0 自动化。
+
+2026-06-30 更新：Gateway MP3 下载鉴权回归测试落地。
+- 根据 `docs/test-case-matrix.md` 继续补齐 `GW-AUDIO-002`：受保护 MP3 下载必须走 mobile auth，并受设备角色和书籍可见性约束。
+- 新增 Gateway API 回归：无 token 和 admin token 访问 mobile MP3 下载返回 401；普通设备访问 trusted 书音频返回 `book_not_found`；受信设备可下载 trusted 书 MP3；禁用设备返回 `device_disabled`。
+- 已运行 `npm --prefix gateway run test`，结果 1 个测试文件、53 个用例全部通过。
+- `docs/test-case-matrix.md` 已把 `GW-AUDIO-002` 标记为 Existing。
+- 下一步建议继续补 `ADMIN-AUDIO-001` 或 `ADMIN-AUDIO-002`：收紧音频覆盖/缺失章节 UI 映射和刷新/清理操作状态。
+
+2026-06-30 更新：第二批 Gateway Admin UI 自动化测试落地。
+- 根据 `docs/test-case-matrix.md` 继续补齐不依赖真机的管理后台状态用例：`ADMIN-AUTH-001` 与 `ADMIN-DASH-003`。
+- Admin UI 现在在管理员未授权时显示安全失败状态，不再伪装成 mock/demo 数据；部分后台接口失败时只保留成功接口的真实数据，失败分区保持为空并通过顶部状态明确提示。
+- 修正 `gateway/admin-ui/src/api.ts` 的部分失败回退策略：只有全部接口不可用时才进入 mock 演示数据，未授权和部分失败都不混入 `initial*` 样例数据。
+- 已运行 `npm --prefix gateway/admin-ui run test`，结果 1 个测试文件、14 个用例全部通过。
+- `docs/test-case-matrix.md` 已把 `ADMIN-AUTH-001`、`ADMIN-DASH-003` 标记为 Existing。
+- 下一步建议转向 Android 或生产流水线用例：`AND-READ-001` / `AND-AUDIO-001` 或 `PIPE-RESUME-001`，补齐移动端和生产恢复的 P0 自动化。
+
+2026-06-30 更新：第一批 Gateway API P0 自动化测试开始落地。
+- 根据 `docs/test-case-matrix.md`，优先补齐不依赖真机的安全边界用例：`GW-AUTH-001`、`GW-BOOK-001` 和 `GW-AI-001`。
+- Gateway 现有测试已覆盖 admin/mobile token audience 分离、生产环境必须显式配置 admin/mobile token、dev token 仅开发 fallback、移动书库 default/trusted/hidden/disabled 可见性。
+- 本轮新增 `/ai/search` 与 `/ai/rag-answer` 的设备可见性回归：普通设备访问 trusted 书返回 `book_not_found`，受信设备可搜索并生成 RAG answer，禁用设备返回 `device_disabled`，admin token 调 mobile AI 路由仍被拒绝。
+- `docs/test-case-matrix.md` 已把 `GW-AUTH-001`、`GW-BOOK-001`、`GW-AI-001` 标记为 Existing。
+- 已运行 `npm --prefix gateway run test`，结果 1 个测试文件、52 个用例全部通过。
+- 下一步建议转向 `AND-READ-001`、`AND-AUDIO-001` 与 `PIPE-RESUME-001`：继续扩大 P0/P1 自动化覆盖。
+
+2026-06-30 更新：旧移动端目录已移除。
+- 删除旧 `mobile-app/` 局域网同步客户端目录，以及根 Web 的 `/mobile` 路由组件 `src/MobileApp.tsx` / `src/MobileApp.css`。
+- 根 Web 入口现在只加载桌面阅读器；当前 Android 移动端统一由 `gateway-android-app/` 维护。
+- README、开发文档、Gateway 文档和产品规格已同步说明：旧实现不再保留在工作树中，历史实现通过 Git 记录追溯。
+
 2026-06-30 更新：进入正规化测试与可运维性建设阶段。
 - 快速功能开发阶段基本收束，后续主线调整为“产品功能规格 -> 测试用例矩阵 -> 系统性 Code Review -> 可观测性/运维能力 -> 发布治理”。
 - 新增 `docs/product-spec.md`，把 PC 阅读器、AI 概要、知识图谱、RAG、production-pipeline、Gateway、Admin UI、Gateway Android App 和历史移动端边界整理为正式产品功能说明书。
 - 新增 `docs/quality-ops-roadmap.md`，记录正规化阶段的里程碑、交付物、验收标准和推荐执行顺序。
+- 新增 `docs/test-case-matrix.md`，按 PC 阅读器、AI 概要、知识图谱、RAG、production-pipeline、Gateway API、Admin UI、Gateway Android、运维发布拆出第一版测试用例矩阵，标注风险等级、测试层级、覆盖状态和真机/真实 Gateway 边界。
 - 新增 `docs/development-history-visual.md`，根据 GitHub PR、tag 和 Git 提交历史整理开发进展时间线、主线 PR 演进图和能力版图演进图。
 - README 已增加产品规格、测试与运维规划入口，并补充下一阶段质量建设重点。
-- 下一步优先编写 `docs/test-case-matrix.md`：按功能域拆出正向、失败路径、风险等级、自动化层级、现有覆盖和真机/真实 Gateway 验证边界。
+- 下一步优先从测试矩阵中挑选不依赖真机的 P0/P1 自动化用例落地：Gateway admin/mobile 鉴权分离、设备角色/书籍可见性、mobile RAG 路由鉴权、Admin UI 未授权不回退 mock、部分接口失败状态、Gateway Android 按书阅读进度和音频状态按书隔离。
 
 2026-06-29 更新：Gateway 管理后台与书库可见性大 feature 已开分支设计。
 - 新增分支 `codex/gateway-admin-visibility`，用于集中开发 Gateway 管理后台、设备角色授权、书籍标签/可见范围和移动端设备识别。
@@ -25,7 +545,7 @@
 - Gateway Android 搜索页修正 embedding 失败后的错误展示：Gateway embedding 鉴权失败但本地关键词兜底成功时，不再显示红色底层错误；`Bearer token is invalid.` 会转换为中文 Token 检查提示。
 - Gateway AI RAG 路由鉴权修正：移动端实际使用的 `/ai/search` 和 `/ai/rag-answer` 改为 mobile device auth，并按设备可见书库校验 `bookId`；保留 `/ai/chat` 和 `/ai/embeddings` 为 admin 上游代理接口，避免受信移动设备在生成 RAG 答案时被 admin token 校验误挡。
 - Gateway Android 修正书库到阅读页的选中态：在书库选中一本书后点击底部“阅读”，如果当前还没有加载该书数据包，会自动打开选中的本地书，避免阅读页显示“请选择一本书”。
-- 移动端维护入口已收束到 `gateway-android-app/`：旧 `mobile-app/` 局域网同步客户端进入退役状态，仅保留历史参考；README、开发文档、贡献指南和 Gateway 计划已改为默认指向 Gateway Android。
+- 移动端维护入口已收束到 `gateway-android-app/`：旧 `mobile-app/` 局域网同步客户端目录已删除；README、开发文档、贡献指南和 Gateway 计划默认指向 Gateway Android。
 - 本轮按 TDD 多 Agent 并行推进：Gateway 后端新增 `/admin/packages`、`/admin/audio`、`/admin/requests` 并补测试；admin-ui 的数据包、音频、请求日志页已从占位改为真实表格视图并兼容真实后端字段；Gateway Android 设置/书库页补强设备 ID、Pairing Code、角色/授权、可见范围和禁用态阻断提示。
 - 下一轮开发计划：继续采用测试驱动和多 Agent 并行，目标做到真实验证前的三步闭环。第一步补后台操作闭环，包含 package 下载/重新导入状态、音频清理/刷新状态、书籍/设备操作的保存中/失败回滚/确认提示；第二步补真实安全边界，将 admin 与 mobile 鉴权语义分开，并让 admin-ui 区分未授权、服务不可用和单接口失败，避免误回退 mock；第三步补移动端角色变化体验，明确 default/trusted/disabled 变化后的书库刷新、缓存可读策略和禁用态错误提示。最终真机和真实部署验证由用户执行。
 - 三步开发已按测试驱动完成：Gateway 后端新增后台 package 下载、音频刷新和音频清单清理接口，并引入 `GATEWAY_ADMIN_ACCESS_TOKEN` / `GATEWAY_MOBILE_ACCESS_TOKEN` 与 dev token fallback；admin-ui 增加数据包下载、音频刷新/清理、书籍/设备保存中/失败回滚/重试，以及未授权/不可用/部分失败状态；Gateway Android 增加角色变化提示，禁用后阻断云端操作但保留本地缓存阅读和清理能力。代码层面已通过 Gateway、admin-ui、Gateway Android 测试和构建，剩余真实部署/真机验证由用户执行。
@@ -56,8 +576,8 @@
 - 今日 Gateway Android 真机开发复盘已记录到 `docs/development-experience.md`，重点沉淀 WebView 存储边界、大文件音频同步、阅读进度恢复、异步状态归属和真机验证经验。
 
 2026-06-25 更新：Gateway 移动书库索引 API 已进入最小可用形态。
-- 产品边界补充：后续面向 Gateway 的 Android 移动端应单独新建应用目录/工程，保持现有 `mobile-app/` 不变，避免影响当前已可用的局域网/离线移动端。
-- 新增独立 `gateway-android-app/` 客户端工程骨架，使用 Capacitor-ready React/Vite，不修改旧 `mobile-app/`；第一版支持配置 Gateway 地址、token、设备名，验证会话，拉取书库并读取单书 package。
+- 产品边界补充：当时决定为 Gateway Android 单独新建应用目录/工程，与旧 `mobile-app/` 隔离，避免影响当时已可用的局域网/离线移动端。
+- 新增独立 `gateway-android-app/` 客户端工程骨架，使用 Capacitor-ready React/Vite；第一版支持配置 Gateway 地址、token、设备名，验证会话，拉取书库并读取单书 package。
 - `gateway-android-app/` 已支持将单书 package 缓存到本地，离线/请求失败时优先回退到缓存；可从 package 中识别章节列表，选择章节并阅读正文。
 - `gateway-android-app/` 已接入 Gateway 音频接口：打开书籍时同步 `/mobile/books/:bookId/audio`，当前章节有音频时可通过受保护下载接口加载并播放 MP3。
 - 新增 Gateway Docker 部署材料：`gateway/Dockerfile`、`gateway/docker-compose.yml` 和 `gateway/docs/deployment.md`，优先支持云服务器/VPS 或家里机器公网映射部署。
@@ -341,7 +861,7 @@ SQLite 图谱表
 - 新 `gateway-android-app/` 已显示当前章节音频时长、大小和时间轴状态；播放时会拉取 manifest，并根据当前播放时间在正文中高亮对应片段。
 
 2026-06-26 更新：Gateway 独立 Android 工程已生成。
-- `gateway-android-app/android/` 已通过 Capacitor 生成独立 Android 原生工程，包名为 `com.gwaves.novelreader.gateway`，不会覆盖旧 `mobile-app/`。
+- `gateway-android-app/android/` 已通过 Capacitor 生成独立 Android 原生工程，包名为 `com.gwaves.novelreader.gateway`，不再需要兼容旧 `mobile-app/`。
 - 新增根脚本 `npm run gateway-android:android:build`，用于构建 Gateway Android debug APK。
 - Android Manifest 已显式允许 HTTP cleartext，便于连接自建 Gateway、公网映射或开发期内网地址。
 - APK 输出名已改为带版本号的 `novel_gateway-v<version>-debug.apk`，产物路径为 `gateway-android-app/android/app/build/outputs/apk/debug/novel_gateway-v<version>-debug.apk`。

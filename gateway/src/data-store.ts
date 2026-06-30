@@ -160,6 +160,7 @@ export async function readBookPackageChapterIds(config: GatewayConfig, bookId: s
   try {
     return (await readBookPackageMetadata(config, book)).chapterIds
   } catch (error) {
+    if (isNodeError(error) && error.code === 'ENOENT') return []
     if (error instanceof GatewayHttpError) return []
     throw error
   }

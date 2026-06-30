@@ -253,14 +253,14 @@ async function runDoctor(options) {
   const checks = []
   let job = null
   try {
-    job = await hydrateJobConfig(rawJob)
+    job = await hydrateDoctorJobConfig(rawJob)
     addDoctorCheck(checks, 'job.parse', true, `loaded ${jobPath}`)
   } catch (error) {
     addDoctorCheck(checks, 'job.parse', false, error.message)
   }
   if (job) {
     const mainDbPath = expandPath(options.mainDb || options.mainDbPath || job.mainDbPath || job.source?.mainDbPath || defaultMainDbPath)
-    await inspectJobPreflight({ checks, job, jobPath, mainDbPath })
+    await inspectJobPreflight({ checks, job, rawJob, jobPath, mainDbPath })
   }
   const failed = checks.filter((check) => !check.ok)
   const report = {
@@ -528,10 +528,13 @@ async function writeAudioControlFile(controlFile, control) {
 function buildKgRuntimeControl({ job, scheduler, stageResults, stageOptions = {} }) {
   const kg = job.kg || {}
   const kgOptions = stageOptions.kg || {}
+  const maxConcurrency = kg.maxConcurrency || kg.max_concurrency
+    ? clampInteger(kg.maxConcurrency ?? kg.max_concurrency, scheduler.concurrency, 1, scheduler.concurrency)
+    : scheduler.concurrency
   return {
-    concurrency: computeKgRuntimeConcurrency({ scheduler, stageResults, stageOptions, kgOptions }),
+    concurrency: Math.min(maxConcurrency, computeKgRuntimeConcurrency({ scheduler, stageResults, stageOptions, kgOptions })),
     updatedAt: new Date().toISOString(),
-    ...(kg.maxConcurrency || kg.max_concurrency ? { maxConcurrency: clampInteger(kg.maxConcurrency ?? kg.max_concurrency, scheduler.concurrency, 1, scheduler.concurrency) } : {}),
+    ...(kg.maxConcurrency || kg.max_concurrency ? { maxConcurrency } : {}),
   }
 }
 
@@ -852,6 +855,9 @@ async function runSummary(options) {
       thinkingEnabled: !isFlagEnabled(options.disableThinking),
       timeoutMs,
       maxAttempts,
+      contentLimit: clampInteger(options.contentLimit || options.content_limit, 14_000, 1_000, 20_000),
+      entityLimit: clampInteger(options.entityLimit || options.entity_limit, 20, 1, 50),
+      relationLimit: clampInteger(options.relationLimit || options.relation_limit, 30, 1, 80),
     }
 
     const db = await openMainDbForSummary(mainDbPath)
@@ -994,7 +1000,7 @@ async function runKg(options) {
   try {
     const concurrency = clampInteger(options.concurrency, 3, 1, 16)
     const limit = clampInteger(options.limit, 0, 0, Number.MAX_SAFE_INTEGER)
-    const timeoutMs = clampInteger(options.timeoutMs, 300_000, 1_000, 900_000)
+    const timeoutMs = clampInteger(options.timeoutMs, 600_000, 1_000, 900_000)
     const maxAttempts = clampInteger(options.maxAttempts || options.retries, 3, 1, 10)
     const force = isFlagEnabled(options.force)
     const llmConfig = {
@@ -1530,6 +1536,7 @@ async function runVerify(options) {
     options.gatewayUrl || options.gatewayURL || process.env.GATEWAY_BASE_URL || process.env.GATEWAY_URL || '',
   )
   const gatewayToken = options.gatewayToken || process.env.GATEWAY_DEV_ACCESS_TOKEN || ''
+  const gatewayAdminToken = options.gatewayAdminToken || process.env.GATEWAY_ADMIN_ACCESS_TOKEN || ''
   if (!gatewayUrl) throw new Error('verify requires --gateway-url <url> or GATEWAY_BASE_URL')
   if (!gatewayToken) throw new Error('verify requires --gateway-token <token> or GATEWAY_DEV_ACCESS_TOKEN')
 
@@ -1542,6 +1549,29 @@ async function runVerify(options) {
   const library = await fetchGatewayJson(gatewayUrl, '/mobile/books', gatewayToken)
   const libraryBook = Array.isArray(library.books) ? library.books.find((book) => book?.id === bookId) : null
   checks.push(assertCheck('library.bookListed', Boolean(libraryBook), { bookId }))
+
+  if (gatewayAdminToken) {
+    const [adminBooksResponse, mobileSessionResponse] = await Promise.all([
+      fetchGatewayJson(gatewayUrl, '/admin/books', gatewayAdminToken),
+      fetchGatewayJson(gatewayUrl, '/auth/session', gatewayToken),
+    ])
+    const adminBook = Array.isArray(adminBooksResponse.books)
+      ? adminBooksResponse.books.find((book) => book?.id === bookId)
+      : null
+    const allowedVisibilities = Array.isArray(mobileSessionResponse.auth?.allowedVisibilities)
+      ? mobileSessionResponse.auth.allowedVisibilities
+      : []
+    const expectedMobileVisible = Boolean(adminBook && allowedVisibilities.includes(adminBook.visibility))
+    checks.push(assertCheck('adminBooks.bookListed', Boolean(adminBook), { bookId }))
+    checks.push(assertCheck('mobileSession.allowedVisibilities', allowedVisibilities.length > 0, { allowedVisibilities }))
+    checks.push(assertCheck('library.visibilityConsistent', Boolean(libraryBook) === expectedMobileVisible, {
+      bookId,
+      visibility: adminBook?.visibility,
+      allowedVisibilities,
+      mobileListed: Boolean(libraryBook),
+      expectedMobileVisible,
+    }))
+  }
 
   if (expected.package) {
     const packageResponse = await fetchGatewayJson(
@@ -1614,6 +1644,22 @@ async function runVerify(options) {
       actual: remoteAudioChapters.map((chapter) => chapter.chapterId),
       expected: expectedAudioChapters.map((chapter) => chapter.chapterId),
     }))
+    const remoteAudioByChapter = new Map(remoteAudioChapters.map((chapter) => [chapter.chapterId, chapter]))
+    for (const expectedChapter of expectedAudioChapters) {
+      const remoteChapter = remoteAudioByChapter.get(expectedChapter.chapterId)
+      if (expectedChapter.durationMs !== undefined) {
+        checks.push(assertCheck(`audio.durationMs.${expectedChapter.chapterId}`, remoteChapter?.durationMs === expectedChapter.durationMs, {
+          actual: remoteChapter?.durationMs,
+          expected: expectedChapter.durationMs,
+        }))
+      }
+      if (expectedChapter.sizeBytes !== undefined) {
+        checks.push(assertCheck(`audio.sizeBytes.${expectedChapter.chapterId}`, remoteChapter?.sizeBytes === expectedChapter.sizeBytes, {
+          actual: remoteChapter?.sizeBytes,
+          expected: expectedChapter.sizeBytes,
+        }))
+      }
+    }
     const audioSampleCount = clampInteger(options.audioSampleCount || options.audioSamples, 1, 0, 20)
     for (const chapter of expectedAudioChapters.slice(0, audioSampleCount)) {
       const encodedChapterId = encodeURIComponent(chapter.chapterId)
@@ -1653,11 +1699,60 @@ async function runVerify(options) {
           contentType: download.headers.get('content-type') || '',
           bytes: bytes.byteLength,
         }))
+        if (chapter.sizeBytes !== undefined) {
+          checks.push(assertCheck(`audio.downloadSize.${chapter.chapterId}`, bytes.byteLength === chapter.sizeBytes, {
+            actual: bytes.byteLength,
+            expected: chapter.sizeBytes,
+          }))
+        }
       } catch (error) {
         checks.push(assertCheck(`audio.download.${chapter.chapterId}`, false, {
           error: error instanceof Error ? error.message : String(error),
         }))
       }
+    }
+
+    if (gatewayAdminToken) {
+      const refreshResponse = await fetchGatewayJson(
+        gatewayUrl,
+        `/admin/books/${encodeURIComponent(bookId)}/audio/refresh`,
+        gatewayAdminToken,
+        { method: 'POST' },
+      )
+      const refreshedAudio = refreshResponse.audio || {}
+      const expectedTotalSizeBytes = expectedAudioChapters.reduce((sum, chapter) => sum + (Number(chapter.sizeBytes) || 0), 0)
+      const expectedChapterCount = Array.isArray(expected.package?.chapters) ? expected.package.chapters.length : undefined
+      const expectedMissingChapterCount = expectedChapterCount === undefined
+        ? undefined
+        : Math.max(0, expectedChapterCount - expectedAudioChapters.length)
+      checks.push(assertCheck('adminAudio.refresh.bookId', refreshedAudio.bookId === bookId, {
+        actual: refreshedAudio.bookId,
+        expected: bookId,
+      }))
+      checks.push(assertCheck('adminAudio.refresh.audioChapterCount', refreshedAudio.audioChapterCount === expectedAudioChapters.length, {
+        actual: refreshedAudio.audioChapterCount,
+        expected: expectedAudioChapters.length,
+      }))
+      if (expectedMissingChapterCount !== undefined) {
+        checks.push(assertCheck('adminAudio.refresh.missingChapterCount', refreshedAudio.missingChapterCount === expectedMissingChapterCount, {
+          actual: refreshedAudio.missingChapterCount,
+          expected: expectedMissingChapterCount,
+        }))
+      }
+      checks.push(assertCheck('adminAudio.refresh.totalSizeBytes', refreshedAudio.totalSizeBytes === expectedTotalSizeBytes, {
+        actual: refreshedAudio.totalSizeBytes,
+        expected: expectedTotalSizeBytes,
+      }))
+
+      const adminAudioResponse = await fetchGatewayJson(gatewayUrl, '/admin/audio', gatewayAdminToken)
+      const adminAudio = Array.isArray(adminAudioResponse.audio)
+        ? adminAudioResponse.audio.find((item) => item?.bookId === bookId)
+        : null
+      checks.push(assertCheck('adminAudio.list.bookListed', Boolean(adminAudio), { bookId }))
+      checks.push(assertCheck('adminAudio.list.audioChapterCount', adminAudio?.audioChapterCount === expectedAudioChapters.length, {
+        actual: adminAudio?.audioChapterCount,
+        expected: expectedAudioChapters.length,
+      }))
     }
   }
 
@@ -2902,13 +2997,14 @@ function resolveRunArtifact(runDir, artifactPath) {
   return resolve(runDir, artifactPath)
 }
 
-async function fetchGatewayJson(gatewayUrl, path, token = '') {
-  const response = await fetchGatewayResponse(gatewayUrl, path, token)
+async function fetchGatewayJson(gatewayUrl, path, token = '', options = {}) {
+  const response = await fetchGatewayResponse(gatewayUrl, path, token, options)
   return response.json()
 }
 
-async function fetchGatewayResponse(gatewayUrl, path, token = '') {
+async function fetchGatewayResponse(gatewayUrl, path, token = '', options = {}) {
   const response = await fetch(`${gatewayUrl}${path}`, {
+    method: options.method || 'GET',
     headers: token ? { authorization: `Bearer ${token}` } : {},
     signal: AbortSignal.timeout(30_000),
   })
@@ -2935,11 +3031,13 @@ function sameJson(actual, expected) {
   return JSON.stringify(actual ?? null) === JSON.stringify(expected ?? null)
 }
 
-async function inspectJobPreflight({ checks, job, jobPath, mainDbPath }) {
-  addDoctorCheck(checks, 'job.bookId', Boolean(job.bookId), job.bookId || 'missing')
-  addDoctorCheck(checks, 'job.stages', job.stages.length > 0, job.stages.join(', ') || 'missing')
-  addDoctorCheck(checks, 'mainDb.path', Boolean(mainDbPath), mainDbPath)
+async function inspectJobPreflight({ checks, job, rawJob, jobPath, mainDbPath }) {
   const sourceFile = job.source?.file || job.source?.path || job.file
+  const canDeriveBookId = job.stages.includes('import') && Boolean(sourceFile)
+  addDoctorCheck(checks, 'job.bookId', Boolean(job.bookId || canDeriveBookId), job.bookId || (canDeriveBookId ? `derived from ${sourceFile}` : 'missing'))
+  const explicitStages = Array.isArray(rawJob?.stages) ? normalizeStageList(rawJob.stages) : []
+  addDoctorCheck(checks, 'job.stages', explicitStages.length > 0, explicitStages.join(', ') || 'missing')
+  addDoctorCheck(checks, 'mainDb.path', Boolean(mainDbPath), mainDbPath)
   if (job.stages.includes('import')) {
     addDoctorCheck(checks, 'import.sourceFile', Boolean(sourceFile), sourceFile || 'missing job.source.file')
     if (sourceFile) addDoctorCheck(checks, 'import.sourceFile.exists', existsSync(expandPath(sourceFile)), expandPath(sourceFile))
@@ -3042,6 +3140,18 @@ async function hydrateJobConfig(rawJob) {
   }
   if (job.bookId) return job
   throw new Error('job requires bookId unless an import stage with job.source.file is present.')
+}
+
+async function hydrateDoctorJobConfig(rawJob) {
+  const job = normalizeJobConfig(rawJob)
+  const sourceFile = job.source?.file || job.source?.path || job.file
+  if (job.stages.includes('import') && sourceFile && existsSync(expandPath(sourceFile))) {
+    return {
+      ...job,
+      bookId: job.bookId || await deriveFileBookId(job),
+    }
+  }
+  return job
 }
 
 async function deriveFileBookId(job) {
@@ -3255,6 +3365,9 @@ function buildStageArgs(stage, job, mainDbPath, runInfo, stageOptions = {}) {
     if (kg.timeoutMs) args.push('--timeout-ms', String(kg.timeoutMs))
     if (kg.maxAttempts || kg.retries) args.push('--max-attempts', String(kg.maxAttempts || kg.retries))
     if (kg.limit) args.push('--limit', String(kg.limit))
+    if (kg.contentLimit || kg.content_limit) args.push('--content-limit', String(kg.contentLimit || kg.content_limit))
+    if (kg.entityLimit || kg.entity_limit) args.push('--entity-limit', String(kg.entityLimit || kg.entity_limit))
+    if (kg.relationLimit || kg.relation_limit) args.push('--relation-limit', String(kg.relationLimit || kg.relation_limit))
     if (isFlagEnabled(kg.force)) args.push('--force')
     if (kg.controlFile || kg.control_file) args.push('--control-file', kg.controlFile || kg.control_file)
     if (kg.thinkingEnabled === false || isFlagEnabled(kg.disableThinking)) args.push('--disable-thinking')
@@ -3342,6 +3455,8 @@ function buildVerifyArgs(job, childRunJson) {
   const args = ['verify', '--run', childRunJson]
   if (verify.gatewayUrl || verify.url) args.push('--gateway-url', verify.gatewayUrl || verify.url)
   if (verify.gatewayToken || verify.token) args.push('--gateway-token', verify.gatewayToken || verify.token)
+  if (verify.gatewayAdminToken || verify.adminToken) args.push('--gateway-admin-token', verify.gatewayAdminToken || verify.adminToken)
+  if (verify.audioSamples) args.push('--audio-samples', String(verify.audioSamples))
   return args
 }
 
@@ -3669,7 +3784,7 @@ async function generateChapterSummary(chapter, config) {
 }
 
 async function generateChapterKnowledgeGraph(chapter, config) {
-  const prompt = buildKgPrompt(chapter, config.thinkingEnabled)
+  const prompt = buildKgPrompt(chapter, config.thinkingEnabled, config)
   const raw = await retryTransientRequest(async () => {
     if (String(config.provider || '').toLowerCase() === 'ollama') {
       return callOllamaGenerate(prompt, config)
@@ -3685,10 +3800,13 @@ async function generateChapterKnowledgeGraph(chapter, config) {
   return parseKgResponse(raw)
 }
 
-function buildKgPrompt(chapter, thinkingEnabled) {
+function buildKgPrompt(chapter, thinkingEnabled, options = {}) {
   const thinkingInstruction = thinkingEnabled
     ? '请先用 /think 判断核心人物、地点、势力和关系，但最终输出必须是 JSON，不要输出任何其他内容。'
     : '请直接输出 JSON，不要输出任何推理过程。'
+  const entityLimit = clampInteger(options.entityLimit, 20, 1, 50)
+  const relationLimit = clampInteger(options.relationLimit, 30, 1, 80)
+  const contentLimit = clampInteger(options.contentLimit, 14_000, 1_000, 20_000)
 
   return `${thinkingInstruction}
 
@@ -3704,13 +3822,13 @@ JSON 字段：
   - source/target 必须能对应 entities 中的实体，若关系端点未列入 entities，也请补入 entities。
   - type 使用短英文或拼音式关系名，例如 sworn_brother, located_in, member_of, enemy_of, helps, owns。
 
-最多输出 20 个实体、30 条关系。只返回 JSON，不要 markdown 代码块，不要解释。
+最多输出 ${entityLimit} 个实体、${relationLimit} 条关系。只返回 JSON，不要 markdown 代码块，不要解释。
 
 章节标题：${chapter.title}
 章节字数：${chapter.wordCount ?? countWords(chapter.content)}
 
 正文：
-${String(chapter.content || '').slice(0, 14000)}`
+${String(chapter.content || '').slice(0, contentLimit)}`
 }
 
 function buildSummaryPrompt(chapter, thinkingEnabled) {
@@ -4358,6 +4476,7 @@ Options:
   --gateway-audio-dir  Local Gateway audio directory for publish.
   --gateway-url        Gateway base URL for verify.
   --gateway-token      Gateway bearer token for verify.
+  --gateway-admin-token Gateway admin bearer token for optional verify refresh checks.
   --audio-samples      Number of audio chapters whose manifest/download should be sampled in verify. Default: 1.
   --concurrency        Summary/KG/embedding request concurrency.
   --mode               Embedding mode: all, chunks, or summaries. Default: all.

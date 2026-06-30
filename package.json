@@ -28,6 +28,8 @@
     "gateway:start": "npm --prefix gateway run start",
     "gateway:test": "npm --prefix gateway run test",
     "gateway:security-smoke": "npm --prefix gateway run security-smoke",
+    "gateway:ops-metrics-smoke": "npm --prefix gateway run ops-metrics-smoke",
+    "gateway:rollback-release": "node gateway/scripts/rollback-release.mjs",
     "gateway:admin-ui:build": "npm --prefix gateway run admin-ui:build",
     "gateway:admin-ui:test": "npm --prefix gateway run admin-ui:test",
     "gateway:publish-audio": "node gateway/scripts/publish-audio.mjs",
@@ -51,6 +53,7 @@
     "preview": "vite preview",
     "test": "npm run test:unit",
     "test:unit": "vitest run",
+    "local-db:test": "node --test tests/api/*.test.mjs",
     "test:e2e": "playwright test",
     "test:smoke": "npm run test:unit && npm run test:e2e"
   },

@@ -7,27 +7,11 @@ const apiPort = Number(process.env.NOVEL_READER_API_PORT || 5174)
 
 // https://vite.dev/config/
 export default defineConfig({
-  plugins: [
-    react(),
-    {
-      name: 'spa-fallback-for-mobile',
-      configureServer(server) {
-        server.middlewares.use((req, _res, next) => {
-          if (req.url?.startsWith('/mobile')) {
-            req.url = '/'
-          }
-          next()
-        })
-      },
-    },
-  ],
+  plugins: [react()],
   server: {
     host,
     port,
     strictPort: true,
-    watch: {
-      ignored: ['**/mobile-app/android/**', '**/mobile-app/dist/**'],
-    },
     proxy: {
       '/api': `http://127.0.0.1:${apiPort}`,
     },

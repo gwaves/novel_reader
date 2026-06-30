@@ -1,4 +1,4 @@
-import { render, screen, within } from '@testing-library/react'
+import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, vi } from 'vitest'
 import App from './App'
@@ -108,6 +108,23 @@ describe('Gateway 管理后台 UI', () => {
             rssBytes: 96 * 1024 * 1024,
             dataDirBytes: 342 * 1024 * 1024,
           },
+          trends: {
+            requests: [
+              {
+                startAt: '2026-06-29T12:25:00.000Z',
+                requestCount: 7,
+                errorCount: 1,
+                p95Ms: 321,
+              },
+            ],
+            downloads: [
+              {
+                startAt: '2026-06-29T12:25:00.000Z',
+                packageDownloads: 2,
+                audioDownloads: 9,
+              },
+            ],
+          },
         })
       }
       if (url === '/admin/events') {
@@ -192,8 +209,11 @@ describe('Gateway 管理后台 UI', () => {
     expect(screen.getByText('12.5%')).toBeInTheDocument()
     expect(screen.getByText('20:34')).toBeInTheDocument()
     expect(screen.getByText('接口事件')).toBeInTheDocument()
+    expect(screen.queryByText('导入《烬鳞纪》数据包成功')).not.toBeInTheDocument()
     expect(screen.getByText('运行 / 内存 / 数据目录').closest('div')).toHaveTextContent('运行 1h 0m · heap 64.0 MB · RSS 96.0 MB · 数据目录 342.0 MB')
     expect(screen.getByText('在线设备').closest('div')).toHaveTextContent('1 台 · 受信 1 台 · 禁用 0 台')
+    expect(document.querySelector('[title="20:25 请求 7 / 错误 1 / P95 321ms"]')).not.toBeNull()
+    expect(document.querySelector('[title="20:25 package 2 / audio 9"]')).not.toBeNull()
     const healthPanel = screen.getByRole('heading', { name: '内容健康' }).closest('section')!
     expect(within(healthPanel).getByText('书籍').closest('div')).toHaveTextContent('1 本')
     expect(within(healthPanel).getByText('受限').closest('div')).toHaveTextContent('1 本')
@@ -211,7 +231,9 @@ describe('Gateway 管理后台 UI', () => {
     await user.click(screen.getByRole('button', { name: '数据包' }))
     expect(screen.getByRole('row', { name: /接口书籍 2026-06-29 20:10 可发布 12\.5 MB/ })).toBeInTheDocument()
     expect(screen.getByText('S 80% · KG 70% · E 60%')).toBeInTheDocument()
-    expect(screen.getByText('S - · KG - · E -')).toBeInTheDocument()
+    const legacyPackageRow = screen.getByRole('row', { name: /旧数据包/ })
+    expect(within(legacyPackageRow).getByText('S - · KG - · E -')).toBeInTheDocument()
+    expect(within(legacyPackageRow).getByText('无')).toBeInTheDocument()
 
     await user.click(screen.getByRole('button', { name: '音频' }))
     expect(screen.getByRole('row', { name: /接口书籍 部分缺失 60% 6\/10/ })).toBeInTheDocument()
@@ -292,7 +314,8 @@ describe('Gateway 管理后台 UI', () => {
     await user.click(screen.getByRole('button', { name: '书籍' }))
     expect(screen.getByRole('row', { name: /部分接口书籍 接口作者 default/ })).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: '数据包' }))
-    expect(screen.getByRole('row', { name: /烬鳞纪 2026\.06\.29-1208 可发布/ })).toBeInTheDocument()
+    expect(screen.getByRole('region', { name: '数据包' })).toHaveTextContent('0 个')
+    expect(screen.queryByRole('row', { name: /烬鳞纪 2026\.06\.29-1208 可发布/ })).not.toBeInTheDocument()
   })
 
   it('书籍列表展示可见范围和标签，并在详情抽屉同步编辑状态', async () => {
@@ -370,11 +393,168 @@ describe('Gateway 管理后台 UI', () => {
     expect(authHeaders).toContain('/admin/books/night-archive/package/download:Bearer download-token')
   })
 
+  it('数据包重新导入成功后刷新行数据，无效 JSON 时显示失败状态', async () => {
+    window.localStorage.setItem(adminTokenStorageKey, 'package-import-token')
+    const requests: Array<{ url: string; method: string; authorization: string; body?: string }> = []
+    let packageVersion = '2026-06-29T12:00:00.000Z'
+    vi.spyOn(window, 'fetch').mockImplementation(async (input, init) => {
+      const url = String(input)
+      const authorization = init?.headers instanceof Headers ? init.headers.get('authorization') ?? '' : ''
+      requests.push({
+        url,
+        method: init?.method ?? 'GET',
+        authorization,
+        body: typeof init?.body === 'string' ? init.body : undefined,
+      })
+      if (url === '/admin/books') {
+        return jsonResponse({
+          books: [
+            {
+              id: 'import-book',
+              title: '导入书',
+              author: '后台',
+              chapterCount: 2,
+              updatedAt: packageVersion,
+              visibility: 'default',
+            },
+          ],
+        })
+      }
+      if (url === '/admin/packages') {
+        return jsonResponse({
+          packages: [
+            {
+              bookId: 'import-book',
+              title: '导入书',
+              importStatus: 'imported',
+              updatedAt: packageVersion,
+              importedAt: packageVersion,
+              sizeBytes: packageVersion.includes('13:00') ? 4096 : 2048,
+              chapterCount: 2,
+              packageChapterCount: 2,
+            },
+          ],
+        })
+      }
+      if (url === '/admin/books/import-book/package' && init?.method === 'PUT') {
+        packageVersion = '2026-06-29T13:00:00.000Z'
+        return jsonResponse({ book: { id: 'import-book' } })
+      }
+      if (url === '/admin/devices') return jsonResponse({ devices: [] })
+      if (url === '/admin/metrics') return jsonResponse({ requests: {}, downloads: {}, trends: { requests: [], downloads: [] } })
+      if (url === '/admin/events') return jsonResponse({ events: [] })
+      if (url === '/admin/audio') return jsonResponse({ audio: [] })
+      if (url === '/admin/requests') return jsonResponse({ requests: [] })
+      throw new TypeError(`unexpected request ${url}`)
+    })
+
+    const user = userEvent.setup()
+    render(<App />)
+    await screen.findByText(/已连接 Gateway 管理 API/)
+
+    await user.click(screen.getByRole('button', { name: '数据包' }))
+    expect(screen.getByRole('row', { name: /导入书 2026-06-29 20:00 可发布/ })).toBeInTheDocument()
+
+    await user.upload(
+      screen.getByLabelText('重新导入 导入书 package'),
+      new File([
+        JSON.stringify({
+          schemaVersion: 1,
+          book: { id: 'import-book', title: '导入书', chapterCount: 2, updatedAt: '2026-06-29T13:00:00.000Z' },
+          chapters: [{ id: 'chapter-1' }, { id: 'chapter-2' }],
+        }),
+      ], 'import-book-package.json', { type: 'application/json' }),
+    )
+
+    expect(await screen.findByText('重新导入完成')).toBeInTheDocument()
+    expect(screen.getByRole('row', { name: /导入书 2026-06-29 21:00 可发布/ })).toBeInTheDocument()
+    expect(requests).toContainEqual(expect.objectContaining({
+      url: '/admin/books/import-book/package',
+      method: 'PUT',
+      authorization: 'Bearer package-import-token',
+    }))
+
+    await user.upload(
+      screen.getByLabelText('重新导入 导入书 package'),
+      new File(['not json'], 'broken-package.json', { type: 'application/json' }),
+    )
+
+    expect(await screen.findByText('重新导入失败：JSON 无效')).toBeInTheDocument()
+  })
+
+  it('音频页按真实 audio summary 显示完整、部分缺失和缺失状态', async () => {
+    vi.spyOn(window, 'fetch').mockImplementation(async (input) => {
+      const url = String(input)
+      if (url === '/admin/audio') {
+        return jsonResponse({
+          audio: [
+            {
+              bookId: 'ready-book',
+              title: '完整音频书',
+              status: 'ready',
+              chapterCount: 3,
+              audioChapterCount: 3,
+              coverage: 1,
+              missingChapterIds: [],
+              totalDuration: '03:00:00',
+              totalSizeBytes: 3145728,
+              updatedAt: '2026-06-29T12:00:00.000Z',
+              voice: '茉莉',
+              downloads24h: 5,
+            },
+            {
+              bookId: 'partial-book',
+              title: '部分音频书',
+              chapterCount: 4,
+              audioChapterCount: 2,
+              coverage: 0.5,
+              missingChapterIds: ['chapter-3', 'chapter-4'],
+              totalSizeBytes: 2097152,
+              updatedAt: '2026-06-29T11:00:00.000Z',
+              voice: '冰糖',
+              downloads24h: 7,
+            },
+            {
+              bookId: 'missing-book',
+              title: '缺失音频书',
+              chapterCount: 2,
+              audioChapterCount: 0,
+              missingChapterIds: ['chapter-1', 'chapter-2'],
+              totalSizeBytes: 0,
+              voice: '默认',
+            },
+          ],
+        })
+      }
+      if (url === '/admin/books') return jsonResponse({ books: [] })
+      if (url === '/admin/packages') return jsonResponse({ packages: [] })
+      if (url === '/admin/devices') return jsonResponse({ devices: [] })
+      if (url === '/admin/metrics') return jsonResponse({ requests: {}, downloads: {}, trends: { requests: [], downloads: [] } })
+      if (url === '/admin/events') return jsonResponse({ events: [] })
+      if (url === '/admin/requests') return jsonResponse({ requests: [] })
+      throw new TypeError(`unexpected request ${url}`)
+    })
+
+    const user = userEvent.setup()
+    render(<App />)
+    await screen.findByText(/已连接 Gateway 管理 API/)
+
+    await user.click(screen.getByRole('button', { name: '音频' }))
+    expect(screen.getByRole('region', { name: '音频' })).toHaveTextContent('50%')
+    expect(screen.getByRole('region', { name: '音频' })).toHaveTextContent('4 章')
+    expect(screen.getByRole('row', { name: /完整音频书 完整 100% 3\/3 无 03:00:00 3\.0 MB 茉莉/ })).toBeInTheDocument()
+    expect(screen.getByRole('row', { name: /部分音频书 部分缺失 50% 2\/4 chapter-3、chapter-4 .*冰糖/ })).toBeInTheDocument()
+    expect(screen.getByRole('row', { name: /缺失音频书 缺失 0% 0\/2 chapter-1、chapter-2/ })).toBeInTheDocument()
+  })
+
   it('音频刷新和清理操作更新当前行状态，清理前需要确认', async () => {
     const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
+    let jinlinRefreshAttempts = 0
     vi.spyOn(window, 'fetch').mockImplementation(async (input, init) => {
       const url = String(input)
       if (url === '/admin/books/jinlin/audio/refresh' && init?.method === 'POST') {
+        jinlinRefreshAttempts += 1
+        if (jinlinRefreshAttempts === 2) return jsonResponse({ error: 'failed' }, false, 503)
         return jsonResponse({
           audio: {
             id: 'audio-jinlin',
@@ -428,9 +608,13 @@ describe('Gateway 管理后台 UI', () => {
     expect(confirmSpy).toHaveBeenCalledWith('确认清理《烬鳞纪》的音频文件？')
     expect(await screen.findByRole('row', { name: /烬鳞纪 缺失 0% 0\/186/ })).toBeInTheDocument()
     expect(screen.getByText('已清理音频')).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: '刷新 烬鳞纪 音频状态' }))
+    expect(await screen.findByText('刷新失败：服务不可用')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: '刷新 烬鳞纪 音频状态' })).not.toBeDisabled()
   })
 
-  it('书籍详情支持删除整本书并同步移除列表行', async () => {
+  it('书籍详情支持删除整本书并同步移除书籍、数据包和音频行', async () => {
     window.localStorage.setItem(adminTokenStorageKey, 'delete-token')
     const confirmSpy = vi.spyOn(window, 'confirm').mockReturnValue(true)
     const authHeaders: string[] = []
@@ -515,6 +699,10 @@ describe('Gateway 管理后台 UI', () => {
     render(<App />)
     await screen.findByText(/实时/)
 
+    await user.click(screen.getByRole('button', { name: '数据包' }))
+    expect(screen.getByRole('row', { name: /待删除书 .*可发布/ })).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: '音频' }))
+    expect(screen.getByRole('row', { name: /待删除书 部分缺失 50% 1\/2/ })).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: '书籍' }))
     await user.click(screen.getByRole('row', { name: /待删除书/ }))
     await user.click(screen.getByRole('button', { name: '删除 待删除书' }))
@@ -523,6 +711,12 @@ describe('Gateway 管理后台 UI', () => {
     expect(await screen.findByText(/已删除书籍/)).toBeInTheDocument()
     expect(screen.queryByRole('row', { name: /待删除书/ })).not.toBeInTheDocument()
     expect(screen.getByRole('row', { name: /保留书/ })).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: '数据包' }))
+    expect(screen.queryByRole('row', { name: /待删除书/ })).not.toBeInTheDocument()
+    expect(screen.getByRole('region', { name: '数据包' })).toHaveTextContent('0 个')
+    await user.click(screen.getByRole('button', { name: '音频' }))
+    expect(screen.queryByRole('row', { name: /待删除书/ })).not.toBeInTheDocument()
+    expect(screen.getByRole('region', { name: '音频' })).toHaveTextContent('0%')
     expect(authHeaders).toContain('/admin/books/delete-book:DELETE:Bearer delete-token')
   })
 
@@ -554,6 +748,61 @@ describe('Gateway 管理后台 UI', () => {
     await user.click(screen.getByRole('button', { name: '重试保存可见范围' }))
     expect(await screen.findByText('保存成功')).toBeInTheDocument()
     expect(within(row).getByText('hidden')).toBeInTheDocument()
+  })
+
+  it('设备角色保存失败时回滚，重试成功后同步列表和详情', async () => {
+    window.localStorage.setItem(adminTokenStorageKey, 'device-retry-token')
+    const roleRequests: Array<{ body: string; authorization: string }> = []
+    let roleAttempts = 0
+    let rejectFirstRoleSave: (() => void) | undefined
+    vi.spyOn(window, 'fetch').mockImplementation(async (input, init) => {
+      const url = String(input)
+      if (url === '/admin/devices/device-living-room-pad' && init?.method === 'PATCH') {
+        roleAttempts += 1
+        const authorization = init.headers instanceof Headers ? init.headers.get('authorization') ?? '' : ''
+        roleRequests.push({
+          body: String(init.body),
+          authorization,
+        })
+        if (roleAttempts === 1) {
+          return new Promise<Response>((resolve) => {
+            rejectFirstRoleSave = () => resolve(jsonResponse({ error: 'failed' }, false, 503))
+          })
+        }
+        return jsonResponse({})
+      }
+      throw new TypeError('api offline')
+    })
+
+    const user = userEvent.setup()
+    render(<App />)
+    await screen.findByText(/API 不可用，正在显示 mock 数据/)
+
+    await user.click(screen.getByRole('button', { name: '设备' }))
+    const row = screen.getByRole('row', { name: /客厅小米平板 428193 普通 192\.168\.88\.23/ })
+    await user.click(row)
+
+    await user.selectOptions(screen.getByLabelText('设备角色'), 'disabled')
+    await waitFor(() => expect(screen.getByLabelText('设备角色')).toBeDisabled())
+    rejectFirstRoleSave?.()
+    expect(await screen.findByText('保存失败，已回滚')).toBeInTheDocument()
+    expect(within(row).getByText('普通')).toBeInTheDocument()
+    expect(screen.getByText('当前角色：普通')).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: '重试保存设备角色' }))
+    expect(await screen.findByText('保存成功')).toBeInTheDocument()
+    expect(within(row).getByText('禁用')).toBeInTheDocument()
+    expect(screen.getByText('当前角色：禁用')).toBeInTheDocument()
+    expect(roleRequests).toEqual([
+      {
+        body: JSON.stringify({ role: 'disabled' }),
+        authorization: 'Bearer device-retry-token',
+      },
+      {
+        body: JSON.stringify({ role: 'disabled' }),
+        authorization: 'Bearer device-retry-token',
+      },
+    ])
   })
 
   it('在设置页保存管理员 Token，并用它刷新后台数据', async () => {

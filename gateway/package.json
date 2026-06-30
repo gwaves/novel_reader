@@ -12,6 +12,8 @@
     "build": "tsc -p tsconfig.json",
     "start": "node dist/server.js",
     "publish-android-apk": "node scripts/publish-android-apk.mjs",
+    "ops-metrics-smoke": "node scripts/ops-metrics-smoke.mjs",
+    "rollback-release": "node scripts/rollback-release.mjs",
     "security-smoke": "bash scripts/security-smoke.sh",
     "test": "vitest run",
     "typecheck": "tsc -p tsconfig.json --noEmit"

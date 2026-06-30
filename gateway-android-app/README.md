@@ -1,6 +1,6 @@
 # Novel Gateway Android App
 
-这是面向 Gateway 云端服务的当前 Android 客户端工程。后续 Gateway 移动端能力都应优先在本目录开发；旧 `mobile-app/` 局域网同步客户端已退役，仅作为历史实现保留。
+这是面向 Gateway 云端服务的当前 Android 客户端工程。后续 Gateway 移动端能力都应优先在本目录开发；旧 `mobile-app/` 局域网同步客户端目录已删除，历史实现可从 Git 记录查阅。
 
 ## 当前能力
 

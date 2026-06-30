@@ -1,12 +1,20 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import {
   buildAudioChapterStatusRows,
+  gatewayGenerateRagAnswer,
   gatewayUserFacingError,
+  listCachedAudioChapterIdsFromStorage,
+  loadAudioCacheIndexFromStorage,
   loadLatestReadingProgressFromStorage,
   loadReadingProgressFromStorage,
   ragFallbackStatus,
+  readCachedAudioChapterFromStorage,
+  readCachedAudioFromStorage,
   removeReadingProgressFromStorage,
   resolveCurrentAudio,
+  scrollElementStartToViewportCenter,
+  searchGatewayRag,
+  writeCachedAudioToStorage,
   saveReadingProgressToStorage,
   type AudioChapter,
 } from './App'
@@ -17,6 +25,13 @@ const cachedChapter: AudioChapter = {
   fileName: 'chapter-46.mp3',
   sizeBytes: 1024,
   updatedAt: '2026-06-30T00:00:00.000Z',
+}
+
+const gatewaySettings = {
+  baseUrl: 'https://gateway.example/',
+  token: 'mobile-token',
+  deviceId: 'device-1',
+  deviceName: 'Pixel 9',
 }
 
 describe('reader audio playback availability', () => {
@@ -65,7 +80,215 @@ describe('reader audio playback availability', () => {
   })
 })
 
+describe('audio cache storage', () => {
+  it('keeps cached MP3 metadata separated by book id even when chapter ids match', () => {
+    const storage = createMemoryStorage()
+
+    writeCachedAudioToStorage(
+      storage,
+      'book-a',
+      { chapterId: 'chapter-1', fileName: 'book-a-chapter-1.mp3', sizeBytes: 1024 },
+      { kind: 'file', filePath: '/audio/book-a/chapter-1.mp3', sizeBytes: 1024 },
+    )
+    writeCachedAudioToStorage(
+      storage,
+      'book-b',
+      { chapterId: 'chapter-1', fileName: 'book-b-chapter-1.mp3', sizeBytes: 2048 },
+      { kind: 'file', filePath: '/audio/book-b/chapter-1.mp3', sizeBytes: 2048 },
+    )
+
+    expect(readCachedAudioFromStorage(storage, 'book-a', 'chapter-1')).toEqual(
+      expect.objectContaining({ filePath: '/audio/book-a/chapter-1.mp3', sizeBytes: 1024 }),
+    )
+    expect(readCachedAudioFromStorage(storage, 'book-b', 'chapter-1')).toEqual(
+      expect.objectContaining({ filePath: '/audio/book-b/chapter-1.mp3', sizeBytes: 2048 }),
+    )
+    expect(readCachedAudioChapterFromStorage(storage, 'book-a', 'chapter-1')).toEqual(
+      expect.objectContaining({ fileName: 'book-a-chapter-1.mp3' }),
+    )
+    expect(readCachedAudioChapterFromStorage(storage, 'book-b', 'chapter-1')).toEqual(
+      expect.objectContaining({ fileName: 'book-b-chapter-1.mp3' }),
+    )
+    expect(listCachedAudioChapterIdsFromStorage(storage, 'book-a')).toEqual(['chapter-1'])
+    expect(listCachedAudioChapterIdsFromStorage(storage, 'book-b')).toEqual(['chapter-1'])
+  })
+
+  it('ignores broken cache records instead of leaking them into visible counts', () => {
+    const storage = createMemoryStorage({
+      'novel-reader-gateway-audio-cache-index': JSON.stringify({
+        'book-a:chapter-1': {
+          bookId: 'book-a',
+          chapterId: 'chapter-1',
+          audioChapter: { chapterId: 'chapter-1', fileName: 'chapter-1.mp3' },
+          filePath: '/audio/book-a/chapter-1.mp3',
+          cachedAt: '2026-06-30T01:00:00.000Z',
+        },
+        'book-a:chapter-2': {
+          bookId: 'book-a',
+          chapterId: 'chapter-2',
+          audioChapter: { chapterId: 'chapter-2' },
+          filePath: '/audio/book-a/chapter-2.mp3',
+          cachedAt: '2026-06-30T01:00:00.000Z',
+        },
+        'book-b:chapter-1': {
+          bookId: 'book-b',
+          chapterId: 'chapter-1',
+          audioChapter: { chapterId: 'chapter-1', fileName: 'chapter-1.mp3' },
+          filePath: '',
+          cachedAt: '2026-06-30T01:00:00.000Z',
+        },
+      }),
+    })
+
+    expect(Object.keys(loadAudioCacheIndexFromStorage(storage))).toEqual(['book-a:chapter-1'])
+    expect(listCachedAudioChapterIdsFromStorage(storage, 'book-a')).toEqual(['chapter-1'])
+    expect(listCachedAudioChapterIdsFromStorage(storage, 'book-b')).toEqual([])
+  })
+})
+
+describe('audio highlight auto-follow', () => {
+  it('scrolls the highlight start to the viewport center', () => {
+    const { scrollTo, viewport } = mockViewportScroll({ innerHeight: 600, scrollY: 300 })
+    const target = createMeasuredElement({ top: 700 })
+
+    scrollElementStartToViewportCenter(target, 'smooth', viewport)
+
+    expect(scrollTo).toHaveBeenCalledWith({ top: 700, behavior: 'smooth' })
+  })
+
+  it('clamps the centered scroll target at the page top', () => {
+    const { scrollTo, viewport } = mockViewportScroll({ innerHeight: 600, scrollY: 0 })
+    const target = createMeasuredElement({ top: 100 })
+
+    scrollElementStartToViewportCenter(target, 'smooth', viewport)
+
+    expect(scrollTo).toHaveBeenCalledWith({ top: 0, behavior: 'smooth' })
+  })
+
+  it('centers the highlight start in the readable area above fixed bottom controls', () => {
+    const { scrollTo, viewport } = mockViewportScroll({ innerHeight: 800, scrollY: 1000 })
+    const target = createMeasuredElement({ top: 650 })
+
+    scrollElementStartToViewportCenter(target, 'smooth', viewport, { top: 0, bottom: 700 })
+
+    expect(scrollTo).toHaveBeenCalledWith({ top: 1300, behavior: 'smooth' })
+  })
+})
+
 describe('RAG search fallback messaging', () => {
+  it('calls Gateway semantic search and normalizes valid chunk results', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          results: [
+            {
+              chapterId: 'chapter-2',
+              chapterIndex: 2,
+              chapterTitle: '第二章',
+              snippet: '林青在雨夜醒来。',
+              score: 0.91,
+            },
+            {
+              chapterIndex: 3,
+              chapterTitle: '第三章',
+              snippet: '缺少 chapterId 的结果会被过滤。',
+              score: 0.77,
+            },
+          ],
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      ),
+    )
+
+    const results = await searchGatewayRag(gatewaySettings, 'book-a', '林青')
+    const [, init] = fetchMock.mock.calls[0]
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      'https://gateway.example/ai/search',
+      expect.objectContaining({
+        method: 'POST',
+        headers: expect.objectContaining({
+          Authorization: 'Bearer mobile-token',
+          'X-Device-Id': 'device-1',
+          'X-Device-Name': 'Pixel 9',
+          'Content-Type': 'application/json',
+        }),
+      }),
+    )
+    expect(JSON.parse(String(init?.body))).toEqual({ bookId: 'book-a', query: '林青', limit: 20 })
+    expect(results).toEqual([
+      {
+        chapterId: 'chapter-2',
+        chapterIndex: 2,
+        chapterTitle: '第二章',
+        snippet: '林青在雨夜醒来。',
+        source: 'chunk',
+        score: 0.91,
+      },
+    ])
+
+    fetchMock.mockRestore()
+  })
+
+  it('calls Gateway RAG answer generation and filters invalid citations', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          answer: '林青正在调查雨夜线索。',
+          results: [
+            {
+              chapterId: 'chapter-5',
+              chapterIndex: 5,
+              chapterTitle: '第五章',
+              snippet: '线索指向旧码头。',
+              score: 0.86,
+            },
+            {
+              chapterId: '',
+              chapterIndex: 6,
+              chapterTitle: '第六章',
+              snippet: '空 chapterId 会被过滤。',
+              score: 0.65,
+            },
+          ],
+        }),
+        { status: 200, headers: { 'Content-Type': 'application/json' } },
+      ),
+    )
+
+    const response = await gatewayGenerateRagAnswer(gatewaySettings, 'book-a', '林青在调查什么')
+    const [, init] = fetchMock.mock.calls[0]
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      'https://gateway.example/ai/rag-answer',
+      expect.objectContaining({
+        method: 'POST',
+        headers: expect.objectContaining({
+          Authorization: 'Bearer mobile-token',
+          'X-Device-Id': 'device-1',
+          'X-Device-Name': 'Pixel 9',
+          'Content-Type': 'application/json',
+        }),
+      }),
+    )
+    expect(JSON.parse(String(init?.body))).toEqual({ bookId: 'book-a', query: '林青在调查什么', limit: 10 })
+    expect(response).toEqual({
+      answer: '林青正在调查雨夜线索。',
+      results: [
+        {
+          chapterId: 'chapter-5',
+          chapterIndex: 5,
+          chapterTitle: '第五章',
+          snippet: '线索指向旧码头。',
+          source: 'chunk',
+          score: 0.86,
+        },
+      ],
+    })
+
+    fetchMock.mockRestore()
+  })
+
   it('uses a friendly token message when Gateway embedding fails and local search is used', () => {
     const error = createGatewayError({
       error: {
@@ -156,5 +379,34 @@ function createMemoryStorage(initial: Record<string, string> = {}) {
     removeItem: (key: string) => {
       values.delete(key)
     },
+  }
+}
+
+function mockViewportScroll({ innerHeight, scrollY }: { innerHeight: number; scrollY: number }) {
+  const scrollTo = vi.fn()
+  return {
+    scrollTo,
+    viewport: {
+      innerHeight,
+      scrollY,
+      pageYOffset: scrollY,
+      scrollTo,
+    },
+  }
+}
+
+function createMeasuredElement({ top }: { top: number }) {
+  return {
+    getBoundingClientRect: () => ({
+      x: 0,
+      y: top,
+      top,
+      right: 0,
+      bottom: top,
+      left: 0,
+      width: 0,
+      height: 0,
+      toJSON: () => ({}),
+    }),
   }
 }

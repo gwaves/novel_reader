@@ -378,6 +378,17 @@ function parseDraftLimit(args) {
   return limit
 }
 
+function isShortNarrativeFallbackCandidate(chapter, preSegments) {
+  const title = optionalString(chapter?.title)
+  const text = String(chapter?.content || '').replace(/\s+/g, '').trim()
+  if (!text || text.length > 120) return false
+  if (!Array.isArray(preSegments) || preSegments.length < 1 || preSegments.length > 2) return false
+  if (!preSegments.every(segment => segment?.typeHint === 'narration')) return false
+  if (/[「『“‘"'”’」』]/.test(text)) return false
+  if (/^第.+卷$/.test(title)) return true
+  return /^(本卷|此卷|这卷|以.+起，以.+收。?|第[一二三四五六七八九十百千万0-9]+回)/.test(text)
+}
+
 function getDraftSourceLimit(chapter, requestedLimit, allowPartial) {
   if (requestedLimit == null) return chapter.content.length
   const safeLimit = getSafeSourceLimit(chapter.content, requestedLimit)
@@ -892,27 +903,41 @@ async function runDraftScript(config, args) {
   }
   const batchResults = new Array(batches.length)
   const llmBatchStats = { attempts: 0, retries: 0, failures: 0, errors: [] }
+  let usedNarrationFallback = false
   console.log(`🚀 导演脚本 LLM 并发：${directorConcurrency}，批次：${batches.length}`)
-  await runConcurrent(batches, directorConcurrency, async (batchInfo) => {
-    const currentBatch = batchInfo.index + 1
-    const batch = batchInfo.segments
-    console.log(`🧾 生成导演判定 ${currentBatch}/${batches.length}，片段 ${batchInfo.start + 1}-${batchInfo.start + batch.length}/${preSegments.length}`)
-    const prompt = buildDirectorPrompt({ config, book, chapter, preSegments: batch, characterCandidates })
-    const batchDecisions = await callOpenAICompatibleWithRetry(config, [
-      { role: 'system', content: '你只输出严格 JSON，不输出 Markdown，不输出思考过程。' },
-      { role: 'user', content: prompt },
-    ], `第 ${currentBatch} 批导演判定`, 3, llmBatchStats)
-    if (!Array.isArray(batchDecisions?.decisions)) {
-      throw new Error(`第 ${currentBatch} 批模型输出缺少 decisions 数组。`)
-    }
-    batchResults[batchInfo.index] = batchDecisions.decisions
-    console.log(`✅ 导演判定完成 ${currentBatch}/${batches.length}`)
-  })
-  const allDecisions = batchResults.flat()
+  try {
+    await runConcurrent(batches, directorConcurrency, async (batchInfo) => {
+      const currentBatch = batchInfo.index + 1
+      const batch = batchInfo.segments
+      console.log(`🧾 生成导演判定 ${currentBatch}/${batches.length}，片段 ${batchInfo.start + 1}-${batchInfo.start + batch.length}/${preSegments.length}`)
+      const prompt = buildDirectorPrompt({ config, book, chapter, preSegments: batch, characterCandidates })
+      const batchDecisions = await callOpenAICompatibleWithRetry(config, [
+        { role: 'system', content: '你只输出严格 JSON，不输出 Markdown，不输出思考过程。' },
+        { role: 'user', content: prompt },
+      ], `第 ${currentBatch} 批导演判定`, 3, llmBatchStats)
+      if (!Array.isArray(batchDecisions?.decisions)) {
+        throw new Error(`第 ${currentBatch} 批模型输出缺少 decisions 数组。`)
+      }
+      batchResults[batchInfo.index] = batchDecisions.decisions
+      console.log(`✅ 导演判定完成 ${currentBatch}/${batches.length}`)
+    })
+  } catch (error) {
+    if (!isShortNarrativeFallbackCandidate(chapter, preSegments)) throw error
+    usedNarrationFallback = true
+    batchResults.fill([])
+    console.warn(`⚠️  第 ${chapter.chapter_index} 章模型输出异常，按短叙述章节降级为单段旁白。`)
+  }
+  const allDecisions = usedNarrationFallback ? [] : batchResults.flat()
   const decisions = { decisions: allDecisions }
   const script = buildDirectorScript({ config, book, chapter, preSegments, decisions, characterCandidates, sourceLimit })
   const validation = validateDirectorScript(script, preSegments)
   script.diagnostics = diagnosticsFor({ config, preSegments, kgCandidates, characterCandidates, validation, batchSize, directorConcurrency, llmBatchStats })
+  if (usedNarrationFallback) {
+    script.diagnostics.narrationFallback = {
+      used: true,
+      reason: 'short_narrative_chapter_after_llm_error',
+    }
+  }
 
   const outputPath = args.out
     ? resolve(args.out)

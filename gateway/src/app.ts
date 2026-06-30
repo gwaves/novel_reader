@@ -433,11 +433,13 @@ export function buildGatewayApp(config: GatewayConfig = loadConfig()) {
 
   app.get<{ Params: { bookId: string } }>('/mobile/books/:bookId/audio', async (request) => {
     const mobileAuth = await requireMobileDevice(config, request)
-    await readVisibleBookSummary(config, request.params.bookId, mobileAuth.allowedVisibilities)
+    const book = await readVisibleBookSummary(config, request.params.bookId, mobileAuth.allowedVisibilities)
     const catalog = await readAudioCatalog(config, request.params.bookId)
+    const summary = await summarizeBookAudio(config, book, await readPackageChapterIds(config, request.params.bookId))
     return {
       schemaVersion: catalog.schemaVersion,
       generatedAt: new Date().toISOString(),
+      summary,
       chapters: catalog.chapters,
     }
   })

@@ -88,6 +88,14 @@ export type ModelConfigDraft = Pick<
   | 'thinkingEnabled'
   | 'embeddingConfig'
 >
+export type MissingSummaryBatchResult = {
+  completedCount: number
+  failedCount: number
+  missingCount: number
+}
+export type SummaryGenerationSelectionOptions = {
+  overwriteExisting?: boolean
+}
 
 type ImportedBookContent = {
   title: string
@@ -105,6 +113,22 @@ const LEGACY_DB_NAME = 'novel-reader-mvp'
 const LEGACY_DB_STORE = 'state'
 const LEGACY_DB_VERSION = 1
 export const CHAPTERS_PER_PAGE = 100
+
+export function chapterScrollPositionKey(bookId: string | null | undefined, chapterId: string) {
+  return `${bookId || 'book'}:${chapterId}`
+}
+
+export function readChapterScrollPosition(
+  positions: Record<string, number>,
+  bookId: string | null | undefined,
+  chapterId: string,
+) {
+  const scoped = positions[chapterScrollPositionKey(bookId, chapterId)]
+  if (typeof scoped === 'number' && Number.isFinite(scoped)) return Math.max(0, scoped)
+
+  const legacy = positions[chapterId]
+  return typeof legacy === 'number' && Number.isFinite(legacy) ? Math.max(0, legacy) : 0
+}
 
 const initialState: StoredState = {
   books: [],
@@ -1437,38 +1461,41 @@ function getChapterTitleNumber(title: string) {
 }
 
 function decodeTextFile(file: File): Promise<string> {
+  if (typeof file.arrayBuffer === 'function') {
+    return file.arrayBuffer().then(decodeTextBuffer)
+  }
+
   return new Promise((resolve, reject) => {
     const reader = new FileReader()
 
     reader.onload = () => {
-      const buffer = reader.result as ArrayBuffer
-      const bytes = new Uint8Array(buffer)
-
-      // UTF-16 BOM
-      if (bytes.length >= 2) {
-        if (bytes[0] === 0xff && bytes[1] === 0xfe) {
-          resolve(new TextDecoder('utf-16le').decode(buffer))
-          return
-        }
-        if (bytes[0] === 0xfe && bytes[1] === 0xff) {
-          resolve(new TextDecoder('utf-16be').decode(buffer))
-          return
-        }
-      }
-
-      // Try UTF-8 first; only fall back to GB18030 if the bytes are not valid UTF-8.
-      try {
-        const utf8 = new TextDecoder('utf-8', { fatal: true }).decode(buffer)
-        resolve(utf8)
-        return
-      } catch {
-        resolve(new TextDecoder('gb18030').decode(buffer))
-      }
+      resolve(decodeTextBuffer(reader.result as ArrayBuffer))
     }
 
     reader.onerror = () => reject(reader.error)
     reader.readAsArrayBuffer(file)
   })
+}
+
+function decodeTextBuffer(buffer: ArrayBuffer): string {
+  const bytes = new Uint8Array(buffer)
+
+  // UTF-16 BOM
+  if (bytes.length >= 2) {
+    if (bytes[0] === 0xff && bytes[1] === 0xfe) {
+      return new TextDecoder('utf-16le').decode(buffer)
+    }
+    if (bytes[0] === 0xfe && bytes[1] === 0xff) {
+      return new TextDecoder('utf-16be').decode(buffer)
+    }
+  }
+
+  // Try UTF-8 first; only fall back to GB18030 if the bytes are not valid UTF-8.
+  try {
+    return new TextDecoder('utf-8', { fatal: true }).decode(buffer)
+  } catch {
+    return new TextDecoder('gb18030').decode(buffer)
+  }
 }
 
 function decodeZipName(bytes: Uint8Array, useUtf8: boolean) {
@@ -1688,7 +1715,7 @@ async function parseEpubFile(file: File): Promise<ImportedBookContent> {
   return { title: metadataTitle, chapters: selectEpubChapters(chapters) }
 }
 
-async function parseImportedBook(
+export async function parseImportedBook(
   file: File,
   modelConfig?: ModelConfigDraft,
 ): Promise<ImportedBookContent> {
@@ -1777,7 +1804,7 @@ async function generateWithOllama(
   }
 }
 
-async function generateWithOpenAICompatible(
+export async function generateWithOpenAICompatible(
   chapter: Chapter,
   baseUrl: string,
   apiKey: string,
@@ -1899,19 +1926,24 @@ async function validateLlmConfig(config: ModelConfigDraft): Promise<void> {
       throw new Error('[LLM] Ollama 并发度必须是 1 到 10 的整数。')
     }
 
-    const response = await fetch(`${OLLAMA_BASE_URL}/api/generate`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model: config.ollamaModel.trim(),
-        prompt: '/no_think\n只输出 JSON：{"ok":true}',
-        stream: false,
-        format: 'json',
-        options: {
-          temperature: config.ollamaTemperature,
-        },
-      }),
-    })
+    let response: Response
+    try {
+      response = await fetch(`${OLLAMA_BASE_URL}/api/generate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model: config.ollamaModel.trim(),
+          prompt: '/no_think\n只输出 JSON：{"ok":true}',
+          stream: false,
+          format: 'json',
+          options: {
+            temperature: config.ollamaTemperature,
+          },
+        }),
+      })
+    } catch (error) {
+      throw new Error(`[LLM] 无法连接 Ollama：${errorMessage(error)}`)
+    }
 
     if (!response.ok) {
       const body = await response.text()
@@ -1969,11 +2001,16 @@ async function validateLlmConfig(config: ModelConfigDraft): Promise<void> {
     validateBody.chat_template_kwargs = { enable_thinking: false }
   }
 
-  const response = await fetch(`${normalizedBaseUrl}/chat/completions`, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify(validateBody),
-  })
+  let response: Response
+  try {
+    response = await fetch(`${normalizedBaseUrl}/chat/completions`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(validateBody),
+    })
+  } catch (error) {
+    throw new Error(`[LLM] 无法连接 OpenAI-compatible Base URL：${errorMessage(error)}`)
+  }
 
   if (!response.ok) {
     const body = await response.text()
@@ -2008,13 +2045,21 @@ async function validateEmbeddingConfig(embeddingConfig: EmbeddingConfig): Promis
   try {
     response = await fetch('/api/rag/embeddings/validate', requestInit)
   } catch {
-    response = await fetch('http://127.0.0.1:5174/api/rag/embeddings/validate', requestInit)
+    try {
+      response = await fetch('http://127.0.0.1:5174/api/rag/embeddings/validate', requestInit)
+    } catch (error) {
+      throw new Error(`[Embedding] 无法连接 embedding 验证服务：${errorMessage(error)}`)
+    }
   }
 
   if (!response.ok) {
     const payload = (await response.json()) as { error?: string }
     throw new Error(`[Embedding] 验证失败：${payload.error ?? response.statusText}`)
   }
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error && error.message ? error.message : String(error || '请求失败')
 }
 
 export function getModelConfigDraft(state: StoredState): ModelConfigDraft {
@@ -2028,6 +2073,95 @@ export function getModelConfigDraft(state: StoredState): ModelConfigDraft {
     thinkingEnabled: state.thinkingEnabled,
     embeddingConfig: sanitizeEmbeddingConfig(state.embeddingConfig),
   }
+}
+
+export function selectSummaryGenerationChapters(
+  chapters: Chapter[],
+  summaries: Record<string, Summary>,
+  options: SummaryGenerationSelectionOptions = {},
+): Chapter[] {
+  if (options.overwriteExisting) return chapters
+  return chapters.filter((chapter) => !summaries[chapter.id])
+}
+
+export function applyChapterSummary(
+  state: StoredState,
+  bookId: string,
+  chapterId: string,
+  summary: Summary,
+): StoredState {
+  return syncLibraryBook(state, bookId, {
+    summaries: {
+      ...getLibraryBookSummaries(state, bookId),
+      [chapterId]: summary,
+    },
+  })
+}
+
+export function buildMissingSummaryBatchConfirmation(
+  totalChapters: number,
+  missingCount: number,
+): string | null {
+  if (missingCount <= 50) return null
+  return (
+    `全书共 ${totalChapters} 章，其中 ${missingCount} 章缺少概要。\n` +
+    `批量生成将调用 AI 接口 ${missingCount} 次，可能耗时较长并消耗较多 token。\n` +
+    '确定要继续吗？'
+  )
+}
+
+export async function runMissingSummaryBatch({
+  pendingChapters,
+  totalChapters,
+  concurrency,
+  generateSummary,
+  onSummary,
+  onFailure,
+  onProgress,
+}: {
+  pendingChapters: Chapter[]
+  totalChapters: number
+  concurrency: number
+  generateSummary: (chapter: Chapter) => Promise<Summary>
+  onSummary: (chapter: Chapter, summary: Summary) => void
+  onFailure?: (chapter: Chapter) => void
+  onProgress?: (message: string) => void
+}): Promise<MissingSummaryBatchResult> {
+  const missingCount = pendingChapters.length
+  const baselineProcessedCount = totalChapters - missingCount
+  let nextIndex = 0
+  let completedCount = 0
+  let failedCount = 0
+
+  async function worker() {
+    while (nextIndex < pendingChapters.length) {
+      const chapter = pendingChapters[nextIndex]
+      nextIndex += 1
+
+      onProgress?.(
+        `并发 ${concurrency}，正在生成 ${completedCount + failedCount + 1}/${missingCount}（全书 ${baselineProcessedCount + completedCount + failedCount + 1}/${totalChapters}）：第 ${chapter.index} 章`,
+      )
+
+      try {
+        const summary = await generateSummary(chapter)
+        completedCount += 1
+        onSummary(chapter, summary)
+      } catch {
+        failedCount += 1
+        onFailure?.(chapter)
+      }
+
+      onProgress?.(
+        `并发 ${concurrency}，已完成 ${completedCount}/${missingCount}（全书 ${baselineProcessedCount + completedCount}/${totalChapters}），失败 ${failedCount} 章`,
+      )
+    }
+  }
+
+  await Promise.all(
+    Array.from({ length: Math.min(concurrency, missingCount) }, () => worker()),
+  )
+
+  return { completedCount, failedCount, missingCount }
 }
 
 export type MobileTab = 'bookshelf' | 'chapters' | 'reader' | 'summary' | 'search'
@@ -2046,6 +2180,10 @@ export interface UseReaderStateReturn {
   isHydrated: boolean
   generatingBookId: string | null
   generatingBookProgress: string
+  generatingChapterId: string | null
+  generatingPageSummaries: boolean
+  pageSummaryProgress: string
+  pageSummaryFailures: string[]
   isConfigOpen: boolean
   modelConfigDraft: ModelConfigDraft
   setModelConfigDraft: React.Dispatch<React.SetStateAction<ModelConfigDraft>>
@@ -2077,6 +2215,8 @@ export interface UseReaderStateReturn {
   importedDate: string
   handleImport: (file: File) => Promise<void>
   generateMissingSummariesForBook: (bookId: string) => Promise<void>
+  generateMissingSummariesForCurrentPage: () => Promise<void>
+  generateSummaryForChapter: (chapterId: string) => Promise<void>
   selectBook: (bookId: string) => Promise<void>
   deleteBook: (bookId: string) => void
   updateActiveChapter: (id: string) => void
@@ -2209,6 +2349,10 @@ export function useReaderState(): UseReaderStateReturn {
   const [isHydrated, setIsHydrated] = useState(false)
   const [generatingBookId, setGeneratingBookId] = useState<string | null>(null)
   const [generatingBookProgress, setGeneratingBookProgress] = useState('')
+  const [generatingChapterId, setGeneratingChapterId] = useState<string | null>(null)
+  const [generatingPageSummaries, setGeneratingPageSummaries] = useState(false)
+  const [pageSummaryProgress, setPageSummaryProgress] = useState('')
+  const [pageSummaryFailures, setPageSummaryFailures] = useState<string[]>([])
   const [isConfigOpen, setIsConfigOpen] = useState(false)
   const [modelConfigDraft, setModelConfigDraft] = useState<ModelConfigDraft>(() =>
     getModelConfigDraft(initialState),
@@ -2426,8 +2570,9 @@ export function useReaderState(): UseReaderStateReturn {
 
     if (!libraryBook) return
 
-    const pendingChapters = libraryBook.book.chapters.filter(
-      (chapter) => !libraryBook.summaries[chapter.id],
+    const pendingChapters = selectSummaryGenerationChapters(
+      libraryBook.book.chapters,
+      libraryBook.summaries,
     )
     const totalChapters = libraryBook.book.chapters.length
     const missingCount = pendingChapters.length
@@ -2441,63 +2586,28 @@ export function useReaderState(): UseReaderStateReturn {
       return
     }
 
-    if (
-      missingCount > 50 &&
-      !window.confirm(
-        `全书共 ${totalChapters} 章，其中 ${missingCount} 章缺少概要。\n` +
-          `批量生成将调用 AI 接口 ${missingCount} 次，可能耗时较长并消耗较多 token。\n` +
-          '确定要继续吗？',
-      )
-    ) {
+    const confirmation = buildMissingSummaryBatchConfirmation(totalChapters, missingCount)
+    if (confirmation && !window.confirm(confirmation)) {
       return
     }
 
     const concurrency = getActiveConcurrency()
-    const baselineProcessedCount = totalChapters - missingCount
 
     setGeneratingBookId(bookId)
     setGeneratingBookProgress(`并发 ${concurrency}，准备生成 ${missingCount} 章概要`)
     setError('')
 
     try {
-      let nextIndex = 0
-      let completedCount = 0
-      let failedCount = 0
-
-      async function worker() {
-        while (nextIndex < pendingChapters.length) {
-          const chapter = pendingChapters[nextIndex]
-          nextIndex += 1
-
-          setGeneratingBookProgress(
-            `并发 ${concurrency}，正在生成 ${completedCount + failedCount + 1}/${missingCount}（全书 ${baselineProcessedCount + completedCount + failedCount + 1}/${totalChapters}）：第 ${chapter.index} 章`,
-          )
-
-          try {
-            const summary = await generateChapterSummary(chapter)
-            completedCount += 1
-
-            setState((current) =>
-              syncLibraryBook(current, bookId, {
-                summaries: {
-                  ...getLibraryBookSummaries(current, bookId),
-                  [chapter.id]: summary,
-                },
-              }),
-            )
-          } catch {
-            failedCount += 1
-          }
-
-          setGeneratingBookProgress(
-            `并发 ${concurrency}，已完成 ${completedCount}/${missingCount}（全书 ${baselineProcessedCount + completedCount}/${totalChapters}），失败 ${failedCount} 章`,
-          )
-        }
-      }
-
-      await Promise.all(
-        Array.from({ length: Math.min(concurrency, missingCount) }, () => worker()),
-      )
+      const { completedCount, failedCount } = await runMissingSummaryBatch({
+        pendingChapters,
+        totalChapters,
+        concurrency,
+        generateSummary: generateChapterSummary,
+        onProgress: setGeneratingBookProgress,
+        onSummary: (chapter, summary) => {
+          setState((current) => applyChapterSummary(current, bookId, chapter.id, summary))
+        },
+      })
 
       if (failedCount > 0) {
         setGeneratingBookProgress(
@@ -2512,6 +2622,73 @@ export function useReaderState(): UseReaderStateReturn {
       setTimeout(() => {
         setGeneratingBookId((current) => (current === bookId ? null : current))
       }, 2000)
+    }
+  }
+
+  async function generateMissingSummariesForCurrentPage() {
+    const bookId = state.activeBookId
+    if (!bookId || !state.book) return
+
+    const pendingChapters = selectSummaryGenerationChapters(pagedChapters, state.summaries)
+    const missingCount = pendingChapters.length
+
+    setPageSummaryFailures([])
+
+    if (!missingCount) {
+      setPageSummaryProgress('当前页概要已经全部生成。')
+      return
+    }
+
+    const concurrency = getActiveConcurrency()
+
+    setGeneratingPageSummaries(true)
+    setPageSummaryProgress(`并发 ${concurrency}，准备生成当前页 ${missingCount} 章概要`)
+    setError('')
+
+    try {
+      const failedTitles: string[] = []
+      const { completedCount, failedCount } = await runMissingSummaryBatch({
+        pendingChapters,
+        totalChapters: pendingChapters.length,
+        concurrency,
+        generateSummary: generateChapterSummary,
+        onProgress: setPageSummaryProgress,
+        onFailure: (chapter) => {
+          failedTitles.push(chapter.title)
+          setPageSummaryFailures([...failedTitles])
+        },
+        onSummary: (chapter, summary) => {
+          setState((current) => applyChapterSummary(current, bookId, chapter.id, summary))
+        },
+      })
+
+      if (failedCount > 0) {
+        setPageSummaryProgress(`当前页生成结束，成功 ${completedCount} 章，失败 ${failedCount} 章。`)
+      } else {
+        setPageSummaryProgress(`当前页 ${missingCount} 章缺失概要已生成。`)
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '当前页生成概要失败。')
+    } finally {
+      setGeneratingPageSummaries(false)
+    }
+  }
+
+  async function generateSummaryForChapter(chapterId: string) {
+    const bookId = state.activeBookId
+    const chapter = state.book?.chapters.find((item) => item.id === chapterId)
+    if (!bookId || !chapter) return
+
+    setGeneratingChapterId(chapterId)
+    setError('')
+
+    try {
+      const summary = await generateChapterSummary(chapter)
+      setState((current) => applyChapterSummary(current, bookId, chapter.id, summary))
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '生成本章概要失败。')
+    } finally {
+      setGeneratingChapterId((current) => (current === chapterId ? null : current))
     }
   }
 
@@ -2775,6 +2952,10 @@ export function useReaderState(): UseReaderStateReturn {
     isHydrated,
     generatingBookId,
     generatingBookProgress,
+    generatingChapterId,
+    generatingPageSummaries,
+    pageSummaryProgress,
+    pageSummaryFailures,
     isConfigOpen,
     modelConfigDraft,
     setModelConfigDraft,
@@ -2806,6 +2987,8 @@ export function useReaderState(): UseReaderStateReturn {
     importedDate,
     handleImport,
     generateMissingSummariesForBook,
+    generateMissingSummariesForCurrentPage,
+    generateSummaryForChapter,
     selectBook,
     deleteBook,
     updateActiveChapter,

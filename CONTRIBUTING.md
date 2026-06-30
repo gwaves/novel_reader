@@ -37,7 +37,6 @@ npm --prefix gateway-android-app run test
 npm --prefix gateway-android-app run build
 ```
 
-The legacy `mobile-app/` LAN-sync client is deprecated and kept for historical reference; only run its checks when intentionally touching that legacy workspace.
 
 ## Pull Request Notes
 

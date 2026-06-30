@@ -40,7 +40,7 @@ Mobile App
 
 - `gateway/`：云端网关服务代码、配置、部署脚本、API 文档和测试。
 - `gateway-android-app/`：当前维护的 Gateway Android 客户端，负责默认 Gateway 域名、设备授权、自定义服务地址、缓存、阅读、RAG 和 MP3 播放体验。
-- `mobile-app/`：旧局域网同步移动端，已退役，仅作为历史实现和迁移参考保留。
+- 旧 `mobile-app/` 局域网同步移动端目录已删除；历史实现请查看 Git 记录。
 - `scripts/local-db-server.mjs`：继续作为本地 PC 端 API，不作为公网服务直接复用。
 - `offline-tts/`：继续负责导演脚本、TTS 合成和 MP3 生产；后续可把产物登记到 Gateway。
 

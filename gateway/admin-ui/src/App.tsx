@@ -5,6 +5,7 @@ import {
   deleteBook,
   deleteBookAudio,
   downloadPackage,
+  importBookPackage,
   loadAdminDashboardData,
   loadAdminOverviewData,
   patchBookLabels,
@@ -260,6 +261,25 @@ function App() {
     }
   }
 
+  const handleReimportPackage = async (item: AdminPackage, file: File | null) => {
+    if (!file) return
+    const operationKey = item.bookId
+    setPackageOperationStatus((current) => ({ ...current, [operationKey]: { state: 'saving', message: '重新导入中' } }))
+    try {
+      const bookPackage = JSON.parse(await readTextFile(file)) as unknown
+      await importBookPackage(item.bookId, bookPackage)
+      const data = await loadAdminDashboardData()
+      applyDashboardData(data)
+      setLoadMessage(connectionMessage(data))
+      setPackageOperationStatus((current) => ({ ...current, [operationKey]: { state: 'success', message: '重新导入完成' } }))
+    } catch (error) {
+      setPackageOperationStatus((current) => ({
+        ...current,
+        [operationKey]: { state: 'failed', message: `重新导入失败：${error instanceof SyntaxError ? 'JSON 无效' : adminErrorLabel(error)}` },
+      }))
+    }
+  }
+
   const replaceAudioRow = (nextAudio: AdminAudio) => {
     setAudio((current) => current.map((item) => (item.bookId === nextAudio.bookId || item.id === nextAudio.id ? nextAudio : item)))
   }
@@ -403,7 +423,12 @@ function App() {
             />
           )}
           {!isInitialLoading && activeView === 'packages' && (
-            <PackagesPage packages={packages} operationStatus={packageOperationStatus} onDownload={handleDownloadPackage} />
+            <PackagesPage
+              packages={packages}
+              operationStatus={packageOperationStatus}
+              onDownload={handleDownloadPackage}
+              onReimport={handleReimportPackage}
+            />
           )}
           {!isInitialLoading && activeView === 'audio' && (
             <AudioPage
@@ -430,6 +455,16 @@ function App() {
       </div>
     </div>
   )
+}
+
+function readTextFile(file: File) {
+  if (typeof file.text === 'function') return file.text()
+  return new Promise<string>((resolve, reject) => {
+    const reader = new FileReader()
+    reader.addEventListener('load', () => resolve(String(reader.result ?? '')))
+    reader.addEventListener('error', () => reject(reader.error ?? new Error('Failed to read file.')))
+    reader.readAsText(file)
+  })
 }
 
 function StatusPill({ label, value, tone }: { label: string; value: string; tone?: 'ok' }) {
@@ -886,10 +921,12 @@ function PackagesPage({
   packages,
   operationStatus,
   onDownload,
+  onReimport,
 }: {
   packages: AdminPackage[]
   operationStatus: Record<string, OperationStatus>
   onDownload: (item: AdminPackage) => void
+  onReimport: (item: AdminPackage, file: File | null) => void
 }) {
   const missingSummaries = packages
     .map((item) => packageMissingSummary(item))
@@ -930,7 +967,7 @@ function PackagesPage({
           </thead>
           <tbody>
             {packages.map((item) => {
-              const status = operationStatus[item.id]
+              const status = operationStatus[item.id] ?? operationStatus[item.bookId]
               return (
                 <tr key={item.id}>
                   <td><strong>{item.bookTitle}</strong></td>
@@ -954,6 +991,17 @@ function PackagesPage({
                     >
                       下载 {item.bookTitle} package
                     </button>
+                    <input
+                      type="file"
+                      className="table-file-input"
+                      accept="application/json,.json"
+                      aria-label={`重新导入 ${item.bookTitle} package`}
+                      disabled={status?.state === 'saving'}
+                      onChange={(event) => {
+                        onReimport(item, event.target.files?.[0] ?? null)
+                        event.currentTarget.value = ''
+                      }}
+                    />
                   </td>
                   <td><OperationInline status={status} /></td>
                 </tr>

@@ -167,6 +167,35 @@ describe('gateway app', () => {
         GATEWAY_DEV_ACCESS_TOKEN: 'dev-token',
       }),
     ).toThrow(/requires GATEWAY_ADMIN_ACCESS_TOKEN and GATEWAY_MOBILE_ACCESS_TOKEN/)
+    expect(() =>
+      loadConfig({
+        GATEWAY_ENV: 'production',
+        GATEWAY_DEV_ACCESS_TOKEN: 'dev-token',
+        GATEWAY_ADMIN_ACCESS_TOKEN: 'admin-token',
+      }),
+    ).toThrow(/requires GATEWAY_ADMIN_ACCESS_TOKEN and GATEWAY_MOBILE_ACCESS_TOKEN/)
+    expect(() =>
+      loadConfig({
+        GATEWAY_ENV: 'production',
+        GATEWAY_DEV_ACCESS_TOKEN: 'dev-token',
+        GATEWAY_MOBILE_ACCESS_TOKEN: 'mobile-token',
+      }),
+    ).toThrow(/requires GATEWAY_ADMIN_ACCESS_TOKEN and GATEWAY_MOBILE_ACCESS_TOKEN/)
+  })
+
+  it('does not use the development token as a production scoped-auth fallback', () => {
+    const config = loadConfig({
+      GATEWAY_ENV: 'production',
+      GATEWAY_DEV_ACCESS_TOKEN: 'dev-token',
+      GATEWAY_ADMIN_ACCESS_TOKEN: 'admin-token',
+      GATEWAY_MOBILE_ACCESS_TOKEN: 'mobile-token',
+    })
+
+    expect(config.auth.devAccessToken).toBe('dev-token')
+    expect(config.auth.adminAccessToken).toBe('admin-token')
+    expect(config.auth.mobileAccessToken).toBe('mobile-token')
+    expect(config.auth.adminAccessToken).not.toBe(config.auth.devAccessToken)
+    expect(config.auth.mobileAccessToken).not.toBe(config.auth.devAccessToken)
   })
 
   it('rejects wildcard CORS origins in production', () => {
@@ -411,6 +440,53 @@ describe('gateway app', () => {
 
     expect(adminResponse.statusCode).toBe(200)
     expect(mobileResponse.statusCode).toBe(200)
+  })
+
+  it('rejects the development token on scoped routes when production tokens are configured', async () => {
+    const dataDir = await makeDataDir()
+    await writeFile(
+      join(dataDir, 'books.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        books: [],
+      }),
+      'utf8',
+    )
+    const app = buildTestApp({
+      GATEWAY_ENV: 'production',
+      GATEWAY_DEV_ACCESS_TOKEN: 'dev-token',
+      GATEWAY_ADMIN_ACCESS_TOKEN: 'admin-token',
+      GATEWAY_MOBILE_ACCESS_TOKEN: 'mobile-token',
+      GATEWAY_DATA_DIR: dataDir,
+    })
+
+    const adminWithDevToken = await app.inject({
+      method: 'GET',
+      url: '/admin/books',
+      headers: { authorization: 'Bearer dev-token' },
+    })
+    const mobileWithDevToken = await app.inject({
+      method: 'GET',
+      url: '/mobile/books',
+      headers: { authorization: 'Bearer dev-token' },
+    })
+    const adminWithAdminToken = await app.inject({
+      method: 'GET',
+      url: '/admin/books',
+      headers: { authorization: 'Bearer admin-token' },
+    })
+    const mobileWithMobileToken = await app.inject({
+      method: 'GET',
+      url: '/mobile/books',
+      headers: { authorization: 'Bearer mobile-token' },
+    })
+
+    expect(adminWithDevToken.statusCode).toBe(401)
+    expect(adminWithDevToken.json().error).toMatchObject({ code: 'invalid_token' })
+    expect(mobileWithDevToken.statusCode).toBe(401)
+    expect(mobileWithDevToken.json().error).toMatchObject({ code: 'invalid_token' })
+    expect(adminWithAdminToken.statusCode).toBe(200)
+    expect(mobileWithMobileToken.statusCode).toBe(200)
   })
 
   it('enriches admin books with package-derived coverage', async () => {
@@ -1074,15 +1150,39 @@ describe('gateway app', () => {
       }),
       'utf8',
     )
+    const audioDir = await makeDataDir()
+    const bookAudioDir = join(audioDir, 'books', 'book-a')
+    await mkdir(bookAudioDir, { recursive: true })
+    await writeFile(join(bookAudioDir, 'chapter-1.mp3'), 'fake mp3 data', 'utf8')
+    await writeFile(
+      join(bookAudioDir, 'audio.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        chapters: [
+          {
+            chapterId: 'chapter-1',
+            title: '第一章',
+            fileName: 'chapter-1.mp3',
+          },
+        ],
+      }),
+      'utf8',
+    )
     const app = buildTestApp({
       GATEWAY_DEV_ACCESS_TOKEN: 'dev-token',
       GATEWAY_DATA_DIR: dataDir,
+      GATEWAY_AUDIO_DIR: audioDir,
     })
     const authHeaders = { authorization: 'Bearer dev-token' }
 
     const downloadResponse = await app.inject({
       method: 'GET',
       url: '/mobile/books/book-a/package/download',
+      headers: authHeaders,
+    })
+    const audioDownloadResponse = await app.inject({
+      method: 'GET',
+      url: '/mobile/books/book-a/audio/chapter-1/download',
       headers: authHeaders,
     })
     const missingResponse = await app.inject({
@@ -1101,6 +1201,7 @@ describe('gateway app', () => {
     })
 
     expect(downloadResponse.statusCode).toBe(200)
+    expect(audioDownloadResponse.statusCode).toBe(200)
     expect(missingResponse.statusCode).toBe(404)
     expect(metricsResponse.statusCode).toBe(200)
     expect(metricsResponse.json()).toMatchObject({
@@ -1112,15 +1213,34 @@ describe('gateway app', () => {
       },
       downloads: {
         packageLast24Hours: 1,
-        audioLast24Hours: 0,
+        audioLast24Hours: 1,
         topBooks: [
           {
             bookId: 'book-a',
             title: '指标书',
             packageDownloads: 1,
+            audioDownloads: 1,
           },
         ],
       },
+      trends: {
+        bucketMinutes: 5,
+        requests: expect.any(Array),
+        downloads: expect.any(Array),
+      },
+    })
+    expect(metricsResponse.json().trends.requests).toHaveLength(12)
+    expect(metricsResponse.json().trends.downloads).toHaveLength(12)
+    expect(metricsResponse.json().trends.requests.at(-1)).toMatchObject({
+      requestCount: expect.any(Number),
+      errorCount: expect.any(Number),
+      p95Ms: expect.any(Number),
+    })
+    expect(metricsResponse.json().trends.requests.at(-1).requestCount).toBeGreaterThanOrEqual(3)
+    expect(metricsResponse.json().trends.requests.at(-1).errorCount).toBeGreaterThanOrEqual(1)
+    expect(metricsResponse.json().trends.downloads.at(-1)).toMatchObject({
+      packageDownloads: 1,
+      audioDownloads: 1,
     })
     expect(metricsResponse.json().requests.last24Hours).toBeGreaterThanOrEqual(2)
     expect(metricsResponse.json().requests.errorRate).toBeGreaterThan(0)
@@ -1136,8 +1256,43 @@ describe('gateway app', () => {
           level: 'warn',
           statusCode: 404,
         }),
+        expect.objectContaining({
+          level: 'info',
+          text: '下载 book-a 章节音频',
+          bookId: 'book-a',
+        }),
       ]),
     )
+  })
+
+  it('returns an empty admin event list before notable requests happen', async () => {
+    const dataDir = await makeDataDir()
+    await writeFile(
+      join(dataDir, 'books.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        books: [],
+      }),
+      'utf8',
+    )
+    const app = buildTestApp({
+      GATEWAY_DEV_ACCESS_TOKEN: 'dev-token',
+      GATEWAY_DATA_DIR: dataDir,
+    })
+
+    const eventsResponse = await app.inject({
+      method: 'GET',
+      url: '/admin/events',
+      headers: {
+        authorization: 'Bearer dev-token',
+      },
+    })
+
+    expect(eventsResponse.statusCode).toBe(200)
+    expect(eventsResponse.json()).toMatchObject({
+      schemaVersion: 1,
+      events: [],
+    })
   })
 
   it('returns admin package import status for every catalog book', async () => {
@@ -1458,6 +1613,11 @@ describe('gateway app', () => {
       url: '/admin/books/book-audio/audio/refresh',
       headers: authHeaders,
     })
+    const adminAudioAfterDeleteResponse = await app.inject({
+      method: 'GET',
+      url: '/admin/audio',
+      headers: authHeaders,
+    })
 
     expect(refreshResponse.statusCode).toBe(200)
     expect(refreshResponse.json()).toMatchObject({
@@ -1490,6 +1650,17 @@ describe('gateway app', () => {
       audioChapterCount: 0,
       missingChapterIds: ['chapter-1', 'chapter-2'],
     })
+    expect(adminAudioAfterDeleteResponse.statusCode).toBe(200)
+    expect(adminAudioAfterDeleteResponse.json().audio).toEqual([
+      expect.objectContaining({
+        bookId: 'book-audio',
+        audioChapterCount: 0,
+        missingChapterCount: 2,
+        missingChapterIds: ['chapter-1', 'chapter-2'],
+        coverage: 0,
+        totalSizeBytes: 0,
+      }),
+    ])
   })
 
   it('returns recent request logs with fields needed by the admin requests view', async () => {
@@ -1710,6 +1881,80 @@ describe('gateway app', () => {
     expect(response.json().generatedAt).toBeTruthy()
   })
 
+  it('downloads protected mobile book packages as full JSON files', async () => {
+    const dataDir = await makeDataDir()
+    await writeFile(
+      join(dataDir, 'books.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        books: [
+          {
+            id: 'book-a',
+            title: '完整下载包',
+            chapterCount: 1,
+            updatedAt: '2026-06-25T00:00:00.000Z',
+          },
+        ],
+      }),
+      'utf8',
+    )
+    await mkdir(join(dataDir, 'books', 'book-a'), { recursive: true })
+    await writeFile(
+      join(dataDir, 'books', 'book-a', 'package.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        book: {
+          id: 'book-a',
+          title: '完整下载包',
+          chapterCount: 1,
+          updatedAt: '2026-06-25T00:00:00.000Z',
+        },
+        chapters: [
+          {
+            id: 'chapter-1',
+            title: '第一章',
+            content: '正文',
+          },
+        ],
+        embeddings: {
+          chunks: [{ chapterId: 'chapter-1', text: '正文', embedding: [0.1, 0.2] }],
+        },
+      }),
+      'utf8',
+    )
+    const app = buildTestApp({
+      GATEWAY_DEV_ACCESS_TOKEN: 'dev-token',
+      GATEWAY_DATA_DIR: dataDir,
+    })
+
+    const unauthorizedResponse = await app.inject({
+      method: 'GET',
+      url: '/mobile/books/book-a/package/download',
+    })
+    const response = await app.inject({
+      method: 'GET',
+      url: '/mobile/books/book-a/package/download',
+      headers: {
+        authorization: 'Bearer dev-token',
+      },
+    })
+
+    expect(unauthorizedResponse.statusCode).toBe(401)
+    expect(response.statusCode).toBe(200)
+    expect(response.headers['content-type']).toContain('application/json')
+    expect(response.headers['content-disposition']).toBe('attachment; filename="book-a-package-full.json"')
+    expect(Number(response.headers['content-length'])).toBeGreaterThan(0)
+    expect(response.json()).toMatchObject({
+      schemaVersion: 1,
+      book: {
+        id: 'book-a',
+      },
+      embeddings: {
+        chunks: [{ chapterId: 'chapter-1' }],
+      },
+    })
+  })
+
   it('returns a stable not found error when a protected book package is missing', async () => {
     const dataDir = await makeDataDir()
     await writeFile(
@@ -1742,6 +1987,27 @@ describe('gateway app', () => {
     expect(response.statusCode).toBe(404)
     expect(response.json().error).toMatchObject({
       code: 'book_package_not_found',
+      statusCode: 404,
+    })
+  })
+
+  it('returns a stable not found error for unknown protected package downloads', async () => {
+    const dataDir = await makeDataDir()
+    const app = buildTestApp({
+      GATEWAY_DEV_ACCESS_TOKEN: 'dev-token',
+      GATEWAY_DATA_DIR: dataDir,
+    })
+    const response = await app.inject({
+      method: 'GET',
+      url: '/mobile/books/missing-book/package/download',
+      headers: {
+        authorization: 'Bearer dev-token',
+      },
+    })
+
+    expect(response.statusCode).toBe(404)
+    expect(response.json().error).toMatchObject({
+      code: 'book_not_found',
       statusCode: 404,
     })
   })
@@ -2203,6 +2469,88 @@ describe('gateway app', () => {
     )
   })
 
+  it('protects admin AI proxy routes and redacts upstream secrets from errors', async () => {
+    const fetchMock = vi.fn(async () =>
+      jsonResponse(
+        {
+          error: {
+            message: 'upstream rejected api key upstream-secret and embedding-secret',
+          },
+        },
+        { status: 401 },
+      ),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+    const app = buildTestApp({
+      GATEWAY_ADMIN_ACCESS_TOKEN: 'admin-token',
+      GATEWAY_MOBILE_ACCESS_TOKEN: 'mobile-token',
+      GATEWAY_AI_BASE_URL: 'https://openai.example.test/v1',
+      GATEWAY_AI_API_KEY: 'upstream-secret',
+      GATEWAY_EMBEDDING_BASE_URL: 'https://openai.example.test/v1',
+      GATEWAY_EMBEDDING_API_KEY: 'embedding-secret',
+    })
+
+    const chatWithMobileToken = await app.inject({
+      method: 'POST',
+      url: '/ai/chat',
+      headers: {
+        authorization: 'Bearer mobile-token',
+      },
+      payload: {
+        messages: [{ role: 'user', content: '你好' }],
+      },
+    })
+    const embeddingsWithMobileToken = await app.inject({
+      method: 'POST',
+      url: '/ai/embeddings',
+      headers: {
+        authorization: 'Bearer mobile-token',
+      },
+      payload: {
+        input: '文本',
+      },
+    })
+    const chatUpstreamError = await app.inject({
+      method: 'POST',
+      url: '/ai/chat',
+      headers: {
+        authorization: 'Bearer admin-token',
+      },
+      payload: {
+        messages: [{ role: 'user', content: '你好' }],
+      },
+    })
+    const embeddingsUpstreamError = await app.inject({
+      method: 'POST',
+      url: '/ai/embeddings',
+      headers: {
+        authorization: 'Bearer admin-token',
+      },
+      payload: {
+        input: '文本',
+      },
+    })
+
+    expect(chatWithMobileToken.statusCode).toBe(401)
+    expect(chatWithMobileToken.json().error).toMatchObject({ code: 'invalid_token' })
+    expect(embeddingsWithMobileToken.statusCode).toBe(401)
+    expect(embeddingsWithMobileToken.json().error).toMatchObject({ code: 'invalid_token' })
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    expect(chatUpstreamError.statusCode).toBe(502)
+    expect(chatUpstreamError.json().error).toMatchObject({
+      code: 'ai_upstream_error',
+      message: 'OpenAI-compatible upstream returned HTTP 401.',
+    })
+    expect(embeddingsUpstreamError.statusCode).toBe(502)
+    expect(embeddingsUpstreamError.json().error).toMatchObject({
+      code: 'embedding_upstream_error',
+      message: 'OpenAI-compatible upstream returned HTTP 401.',
+    })
+    const responseBodies = `${chatWithMobileToken.body}\n${embeddingsWithMobileToken.body}\n${chatUpstreamError.body}\n${embeddingsUpstreamError.body}`
+    expect(responseBodies).not.toContain('upstream-secret')
+    expect(responseBodies).not.toContain('embedding-secret')
+  })
+
   it('forwards protected embedding requests to an Ollama upstream', async () => {
     const fetchMock = vi.fn(async () => jsonResponse({ embedding: [0.3, 0.4, 0.5] }))
     vi.stubGlobal('fetch', fetchMock)
@@ -2328,6 +2676,153 @@ describe('gateway app', () => {
     expect(adminResponse.json().error).toMatchObject({ code: 'invalid_token' })
   })
 
+  it('applies device visibility rules to mobile AI search and RAG answer routes', async () => {
+    const dataDir = await makeDataDir()
+    await mkdir(join(dataDir, 'books', 'trusted-book'), { recursive: true })
+    await writeFile(
+      join(dataDir, 'books.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        books: [
+          {
+            id: 'trusted-book',
+            title: '受信书',
+            chapterCount: 1,
+            updatedAt: '2026-06-30T00:00:00.000Z',
+            visibility: 'trusted',
+          },
+        ],
+      }),
+      'utf8',
+    )
+    await writeFile(
+      join(dataDir, 'books', 'trusted-book', 'package.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        book: {
+          id: 'trusted-book',
+          title: '受信书',
+          chapterCount: 1,
+          updatedAt: '2026-06-30T00:00:00.000Z',
+          visibility: 'trusted',
+        },
+        chapters: [{ id: 'chapter-1', title: '第一章', index: 1 }],
+        embeddings: {
+          chunks: [{ chapterId: 'chapter-1', chapterIndex: 1, text: '耿照和阿傻在妖刀旁相遇。', embedding: [0.1, 0.2] }],
+        },
+      }),
+      'utf8',
+    )
+    await writeFile(
+      join(dataDir, 'devices.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        devices: [
+          {
+            id: 'trusted-device',
+            name: 'Trusted',
+            pairingCode: '111111',
+            role: 'trusted',
+            firstSeenAt: '2026-06-29T00:00:00.000Z',
+            lastSeenAt: '2026-06-29T00:00:00.000Z',
+          },
+          {
+            id: 'disabled-device',
+            name: 'Disabled',
+            pairingCode: '222222',
+            role: 'disabled',
+            firstSeenAt: '2026-06-29T00:00:00.000Z',
+            lastSeenAt: '2026-06-29T00:00:00.000Z',
+          },
+        ],
+      }),
+      'utf8',
+    )
+    const fetchMock = vi.fn(async (input: string | URL | Request) => {
+      const url = String(input)
+      if (url.includes('/embeddings')) return jsonResponse({ data: [{ embedding: [0.1, 0.2] }] })
+      if (url.includes('/chat/completions')) return jsonResponse({ choices: [{ message: { content: '耿照和阿傻在妖刀旁相遇。' } }] })
+      return jsonResponse({ error: 'unexpected upstream' }, { status: 500 })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const app = buildTestApp({
+      GATEWAY_ADMIN_ACCESS_TOKEN: 'admin-token',
+      GATEWAY_MOBILE_ACCESS_TOKEN: 'mobile-token',
+      GATEWAY_DATA_DIR: dataDir,
+      GATEWAY_AI_BASE_URL: 'https://ai.example.test/v1',
+      GATEWAY_AI_API_KEY: 'ai-secret',
+      GATEWAY_AI_MODEL: 'chat-test',
+      GATEWAY_EMBEDDING_BASE_URL: 'https://embedding.example.test/v1',
+      GATEWAY_EMBEDDING_API_KEY: 'embedding-secret',
+      GATEWAY_EMBEDDING_MODEL: 'text-embedding-test',
+    })
+
+    const defaultSearch = await app.inject({
+      method: 'POST',
+      url: '/ai/search',
+      headers: {
+        authorization: 'Bearer mobile-token',
+        'x-device-id': 'default-device',
+      },
+      payload: {
+        bookId: 'trusted-book',
+        query: '耿照',
+      },
+    })
+    const trustedSearch = await app.inject({
+      method: 'POST',
+      url: '/ai/search',
+      headers: {
+        authorization: 'Bearer mobile-token',
+        'x-device-id': 'trusted-device',
+      },
+      payload: {
+        bookId: 'trusted-book',
+        query: '耿照',
+      },
+    })
+    const trustedAnswer = await app.inject({
+      method: 'POST',
+      url: '/ai/rag-answer',
+      headers: {
+        authorization: 'Bearer mobile-token',
+        'x-device-id': 'trusted-device',
+      },
+      payload: {
+        bookId: 'trusted-book',
+        query: '耿照在哪里遇到阿傻？',
+      },
+    })
+    const disabledAnswer = await app.inject({
+      method: 'POST',
+      url: '/ai/rag-answer',
+      headers: {
+        authorization: 'Bearer mobile-token',
+        'x-device-id': 'disabled-device',
+      },
+      payload: {
+        bookId: 'trusted-book',
+        query: '耿照',
+      },
+    })
+
+    expect(defaultSearch.statusCode).toBe(404)
+    expect(defaultSearch.json().error).toMatchObject({ code: 'book_not_found' })
+    expect(trustedSearch.statusCode).toBe(200)
+    expect(trustedSearch.json()).toMatchObject({
+      bookId: 'trusted-book',
+      results: [expect.objectContaining({ chapterId: 'chapter-1' })],
+    })
+    expect(trustedAnswer.statusCode).toBe(200)
+    expect(trustedAnswer.json()).toMatchObject({
+      bookId: 'trusted-book',
+      answer: '耿照和阿傻在妖刀旁相遇。',
+      results: [expect.objectContaining({ chapterId: 'chapter-1' })],
+    })
+    expect(disabledAnswer.statusCode).toBe(403)
+    expect(disabledAnswer.json().error).toMatchObject({ code: 'device_disabled', statusCode: 403 })
+  })
+
   it('returns stable errors when OpenAI-compatible upstreams are not configured', async () => {
     const app = buildTestApp({
       GATEWAY_DEV_ACCESS_TOKEN: 'dev-token',
@@ -2420,9 +2915,27 @@ describe('gateway app', () => {
           {
             id: 'book-a',
             title: '音频书',
-            chapterCount: 1,
+            chapterCount: 2,
             updatedAt: '2026-06-25T00:00:00.000Z',
           },
+        ],
+      }),
+      'utf8',
+    )
+    await mkdir(join(dataDir, 'books', 'book-a'), { recursive: true })
+    await writeFile(
+      join(dataDir, 'books', 'book-a', 'package.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        book: {
+          id: 'book-a',
+          title: '音频书',
+          chapterCount: 2,
+          updatedAt: '2026-06-25T00:00:00.000Z',
+        },
+        chapters: [
+          { id: 'chapter-1', title: '第一章', content: '正文一' },
+          { id: 'chapter-2', title: '第二章', content: '正文二' },
         ],
       }),
       'utf8',
@@ -2485,6 +2998,16 @@ describe('gateway app', () => {
 
     expect(catalogResponse.statusCode).toBe(200)
     expect(catalogResponse.json()).toMatchObject({
+      summary: {
+        bookId: 'book-a',
+        title: '音频书',
+        chapterCount: 2,
+        audioChapterCount: 1,
+        missingChapterCount: 1,
+        missingChapterIds: ['chapter-2'],
+        coverage: 0.5,
+        totalSizeBytes: 'fake mp3 data'.length,
+      },
       chapters: [
         {
           chapterId: 'chapter-1',
@@ -2504,6 +3027,134 @@ describe('gateway app', () => {
       timelineVersion: 1,
       timeline: [{ text: '正文' }],
     })
+  })
+
+  it('protects MP3 downloads with mobile auth, device role, and book visibility', async () => {
+    const dataDir = await makeDataDir()
+    const audioDir = await makeDataDir()
+    const defaultBookAudioDir = join(audioDir, 'books', 'book-default')
+    const trustedBookAudioDir = join(audioDir, 'books', 'book-trusted')
+    await mkdir(defaultBookAudioDir, { recursive: true })
+    await mkdir(trustedBookAudioDir, { recursive: true })
+    await writeFile(
+      join(dataDir, 'books.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        books: [
+          {
+            id: 'book-default',
+            title: '普通音频书',
+            chapterCount: 1,
+            updatedAt: '2026-06-25T00:00:00.000Z',
+            visibility: 'default',
+          },
+          {
+            id: 'book-trusted',
+            title: '受信音频书',
+            chapterCount: 1,
+            updatedAt: '2026-06-25T00:00:00.000Z',
+            visibility: 'trusted',
+          },
+        ],
+      }),
+      'utf8',
+    )
+    for (const bookId of ['book-default', 'book-trusted']) {
+      const bookAudioDir = join(audioDir, 'books', bookId)
+      await writeFile(join(bookAudioDir, 'chapter-1.mp3'), `${bookId} mp3 data`)
+      await writeFile(
+        join(bookAudioDir, 'audio.json'),
+        JSON.stringify({
+          schemaVersion: 1,
+          chapters: [
+            {
+              chapterId: 'chapter-1',
+              title: '第一章',
+              fileName: 'chapter-1.mp3',
+              durationMs: 1200,
+            },
+          ],
+        }),
+        'utf8',
+      )
+    }
+    await writeFile(
+      join(dataDir, 'devices.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        devices: [
+          {
+            id: 'trusted-device',
+            name: '受信设备',
+            role: 'trusted',
+            pairingCode: '111111',
+            firstSeenAt: '2026-06-25T00:00:00.000Z',
+            lastSeenAt: '2026-06-25T00:00:00.000Z',
+          },
+          {
+            id: 'disabled-device',
+            name: '禁用设备',
+            role: 'disabled',
+            pairingCode: '222222',
+            firstSeenAt: '2026-06-25T00:00:00.000Z',
+            lastSeenAt: '2026-06-25T00:00:00.000Z',
+          },
+        ],
+      }),
+      'utf8',
+    )
+    const app = buildTestApp({
+      GATEWAY_ADMIN_ACCESS_TOKEN: 'admin-token',
+      GATEWAY_MOBILE_ACCESS_TOKEN: 'mobile-token',
+      GATEWAY_DATA_DIR: dataDir,
+      GATEWAY_AUDIO_DIR: audioDir,
+    })
+
+    const noTokenResponse = await app.inject({
+      method: 'GET',
+      url: '/mobile/books/book-default/audio/chapter-1/download',
+    })
+    const adminTokenResponse = await app.inject({
+      method: 'GET',
+      url: '/mobile/books/book-default/audio/chapter-1/download',
+      headers: {
+        authorization: 'Bearer admin-token',
+      },
+    })
+    const defaultDeviceTrustedBookResponse = await app.inject({
+      method: 'GET',
+      url: '/mobile/books/book-trusted/audio/chapter-1/download',
+      headers: {
+        authorization: 'Bearer mobile-token',
+        'x-device-id': 'default-device',
+      },
+    })
+    const trustedDeviceResponse = await app.inject({
+      method: 'GET',
+      url: '/mobile/books/book-trusted/audio/chapter-1/download',
+      headers: {
+        authorization: 'Bearer mobile-token',
+        'x-device-id': 'trusted-device',
+      },
+    })
+    const disabledDeviceResponse = await app.inject({
+      method: 'GET',
+      url: '/mobile/books/book-default/audio/chapter-1/download',
+      headers: {
+        authorization: 'Bearer mobile-token',
+        'x-device-id': 'disabled-device',
+      },
+    })
+
+    expect(noTokenResponse.statusCode).toBe(401)
+    expect(adminTokenResponse.statusCode).toBe(401)
+    expect(defaultDeviceTrustedBookResponse.statusCode).toBe(404)
+    expect(defaultDeviceTrustedBookResponse.json()).toMatchObject({ error: { code: 'book_not_found' } })
+    expect(trustedDeviceResponse.statusCode).toBe(200)
+    expect(trustedDeviceResponse.headers['content-type']).toContain('audio/mpeg')
+    expect(trustedDeviceResponse.body).toBe('book-trusted mp3 data')
+    expect(disabledDeviceResponse.statusCode).toBe(403)
+    expect(disabledDeviceResponse.json()).toMatchObject({ error: { code: 'device_disabled' } })
   })
 
   it('rejects unsafe protected audio catalog paths', async () => {
