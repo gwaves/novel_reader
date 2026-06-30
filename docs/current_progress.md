@@ -2,6 +2,7 @@
 - 快速功能开发阶段基本收束，后续主线调整为“产品功能规格 -> 测试用例矩阵 -> 系统性 Code Review -> 可观测性/运维能力 -> 发布治理”。
 - 新增 `docs/product-spec.md`，把 PC 阅读器、AI 概要、知识图谱、RAG、production-pipeline、Gateway、Admin UI、Gateway Android App 和历史移动端边界整理为正式产品功能说明书。
 - 新增 `docs/quality-ops-roadmap.md`，记录正规化阶段的里程碑、交付物、验收标准和推荐执行顺序。
+- 新增 `docs/development-history-visual.md`，根据 GitHub PR、tag 和 Git 提交历史整理开发进展时间线、主线 PR 演进图和能力版图演进图。
 - README 已增加产品规格、测试与运维规划入口，并补充下一阶段质量建设重点。
 - 下一步优先编写 `docs/test-case-matrix.md`：按功能域拆出正向、失败路径、风险等级、自动化层级、现有覆盖和真机/真实 Gateway 验证边界。
 
