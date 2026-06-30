@@ -20,12 +20,10 @@ Gateway 第一版面向两种部署方式：
 
 ```bash
 GATEWAY_PUBLIC_BASE_URL=https://reader.example.com
-GATEWAY_DEV_ACCESS_TOKEN=replace-with-a-long-random-token
-# 源码支持 admin/mobile token 分离；未设置时分别回退到 GATEWAY_DEV_ACCESS_TOKEN。
-# 当前 compose 模板只透传 GATEWAY_DEV_ACCESS_TOKEN。如需容器内强制分离，
-# 需要在 compose environment 中一并透传下面两个变量。
+GATEWAY_DEV_ACCESS_TOKEN=
 GATEWAY_ADMIN_ACCESS_TOKEN=replace-with-a-long-random-admin-token
 GATEWAY_MOBILE_ACCESS_TOKEN=replace-with-a-long-random-mobile-token
+# 浏览器跨域白名单，移动 App 原生请求通常不需要。生产如果不需要浏览器跨域，保持空；不要配置 *。
 GATEWAY_CORS_ORIGINS=
 GATEWAY_AI_BASE_URL=https://api.openai.com/v1
 GATEWAY_AI_API_KEY=
@@ -96,6 +94,14 @@ gateway/audio/
 Nginx 示例：
 
 ```nginx
+server_tokens off;
+
+server {
+    listen 443 ssl http2 default_server;
+    server_name _;
+    return 444;
+}
+
 server {
     listen 443 ssl http2;
     server_name reader.example.com;
@@ -119,12 +125,24 @@ server {
 Compose 内置 Nginx 容器时，可以使用同一 Docker 网络里的服务名反代：
 
 ```nginx
+server_tokens off;
+
+server {
+    listen 8443 ssl http2 default_server;
+    server_name _;
+
+    ssl_certificate /etc/nginx/tls/fullchain.pem;
+    ssl_certificate_key /etc/nginx/tls/privkey.pem;
+
+    return 444;
+}
+
 server {
     listen 8443 ssl http2;
     server_name novel.gwaves.net;
 
-    ssl_certificate /etc/letsencrypt/live/novel.gwaves.net/fullchain.pem;
-    ssl_certificate_key /etc/letsencrypt/live/novel.gwaves.net/privkey.pem;
+    ssl_certificate /etc/nginx/tls/fullchain.pem;
+    ssl_certificate_key /etc/nginx/tls/privkey.pem;
 
     client_max_body_size 512m;
     proxy_read_timeout 1800s;
@@ -176,6 +194,7 @@ curl -H "Authorization: Bearer $GATEWAY_ADMIN_ACCESS_TOKEN" \
 
 curl -kI https://novel.gwaves.net:8888/admin/ui
 curl -I http://192.168.88.100:6180/admin/ui
+npm run gateway:security-smoke
 ```
 
-`/health` 可公开访问；公网 Nginx 入口的 `/admin/ui` 应返回 403；内网直连 `6180` 可访问管理后台；`/admin/*` 和后台 AI/RAG 接口使用 admin bearer token，`/auth/*`、`/mobile/*` 和 MP3 接口使用 mobile bearer token。未设置 `GATEWAY_ADMIN_ACCESS_TOKEN` 或 `GATEWAY_MOBILE_ACCESS_TOKEN` 时，会分别回退到 `GATEWAY_DEV_ACCESS_TOKEN`，方便开发期沿用旧配置。
+`/health` 可公开访问；公网 Nginx 入口的 `/admin/ui` 应返回 403；未知 Host 或 IP 直连不应返回 200；内网直连 `6180` 可访问管理后台；`/admin/*` 和后台 AI/RAG 接口使用 admin bearer token，`/auth/*`、`/mobile/*` 和 MP3 接口使用 mobile bearer token。生产环境未设置 `GATEWAY_ADMIN_ACCESS_TOKEN` 或 `GATEWAY_MOBILE_ACCESS_TOKEN` 时，Gateway 会拒绝启动。

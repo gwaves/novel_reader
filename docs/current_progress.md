@@ -6,8 +6,11 @@
 - 开发策略确定为测试驱动：先补 Gateway 接口测试、移动端设备身份测试和后台 UI 测试，再实现功能；可并发拆分为 Gateway API、Gateway Mobile App 设备身份、管理后台 UI 三条线。
 - 当前已完成第一轮落地并提交：Gateway 管理 API、移动端设备身份、管理后台 UI 骨架和生产流水线 v2 收束已合并到 `b2843545`。
 - 管理后台继续推进：Gateway 现在从 `/admin/ui` 服务 `gateway/admin-ui/dist`，避免覆盖 `/admin/books` JSON API；后台 UI 已接入 `/admin/books` 和 `/admin/devices`，API 不可用时回退 mock 数据。
+- Gateway 公网安全整改已落地：生产环境不再使用 dev token fallback，匿名 `/capabilities`/`/version` 去除认证与环境细节，新增公网 Nginx Host 白名单模板和 `gateway:security-smoke` 验证脚本。
 - Gateway 总览指标继续推进：新增进程内 `/admin/metrics` 和 `/admin/events`，统计最近请求数、错误率、P95、package/audio 下载次数、热门书籍和最近下载/错误事件；后台总览页已接入这些真实 API。
-- Gateway Android 修正 MP3 计数串书：本机缓存章节数与云端音频总数已分离，下载三国演义时不会再把进度/缓存数显示到妖刀记；MP3 批量同步新增停止按钮，停止后当前章节完成即不再继续后续章节。
+- Gateway Android 修正 MP3 计数串书：本机缓存章节数与可缓存音频总数已分离，下载三国演义时不会再把进度/缓存数显示到妖刀记；MP3 批量同步新增停止按钮，停止后当前章节完成即不再继续后续章节。
+- Gateway Android 修正已缓存 MP3 的播放面板显示：当前章音频现在会优先匹配服务端音频目录，并在目录未加载或离线时回退到本机 MP3 缓存索引，避免已下载章节仍显示“当前章节暂无缓存 MP3”；播放引擎文案已从“云端 MP3”改为“缓存 MP3”，避免误解为在线播放。
+- Gateway Android 的 MP3 管理面板新增章节缓存明细，逐章显示“已缓存 / 未缓存 / 无音频”并高亮当前章节，避免只能看到缓存总数却无法判断具体哪些章节已下载；未缓存但有音频的章节现在可单独加入后台下载队列，实现选集缓存。
 - 本轮按 TDD 多 Agent 并行推进：Gateway 后端新增 `/admin/packages`、`/admin/audio`、`/admin/requests` 并补测试；admin-ui 的数据包、音频、请求日志页已从占位改为真实表格视图并兼容真实后端字段；Gateway Android 设置/书库页补强设备 ID、Pairing Code、角色/授权、可见范围和禁用态阻断提示。
 - 下一轮开发计划：继续采用测试驱动和多 Agent 并行，目标做到真实验证前的三步闭环。第一步补后台操作闭环，包含 package 下载/重新导入状态、音频清理/刷新状态、书籍/设备操作的保存中/失败回滚/确认提示；第二步补真实安全边界，将 admin 与 mobile 鉴权语义分开，并让 admin-ui 区分未授权、服务不可用和单接口失败，避免误回退 mock；第三步补移动端角色变化体验，明确 default/trusted/disabled 变化后的书库刷新、缓存可读策略和禁用态错误提示。最终真机和真实部署验证由用户执行。
 - 三步开发已按测试驱动完成：Gateway 后端新增后台 package 下载、音频刷新和音频清单清理接口，并引入 `GATEWAY_ADMIN_ACCESS_TOKEN` / `GATEWAY_MOBILE_ACCESS_TOKEN` 与 dev token fallback；admin-ui 增加数据包下载、音频刷新/清理、书籍/设备保存中/失败回滚/重试，以及未授权/不可用/部分失败状态；Gateway Android 增加角色变化提示，禁用后阻断云端操作但保留本地缓存阅读和清理能力。代码层面已通过 Gateway、admin-ui、Gateway Android 测试和构建，剩余真实部署/真机验证由用户执行。

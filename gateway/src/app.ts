@@ -121,10 +121,9 @@ export function buildGatewayApp(config: GatewayConfig = loadConfig()) {
   app.get('/version', async () => ({
     service: 'novel-reader-gateway',
     version: '0.1.0',
-    environment: config.environment,
   }))
 
-  app.get('/capabilities', async () => buildCapabilities(config))
+  app.get('/capabilities', async () => buildCapabilities())
 
   app.get('/admin/ui', async (_request, reply) => serveAdminUiFile(config, reply, 'index.html'))
   app.get<{ Params: { '*': string } }>('/admin/ui/*', async (request, reply) => {

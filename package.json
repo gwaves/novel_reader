@@ -27,6 +27,7 @@
     "gateway:build": "npm --prefix gateway run build",
     "gateway:start": "npm --prefix gateway run start",
     "gateway:test": "npm --prefix gateway run test",
+    "gateway:security-smoke": "npm --prefix gateway run security-smoke",
     "gateway:admin-ui:build": "npm --prefix gateway run admin-ui:build",
     "gateway:admin-ui:test": "npm --prefix gateway run admin-ui:test",
     "gateway:publish-audio": "node gateway/scripts/publish-audio.mjs",

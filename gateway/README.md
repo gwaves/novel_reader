@@ -87,7 +87,8 @@ localStorage.setItem('novel-reader-gateway-admin-token', '<GATEWAY_ADMIN_ACCESS_
 
 - `GATEWAY_ADMIN_ACCESS_TOKEN`：用于 `/admin/*` 和后台 AI/RAG 转发接口。
 - `GATEWAY_MOBILE_ACCESS_TOKEN`：用于 `/auth/*` 和 `/mobile/*`。
-- `GATEWAY_DEV_ACCESS_TOKEN`：兼容旧开发流程；当 admin/mobile token 未配置时作为 fallback。
+- `GATEWAY_DEV_ACCESS_TOKEN`：兼容旧开发流程；仅在非生产环境作为 fallback。
+- `GATEWAY_ENV=production` 时必须显式设置 `GATEWAY_ADMIN_ACCESS_TOKEN` 和 `GATEWAY_MOBILE_ACCESS_TOKEN`，不会回退到 dev token。
 
 受保护接口需要携带：
 
@@ -179,6 +180,14 @@ npm run gateway:publish-audio -- \
 
 脚本会扫描 `<source-root>/chNNN-full/audio/chapter.mp3` 和 `manifest.json`，根据本地移动数据包章节序号匹配真实 `chapterId`，复制到 `GATEWAY_AUDIO_DIR/books/<bookId>/`，并生成 `audio.json`。可以用 `--package-file path/to/package.json` 跳过本地 API，或用 `--dry-run` 只检查映射结果。
 
+公网部署后可以执行安全 smoke 检查：
+
+```bash
+npm run gateway:security-smoke
+```
+
+脚本默认检查 `https://novel.gwaves.net:8888`，可通过 `GATEWAY_SECURITY_BASE_URL`、`GATEWAY_SECURITY_IP_URL` 和 `GATEWAY_SECURITY_HOST` 覆盖目标。
+
 如果 Gateway 跑在远端机器上，可以在本地整理完音频目录后直接同步到远端挂载目录。例如家里网关机器 `192.168.88.100` 的 compose 挂载了 `~/novel-reader-gateway/audio:/audio`，以便管理后台可以清理重建单书音频目录：
 
 ```bash
@@ -192,4 +201,4 @@ npm run gateway:publish-audio -- \
 
 需要指定 SSH 用户或端口时，增加 `--remote-user <user>` 和 `--remote-ssh-port <port>`；脚本会把 `books/<bookId>/` 同步到远端，并默认删除远端该书目录里已经不存在的旧文件。
 
-未配置 AI、embedding 或对象存储时，`/capabilities` 会明确返回对应能力不可用，而不是在运行时崩溃。
+未配置 AI、embedding 或对象存储时，`/capabilities` 会返回公开可见的能力可用性；认证模式、token 配置状态和限流细节不会从匿名公网接口暴露。

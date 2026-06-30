@@ -60,17 +60,10 @@ describe('gateway app', () => {
     expect(response.json()).toMatchObject({
       auth: {
         requiredByDefault: true,
-        mode: 'not-configured',
       },
       features: {
         books: {
           available: true,
-        },
-        aiSearch: {
-          available: false,
-        },
-        embeddings: {
-          available: false,
         },
         audio: {
           available: true,
@@ -78,9 +71,13 @@ describe('gateway app', () => {
         },
       },
     })
+    expect(response.json().auth).not.toHaveProperty('mode')
+    expect(response.json()).not.toHaveProperty('limits')
+    expect(response.json().features).not.toHaveProperty('aiSearch')
+    expect(response.json().features).not.toHaveProperty('embeddings')
   })
 
-  it('reports configured AI, embedding, and audio capabilities', async () => {
+  it('does not expose upstream configuration from public capabilities', async () => {
     const app = buildTestApp({
       GATEWAY_DEV_ACCESS_TOKEN: 'dev-token',
       GATEWAY_AI_BASE_URL: 'https://ai.example.test/v1',
@@ -98,20 +95,53 @@ describe('gateway app', () => {
     expect(response.statusCode).toBe(200)
     expect(response.json()).toMatchObject({
       auth: {
-        mode: 'development-static-token',
+        requiredByDefault: true,
       },
       features: {
-        aiSearch: {
-          available: true,
-        },
-        embeddings: {
-          available: true,
-        },
         audio: {
           available: true,
         },
       },
     })
+    expect(response.json().auth).not.toHaveProperty('adminTokenConfigured')
+    expect(response.json().auth).not.toHaveProperty('mobileTokenConfigured')
+    expect(response.json().auth).not.toHaveProperty('tokenSecretConfigured')
+    expect(response.json().features).not.toHaveProperty('aiSearch')
+    expect(response.json().features).not.toHaveProperty('embeddings')
+  })
+
+  it('does not expose the runtime environment from the public version endpoint', async () => {
+    const app = buildTestApp()
+    const response = await app.inject({
+      method: 'GET',
+      url: '/version',
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect(response.json()).toEqual({
+      service: 'novel-reader-gateway',
+      version: '0.1.0',
+    })
+  })
+
+  it('rejects production config without explicit admin and mobile tokens', () => {
+    expect(() =>
+      loadConfig({
+        GATEWAY_ENV: 'production',
+        GATEWAY_DEV_ACCESS_TOKEN: 'dev-token',
+      }),
+    ).toThrow(/requires GATEWAY_ADMIN_ACCESS_TOKEN and GATEWAY_MOBILE_ACCESS_TOKEN/)
+  })
+
+  it('rejects wildcard CORS origins in production', () => {
+    expect(() =>
+      loadConfig({
+        GATEWAY_ENV: 'production',
+        GATEWAY_ADMIN_ACCESS_TOKEN: 'admin-token',
+        GATEWAY_MOBILE_ACCESS_TOKEN: 'mobile-token',
+        GATEWAY_CORS_ORIGINS: '*',
+      }),
+    ).toThrow(/does not allow wildcard GATEWAY_CORS_ORIGINS/)
   })
 
   it('serves the admin UI under /admin/ui without shadowing admin APIs', async () => {
@@ -180,13 +210,7 @@ describe('gateway app', () => {
     })
 
     expect(response.statusCode).toBe(200)
-    expect(response.json()).toMatchObject({
-      features: {
-        embeddings: {
-          available: true,
-        },
-      },
-    })
+    expect(response.json().features).not.toHaveProperty('embeddings')
   })
 
   it('returns unified errors for unknown routes', async () => {

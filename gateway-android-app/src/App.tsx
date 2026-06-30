@@ -48,7 +48,7 @@ type Chapter = {
   chapterIndex?: number
 }
 
-type AudioChapter = {
+export type AudioChapter = {
   chapterId: string
   title?: string
   fileName: string
@@ -225,6 +225,12 @@ type BookCacheSummary = {
   totalSizeBytes: number
 }
 
+type AudioDownloadQueueItem = {
+  key: string
+  bookId: string
+  audioChapter: AudioChapter
+}
+
 type SearchResult = {
   chapterId: string
   chapterIndex: number
@@ -332,6 +338,8 @@ function App() {
   const [cachedAudioBookId, setCachedAudioBookId] = useState<string | null>(null)
   const [audioSyncProgress, setAudioSyncProgress] = useState<{ done: number; total: number } | null>(null)
   const [audioSyncBookId, setAudioSyncBookId] = useState<string | null>(null)
+  const [audioDownloadQueueIds, setAudioDownloadQueueIds] = useState<Set<string>>(() => new Set())
+  const [audioDownloadingChapterKey, setAudioDownloadingChapterKey] = useState<string | null>(null)
   const [fullPackageCache, setFullPackageCache] = useState<FullPackageCache | null>(() => loadFullPackageCache())
   const [fullPackageStatus, setFullPackageStatus] = useState<FullPackageStatus>(() => {
     const cache = loadFullPackageCache()
@@ -380,9 +388,17 @@ function App() {
   const displayCloudAudioChapterCount = visibleAudioChapters.length || selectedBook?.audioChapterCount || 0
   const displayCachedAudioChapterCount = visibleCachedAudioIds.size || bookCachedAudioCount(selectedLocalBook ?? selectedBook)
   const cacheSummaries = useMemo(() => buildBookCacheSummaries([...displayLocalBooks, ...books], cacheVersion), [books, displayLocalBooks, cacheVersion])
+  const cachedCurrentAudio = useMemo(
+    () => (selectedBookId && currentChapter?.id ? readCachedAudioChapter(selectedBookId, currentChapter.id) : null),
+    [currentChapter?.id, selectedBookId, visibleCachedAudioIds],
+  )
   const currentAudio = useMemo(
-    () => visibleAudioChapters.find((chapter) => chapter.chapterId === currentChapter?.id) ?? null,
-    [currentChapter, visibleAudioChapters],
+    () => resolveCurrentAudio(currentChapter?.id, visibleAudioChapters, cachedCurrentAudio),
+    [cachedCurrentAudio, currentChapter?.id, visibleAudioChapters],
+  )
+  const audioChapterStatusRows = useMemo(
+    () => buildAudioChapterStatusRows(chapters, visibleAudioChapters, visibleCachedAudioIds, currentChapter?.id),
+    [chapters, currentChapter?.id, visibleAudioChapters, visibleCachedAudioIds],
   )
   const activeTimelineEntry = useMemo(
     () => findActiveTimelineEntry(audioManifest, audioTime),
@@ -436,6 +452,8 @@ function App() {
   const playbackEngineTouchedRef = useRef(false)
   const deviceMetadata = useMemo(() => getDeviceMetadata(appVersion), [])
   const audioSyncCancelRequestedRef = useRef(false)
+  const audioDownloadQueueRef = useRef<AudioDownloadQueueItem[]>([])
+  const audioDownloadProcessingRef = useRef(false)
   const gatewaySessionRef = useRef<GatewaySession | null>(gatewaySession)
   const cloudBookCountRef = useRef(books.length)
 
@@ -1080,7 +1098,7 @@ function App() {
           ? catalog.filter((chapter) => !readCachedAudio(bookId, chapter.chapterId))
           : catalog.slice(safeStartIndex, safeStartIndex + (limit === 'current' ? 1 : limit))
       if (targetChapters.length === 0) {
-        setMessage(limit === 'all' ? '所有云端 MP3 都已缓存' : '选中范围暂无可下载 MP3')
+        setMessage(limit === 'all' ? '所有可缓存 MP3 都已下载' : '选中范围暂无可下载 MP3')
         return
       }
       const label = limit === 'all' ? '未缓存音频' : limit === 'current' ? '当前章节 MP3' : `后续 ${limit} 章 MP3`
@@ -1135,6 +1153,65 @@ function App() {
       setAudioSyncProgress(null)
       setAudioSyncBookId(null)
       audioSyncCancelRequestedRef.current = false
+    }
+  }
+
+  function enqueueAudioChapterDownload(bookId: string, audioChapter: AudioChapter) {
+    const blockedReason = cloudActionBlockedReason(gatewaySessionRef.current, '下载 MP3')
+    if (blockedReason) {
+      setConnectionState('error')
+      setMessage(blockedReason)
+      return
+    }
+    if (readCachedAudio(bookId, audioChapter.chapterId)) {
+      setCachedAudioIds((current) => new Set(current).add(audioChapter.chapterId))
+      setMessage('本章 MP3 已缓存')
+      return
+    }
+    const key = audioDownloadQueueKey(bookId, audioChapter.chapterId)
+    if (audioDownloadingChapterKey === key || audioDownloadQueueRef.current.some((item) => item.key === key)) {
+      setMessage('本章 MP3 已在下载队列中')
+      return
+    }
+    audioDownloadQueueRef.current = [...audioDownloadQueueRef.current, { key, bookId, audioChapter }]
+    setAudioDownloadQueueIds((current) => new Set(current).add(key))
+    setMessage(`已加入下载队列：${audioChapter.title ?? audioChapter.chapterId}`)
+    void processAudioDownloadQueue()
+  }
+
+  async function processAudioDownloadQueue() {
+    if (audioDownloadProcessingRef.current) return
+    audioDownloadProcessingRef.current = true
+    try {
+      while (audioDownloadQueueRef.current.length > 0) {
+        const item = audioDownloadQueueRef.current.shift()
+        if (!item) continue
+        setAudioDownloadQueueIds((current) => {
+          const next = new Set(current)
+          next.delete(item.key)
+          return next
+        })
+        setAudioDownloadingChapterKey(item.key)
+        setCachedAudioBookId(item.bookId)
+        try {
+          if (!readCachedAudio(item.bookId, item.audioChapter.chapterId)) {
+            await cacheAudioChapter(item.bookId, item.audioChapter)
+          }
+          setCachedAudioIds((current) => new Set(current).add(item.audioChapter.chapterId))
+          await refreshCachedAudioIds(item.bookId)
+          await refreshLocalLibrary()
+          setMessage(`已缓存：${item.audioChapter.title ?? item.audioChapter.chapterId}`)
+        } catch (error) {
+          if (isDeviceDisabledError(error)) {
+            setConnectionState('error')
+          }
+          setMessage(`缓存失败：${errorMessage(error)}`)
+        } finally {
+          setAudioDownloadingChapterKey(null)
+        }
+      }
+    } finally {
+      audioDownloadProcessingRef.current = false
     }
   }
 
@@ -2011,7 +2088,7 @@ function App() {
     if (ttsSettings.engine === 'cloud-mp3') {
       if (chapterAudioPlaying) return `正在播放 MP3 · ${formatDuration(audioTime * 1000)}`
       if (audioUrl) return `MP3 已加载 · ${formatDuration(audioTime * 1000)}`
-      return currentAudio ? '本章可播放云端 MP3' : '当前章节暂无 MP3'
+      return currentAudio ? '本章可播放缓存 MP3' : '当前章节暂无缓存 MP3'
     }
     if (speechPlayback.status === 'playing') return `正在朗读 ${speechPlayback.segmentIndex + 1}/${speechChapter?.segments.length ?? 0}`
     if (speechPlayback.status === 'paused') return `已暂停在 ${speechPlayback.segmentIndex + 1}/${speechChapter?.segments.length ?? 0}`
@@ -2121,7 +2198,7 @@ function App() {
             updateTtsSettings({ ...ttsSettings, engine: 'cloud-mp3' })
           }}
         >
-          云端 MP3
+          缓存 MP3
         </button>
       </div>
     )
@@ -2717,13 +2794,64 @@ function App() {
                 <dd>{displayCachedAudioChapterCount} 章</dd>
               </div>
               <div>
-                <dt>云端 MP3</dt>
+                <dt>可缓存 MP3</dt>
                 <dd>{displayCloudAudioChapterCount || visibleAudioChapters.length || '未刷新'} 章</dd>
               </div>
               <div>
                 <dt>当前章节</dt>
                 <dd>{currentChapter ? `${Math.max(1, currentChapterPosition + 1)} / ${chapters.length}` : '未打开'}</dd>
               </div>
+            </div>
+            <div className="mp3-chapter-list">
+              <div className="mp3-chapter-list-heading">
+                <strong>章节缓存明细</strong>
+                <span>{audioChapterStatusRows.length ? `${visibleCachedAudioIds.size}/${audioChapterStatusRows.filter((row) => row.hasAudio).length} 已缓存` : '未加载章节'}</span>
+              </div>
+              {audioChapterStatusRows.length ? (
+                <div className="mp3-chapter-rows">
+                  {audioChapterStatusRows.map((row) => (
+                    <div
+                      className={[
+                        'mp3-chapter-row',
+                        row.isCurrent ? 'current' : '',
+                        row.cached ? 'cached' : row.hasAudio ? 'missing' : 'unavailable',
+                      ].filter(Boolean).join(' ')}
+                      key={row.chapterId}
+                    >
+                      <button className="mp3-chapter-title-button" type="button" onClick={() => selectChapter(row.chapterId)}>
+                        <span>{row.index}. {row.title}</span>
+                      </button>
+                      {row.cached ? (
+                        <strong className="mp3-chapter-status">已缓存</strong>
+                      ) : row.hasAudio && row.audioChapter ? (
+                        <button
+                          className="mp3-chapter-cache-button"
+                          type="button"
+                          disabled={
+                            cloudSyncBlocked ||
+                            audioDownloadingChapterKey === audioDownloadQueueKey(selectedBookId ?? '', row.audioChapter.chapterId) ||
+                            audioDownloadQueueIds.has(audioDownloadQueueKey(selectedBookId ?? '', row.audioChapter.chapterId))
+                          }
+                          onClick={() => {
+                            if (!selectedBookId || !row.audioChapter) return
+                            enqueueAudioChapterDownload(selectedBookId, row.audioChapter)
+                          }}
+                        >
+                          {audioDownloadingChapterKey === audioDownloadQueueKey(selectedBookId ?? '', row.audioChapter.chapterId)
+                            ? '下载中'
+                            : audioDownloadQueueIds.has(audioDownloadQueueKey(selectedBookId ?? '', row.audioChapter.chapterId))
+                              ? '队列中'
+                              : '缓存'}
+                        </button>
+                      ) : (
+                        <strong className="mp3-chapter-status">无音频</strong>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <p className="mp3-chapter-empty">打开书籍后显示每章 MP3 缓存状态。</p>
+              )}
             </div>
             {visibleAudioSyncProgress ? (
               <div className="package-line mp3-progress-line">
@@ -3873,7 +4001,7 @@ function normalizeBookTitle(title: string) {
 function formatBookMeta(book: BookSummary, audioChapterCount = book.audioChapterCount) {
   const parts = [`${book.chapterCount} 章`]
   if (book.author) parts.push(book.author)
-  if (audioChapterCount) parts.push(`${audioChapterCount} 云端音频`)
+  if (audioChapterCount) parts.push(`${audioChapterCount} 可缓存音频`)
   return parts.join(' · ')
 }
 
@@ -4057,6 +4185,12 @@ function readCachedAudio(bookId: string, chapterId: string): CachedAudio | null 
   }
 }
 
+function readCachedAudioChapter(bookId: string, chapterId: string): AudioChapter | null {
+  const record = loadAudioCacheIndex()[audioCacheKey(bookId, chapterId)]
+  if (!record?.filePath || record.chapterId !== chapterId) return null
+  return record.audioChapter
+}
+
 async function listCachedAudioChapterIds(bookId: string) {
   return Object.values(loadAudioCacheIndex())
     .filter((record) => record.bookId === bookId)
@@ -4094,6 +4228,50 @@ function saveAudioCacheIndex(index: Record<string, CachedAudioRecord>) {
 
 function audioCacheKey(bookId: string, chapterId: string) {
   return `${bookId}:${chapterId}`
+}
+
+function audioDownloadQueueKey(bookId: string, chapterId: string) {
+  return `${bookId}:${chapterId}`
+}
+
+export function resolveCurrentAudio(
+  currentChapterId: string | null | undefined,
+  visibleAudioChapters: AudioChapter[],
+  cachedAudioChapter: AudioChapter | null,
+) {
+  if (!currentChapterId) return null
+  return (
+    visibleAudioChapters.find((chapter) => chapter.chapterId === currentChapterId) ??
+    (cachedAudioChapter?.chapterId === currentChapterId ? cachedAudioChapter : null)
+  )
+}
+
+type AudioChapterStatusRow = {
+  chapterId: string
+  index: number
+  title: string
+  cached: boolean
+  hasAudio: boolean
+  isCurrent: boolean
+  audioChapter: AudioChapter | null
+}
+
+export function buildAudioChapterStatusRows(
+  chapters: Chapter[],
+  audioChapters: AudioChapter[],
+  cachedAudioIds: Set<string>,
+  currentChapterId: string | null | undefined,
+): AudioChapterStatusRow[] {
+  const audioChapterById = new Map(audioChapters.map((chapter) => [chapter.chapterId, chapter]))
+  return chapters.map((chapter, index) => ({
+    chapterId: chapter.id,
+    index: chapter.index ?? chapter.chapterIndex ?? index + 1,
+    title: chapter.title,
+    cached: cachedAudioIds.has(chapter.id),
+    hasAudio: audioChapterById.has(chapter.id) || cachedAudioIds.has(chapter.id),
+    isCurrent: chapter.id === currentChapterId,
+    audioChapter: audioChapterById.get(chapter.id) ?? null,
+  }))
 }
 
 function buildBookCacheSummaries(books: BookSummary[], version: number): BookCacheSummary[] {
