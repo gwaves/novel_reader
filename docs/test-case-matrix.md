@@ -166,9 +166,9 @@
 
 | ID | 用例 | 前置条件 | 期望结果 | 层级 | 风险 | 状态 |
 |----|------|----------|----------|------|------|------|
-| AND-CONN-001 | 首次连接 Gateway | 配置 baseUrl/token/deviceName | session 成功，设备登记，书库同步 | Android + Manual | P1 | Manual |
+| AND-CONN-001 | 首次连接 Gateway | 配置 baseUrl/token/deviceName | session 成功，设备登记，书库同步 | Android + Manual | P1 | Existing |
 | AND-CONN-002 | token 错误 | 错误 mobile token | 显示中文 token 检查提示，不进入假成功状态 | Android | P1 | Partial |
-| AND-LIB-001 | 书库可见性 | default/trusted/disabled 设备 | 显示符合角色的书籍，禁用后云端操作阻断 | Android + Ops | P0 | Manual |
+| AND-LIB-001 | 书库可见性 | default/trusted/disabled 设备 | 显示符合角色的书籍，禁用后云端操作阻断 | Android + Ops | P0 | Existing |
 | AND-PKG-001 | 单书 package 下载缓存 | 选择大包书籍 | 写入本地缓存，重启后可打开 | Android | P1 | Partial |
 | AND-PKG-002 | 大包存储上限 | 妖刀记/大唐双龙传 package | 不触发 WebView quota 崩溃 | Android + Manual | P1 | Manual |
 | AND-READ-001 | 按书阅读进度 | 多本书交替阅读 | 每本书章节/滚动位置独立恢复 | Android | P0 | Existing |

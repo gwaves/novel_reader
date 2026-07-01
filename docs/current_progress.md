@@ -1,3 +1,9 @@
+2026-07-01 更新：小米真机设备角色可见性验收完成。
+- 使用 192.168.88.100 真实 Gateway 的远端 `.env` token，仅在远端进程内读取，不写入文档；测试设备为小米 `23127PN0CC`，Gateway deviceId 为 `cd44be65-7413-4008-9e0f-4e1436c1e1be`。
+- 通过 Admin API 将该设备临时切换为 `trusted`，`/mobile/books` 返回 8 本书，包含 default 书籍以及《金麟外传》《大唐双龙传》《妖刀记》等 trusted 可见书籍。
+- 将设备临时切换为 `disabled` 后，`/auth/session` 仍可探活，但 `/mobile/books` 返回 403 `device_disabled`，验证禁用设备的云端书库操作被阻断。
+- 脚本使用 `finally` 将设备恢复为 `default`，复测 `/mobile/books` 回到 5 本默认可见书籍；`AND-CONN-001` 与 `AND-LIB-001` 已从真机/真实 Gateway Manual 收口为 Existing。
+
 2026-07-01 更新：Let's Encrypt 证书与小米真机 Gateway 联网验收通过，并修复设备并发写入 bug。
 - 复测真实 Gateway 证书：`novel.gwaves.net:8888` 当前证书 issuer 为 Let's Encrypt `YE2`，严格 TLS `curl -I https://novel.gwaves.net:8888/health` 返回 200；`npm run gateway:security-smoke` 与 `npm run gateway:apk-metadata-smoke -- --gateway-url https://novel.gwaves.net:8888` 均通过。
 - 小米真机 `23127PN0CC` 安装临时 build 238 测试包后，`/auth/session` 返回 200，`/mobile/books` 返回 5 本 default 可见书籍，红楼梦/三国演义/西游记等 audio catalog 返回 200；证书替换前的 `Trust anchor for certification path not found` 已消失。
