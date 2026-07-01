@@ -1,3 +1,9 @@
+2026-07-01 更新：移动端完整包不再下载向量。
+- Gateway 移动端普通 package 原本已剥离 `embeddings`，但 `/mobile/books/:bookId/package/download` 仍直接 stream 原始 full package，会把向量/coverage 元数据带到手机并让原生导入误判“导入向量”。
+- 修正 `gateway/src/app.ts`：移动端 `include=full` 与 `package/download` 都动态生成 mobile full package，删除顶层 `embeddings` 和 `integrity.embeddings`；Admin full package 下载保持原始全量包。
+- 已运行 `npm --prefix gateway run test -- app.test.ts`（61 passed）和 `npm --prefix gateway run build`；已同步并重建 192.168.88.100 Gateway。
+- 真实复测《红楼梦》：移动端 `package?include=full` 与 `package/download` 均不含 `embeddings` / `integrity.embeddings`，仍保留 128 章、128 个概要和 knowledgeGraph；原始远端 package 仍保留 embeddings 元数据供 Gateway/运维侧使用。
+
 2026-07-01 更新：移动端书库 RAG/向量显示口径修正。
 - 根据 LT Pad《红楼梦》验证，移动端书库原先显示“向量 100%”容易误导：向量召回发生在 Gateway，手机端并不下载或持有完整向量。
 - 修正 `gateway-android-app/src/App.tsx`：书库详情的第三个 coverage 项从“向量百分比”改为 `RAG` 状态，显示 `云端` / `本地` / `未加载`；概要和图谱仍按本地阅读包/完整包覆盖率显示。

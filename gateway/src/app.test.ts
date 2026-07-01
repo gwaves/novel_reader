@@ -1920,7 +1920,7 @@ describe('gateway app', () => {
     expect(response.json().generatedAt).toBeTruthy()
   })
 
-  it('downloads protected mobile book packages as full JSON files', async () => {
+  it('downloads protected mobile book packages without embedding vectors', async () => {
     const dataDir = await makeDataDir()
     await writeFile(
       join(dataDir, 'books.json'),
@@ -1988,10 +1988,8 @@ describe('gateway app', () => {
       book: {
         id: 'book-a',
       },
-      embeddings: {
-        chunks: [{ chapterId: 'chapter-1' }],
-      },
     })
+    expect(response.json()).not.toHaveProperty('embeddings')
   })
 
   it('returns a stable not found error when a protected book package is missing', async () => {

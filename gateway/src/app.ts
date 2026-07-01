@@ -184,19 +184,21 @@ export function buildGatewayApp(config: GatewayConfig = loadConfig()) {
     const includeFullPackage = request.query.include === 'all' || request.query.include === 'full'
     return {
       generatedAt: new Date().toISOString(),
-      package: includeFullPackage ? bookPackage : buildReaderPackage(bookPackage),
+      package: includeFullPackage ? buildMobileFullPackage(bookPackage) : buildReaderPackage(bookPackage),
     }
   })
 
   app.get<{ Params: { bookId: string } }>('/mobile/books/:bookId/package/download', async (request, reply) => {
     const mobileAuth = await requireMobileDevice(config, request)
     await readVisibleBookSummary(config, request.params.bookId, mobileAuth.allowedVisibilities)
+    const bookPackage = await readBookPackage(config, request.params.bookId)
     const packageFile = await openBookPackageFile(config, request.params.bookId)
+    const payload = `${JSON.stringify(buildMobileFullPackage(bookPackage))}\n`
     return reply
       .header('content-type', 'application/json; charset=utf-8')
-      .header('content-length', packageFile.sizeBytes)
+      .header('content-length', Buffer.byteLength(payload))
       .header('content-disposition', `attachment; filename="${basename(packageFile.fileName)}"`)
-      .send(packageFile.stream)
+      .send(payload)
   })
 
   app.put<{ Body: unknown; Params: { bookId: string } }>('/admin/books/:bookId/package', async (request) => {
@@ -655,6 +657,15 @@ function buildReaderPackage(bookPackage: Awaited<ReturnType<typeof readBookPacka
   }
 }
 
+function buildMobileFullPackage(bookPackage: Awaited<ReturnType<typeof readBookPackage>>) {
+  const { integrity, ...mobilePackage } = bookPackage
+  delete (mobilePackage as { embeddings?: unknown }).embeddings
+  return {
+    ...mobilePackage,
+    integrity: summarizeIntegrity(integrity),
+  }
+}
+
 function summarizeKnowledgeGraph(value: unknown) {
   if (!isRecord(value)) return value
 
@@ -663,15 +674,9 @@ function summarizeKnowledgeGraph(value: unknown) {
 
 function summarizeIntegrity(value: unknown) {
   if (!isRecord(value)) return value
-
-  return {
-    ...value,
-    embeddings: summarizeCount(value.embeddings),
-  }
-}
-
-function summarizeCount(value: unknown) {
-  return Array.isArray(value) ? { count: value.length } : value
+  const { embeddings, ...safeIntegrity } = value
+  void embeddings
+  return safeIntegrity
 }
 
 function searchPackageWithEmbedding(
