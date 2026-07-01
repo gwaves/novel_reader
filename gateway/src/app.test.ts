@@ -665,6 +665,45 @@ describe('gateway app', () => {
     expect(Date.parse(String(devices.devices[0].lastSeenAt))).not.toBeNaN()
   })
 
+  it('handles concurrent mobile device touches without temp file collisions', async () => {
+    const dataDir = await makeDataDir()
+    const app = buildTestApp({
+      GATEWAY_DEV_ACCESS_TOKEN: 'dev-token',
+      GATEWAY_DATA_DIR: dataDir,
+    })
+    const headers = {
+      authorization: 'Bearer dev-token',
+      'x-device-id': 'xiaomi-phone',
+      'x-device-name': 'Xiaomi Phone',
+      'x-device-model': '23127PN0CC',
+      'x-device-platform': 'android',
+      'x-app-version': '0.2.0',
+    }
+
+    const responses = await Promise.all(
+      Array.from({ length: 12 }, () =>
+        app.inject({
+          method: 'GET',
+          url: '/auth/session',
+          headers,
+        }),
+      ),
+    )
+    const devices = JSON.parse(await readFile(join(dataDir, 'devices.json'), 'utf8')) as {
+      devices: Array<Record<string, unknown>>
+    }
+
+    expect(responses.map((response) => response.statusCode)).toEqual(Array(12).fill(200))
+    expect(devices.devices).toHaveLength(1)
+    expect(devices.devices[0]).toMatchObject({
+      id: 'xiaomi-phone',
+      name: 'Xiaomi Phone',
+      model: '23127PN0CC',
+      platform: 'android',
+      appVersion: '0.2.0',
+    })
+  })
+
   it('normalizes legacy name-only device records for admin listing', async () => {
     const dataDir = await makeDataDir()
     await writeFile(

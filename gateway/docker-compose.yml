@@ -45,4 +45,4 @@ services:
       - "${GATEWAY_PORT:-8888}:8443"
     volumes:
       - ./nginx/gateway-https.conf:/etc/nginx/conf.d/default.conf:ro
-      - ./tls:/etc/nginx/tls:ro
+      - ${GATEWAY_LETSENCRYPT_CONFIG_DIR:-/home/gwaves/letsencrypt/config}:/etc/letsencrypt:ro

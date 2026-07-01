@@ -1,3 +1,18 @@
+2026-07-01 更新：Let's Encrypt 证书与小米真机 Gateway 联网验收通过，并修复设备并发写入 bug。
+- 复测真实 Gateway 证书：`novel.gwaves.net:8888` 当前证书 issuer 为 Let's Encrypt `YE2`，严格 TLS `curl -I https://novel.gwaves.net:8888/health` 返回 200；`npm run gateway:security-smoke` 与 `npm run gateway:apk-metadata-smoke -- --gateway-url https://novel.gwaves.net:8888` 均通过。
+- 小米真机 `23127PN0CC` 安装临时 build 238 测试包后，`/auth/session` 返回 200，`/mobile/books` 返回 5 本 default 可见书籍，红楼梦/三国演义/西游记等 audio catalog 返回 200；证书替换前的 `Trust anchor for certification path not found` 已消失。
+- 真机并发拉取多个 audio catalog 时发现真实 Gateway bug：多个请求同时更新 `devices.json`，`writeDeviceRegistry()` 的临时文件名只含 `pid + Date.now()`，同毫秒冲突会导致 `rename ... devices.json.tmp-* -> devices.json` 的 ENOENT 500。
+- 修复 `gateway/src/device-store.ts`：设备注册表写入临时文件名追加 `randomUUID()`，避免并发写入 tmp 文件碰撞；新增 `handles concurrent mobile device touches without temp file collisions` 回归，12 个并发 `/auth/session` 均返回 200。
+- 已运行 `npm --prefix gateway run build`、目标 Vitest、`npm --prefix gateway run test`（60 个 Gateway 用例全部通过）；已同步并重建 192.168.88.100 Gateway，复测 5 个 default 书籍 audio catalog 并发请求均为 200，真机重启 App 后不再出现 `devices.json.tmp` 500。
+- `OPS-DEPLOY-001` 已从 Partial 收口为 Existing；证书部署约定已写入 `gateway/.env.example`、`gateway/docker-compose.yml`、`gateway/nginx/gateway-https.conf` 和 `gateway/docs/deployment.md`。
+
+2026-07-01 更新：88.100 Gateway 已切换到 Let's Encrypt 证书。
+- 根据真机“检查更新”报错 `Trust anchor for certification path not found`，修正 `gateway-https` 的证书挂载和部署说明，避免继续使用 `tls/gateway.crt` 自签证书。
+- 真实 Gateway 部署目录仍为 `/home/gwaves/novel-reader-gateway`；公网 HTTPS 证书来源改为 `/home/gwaves/letsencrypt/config`，Compose 将该目录挂载到容器内 `/etc/letsencrypt`。
+- Nginx 现在固定读取 `/etc/letsencrypt/live/novel.gwaves.net/fullchain.pem` 与 `/etc/letsencrypt/live/novel.gwaves.net/privkey.pem`；`gateway/docker-compose.yml`、`gateway/nginx/gateway-https.conf`、`gateway/.env.example` 和 `gateway/docs/deployment.md` 已同步更新。
+- 已同步配置到 192.168.88.100 并重建 `gateway-https`；远端 `docker compose exec gateway-https nginx -t` 通过，仅保留 Nginx `listen ... http2` deprecation warning。
+- 严格 TLS 验收已通过：`openssl s_client -connect novel.gwaves.net:8888 -servername novel.gwaves.net -verify_return_error` 返回 Let's Encrypt 链和 `Verify return code: 0 (ok)`；`curl -I https://novel.gwaves.net:8888/health` 返回 HTTP/2 200；`/downloads/android-app.json` 可严格 HTTPS 读取。
+
 2026-07-01 更新：OPS 回滚演练、公网安全和小米真机首轮验收推进。
 - `OPS-ROLLBACK-001` 已在临时测试 Gateway 完成受控演练：使用独立 `GATEWAY_DATA_DIR/GATEWAY_AUDIO_DIR/GATEWAY_DOWNLOADS_DIR` 和 `rollback-book` 构造错误版本，再对 package/audio/APK 分别执行 dry-run 与 `--apply`。
 - package 回滚通过测试 Gateway admin `PUT /admin/books/rollback-book/package` 恢复，验证 `/admin/books` 与 `/admin/books/rollback-book/package/download` 均显示备份版本书名、章节和正文。

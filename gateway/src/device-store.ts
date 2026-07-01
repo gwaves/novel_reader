@@ -1,5 +1,5 @@
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises'
-import { randomInt } from 'node:crypto'
+import { randomInt, randomUUID } from 'node:crypto'
 import { join } from 'node:path'
 import type { GatewayAuthContext } from './auth.js'
 import type { GatewayConfig } from './config.js'
@@ -123,7 +123,7 @@ export async function readDeviceRegistry(config: GatewayConfig): Promise<Gateway
 
 async function writeDeviceRegistry(config: GatewayConfig, registry: GatewayDeviceRegistry) {
   const path = join(config.dataDir, 'devices.json')
-  const tmpPath = `${path}.tmp-${process.pid}-${Date.now()}`
+  const tmpPath = `${path}.tmp-${process.pid}-${Date.now()}-${randomUUID()}`
   await writeFile(tmpPath, `${JSON.stringify(registry, null, 2)}\n`, 'utf8')
   await rename(tmpPath, path)
 }

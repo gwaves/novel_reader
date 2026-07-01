@@ -185,7 +185,7 @@
 
 | ID | 用例 | 前置条件 | 期望结果 | 层级 | 风险 | 状态 |
 |----|------|----------|----------|------|------|------|
-| OPS-DEPLOY-001 | Gateway 启动健康检查 | 生产 token、可信 TLS 证书和数据目录配置完成 | `/health`、`/capabilities` 正常，严格 TLS 通过，敏感环境不泄露 | Ops Script + Real Gateway | P0 | Partial |
+| OPS-DEPLOY-001 | Gateway 启动健康检查 | 生产 token、可信 TLS 证书和数据目录配置完成 | `/health`、`/capabilities` 正常，严格 TLS 通过，敏感环境不泄露 | Ops Script + Real Gateway | P0 | Existing |
 | OPS-SEC-001 | 公网 Admin UI 禁止访问 | Nginx 公网入口 | `/admin/ui` 返回 403，内网可访问 | Ops Script + Real Gateway | P0 | Existing |
 | OPS-SEC-002 | 未知 Host/IP 直连 | 公网 Nginx | 不返回 Gateway 应用内容 | Ops Script + Real Gateway | P0 | Existing |
 | OPS-PUBLISH-001 | package 发布后真实可见 | production-pipeline publish 完成 | 远端 `books.json` 与 `/mobile/books` 设备可见性一致 | API + Ops | P0 | Existing |

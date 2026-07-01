@@ -156,6 +156,62 @@ npm run gateway:publish-android-apk -- \
 https://novel.gwaves.net:8888/downloads/ai_novel_reader.apk
 ```
 
+## 192.168.88.100 证书部署约定
+
+真实 Gateway 部署目录固定为 `gwaves@192.168.88.100:/home/gwaves/novel-reader-gateway`。公网 HTTPS 证书由 88.100 上的 Certbot/Let's Encrypt 目录提供，当前路径为 `/home/gwaves/letsencrypt/config`。自动化部署同步 `gateway/` 时不得覆盖该目录，也不要把旧的 `tls/gateway.crt` 自签证书重新接回公网 Nginx。
+
+当前 Compose 内置 Nginx 容器把 `${GATEWAY_LETSENCRYPT_CONFIG_DIR:-/home/gwaves/letsencrypt/config}` 挂载到容器内 `/etc/letsencrypt`，Nginx 配置固定读取：
+
+```text
+/etc/letsencrypt/live/novel.gwaves.net/fullchain.pem
+/etc/letsencrypt/live/novel.gwaves.net/privkey.pem
+```
+
+远端有效证书目录应类似：
+
+```text
+/home/gwaves/letsencrypt/config/
+├── live/
+│   └── novel.gwaves.net/
+│       ├── fullchain.pem -> ../../archive/novel.gwaves.net/fullchain<N>.pem
+│       └── privkey.pem -> ../../archive/novel.gwaves.net/privkey<N>.pem
+└── archive/
+    └── novel.gwaves.net/
+```
+
+`fullchain.pem` 必须是公网 CA 签发的完整证书链，也就是 leaf certificate 加中间证书链；不能只放自签证书，不能只放 leaf certificate。Android 真机检查更新或下载安装 APK 时如果看到 `java.security.cert.CertPathValidatorException: Trust anchor for certification path not found.`，优先按证书链错误处理，不要先改 App 下载逻辑。
+
+证书文件放置或续期后，在 192.168.88.100 上执行：
+
+```bash
+cd /home/gwaves/novel-reader-gateway
+docker compose --profile https up -d gateway-https
+docker compose exec gateway-https nginx -t
+```
+
+发布脚本或手工同步代码到 192.168.88.100 时，必须排除远端运行数据和证书目录：
+
+```bash
+rsync -az --delete \
+  --exclude '.env' \
+  --exclude 'data/' \
+  --exclude 'audio/' \
+  --exclude 'backups/' \
+  --exclude 'tls/' \
+  --exclude 'letsencrypt/' \
+  gateway/ gwaves@192.168.88.100:/home/gwaves/novel-reader-gateway/
+```
+
+上线前必须做严格 TLS 校验，不能用 `curl -k` 作为公网或真机验收依据：
+
+```bash
+openssl s_client -connect novel.gwaves.net:8888 -servername novel.gwaves.net -verify_return_error </dev/null
+curl -I https://novel.gwaves.net:8888/health
+curl https://novel.gwaves.net:8888/downloads/android-app.json
+```
+
+`openssl s_client` 必须返回 `Verify return code: 0 (ok)`；`curl -I` 不能出现 certificate verify failed。如果 `openssl x509 -in /home/gwaves/letsencrypt/config/live/novel.gwaves.net/fullchain.pem -noout -subject -issuer` 显示 `subject` 和 `issuer` 都是 `CN = novel.gwaves.net`，说明仍是自签证书，Android 系统默认不会信任。
+
 ## 反向代理
 
 Nginx 示例：
