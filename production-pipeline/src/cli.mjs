@@ -1854,6 +1854,12 @@ function normalizeEmbeddingMode(value) {
 }
 
 async function readBookFromMainDb(dbPath, bookId) {
+  return retrySqliteRead(() => readBookFromMainDbOnce(dbPath, bookId), {
+    label: `read book ${bookId}`,
+  })
+}
+
+async function readBookFromMainDbOnce(dbPath, bookId) {
   const DatabaseSync = await loadDatabaseSync()
   const db = new DatabaseSync(dbPath, { readOnly: true })
   try {
@@ -1887,6 +1893,30 @@ async function readBookFromMainDb(dbPath, bookId) {
   } finally {
     db.close()
   }
+}
+
+async function retrySqliteRead(operation, { label = 'sqlite read', attempts = 30, baseDelayMs = 250 } = {}) {
+  let lastError
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    try {
+      return await operation()
+    } catch (error) {
+      if (!isSqliteBusyError(error) || attempt === attempts) throw error
+      lastError = error
+      const delayMs = Math.min(5000, baseDelayMs * attempt)
+      if (attempt === 1 || attempt % 5 === 0) {
+        console.warn(`[${new Date().toISOString()}] ${label} waiting for SQLite lock, retry ${attempt}/${attempts}`)
+      }
+      await sleep(delayMs)
+    }
+  }
+  throw lastError
+}
+
+function isSqliteBusyError(error) {
+  const code = String(error?.code || '')
+  const message = String(error?.message || '')
+  return code === 'SQLITE_BUSY' || code === 'SQLITE_LOCKED' || /database is (locked|busy)/i.test(message)
 }
 
 function buildGatewayBookPackage(book, generatedAt) {
@@ -3337,7 +3367,7 @@ function normalizeLlmScheduler(job) {
   const llm = job.llm || {}
   const scheduler = llm.scheduler || llm.scheduling
   if (!scheduler) return null
-  const concurrency = clampInteger(scheduler.concurrency ?? llm.concurrency, 0, 1, 64)
+  const concurrency = clampInteger(scheduler.concurrency ?? llm.concurrency, 0, 1, 256)
   if (!concurrency) return null
   const weights = {
     summary: 4,
@@ -3453,9 +3483,11 @@ function buildStageArgs(stage, job, mainDbPath, runInfo, stageOptions = {}) {
     const audio = job.audio || {}
     const sourceRoot = audio.sourceRoot || audio.source_root
     const ttsConfig = audio.ttsConfig || audio.tts_config
+    const ttsLlmConfig = buildTtsLlmConfigFromJob(job)
     const args = ['audio', ...common]
     if (sourceRoot) args.push('--source-root', sourceRoot)
     if (ttsConfig) args.push('--tts-config', ttsConfig)
+    if (ttsLlmConfig) args.push('--tts-llm-config', JSON.stringify(ttsLlmConfig))
     if (audio.ttsOutRoot || audio.tts_out_root) args.push('--tts-out-root', audio.ttsOutRoot || audio.tts_out_root)
     if (audio.ttsDirectorScript || audio.tts_director_script) args.push('--tts-director-script', audio.ttsDirectorScript || audio.tts_director_script)
     if (audio.chapters) args.push('--chapters', String(audio.chapters))
@@ -3485,6 +3517,26 @@ function buildStageArgs(stage, job, mainDbPath, runInfo, stageOptions = {}) {
     return buildEmbeddingStageArgs(job, common, 'summaries')
   }
   throw new Error(`Unsupported run stage: ${stage}`)
+}
+
+function buildTtsLlmConfigFromJob(job) {
+  const llm = job.llm || {}
+  const baseUrl = llm.baseUrl || llm.base_url
+  const model = llm.model || llm.modelName || llm.model_name
+  if (!baseUrl || !model) return null
+
+  const config = {
+    baseUrl,
+    model_name: model,
+    apiKeyEnv: llm.apiKeyEnv || llm.api_key_env || 'LLM_API_KEY',
+  }
+  if (llm.temperature !== undefined) config.temperature = llm.temperature
+  if (llm.timeoutMs || llm.timeout_ms) config.timeoutMs = llm.timeoutMs || llm.timeout_ms
+  if (llm.maxTokens || llm.max_tokens) config.maxTokens = llm.maxTokens || llm.max_tokens
+  if (llm.responseFormatJson !== undefined || llm.response_format_json !== undefined) {
+    config.responseFormatJson = llm.responseFormatJson ?? llm.response_format_json
+  }
+  return config
 }
 
 function buildEmbeddingStageArgs(job, common, mode) {
@@ -3736,11 +3788,12 @@ async function prepareAudioSourceRoot({ options, run, book }) {
 
   const chapters = audioChapterSelection(options, book.chapters.length)
   const directorScript = resolve(options.ttsDirectorScript || join(dirname(cliFilePath), '..', '..', 'offline-tts', 'scripts', 'tts-director.mjs'))
+  const ttsConfigPath = await prepareTtsDirectorConfigForAudio(options, run)
   const args = [
     directorScript,
     'batch-pipeline',
     '--config',
-    expandPath(required(options.ttsConfig, 'audio TTS generation requires --tts-config <path>')),
+    ttsConfigPath,
     '--book-id',
     book.id,
     '--chapters',
@@ -3777,6 +3830,41 @@ async function prepareAudioSourceRoot({ options, run, book }) {
     || join(sourceRoot, `batch-pipeline-${chapters.split(',')[0]}-${chapters.split(',').at(-1)}.summary.json`)
   if (existsSync(summaryPath)) options.ttsSummaryPath = summaryPath
   return sourceRoot
+}
+
+async function prepareTtsDirectorConfigForAudio(options, run) {
+  const configPath = expandPath(required(options.ttsConfig, 'audio TTS generation requires --tts-config <path>'))
+  if (!options.ttsLlmConfig) return configPath
+
+  const baseConfig = JSON.parse(await readFile(configPath, 'utf8'))
+  const llmConfig = parseTtsLlmConfigOption(options.ttsLlmConfig)
+  if (!Object.keys(llmConfig).length) return configPath
+
+  const effectiveConfig = {
+    ...baseConfig,
+    llm: {
+      ...(isPlainRecord(baseConfig.llm) ? baseConfig.llm : {}),
+      ...llmConfig,
+    },
+  }
+  delete effectiveConfig.llm.apiKey
+
+  const effectiveConfigPath = join(run.artifactsDir, 'tts-director.effective.config.json')
+  await writeJson(effectiveConfigPath, effectiveConfig)
+  return effectiveConfigPath
+}
+
+function parseTtsLlmConfigOption(value) {
+  if (!value) return {}
+  const parsed = typeof value === 'string' ? safeJsonParse(value, {}) : value
+  if (!isPlainRecord(parsed)) return {}
+  return Object.fromEntries(
+    Object.entries(parsed).filter(([, entryValue]) => entryValue !== undefined && entryValue !== null && entryValue !== ''),
+  )
+}
+
+function isPlainRecord(value) {
+  return Boolean(value && typeof value === 'object' && !Array.isArray(value))
 }
 
 async function findReusableTtsSourceRoot(run) {

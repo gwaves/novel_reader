@@ -1066,9 +1066,14 @@ describe('production-pipeline import', () => {
       const kgReport = JSON.parse(await readFile(join(dirname(runJson.stages.kg.childRunJson), 'artifacts', 'kg-report.json'), 'utf8'))
       const audioRunJson = JSON.parse(await readFile(runJson.stages.audio.childRunJson, 'utf8'))
       const ttsArgs = JSON.parse(await readFile(join(audioRunJson.stages.audio.artifacts.ttsSourceRoot, 'args.json'), 'utf8'))
+      const ttsConfig = JSON.parse(await readFile(join(audioRunJson.stages.audio.artifacts.ttsSourceRoot, 'config.json'), 'utf8'))
       const finalAudioControl = JSON.parse(await readFile(join(audioRunJson.stages.audio.artifacts.ttsSourceRoot, 'control-final.json'), 'utf8'))
       assert.equal(summaryReport.concurrency, 3)
       assert.equal(kgReport.concurrency, 3)
+      assert.equal(ttsConfig.llm.baseUrl, chatServer.url)
+      assert.equal(ttsConfig.llm.model_name, 'fake-chat')
+      assert.equal(ttsConfig.llm.apiKeyEnv, 'LLM_API_KEY')
+      assert.equal(ttsConfig.llm.apiKey, undefined)
       assert.equal(ttsArgs['director-concurrency'], '2')
       assert.equal(ttsArgs['llm-chapters'], '2')
       assert.ok(ttsArgs['control-file'])
@@ -2722,6 +2727,7 @@ if (args._[0] !== 'batch-pipeline') throw new Error('fake director only supports
 await mkdir(args['out-root'], { recursive: true })
 await writeFile(join(args['out-root'], 'args.json'), JSON.stringify(args))
 const config = args.config ? JSON.parse(await readFile(args.config, 'utf8')) : {}
+await writeFile(join(args['out-root'], 'config.json'), JSON.stringify(config))
 console.log('fake director start')
 if (config.fakeDelayMs) {
   await new Promise(resolve => setTimeout(resolve, Number(config.fakeDelayMs)))
