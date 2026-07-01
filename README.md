@@ -74,7 +74,7 @@
 - **多模型配置**：同时配置本地 Ollama 与多个兼容 OpenAI 的外部模型，并为生成模型和 embedding 模型分别校验。
 - **离线扫描器**：在浏览器外批量处理概要或知识图谱任务，支持中断续扫并导回主数据库。
 - **数据本地存储与备份**：导入的章节、阅读进度、概要、设置、知识图谱、embedding 全部持久化到本地 SQLite，并支持浏览器内导出/恢复完整数据库。
-- **Gateway Android 移动端**：`gateway-android-app` 是当前维护的 Android/Capacitor 应用，通过 Gateway 获取书库、单书 package、RAG 检索和 MP3 音频；本地缓存后可离线阅读与播放。旧 `mobile-app/` 已进入退役状态，仅作为历史实现保留。
+- **Gateway Android 移动端**：`gateway-android-app` 是当前维护的 Android/Capacitor 应用，通过 Gateway 获取书库、单书 package、RAG 检索和 MP3 音频；本地缓存后可离线阅读与播放。旧 `mobile-app/` 局域网同步客户端目录已删除，历史实现可从 Git 记录查阅。
 
 ## 快速开始
 
@@ -354,6 +354,10 @@ node scripts/offline-scanner.mjs bundle <bookId>
 
 - [产品功能说明书](docs/product-spec.md)
 - [正规化测试与运维规划](docs/quality-ops-roadmap.md)
+- [测试用例矩阵](docs/test-case-matrix.md)
+- [系统性 Code Review Checklist](docs/code-review-checklist.md)
+- [运维 Runbook](docs/operations-runbook.md)
+- [发布检查清单](docs/release-checklist.md)
 - [开发文档](docs/development.zh-CN.md)
 - [Backend API Reference](docs/backend-api.md)
 - [Gateway Android App 构建说明](gateway-android-app/README.md)
@@ -385,6 +389,7 @@ node scripts/offline-scanner.mjs bundle <bookId>
 - 优先自动化鉴权/可见性、数据一致性、发布验证和移动端缓存/进度类高风险用例。
 - 按模块开展 Code Review，并把发现的问题回填到测试矩阵和运维规划。
 - 补齐 Gateway 与 production-pipeline 的指标、事件、日志、发布验证和故障排查手册。
+- 固化真实 Gateway、APK、package/audio 发布验收和回滚记录格式。
 
 ### 环境变量
 
@@ -459,12 +464,9 @@ novel_reader/
 │   ├── offline-scanner.mjs # 离线批量扫描器 CLI
 │   └── offline-scanner/    # 扫描器模块（config、db、llm、scanner）
 ├── gateway-android-app/    # 当前维护的 Gateway Android App（Capacitor + React）
-├── mobile-app/             # 旧局域网同步移动端，已退役，仅保留历史参考
 ├── src/                    # React 前端
-│   ├── main.tsx            # 入口（桌面/移动路由）
+│   ├── main.tsx            # 入口
 │   ├── App.tsx             # 桌面端主 UI
-│   ├── MobileApp.tsx       # 移动端 UI
-│   ├── MobileApp.css       # 移动端样式
 │   ├── hooks/              # React hooks
 │   └── assets/             # 静态资源
 ├── public/                 # 公共静态文件

@@ -1,0 +1,29 @@
+{
+  "bookId": "file-505c9ffdd00063074ec8e3bf",
+  "title": "红楼梦 KG rescue",
+  "mainDbPath": "~/.novel_reader/novel_reader.sqlite",
+  "source": {
+    "type": "main-db"
+  },
+  "stages": [
+    "kg"
+  ],
+  "llm": {
+    "provider": "openai-compatible",
+    "baseUrl": "http://192.168.88.24:30000/v1",
+    "apiKey": "dummy",
+    "model": "qwen3.6-27b",
+    "concurrency": 1,
+    "timeoutMs": 600000,
+    "retries": 1
+  },
+  "kg": {
+    "concurrency": 1,
+    "timeoutMs": 600000,
+    "maxAttempts": 1,
+    "contentLimit": 8000,
+    "entityLimit": 12,
+    "relationLimit": 16,
+    "disableThinking": true
+  }
+}

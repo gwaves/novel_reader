@@ -105,6 +105,9 @@ type GatewayPackage = {
   summaryCoverage?: number
   kgCoverage?: number
   embeddingCoverage?: number
+  embeddingVectorCoverage?: number
+  embeddingSummaryVectorCount?: number
+  embeddingChunkVectorCount?: number
   missingChapters?: unknown[]
   checksum?: string
   errorCode?: string
@@ -186,13 +189,13 @@ export async function loadAdminDashboardData(fetcher: typeof fetch = fetch): Pro
   const failedSections = sections.flatMap((section, index) => section.status === 'rejected' ? [sectionNames[index]] : [])
   const status: AdminDashboardData['status'] = failedSections.length > 0 ? 'partial' : 'ok'
 
-  const booksResponse = valueOr(booksResult, { books: initialBooks })
-  const devicesResponse = valueOr(devicesResult, { devices: initialDevices })
-  const metricsResponse = valueOr(metricsResult, null)
-  const eventsResponse = valueOr(eventsResult, null)
-  const packagesResponse = valueOr(packagesResult, { packages: initialPackages })
-  const audioResponse = valueOr(audioResult, { audio: initialAudio })
-  const requestsResponse = valueOr(requestsResult, { requests: initialRequestLogs })
+  const booksResponse = booksResult.status === 'fulfilled' ? booksResult.value : { books: [] }
+  const devicesResponse = devicesResult.status === 'fulfilled' ? devicesResult.value : { devices: [] }
+  const metricsResponse = metricsResult.status === 'fulfilled' ? metricsResult.value : null
+  const eventsResponse = eventsResult.status === 'fulfilled' ? eventsResult.value : null
+  const packagesResponse = packagesResult.status === 'fulfilled' ? packagesResult.value : { packages: [] }
+  const audioResponse = audioResult.status === 'fulfilled' ? audioResult.value : { audio: [] }
+  const requestsResponse = requestsResult.status === 'fulfilled' ? requestsResult.value : { requests: [] }
 
   return {
     books: Array.isArray(booksResponse.books) ? booksResponse.books.map(mapBookLike) : [],
@@ -200,8 +203,8 @@ export async function loadAdminDashboardData(fetcher: typeof fetch = fetch): Pro
     packages: Array.isArray(packagesResponse.packages) ? packagesResponse.packages.map(mapPackageLike) : [],
     audio: Array.isArray(audioResponse.audio) ? audioResponse.audio.map(mapAudioLike) : [],
     requestLogs: Array.isArray(requestsResponse.requests) ? requestsResponse.requests.map(mapRequestLogLike) : [],
-    overviewMetrics: metricsResponse ? mapMetrics(metricsResponse) : overviewMetrics,
-    recentEvents: eventsResponse ? mapEvents(eventsResponse) : recentEvents,
+    overviewMetrics: metricsResponse ? mapMetrics(metricsResponse) : [],
+    recentEvents: eventsResponse ? mapEvents(eventsResponse) : [],
     requestTrend: metricsResponse ? mapRequestTrend(metricsResponse) : [],
     downloadTrend: metricsResponse ? mapDownloadTrend(metricsResponse) : [],
     systemSummary: metricsResponse ? mapSystemSummary(metricsResponse) : emptySystemSummary,
@@ -246,8 +249,8 @@ export async function loadAdminOverviewData(fetcher: typeof fetch = fetch): Prom
   const [metricsResult, eventsResult] = sections
   const failedSections = sections.flatMap((section, index) => section.status === 'rejected' ? [['metrics', 'events'][index]] : [])
   return {
-    overviewMetrics: metricsResult.status === 'fulfilled' ? mapMetrics(metricsResult.value) : overviewMetrics,
-    recentEvents: eventsResult.status === 'fulfilled' ? mapEvents(eventsResult.value) : recentEvents,
+    overviewMetrics: metricsResult.status === 'fulfilled' ? mapMetrics(metricsResult.value) : [],
+    recentEvents: eventsResult.status === 'fulfilled' ? mapEvents(eventsResult.value) : [],
     requestTrend: metricsResult.status === 'fulfilled' ? mapRequestTrend(metricsResult.value) : [],
     downloadTrend: metricsResult.status === 'fulfilled' ? mapDownloadTrend(metricsResult.value) : [],
     systemSummary: metricsResult.status === 'fulfilled' ? mapSystemSummary(metricsResult.value) : emptySystemSummary,
@@ -280,6 +283,13 @@ export async function patchDeviceRole(deviceId: string, role: DeviceRole, fetche
 
 export async function downloadPackage(bookId: string, fetcher: typeof fetch = fetch) {
   return adminFetch<Blob>(`/admin/books/${encodeURIComponent(bookId)}/package/download`, fetcher, {}, 'blob')
+}
+
+export async function importBookPackage(bookId: string, bookPackage: unknown, fetcher: typeof fetch = fetch) {
+  await adminFetch(`/admin/books/${encodeURIComponent(bookId)}/package`, fetcher, {
+    method: 'PUT',
+    body: JSON.stringify(bookPackage),
+  })
 }
 
 export async function refreshBookAudio(bookId: string, fetcher: typeof fetch = fetch) {
@@ -379,10 +389,6 @@ function mockDashboardData(status: AdminDashboardData['status'], source: AdminDa
   }
 }
 
-function valueOr<T, F>(result: PromiseSettledResult<T>, fallback: F): T | F {
-  return result.status === 'fulfilled' ? result.value : fallback
-}
-
 function readAdminToken() {
   try {
     return window.localStorage.getItem(adminTokenStorageKey)?.trim() || ''
@@ -440,6 +446,9 @@ function mapPackage(item: GatewayPackage): AdminPackage {
   const summaryCoverage = optionalRatioToPercent(item.summaryCoverage)
   const kgCoverage = optionalRatioToPercent(item.kgCoverage)
   const embeddingCoverage = optionalRatioToPercent(item.embeddingCoverage)
+  const embeddingVectorCoverage = optionalRatioToPercent(item.embeddingVectorCoverage)
+  const embeddingSummaryVectorCount = readNumber(item.embeddingSummaryVectorCount)
+  const embeddingChunkVectorCount = readNumber(item.embeddingChunkVectorCount)
   return {
     id: readString(item.id, `${readString(item.bookId, 'package')}-${version}`),
     bookId: readString(item.bookId, 'unknown-book'),
@@ -452,6 +461,9 @@ function mapPackage(item: GatewayPackage): AdminPackage {
     summaryCoverage,
     kgCoverage,
     embeddingCoverage,
+    embeddingVectorCoverage,
+    embeddingSummaryVectorCount,
+    embeddingChunkVectorCount,
     missingChapters,
     validationIssues: buildPackageValidationIssues({
       chapterCount,
@@ -459,6 +471,9 @@ function mapPackage(item: GatewayPackage): AdminPackage {
       summaryCoverage,
       kgCoverage,
       embeddingCoverage,
+      embeddingVectorCoverage,
+      embeddingChunkVectorCount,
+      embeddingSummaryVectorCount,
     }),
     checksum: readString(item.checksum, readString(item.errorCode, '-')),
   }
@@ -622,12 +637,18 @@ function buildPackageValidationIssues({
   summaryCoverage,
   kgCoverage,
   embeddingCoverage,
+  embeddingVectorCoverage,
+  embeddingChunkVectorCount,
+  embeddingSummaryVectorCount,
 }: {
   chapterCount: number
   missingChapters: Array<number | string>
   summaryCoverage: number | null
   kgCoverage: number | null
   embeddingCoverage: number | null
+  embeddingVectorCoverage: number | null
+  embeddingChunkVectorCount: number
+  embeddingSummaryVectorCount: number
 }) {
   const issues: string[] = []
   if (missingChapters.length > 0) issues.push(`章节文件缺失 ${missingChapters.length} 章`)
@@ -640,6 +661,12 @@ function buildPackageValidationIssues({
   for (const [label, coverage] of coverageItems) {
     const missingCount = missingCountFromCoverage(chapterCount, coverage)
     if (missingCount > 0) issues.push(`${label} 缺 ${missingCount} 章`)
+  }
+  if (embeddingCoverage !== null && embeddingCoverage > 0 && embeddingChunkVectorCount === 0 && embeddingSummaryVectorCount === 0) {
+    issues.push('Embedding 报告存在但 Gateway 向量缺失')
+  } else {
+    const missingVectorChapters = missingCountFromCoverage(chapterCount, embeddingVectorCoverage)
+    if (missingVectorChapters > 0) issues.push(`Gateway 向量缺 ${missingVectorChapters} 章`)
   }
 
   return issues

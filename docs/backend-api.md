@@ -1141,7 +1141,7 @@ The API requires at least 80% embedding coverage for the selected model before s
 
 ## Legacy Mobile Sync APIs
 
-These endpoints are the legacy PC-side contract for the deprecated Android app under `mobile-app/`. They were designed for LAN sync: the mobile app pulled complete PC-generated data while it could reach the PC, then read and searched its local SQLite copy while away from the LAN. The maintained Android client is now `gateway-android-app`, which consumes Gateway `/mobile/*`, `/ai/*`, and audio endpoints instead.
+These endpoints are the legacy PC-side mobile package contract. The old `mobile-app/` LAN-sync client directory has been removed; these endpoints remain only for local package export, compatibility, and Gateway publishing workflows. The maintained Android client is now `gateway-android-app`, which consumes Gateway `/mobile/*`, `/ai/*`, and audio endpoints instead.
 
 The legacy mobile app must not generate book, chapter, summary, or chunk embeddings. Mobile packages include PC-generated `summary_embeddings` and `chapter_chunk_embeddings` as read-only synced assets.
 

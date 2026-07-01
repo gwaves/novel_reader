@@ -130,4 +130,16 @@ describe('device identity', () => {
 
     expect(errorMessage(error)).toContain('设备已被禁用')
   })
+
+  it('translates invalid mobile token errors clearly', () => {
+    const error = createGatewayError({
+      error: {
+        code: 'invalid_token',
+        message: 'Bearer token is invalid.',
+        statusCode: 401,
+      },
+    })
+
+    expect(errorMessage(error)).toBe('Gateway Token 无效，请在设置页检查 Token 后重试。')
+  })
 })

@@ -33,6 +33,9 @@ export type AdminPackage = {
   summaryCoverage: number | null
   kgCoverage: number | null
   embeddingCoverage: number | null
+  embeddingVectorCoverage: number | null
+  embeddingSummaryVectorCount: number
+  embeddingChunkVectorCount: number
   missingChapters: Array<number | string>
   validationIssues: string[]
   checksum: string
@@ -146,6 +149,9 @@ export const initialPackages: AdminPackage[] = [
     summaryCoverage: 96,
     kgCoverage: 88,
     embeddingCoverage: 94,
+    embeddingVectorCoverage: 94,
+    embeddingSummaryVectorCount: 175,
+    embeddingChunkVectorCount: 932,
     missingChapters: [],
     validationIssues: ['Summary 缺 7 章', 'KG 缺 22 章', 'Embedding 缺 11 章'],
     checksum: 'sha256:8f2c1a',
@@ -162,8 +168,11 @@ export const initialPackages: AdminPackage[] = [
     summaryCoverage: 82,
     kgCoverage: 56,
     embeddingCoverage: 68,
+    embeddingVectorCoverage: 68,
+    embeddingSummaryVectorCount: 28,
+    embeddingChunkVectorCount: 154,
     missingChapters: [7, 19, 33],
-    validationIssues: ['章节文件缺失 3 章', 'Summary 缺 7 章', 'KG 缺 18 章', 'Embedding 缺 13 章'],
+    validationIssues: ['章节文件缺失 3 章', 'Summary 缺 7 章', 'KG 缺 18 章', 'Embedding 缺 13 章', 'Gateway 向量缺 13 章'],
     checksum: 'sha256:91bb03',
   },
   {
@@ -178,8 +187,11 @@ export const initialPackages: AdminPackage[] = [
     summaryCoverage: 60,
     kgCoverage: 40,
     embeddingCoverage: 55,
+    embeddingVectorCoverage: 0,
+    embeddingSummaryVectorCount: 0,
+    embeddingChunkVectorCount: 0,
     missingChapters: [3, 4, 5, 6],
-    validationIssues: ['章节文件缺失 4 章', 'Summary 缺 7 章', 'KG 缺 11 章', 'Embedding 缺 8 章'],
+    validationIssues: ['章节文件缺失 4 章', 'Summary 缺 7 章', 'KG 缺 11 章', 'Embedding 缺 8 章', 'Embedding 报告存在但 Gateway 向量缺失'],
     checksum: 'sha256:pending',
   },
 ]

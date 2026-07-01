@@ -680,6 +680,11 @@ input {
   opacity: 0.62;
 }
 
+.table-file-input {
+  max-width: 190px;
+  font-size: 12px;
+}
+
 .operation-status {
   display: inline-flex;
   align-items: center;

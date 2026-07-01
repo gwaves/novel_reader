@@ -9,8 +9,22 @@ import {
   type Node,
 } from '@xyflow/react'
 import '@xyflow/react/dist/style.css'
-import { countBookWords, formatWordCount, normalizeStoredState, useReaderState } from './hooks/useReaderState.ts'
+import {
+  chapterScrollPositionKey,
+  countBookWords,
+  formatWordCount,
+  normalizeStoredState,
+  readChapterScrollPosition,
+  useReaderState,
+} from './hooks/useReaderState.ts'
 import type { AIProvider, Chapter, EmbeddingProvider, OpenAIConfig } from './hooks/useReaderState.ts'
+import {
+  createRagAnswerUpdate,
+  getKgEntityTypeLabel,
+  normalizeGraphSearch,
+  type RagEntityMatch,
+  type RagSearchResult,
+} from './ragAnswer.ts'
 import './App.css'
 
 type KgOverview = {
@@ -251,31 +265,6 @@ type KgCoreferenceCandidate = {
 
 type KgCoreferenceComponent = KgCoreferenceCandidate[]
 
-type RagSearchResult = {
-  chapterId: string
-  chapterIndex: number
-  chapterTitle: string
-  summary: {
-    short: string
-    detail: string
-    keyPoints: string[]
-  }
-  similarity: number
-  matchType: 'vector' | 'chunk' | 'entity' | 'both' | 'entity-first'
-  matchedEntities: string[]
-  contentSnippet: string | null
-  chunkIndex?: number | null
-}
-
-type RagEntityMatch = {
-  entityId: string
-  entityName: string
-  entityType: string
-  firstChapterIndex: number | null
-  lastChapterIndex: number | null
-  aliases?: string[]
-}
-
 type EmbeddingStatus = {
   totalChapters: number
   summarizedChapters?: number
@@ -357,20 +346,6 @@ function formatBytes(bytes: number): string {
   return `${bytes} B`
 }
 
-function getKgEntityTypeLabel(type: string): string {
-  const labels: Record<string, string> = {
-    beast: '灵兽',
-    character: '人物',
-    event: '事件',
-    item: '道具',
-    location: '地点',
-    other: '其他',
-    sect: '组织',
-    skill: '功法',
-  }
-  return labels[type] ?? type
-}
-
 function getKgEntityColor(type: string): string {
   const colors: Record<string, string> = {
     beast: '#7f5a9b',
@@ -383,10 +358,6 @@ function getKgEntityColor(type: string): string {
     skill: '#a94f64',
   }
   return colors[type] ?? colors.other
-}
-
-function normalizeGraphSearch(value: string): string {
-  return value.trim().replace(/\s+/g, '').toLowerCase()
 }
 
 function getKgEntityNodeWidth(entity: KgEntity): number {
@@ -628,6 +599,10 @@ function App() {
     isHydrated,
     generatingBookId,
     generatingBookProgress,
+    generatingChapterId,
+    generatingPageSummaries,
+    pageSummaryProgress,
+    pageSummaryFailures,
     isConfigOpen,
     modelConfigDraft,
     setModelConfigDraft,
@@ -646,6 +621,7 @@ function App() {
     searchedChapters,
     visibleChapters,
     processedCount,
+    pageSummaryCount,
     currentProgressLabel,
     activeProviderLabel,
     activeOpenAIConfig,
@@ -660,6 +636,8 @@ function App() {
     deleteBook,
     updateActiveChapter,
     generateMissingSummariesForBook,
+    generateMissingSummariesForCurrentPage,
+    generateSummaryForChapter,
     navigateToPreviousChapter,
     navigateToNextChapter,
     openModelConfig,
@@ -676,6 +654,7 @@ function App() {
   const hasEmbeddingConfig = Boolean(embeddingModelName && state.embeddingConfig.baseUrl.trim())
   const totalChapters = state.book?.chapters.length ?? 0
   const summariesComplete = totalChapters > 0 && processedCount === totalChapters
+  const currentPageMissingSummaryCount = Math.max(0, pagedChapters.length - pageSummaryCount)
   const activeChapterParagraphs = useMemo(() => {
     if (!activeChapter) return []
 
@@ -791,8 +770,7 @@ function App() {
 
     window.requestAnimationFrame(() => {
       if (readerRef.current) {
-        const key = `${state.book?.id ?? 'book'}:${activeChapter.id}`
-        readerRef.current.scrollTop = state.chapterScrollPositions[key] ?? 0
+        readerRef.current.scrollTop = readChapterScrollPosition(state.chapterScrollPositions, state.book?.id, activeChapter.id)
       }
     })
   }, [view, activeChapter?.id, state.book?.id])
@@ -803,7 +781,7 @@ function App() {
     if (!readerRef.current) return
     const readerElement = readerRef.current
 
-    const key = `${state.book?.id ?? 'book'}:${activeChapter.id}`
+    const key = chapterScrollPositionKey(state.book?.id, activeChapter.id)
     let lastProgress = -1
 
     function commitReaderScrollPosition() {
@@ -2531,126 +2509,6 @@ function App() {
     }
   }
 
-  function buildRagAnswerPrompt(
-    question: string,
-    results: RagSearchResult[],
-    entityMatches: RagEntityMatch[] = [],
-  ): string {
-    const sorted = [...results].sort((a, b) => a.chapterIndex - b.chapterIndex)
-    const normalizedQuestion = normalizeGraphSearch(question)
-
-    const entitySection =
-      entityMatches.length > 0
-        ? `相关实体：\n${entityMatches
-            .map((entity) => {
-              const parts = [
-                `- ${entity.entityName}（${getKgEntityTypeLabel(entity.entityType)}）`,
-              ]
-              if (entity.firstChapterIndex != null) {
-                parts.push(`首次出现：第 ${entity.firstChapterIndex} 章`)
-              }
-              if (
-                entity.lastChapterIndex != null &&
-                entity.lastChapterIndex !== entity.firstChapterIndex
-              ) {
-                parts.push(`末次出现：第 ${entity.lastChapterIndex} 章`)
-              }
-              const relevantAliases = (entity.aliases || [])
-                .filter((alias) => {
-                  const normalizedAlias = normalizeGraphSearch(alias)
-                  return (
-                    normalizedAlias.length >= 2 &&
-                    (normalizedQuestion.includes(normalizedAlias) ||
-                      normalizedAlias.includes(normalizedQuestion))
-                  )
-                })
-                .slice(0, 5)
-              if (relevantAliases.length > 0) {
-                parts.push(`与问题相关的别名：${relevantAliases.join('、')}`)
-              }
-              return parts.join('，')
-            })
-            .join('\n')}\n\n`
-        : ''
-
-    const context = sorted
-      .map((result) => {
-        const lines = [`[第 ${result.chapterIndex} 章] ${result.chapterTitle}`]
-        if (result.summary.detail) lines.push(`摘要：${result.summary.detail}`)
-        if (result.contentSnippet) lines.push(`原文片段：${result.contentSnippet}`)
-        return lines.join('\n')
-      })
-      .join('\n\n')
-
-    return `你是长篇小说阅读助手。请根据以下按章节顺序排列的相关内容回答问题。回答要简洁准确，并引用章节号。如果信息不足，请明确说明。
-
-问题：${question}
-
-${entitySection}相关内容：
-${context}
-
-请给出回答：`
-  }
-
-  async function generateRagAnswerWithOllama(prompt: string, model: string, temperature: number): Promise<string> {
-    const response = await fetch('http://localhost:11434/api/generate', {
-      body: JSON.stringify({
-        model: model.trim(),
-        prompt,
-        stream: false,
-        options: { temperature },
-      }),
-      headers: { 'Content-Type': 'application/json' },
-      method: 'POST',
-    })
-
-    if (!response.ok) {
-      const body = await response.text()
-      throw new Error(`Ollama 返回 ${response.status}：${body || '请求失败'}`)
-    }
-
-    const data = (await response.json()) as { response?: string }
-    return (data.response ?? '').trim()
-  }
-
-  async function generateRagAnswerWithOpenAI(prompt: string, config: OpenAIConfig): Promise<string> {
-    const normalizedBaseUrl = config.baseUrl.trim().replace(/\/+$/, '')
-    if (!normalizedBaseUrl) throw new Error('请先填写 OpenAI-compatible Base URL。')
-    if (!config.model.trim()) throw new Error('请先填写 OpenAI-compatible Model Name。')
-
-    const headers: Record<string, string> = { 'Content-Type': 'application/json' }
-    if (config.apiKey.trim()) {
-      headers.Authorization = `Bearer ${config.apiKey.trim()}`
-    }
-
-    const requestBody: Record<string, unknown> = {
-      model: config.model.trim(),
-      messages: [
-        { role: 'system', content: '你是长篇网络小说陪读助手。请直接回答问题，不需要输出 JSON。' },
-        { role: 'user', content: prompt },
-      ],
-      temperature: config.temperature,
-    }
-
-    if (!config.thinkingEnabled) {
-      requestBody.chat_template_kwargs = { enable_thinking: false }
-    }
-
-    const response = await fetch(`${normalizedBaseUrl}/chat/completions`, {
-      body: JSON.stringify(requestBody),
-      headers,
-      method: 'POST',
-    })
-
-    if (!response.ok) {
-      const body = await response.text()
-      throw new Error(`OpenAI 返回 ${response.status}：${body || '请求失败'}`)
-    }
-
-    const data = (await response.json()) as { choices?: { message?: { content?: string } }[] }
-    return (data.choices?.[0]?.message?.content ?? '').trim()
-  }
-
   async function handleGenerateRagAnswer() {
     if (!ragQuery.trim() || ragResults.length === 0) return
 
@@ -2658,15 +2516,22 @@ ${context}
     setRagError('')
 
     try {
-      const prompt = buildRagAnswerPrompt(ragQuery.trim(), ragResults, ragEntityMatches)
-      let answer = ''
-      if (state.aiProvider === 'openai') {
-        if (!activeOpenAIConfig) throw new Error('请先配置外部模型。')
-        answer = await generateRagAnswerWithOpenAI(prompt, activeOpenAIConfig)
-      } else {
-        answer = await generateRagAnswerWithOllama(prompt, state.ollamaModel, state.ollamaTemperature)
+      const update = await createRagAnswerUpdate({
+        question: ragQuery.trim(),
+        results: ragResults,
+        entityMatches: ragEntityMatches,
+        aiProvider: state.aiProvider,
+        openAIConfig: activeOpenAIConfig ?? null,
+        ollamaModel: state.ollamaModel,
+        ollamaTemperature: state.ollamaTemperature,
+      })
+      setRagResults(update.results)
+      setRagEntityMatches(update.entityMatches)
+      if (update.error) {
+        setRagError(update.error)
+        return
       }
-      setRagAnswer(answer)
+      setRagAnswer(update.answer)
     } catch (err) {
       setRagError(err instanceof Error ? err.message : '生成答案失败。')
     } finally {
@@ -6533,7 +6398,39 @@ ${context}
               >
                 下 100 章
               </button>
+              <button
+                type="button"
+                className="ghost-button"
+                disabled={
+                  !activeModelName ||
+                  generatingPageSummaries ||
+                  currentPageMissingSummaryCount === 0 ||
+                  Boolean(normalizedChapterSearch)
+                }
+                title={
+                  !activeModelName
+                    ? '未配置模型，请先点击右上角设置'
+                    : currentPageMissingSummaryCount === 0
+                      ? '当前页概要已经全部生成'
+                      : `${currentPageMissingSummaryCount} 章缺少概要`
+                }
+                onClick={() => void generateMissingSummariesForCurrentPage()}
+              >
+                {generatingPageSummaries
+                  ? `生成中… ${pageSummaryProgress}`
+                  : currentPageMissingSummaryCount === 0
+                    ? '当前页概要已生成'
+                    : `生成当前页概要 (${currentPageMissingSummaryCount})`}
+              </button>
             </div>
+            {(pageSummaryProgress || pageSummaryFailures.length > 0) && (
+              <div className="search-status">
+                {pageSummaryProgress && <span>{pageSummaryProgress}</span>}
+                {pageSummaryFailures.length > 0 && (
+                  <span>失败章节：{pageSummaryFailures.join('、')}</span>
+                )}
+              </div>
+            )}
 
             <div className="chapter-scroll" ref={chapterListRef}>
               {visibleChapters.map((chapter) => (
@@ -6768,7 +6665,16 @@ ${context}
               </div>
             ) : (
               <div className="empty-summary">
-                <p>这一章还没有概要。请在首页点击书籍的「生成概要」按钮批量生成。</p>
+                <p>这一章还没有概要。可以先生成本章概要，或回首页批量补齐缺失概要。</p>
+                {activeChapter && (
+                  <button
+                    type="button"
+                    onClick={() => void generateSummaryForChapter(activeChapter.id)}
+                    disabled={generatingChapterId === activeChapter.id}
+                  >
+                    {generatingChapterId === activeChapter.id ? '生成中...' : '生成本章概要'}
+                  </button>
+                )}
               </div>
             )}
           </aside>

@@ -80,12 +80,9 @@ novel_reader/
 │   ├── offline-scanner.mjs # Offline batch scanner CLI
 │   └── offline-scanner/    # Scanner modules (config, db, llm, scanner)
 ├── gateway-android-app/    # Current maintained Gateway Android App
-├── mobile-app/             # Legacy LAN-sync mobile app, deprecated and kept for reference
 ├── src/                    # React frontend
-│   ├── main.tsx            # Entry point (desktop / mobile routing)
+│   ├── main.tsx            # Entry point
 │   ├── App.tsx             # Main desktop UI
-│   ├── MobileApp.tsx       # Mobile UI
-│   ├── MobileApp.css       # Mobile UI styles
 │   ├── hooks/              # React hooks
 │   └── assets/             # Static assets
 ├── public/                 # Public static files
@@ -142,12 +139,12 @@ RAG search combines summary embeddings, chapter chunk embeddings, and knowledge 
 - Search calls `/api/rag/search`, which fuses summary vector recall, best-per-chapter chunk recall, and entity recall with reciprocal-rank-style scoring.
 - Search results include chapter summaries, matched entity names, similarity, match type, and optional best-matching chunk snippets.
 - If fewer than 80% of chapters have embeddings for the selected model, the API returns `409 EMBEDDINGS_NOT_READY`.
-- The current web desktop UI and `/mobile` route can still generate embeddings, search, and ask the configured generation model to answer from retrieved results.
-- The independent Android mobile app must not generate book, chapter, or chunk embeddings. It consumes PC-generated embeddings synced into local mobile storage.
+- The current web desktop UI can generate embeddings, search, and ask the configured generation model to answer from retrieved results.
+- The maintained Gateway Android app must not generate book, chapter, or chunk embeddings. It consumes PC/Gateway-generated embeddings from published packages.
 
 ## Mobile Support Status
 
-The maintained Android mobile client is now [`../gateway-android-app`](../gateway-android-app). It uses Gateway for the library, book packages, RAG/AI, and MP3 audio, then caches data locally for offline reading and playback. The older [`../mobile-app`](../mobile-app) LAN-sync client is deprecated and kept only as historical reference.
+The maintained Android mobile client is now [`../gateway-android-app`](../gateway-android-app). It uses Gateway for the library, book packages, RAG/AI, and MP3 audio, then caches data locally for offline reading and playback. The old `../mobile-app` LAN-sync client directory has been removed; historical implementation remains available in Git history.
 
 The PC/Gateway production path still owns:
 

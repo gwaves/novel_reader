@@ -273,6 +273,20 @@ describe('production-pipeline import', () => {
       })
       assert.equal(bookPackage.embeddings.coverage.chunks.embeddedChunks, 2)
       assert.equal(bookPackage.embeddings.coverage.chunks.embeddedChapters, 2)
+      assert.deepEqual(
+        bookPackage.embeddings.summaries.map((embedding) => [embedding.chapterId, embedding.model, embedding.dimension, embedding.embedding]),
+        [
+          ['sample-book:ch00001', 'fake-embedding', 3, [1, 2, 3]],
+          ['sample-book:ch00002', 'fake-embedding', 3, [1, 2, 3]],
+        ],
+      )
+      assert.deepEqual(
+        bookPackage.embeddings.chunks.map((embedding) => [embedding.chapterId, embedding.chapterIndex, embedding.chunkIndex, embedding.text, embedding.embedding]),
+        [
+          ['sample-book:ch00001', 1, 0, '这是第一章内容。', [1, 2, 3]],
+          ['sample-book:ch00002', 2, 0, '这是第二章内容。', [1, 2, 3]],
+        ],
+      )
       assert.equal(bookPackage.knowledgeGraph.entities.length, 2)
       assert.equal(bookPackage.knowledgeGraph.entityMentions.length, 2)
       assert.equal(bookPackage.knowledgeGraph.relations.length, 1)
@@ -417,7 +431,13 @@ describe('production-pipeline import', () => {
       await mkdir(gatewayDataDir, { recursive: true })
       await writeFile(
         join(gatewayDataDir, 'books.json'),
-        JSON.stringify({ schemaVersion: 1, books: [] }),
+        JSON.stringify({
+          schemaVersion: 1,
+          books: [
+            { id: 'old-book', title: '旧书', chapterCount: 1, updatedAt: '2026-01-01T00:00:00.000Z' },
+            { id: 'sample-book', title: '旧样书', chapterCount: 99, updatedAt: '2026-01-02T00:00:00.000Z' },
+          ],
+        }),
         'utf8',
       )
       await execFileAsync(process.execPath, [
@@ -443,7 +463,6 @@ describe('production-pipeline import', () => {
           stages: ['package', 'publish'],
           publish: {
             gatewayDataDir,
-            dryRun: true,
           },
         }),
         'utf8',
@@ -476,7 +495,17 @@ describe('production-pipeline import', () => {
         join(dirname(runJson.stages.package.childRunJson), packageRun.stages.package.artifacts.gatewayDataDir, 'books.json'),
         'utf8',
       ))
-      assert.deepEqual(mergedCatalog.books.map((book) => book.id), ['sample-book'])
+      assert.deepEqual(mergedCatalog.books.map((book) => book.id).sort(), ['old-book', 'sample-book'])
+      assert.equal(mergedCatalog.books.find((book) => book.id === 'old-book')?.title, '旧书')
+      assert.equal(mergedCatalog.books.filter((book) => book.id === 'sample-book').length, 1)
+      assert.equal(mergedCatalog.books.find((book) => book.id === 'sample-book')?.title, '样书')
+
+      const publishedCatalog = JSON.parse(await readFile(join(gatewayDataDir, 'books.json'), 'utf8'))
+      assert.deepEqual(publishedCatalog.books.map((book) => book.id).sort(), ['old-book', 'sample-book'])
+      assert.equal(publishedCatalog.books.find((book) => book.id === 'old-book')?.title, '旧书')
+      assert.equal(publishedCatalog.books.filter((book) => book.id === 'sample-book').length, 1)
+      assert.equal(publishedCatalog.books.find((book) => book.id === 'sample-book')?.title, '样书')
+      assert.equal(await fileExists(join(gatewayDataDir, 'books', 'sample-book', 'package.json')), true)
 
       const { stdout: resumeStdout } = await execFileAsync(process.execPath, [
         cliPath,
@@ -515,6 +544,100 @@ describe('production-pipeline import', () => {
         '--json',
       ])
       assert.equal(JSON.parse(statusJsonStdout).status, 'completed')
+    } finally {
+      await rm(tempDir, { recursive: true, force: true })
+    }
+  })
+
+  it('resumes a failed job by skipping completed stages and retrying the failed stage', async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), 'production-pipeline-resume-failed-test-'))
+    try {
+      const txtPath = join(tempDir, 'sample.txt')
+      const dbPath = join(tempDir, 'main.sqlite')
+      const runRoot = join(tempDir, 'runs')
+      const gatewayDataDir = join(tempDir, 'gateway-data')
+      const jobPath = join(tempDir, 'job.json')
+      await writeFile(txtPath, `第一章 开始\n这是第一章内容。\n\n第二章 继续\n这是第二章内容。`, 'utf8')
+      await writeFile(gatewayDataDir, 'not a directory', 'utf8')
+      await execFileAsync(process.execPath, [
+        cliPath,
+        'import',
+        '--file',
+        txtPath,
+        '--book-id',
+        'sample-book',
+        '--title',
+        '样书',
+        '--main-db',
+        dbPath,
+        '--run-root',
+        runRoot,
+      ])
+      await writeFile(
+        jobPath,
+        JSON.stringify({
+          bookId: 'sample-book',
+          title: '样书',
+          mainDbPath: dbPath,
+          stages: ['package', 'publish'],
+          publish: {
+            gatewayDataDir,
+          },
+        }),
+        'utf8',
+      )
+
+      let failedRun
+      try {
+        await execFileAsync(process.execPath, [
+          cliPath,
+          'run',
+          '--job',
+          jobPath,
+          '--run-root',
+          runRoot,
+        ])
+      } catch (error) {
+        failedRun = error
+      }
+      assert.ok(failedRun)
+      assert.match(failedRun.message, /Command failed:/)
+      assert.match(failedRun.stdout, /completed: package/)
+      const parentRunDir = await findRunDir(runRoot, 'sample-book', (runJson) =>
+        runJson.status === 'failed' &&
+        runJson.stages?.package?.status === 'completed' &&
+        runJson.stages?.publish?.status === 'failed'
+      )
+      const runJsonPath = join(parentRunDir, 'run.json')
+      const failedRunJson = JSON.parse(await readFile(runJsonPath, 'utf8'))
+      assert.equal(failedRunJson.status, 'failed')
+      assert.equal(failedRunJson.stages.package.status, 'completed')
+      assert.equal(failedRunJson.stages.publish.status, 'failed')
+      const packageChildRunJson = failedRunJson.stages.package.childRunJson
+      assert.ok(packageChildRunJson)
+
+      await rm(gatewayDataDir, { force: true })
+      await mkdir(gatewayDataDir, { recursive: true })
+      await writeFile(join(gatewayDataDir, 'books.json'), JSON.stringify({ schemaVersion: 1, books: [] }), 'utf8')
+
+      const { stdout: resumeStdout } = await execFileAsync(process.execPath, [
+        cliPath,
+        'resume',
+        '--run',
+        runJsonPath,
+      ])
+
+      assert.match(resumeStdout, /skip: package already completed/)
+      assert.doesNotMatch(resumeStdout, /completed: package/)
+      assert.match(resumeStdout, /completed: publish/)
+      assert.match(resumeStdout, /status: completed/)
+
+      const resumedRunJson = JSON.parse(await readFile(runJsonPath, 'utf8'))
+      assert.equal(resumedRunJson.status, 'completed')
+      assert.equal(resumedRunJson.stages.package.status, 'completed')
+      assert.equal(resumedRunJson.stages.package.childRunJson, packageChildRunJson)
+      assert.equal(resumedRunJson.stages.publish.status, 'completed')
+      assert.equal(await fileExists(join(gatewayDataDir, 'books', 'sample-book', 'package.json')), true)
     } finally {
       await rm(tempDir, { recursive: true, force: true })
     }
@@ -1032,6 +1155,369 @@ describe('production-pipeline import', () => {
     }
   })
 
+  it('runs summary as an independent job stage and records child artifacts', async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), 'production-pipeline-summary-stage-test-'))
+    let chatServer
+    try {
+      chatServer = await startFakeChatServer()
+      const txtPath = join(tempDir, 'sample.txt')
+      const dbPath = join(tempDir, 'main.sqlite')
+      const runRoot = join(tempDir, 'runs')
+      const jobPath = join(tempDir, 'job.json')
+      await writeFile(txtPath, `第一章 开始\n这是第一章内容。\n\n第二章 继续\n这是第二章内容。`, 'utf8')
+      await execFileAsync(process.execPath, [
+        cliPath,
+        'import',
+        '--file',
+        txtPath,
+        '--book-id',
+        'sample-book',
+        '--title',
+        '样书',
+        '--main-db',
+        dbPath,
+        '--run-root',
+        runRoot,
+      ])
+      await writeFile(
+        jobPath,
+        JSON.stringify({
+          bookId: 'sample-book',
+          title: '样书',
+          mainDbPath: dbPath,
+          stages: ['summary'],
+          llm: {
+            provider: 'openai-compatible',
+            baseUrl: chatServer.url,
+            model: 'fake-chat',
+            concurrency: 2,
+          },
+        }),
+        'utf8',
+      )
+
+      const { stdout } = await execFileAsync(process.execPath, [
+        cliPath,
+        'run',
+        '--job',
+        jobPath,
+        '--run-root',
+        runRoot,
+      ])
+
+      assert.match(stdout, /completed: summary/)
+      assert.match(stdout, /status: completed/)
+      const parentRunDir = stdout.match(/runDir: (.+)/)?.[1]?.trim()
+      assert.ok(parentRunDir)
+      const parentRunJson = JSON.parse(await readFile(join(parentRunDir, 'run.json'), 'utf8'))
+      assert.equal(parentRunJson.status, 'completed')
+      assert.deepEqual(Object.keys(parentRunJson.stages), ['summary'])
+      assert.equal(parentRunJson.stages.summary.status, 'completed')
+      assert.ok(parentRunJson.stages.summary.childRunJson)
+      assert.ok(parentRunJson.stages.summary.logFile)
+
+      const childRunJson = JSON.parse(await readFile(parentRunJson.stages.summary.childRunJson, 'utf8'))
+      assert.equal(childRunJson.command, 'summary')
+      assert.equal(childRunJson.status, 'completed')
+      assert.equal(childRunJson.stages.summary.status, 'completed')
+      const summaryReport = JSON.parse(await readFile(join(dirname(parentRunJson.stages.summary.childRunJson), 'artifacts', 'summary-report.json'), 'utf8'))
+      assert.equal(summaryReport.targetChapters, 2)
+      assert.equal(summaryReport.completed, 2)
+      assert.equal(summaryReport.failed, 0)
+      assert.equal(summaryReport.concurrency, 2)
+
+      const db = new DatabaseSync(dbPath, { readOnly: true })
+      try {
+        const rows = db.prepare('SELECT chapter_id AS chapterId, short FROM summaries ORDER BY chapter_id').all().map(plainRow)
+        assert.deepEqual(rows, [
+          { chapterId: 'sample-book:ch00001', short: '本章概要' },
+          { chapterId: 'sample-book:ch00002', short: '本章概要' },
+        ])
+      } finally {
+        db.close()
+      }
+    } finally {
+      await chatServer?.close()
+      await rm(tempDir, { recursive: true, force: true })
+    }
+  })
+
+  it('runs kg as an independent job stage and records child artifacts', async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), 'production-pipeline-kg-stage-test-'))
+    let chatServer
+    try {
+      chatServer = await startFakeChatServer()
+      const txtPath = join(tempDir, 'sample.txt')
+      const dbPath = join(tempDir, 'main.sqlite')
+      const runRoot = join(tempDir, 'runs')
+      const jobPath = join(tempDir, 'job.json')
+      await writeFile(txtPath, `第一章 开始\n阿甲在长安帮助乙门。\n\n第二章 继续\n阿甲再次来到长安。`, 'utf8')
+      await execFileAsync(process.execPath, [
+        cliPath,
+        'import',
+        '--file',
+        txtPath,
+        '--book-id',
+        'sample-book',
+        '--title',
+        '样书',
+        '--main-db',
+        dbPath,
+        '--run-root',
+        runRoot,
+      ])
+      await writeFile(
+        jobPath,
+        JSON.stringify({
+          bookId: 'sample-book',
+          title: '样书',
+          mainDbPath: dbPath,
+          stages: ['kg'],
+          llm: {
+            provider: 'openai-compatible',
+            baseUrl: chatServer.url,
+            model: 'fake-chat',
+            concurrency: 2,
+          },
+        }),
+        'utf8',
+      )
+
+      const { stdout } = await execFileAsync(process.execPath, [
+        cliPath,
+        'run',
+        '--job',
+        jobPath,
+        '--run-root',
+        runRoot,
+      ])
+
+      assert.match(stdout, /completed: kg/)
+      assert.match(stdout, /status: completed/)
+      const parentRunDir = stdout.match(/runDir: (.+)/)?.[1]?.trim()
+      assert.ok(parentRunDir)
+      const parentRunJson = JSON.parse(await readFile(join(parentRunDir, 'run.json'), 'utf8'))
+      assert.equal(parentRunJson.status, 'completed')
+      assert.deepEqual(Object.keys(parentRunJson.stages), ['kg'])
+      assert.equal(parentRunJson.stages.kg.status, 'completed')
+      assert.ok(parentRunJson.stages.kg.childRunJson)
+      assert.ok(parentRunJson.stages.kg.logFile)
+
+      const childRunJson = JSON.parse(await readFile(parentRunJson.stages.kg.childRunJson, 'utf8'))
+      assert.equal(childRunJson.command, 'kg')
+      assert.equal(childRunJson.status, 'completed')
+      assert.equal(childRunJson.stages.kg.status, 'completed')
+      const kgReport = JSON.parse(await readFile(join(dirname(parentRunJson.stages.kg.childRunJson), 'artifacts', 'kg-report.json'), 'utf8'))
+      assert.equal(kgReport.targetChapters, 2)
+      assert.equal(kgReport.completed, 2)
+      assert.equal(kgReport.failed, 0)
+      assert.equal(kgReport.entityMentions, 4)
+      assert.equal(kgReport.relationMentions, 2)
+      assert.equal(kgReport.concurrency, 2)
+
+      const db = new DatabaseSync(dbPath, { readOnly: true })
+      try {
+        const extractionCount = db.prepare('SELECT COUNT(*) AS count FROM kg_chapter_extractions WHERE book_id = ? AND status = ?')
+          .get('sample-book', 'completed').count
+        const entityCount = db.prepare('SELECT COUNT(*) AS count FROM kg_entities WHERE book_id = ?').get('sample-book').count
+        const relationCount = db.prepare('SELECT COUNT(*) AS count FROM kg_relations WHERE book_id = ?').get('sample-book').count
+        assert.equal(extractionCount, 2)
+        assert.equal(entityCount, 2)
+        assert.equal(relationCount, 1)
+      } finally {
+        db.close()
+      }
+    } finally {
+      await chatServer?.close()
+      await rm(tempDir, { recursive: true, force: true })
+    }
+  })
+
+  it('runs embedding as independent job stages and records child artifacts', async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), 'production-pipeline-embedding-stage-test-'))
+    let embeddingServer
+    try {
+      embeddingServer = await startFakeEmbeddingServer()
+      const txtPath = join(tempDir, 'sample.txt')
+      const dbPath = join(tempDir, 'main.sqlite')
+      const runRoot = join(tempDir, 'runs')
+      const jobPath = join(tempDir, 'job.json')
+      await writeFile(txtPath, `第一章 开始\n这是第一章内容。\n\n第二章 继续\n这是第二章内容。`, 'utf8')
+      await execFileAsync(process.execPath, [
+        cliPath,
+        'import',
+        '--file',
+        txtPath,
+        '--book-id',
+        'sample-book',
+        '--title',
+        '样书',
+        '--main-db',
+        dbPath,
+        '--run-root',
+        runRoot,
+      ])
+      seedSummaries(dbPath)
+      await writeFile(
+        jobPath,
+        JSON.stringify({
+          bookId: 'sample-book',
+          title: '样书',
+          mainDbPath: dbPath,
+          stages: ['embedding'],
+          embedding: {
+            provider: 'openai',
+            baseUrl: embeddingServer.url,
+            model: 'fake-embedding',
+            concurrency: 2,
+          },
+        }),
+        'utf8',
+      )
+
+      const { stdout } = await execFileAsync(process.execPath, [
+        cliPath,
+        'run',
+        '--job',
+        jobPath,
+        '--run-root',
+        runRoot,
+      ])
+
+      assert.match(stdout, /completed: chunkEmbedding/)
+      assert.match(stdout, /completed: summaryEmbedding/)
+      assert.match(stdout, /status: completed/)
+      const parentRunDir = stdout.match(/runDir: (.+)/)?.[1]?.trim()
+      assert.ok(parentRunDir)
+      const parentRunJson = JSON.parse(await readFile(join(parentRunDir, 'run.json'), 'utf8'))
+      assert.equal(parentRunJson.status, 'completed')
+      assert.deepEqual(Object.keys(parentRunJson.stages), ['chunkEmbedding', 'summaryEmbedding'])
+      assert.equal(parentRunJson.stages.chunkEmbedding.status, 'completed')
+      assert.equal(parentRunJson.stages.summaryEmbedding.status, 'completed')
+      assert.ok(parentRunJson.stages.chunkEmbedding.childRunJson)
+      assert.ok(parentRunJson.stages.summaryEmbedding.childRunJson)
+
+      const chunkChildRunJson = JSON.parse(await readFile(parentRunJson.stages.chunkEmbedding.childRunJson, 'utf8'))
+      const summaryChildRunJson = JSON.parse(await readFile(parentRunJson.stages.summaryEmbedding.childRunJson, 'utf8'))
+      assert.equal(chunkChildRunJson.command, 'embedding')
+      assert.equal(summaryChildRunJson.command, 'embedding')
+      assert.equal(chunkChildRunJson.status, 'completed')
+      assert.equal(summaryChildRunJson.status, 'completed')
+      const chunkReport = JSON.parse(await readFile(join(dirname(parentRunJson.stages.chunkEmbedding.childRunJson), 'artifacts', 'embedding-report.json'), 'utf8'))
+      const summaryReport = JSON.parse(await readFile(join(dirname(parentRunJson.stages.summaryEmbedding.childRunJson), 'artifacts', 'embedding-report.json'), 'utf8'))
+      assert.equal(chunkReport.mode, 'chunks')
+      assert.equal(chunkReport.targetChapters, 2)
+      assert.equal(chunkReport.completed, 2)
+      assert.equal(chunkReport.chunkCompleted, 2)
+      assert.equal(summaryReport.mode, 'summaries')
+      assert.equal(summaryReport.targetChapters, 2)
+      assert.equal(summaryReport.completed, 2)
+      assert.equal(summaryReport.chunkCompleted, 0)
+
+      const db = new DatabaseSync(dbPath, { readOnly: true })
+      try {
+        const summaryCount = db.prepare('SELECT COUNT(*) AS count FROM summary_embeddings WHERE book_id = ? AND model = ?')
+          .get('sample-book', 'fake-embedding').count
+        const chunkCount = db.prepare('SELECT COUNT(*) AS count FROM chapter_chunk_embeddings WHERE book_id = ? AND model = ?')
+          .get('sample-book', 'fake-embedding').count
+        assert.equal(summaryCount, 2)
+        assert.equal(chunkCount, 2)
+      } finally {
+        db.close()
+      }
+    } finally {
+      if (embeddingServer) await embeddingServer.close()
+      await rm(tempDir, { recursive: true, force: true })
+    }
+  })
+
+  it('runs audio as an independent job stage and records child artifacts', async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), 'production-pipeline-audio-stage-test-'))
+    try {
+      const txtPath = join(tempDir, 'sample.txt')
+      const dbPath = join(tempDir, 'main.sqlite')
+      const runRoot = join(tempDir, 'runs')
+      const ttsOutRoot = join(tempDir, 'generated-tts')
+      const fakeDirectorPath = join(tempDir, 'fake-tts-director.mjs')
+      const fakeConfigPath = join(tempDir, 'fake-tts-config.json')
+      const jobPath = join(tempDir, 'job.json')
+      await writeFile(txtPath, `第一章 开始\n这是第一章内容。\n\n第二章 继续\n这是第二章内容。`, 'utf8')
+      await writeFile(fakeConfigPath, JSON.stringify({ ok: true }), 'utf8')
+      await writeFile(fakeDirectorPath, fakeTtsDirectorSource(), 'utf8')
+      await execFileAsync(process.execPath, [
+        cliPath,
+        'import',
+        '--file',
+        txtPath,
+        '--book-id',
+        'sample-book',
+        '--title',
+        '样书',
+        '--main-db',
+        dbPath,
+        '--run-root',
+        runRoot,
+      ])
+      await writeFile(
+        jobPath,
+        JSON.stringify({
+          bookId: 'sample-book',
+          title: '样书',
+          mainDbPath: dbPath,
+          stages: ['audio'],
+          audio: {
+            ttsConfig: fakeConfigPath,
+            ttsDirectorScript: fakeDirectorPath,
+            ttsOutRoot,
+            chapters: '1-2',
+            resume: true,
+          },
+        }),
+        'utf8',
+      )
+
+      const { stdout } = await execFileAsync(process.execPath, [
+        cliPath,
+        'run',
+        '--job',
+        jobPath,
+        '--run-root',
+        runRoot,
+      ])
+
+      assert.match(stdout, /completed: audio/)
+      assert.match(stdout, /status: completed/)
+      const parentRunDir = stdout.match(/runDir: (.+)/)?.[1]?.trim()
+      assert.ok(parentRunDir)
+      const parentRunJson = JSON.parse(await readFile(join(parentRunDir, 'run.json'), 'utf8'))
+      assert.equal(parentRunJson.status, 'completed')
+      assert.deepEqual(Object.keys(parentRunJson.stages), ['audio'])
+      assert.equal(parentRunJson.stages.audio.status, 'completed')
+      assert.ok(parentRunJson.stages.audio.childRunJson)
+      assert.ok(parentRunJson.stages.audio.logFile)
+
+      const childRunDir = dirname(parentRunJson.stages.audio.childRunJson)
+      const childRunJson = JSON.parse(await readFile(parentRunJson.stages.audio.childRunJson, 'utf8'))
+      assert.equal(childRunJson.command, 'audio')
+      assert.equal(childRunJson.status, 'completed')
+      assert.equal(childRunJson.stages.audio.status, 'completed')
+      const audioCatalogPath = join(childRunDir, childRunJson.stages.audio.artifacts.audioCatalog)
+      const audioCatalog = JSON.parse(await readFile(audioCatalogPath, 'utf8'))
+      assert.deepEqual(audioCatalog.chapters.map((chapter) => chapter.chapterId), [
+        'sample-book:ch00001',
+        'sample-book:ch00002',
+      ])
+      assert.equal(audioCatalog.chapters[0].timelineVersion, 2)
+      assert.equal(audioCatalog.chapters[0].durationMs, 1000)
+      assert.equal(audioCatalog.chapters[1].durationMs, 2000)
+      assert.equal(await fileExists(join(dirname(audioCatalogPath), audioCatalog.chapters[0].fileName)), true)
+      assert.equal(await fileExists(join(ttsOutRoot, 'ch001-full', 'audio', 'chapter.mp3')), true)
+      assert.match(await readFile(join(childRunDir, 'artifacts', 'tts-director.log'), 'utf8'), /fake director start/)
+    } finally {
+      await rm(tempDir, { recursive: true, force: true })
+    }
+  })
+
   it('records child log metadata while a child stage is still running', async () => {
     const tempDir = await mkdtemp(join(tmpdir(), 'production-pipeline-running-child-test-'))
     let chatServer
@@ -1255,6 +1741,62 @@ describe('production-pipeline import', () => {
         () => execFileAsync(process.execPath, [cliPath, 'doctor', '--job', badJobPath]),
         /Doctor failed: \d+ check\(s\) failed\./,
       )
+    } finally {
+      await rm(tempDir, { recursive: true, force: true })
+    }
+  })
+
+  it('reports missing job fields and stage configuration in one doctor pass', async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), 'production-pipeline-doctor-missing-test-'))
+    try {
+      const missingStagesJobPath = join(tempDir, 'missing-stages-job.json')
+      const incompleteJobPath = join(tempDir, 'incomplete-job.json')
+      await writeFile(
+        missingStagesJobPath,
+        JSON.stringify({
+          title: '缺阶段',
+          mainDbPath: join(tempDir, 'missing-main.sqlite'),
+        }),
+        'utf8',
+      )
+      await writeFile(
+        incompleteJobPath,
+        JSON.stringify({
+          title: '缺配置',
+          mainDbPath: join(tempDir, 'missing-main.sqlite'),
+          stages: ['summary', 'publish', 'verify'],
+          gateway: {
+            url: 'https://127.0.0.1:8888',
+          },
+        }),
+        'utf8',
+      )
+
+      const missingStagesError = await captureRejectedExec(process.execPath, [cliPath, 'doctor', '--job', missingStagesJobPath])
+      assert.match(missingStagesError.message, /Doctor failed: \d+ check\(s\) failed\./)
+      const missingStagesStdout = missingStagesError.stdout
+      assert.match(missingStagesStdout, /fail: job\.bookId - missing/)
+      assert.match(missingStagesStdout, /fail: job\.stages - missing/)
+
+      const incompleteError = await captureRejectedExec(process.execPath, [cliPath, 'doctor', '--job', incompleteJobPath])
+      assert.match(incompleteError.message, /Doctor failed: \d+ check\(s\) failed\./)
+      const stdout = incompleteError.stdout
+      assert.match(stdout, /fail: job\.bookId - missing/)
+      assert.match(stdout, /fail: mainDb\.exists/)
+      assert.match(stdout, /fail: stage\.summary\.config - summary stage requires job\.llm\.baseUrl or job\.summary\.baseUrl/)
+      assert.match(stdout, /fail: publish\.target - missing/)
+      assert.match(stdout, /ok: verify\.gatewayUrl - https:\/\/127\.0\.0\.1:8888/)
+      assert.match(stdout, /fail: verify\.gatewayToken - missing/)
+
+      const error = await captureRejectedExec(process.execPath, [cliPath, 'doctor', '--job', incompleteJobPath, '--json'])
+      assert.match(error.message, /Doctor failed: \d+ check\(s\) failed\./)
+      const report = JSON.parse(error.stdout)
+      assert.equal(report.ok, false)
+      const failedCheckNames = report.checks.filter((check) => !check.ok).map((check) => check.name)
+      assert.ok(failedCheckNames.includes('job.bookId'))
+      assert.ok(failedCheckNames.includes('stage.summary.config'))
+      assert.ok(failedCheckNames.includes('publish.target'))
+      assert.ok(failedCheckNames.includes('verify.gatewayToken'))
     } finally {
       await rm(tempDir, { recursive: true, force: true })
     }
@@ -1560,6 +2102,7 @@ describe('production-pipeline import', () => {
             manifestFileName: 'ch001-1/manifest.json',
             timelineVersion: 2,
             durationMs: 1000,
+            sizeBytes: 13,
           },
         ],
       }
@@ -1571,6 +2114,7 @@ describe('production-pipeline import', () => {
       )
       gateway = await startFakeGateway({
         token: 'dev-token',
+        adminToken: 'admin-token',
         bookPackage,
         audioCatalog,
       })
@@ -1584,13 +2128,39 @@ describe('production-pipeline import', () => {
         gateway.url,
         '--gateway-token',
         'dev-token',
+        '--gateway-admin-token',
+        'admin-token',
       ])
 
-      assert.match(stdout, /checks: 17\/17/)
+      assert.match(stdout, /checks: 29\/29/)
       const runJson = JSON.parse(await readFile(join(runRoot, 'sample-book', runId, 'run.json'), 'utf8'))
       assert.equal(runJson.stages.verify.status, 'completed')
       const report = JSON.parse(await readFile(join(runRoot, 'sample-book', runId, 'artifacts', 'verify-report.json'), 'utf8'))
       assert.equal(report.ok, true)
+      const checksByName = new Map(report.checks.map((check) => [check.name, check]))
+      assert.equal(checksByName.get('audio.durationMs.sample-book:ch00001')?.ok, true)
+      assert.equal(checksByName.get('audio.sizeBytes.sample-book:ch00001')?.ok, true)
+      assert.equal(checksByName.get('audio.manifestTimelineVersion.sample-book:ch00001')?.ok, true)
+      assert.equal(checksByName.get('audio.download.sample-book:ch00001')?.ok, true)
+      assert.equal(checksByName.get('audio.downloadSize.sample-book:ch00001')?.ok, true)
+      assert.equal(checksByName.get('adminBooks.bookListed')?.ok, true)
+      assert.equal(checksByName.get('mobileSession.allowedVisibilities')?.ok, true)
+      assert.equal(checksByName.get('library.visibilityConsistent')?.ok, true)
+      assert.equal(checksByName.get('adminAudio.refresh.bookId')?.ok, true)
+      assert.equal(checksByName.get('adminAudio.refresh.audioChapterCount')?.ok, true)
+      assert.equal(checksByName.get('adminAudio.refresh.missingChapterCount')?.ok, true)
+      assert.equal(checksByName.get('adminAudio.refresh.totalSizeBytes')?.ok, true)
+      assert.equal(checksByName.get('adminAudio.list.bookListed')?.ok, true)
+      assert.equal(checksByName.get('adminAudio.list.audioChapterCount')?.ok, true)
+      assert.deepEqual(gateway.requests.filter((request) => request.url.startsWith('/mobile/books') && request.url.includes('/audio/')).map((request) => request.url).sort(), [
+        '/mobile/books/sample-book/audio/sample-book%3Ach00001/download',
+        '/mobile/books/sample-book/audio/sample-book%3Ach00001/manifest',
+      ].sort())
+      assert.deepEqual(gateway.requests.filter((request) => request.url.startsWith('/admin')).map((request) => `${request.method} ${request.url}`), [
+        'GET /admin/books',
+        'POST /admin/books/sample-book/audio/refresh',
+        'GET /admin/audio',
+      ])
     } finally {
       if (gateway) await gateway.close()
       await rm(tempDir, { recursive: true, force: true })
@@ -2182,6 +2752,18 @@ async function fileExists(path) {
   }
 }
 
+async function findRunDir(runRoot, bookId, predicate) {
+  const bookRunRoot = join(runRoot, bookId)
+  const entries = await readdir(bookRunRoot, { withFileTypes: true })
+  for (const entry of entries) {
+    if (!entry.isDirectory()) continue
+    const runDir = join(bookRunRoot, entry.name)
+    const runJson = await readJsonIfExists(join(runDir, 'run.json'))
+    if (runJson && predicate(runJson)) return runDir
+  }
+  assert.fail(`No matching run.json found in ${bookRunRoot}`)
+}
+
 async function readJsonIfExists(path) {
   try {
     return JSON.parse(await readFile(path, 'utf8'))
@@ -2361,14 +2943,18 @@ async function readRequestJson(request) {
   return JSON.parse(Buffer.concat(chunks).toString('utf8') || '{}')
 }
 
-async function startFakeGateway({ token, bookPackage, audioCatalog }) {
+async function startFakeGateway({ token, adminToken = token, bookPackage, audioCatalog }) {
+  const requests = []
   const server = createServer((request, response) => {
     const url = new URL(request.url, 'http://127.0.0.1')
+    requests.push({ method: request.method, url: url.pathname, headers: request.headers })
     if (url.pathname === '/health') {
       sendJson(response, { status: 'ok' })
       return
     }
-    if (request.headers.authorization !== `Bearer ${token}`) {
+    const isAdminRoute = url.pathname.startsWith('/admin/') || url.pathname === '/admin/audio'
+    const expectedToken = isAdminRoute ? adminToken : token
+    if (request.headers.authorization !== `Bearer ${expectedToken}`) {
       sendJson(response, { error: { code: 'invalid_token' } }, 401)
       return
     }
@@ -2376,6 +2962,26 @@ async function startFakeGateway({ token, bookPackage, audioCatalog }) {
       sendJson(response, {
         schemaVersion: 1,
         books: [{ ...bookPackage.book, audioChapterCount: audioCatalog.chapters.length }],
+      })
+      return
+    }
+    if (url.pathname === '/auth/session') {
+      sendJson(response, {
+        authenticated: true,
+        auth: {
+          mode: 'development-static-token',
+          deviceId: 'verify-device',
+          deviceName: 'Verify Device',
+          role: 'default',
+          allowedVisibilities: ['default'],
+        },
+      })
+      return
+    }
+    if (request.method === 'GET' && url.pathname === '/admin/books') {
+      sendJson(response, {
+        schemaVersion: 1,
+        books: [{ ...bookPackage.book, visibility: bookPackage.book.visibility ?? 'default', audioChapterCount: audioCatalog.chapters.length }],
       })
       return
     }
@@ -2387,6 +2993,22 @@ async function startFakeGateway({ token, bookPackage, audioCatalog }) {
       sendJson(response, audioCatalog)
       return
     }
+    if (request.method === 'POST' && url.pathname === `/admin/books/${bookPackage.book.id}/audio/refresh`) {
+      sendJson(response, {
+        schemaVersion: 1,
+        refreshedAt: new Date().toISOString(),
+        audio: fakeAdminAudioSummary(bookPackage, audioCatalog),
+      })
+      return
+    }
+    if (request.method === 'GET' && url.pathname === '/admin/audio') {
+      sendJson(response, {
+        schemaVersion: 1,
+        generatedAt: new Date().toISOString(),
+        audio: [fakeAdminAudioSummary(bookPackage, audioCatalog)],
+      })
+      return
+    }
     const audioDownloadMatch = url.pathname.match(new RegExp(`^/mobile/books/${bookPackage.book.id}/audio/([^/]+)/download$`))
     if (audioDownloadMatch) {
       const chapterId = decodeURIComponent(audioDownloadMatch[1])
@@ -2394,8 +3016,10 @@ async function startFakeGateway({ token, bookPackage, audioCatalog }) {
         sendJson(response, { error: { code: 'not_found' } }, 404)
         return
       }
-      response.writeHead(200, { 'content-type': 'audio/mpeg' })
-      response.end('fake mp3 data')
+      const chapter = audioCatalog.chapters.find((candidate) => candidate.chapterId === chapterId)
+      const bytes = Buffer.alloc(chapter.sizeBytes ?? 13, 1)
+      response.writeHead(200, { 'content-type': 'audio/mpeg', 'content-length': String(bytes.byteLength) })
+      response.end(bytes)
       return
     }
     const audioManifestMatch = url.pathname.match(new RegExp(`^/mobile/books/${bookPackage.book.id}/audio/([^/]+)/manifest$`))
@@ -2423,11 +3047,39 @@ async function startFakeGateway({ token, bookPackage, audioCatalog }) {
   const address = server.address()
   return {
     url: `http://127.0.0.1:${address.port}`,
+    requests,
     close: () => new Promise((resolve, reject) => server.close((error) => (error ? reject(error) : resolve()))),
+  }
+}
+
+function fakeAdminAudioSummary(bookPackage, audioCatalog) {
+  const packageChapterIds = Array.isArray(bookPackage.chapters) ? bookPackage.chapters.map((chapter) => chapter.id) : []
+  const audioChapterIds = new Set(audioCatalog.chapters.map((chapter) => chapter.chapterId))
+  const missingChapterIds = packageChapterIds.filter((chapterId) => !audioChapterIds.has(chapterId))
+  const totalSizeBytes = audioCatalog.chapters.reduce((sum, chapter) => sum + (Number(chapter.sizeBytes) || 0), 0)
+  return {
+    bookId: bookPackage.book.id,
+    title: bookPackage.book.title,
+    chapterCount: packageChapterIds.length,
+    audioChapterCount: audioCatalog.chapters.length,
+    missingChapterCount: missingChapterIds.length,
+    missingChapterIds,
+    coverage: packageChapterIds.length > 0 ? audioCatalog.chapters.length / packageChapterIds.length : 0,
+    totalSizeBytes,
+    updatedAt: new Date().toISOString(),
   }
 }
 
 function sendJson(response, value, statusCode = 200) {
   response.writeHead(statusCode, { 'content-type': 'application/json; charset=utf-8' })
   response.end(JSON.stringify(value))
+}
+
+async function captureRejectedExec(command, args) {
+  try {
+    await execFileAsync(command, args)
+  } catch (error) {
+    return error
+  }
+  assert.fail(`Expected command to fail: ${command} ${args.join(' ')}`)
 }

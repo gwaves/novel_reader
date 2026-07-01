@@ -2,6 +2,7 @@
 set -euo pipefail
 
 BASE_URL="${GATEWAY_SECURITY_BASE_URL:-https://novel.gwaves.net:8888}"
+STRICT_TLS_URL="${GATEWAY_SECURITY_STRICT_TLS_URL:-$BASE_URL}"
 IP_URL="${GATEWAY_SECURITY_IP_URL:-https://114.248.3.13:8888}"
 HOST_HEADER="${GATEWAY_SECURITY_HOST:-novel.gwaves.net}"
 EVIL_ORIGIN="${GATEWAY_SECURITY_EVIL_ORIGIN:-https://evil.example}"
@@ -18,6 +19,9 @@ status_code() {
 headers() {
   curl --noproxy '*' -k -sS -D - -o /dev/null --max-time 10 "$@"
 }
+
+strict_tls_status="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 10 "$STRICT_TLS_URL/health" || true)"
+[[ "$strict_tls_status" == "200" ]] || fail "expected strict TLS /health to return 200, got $strict_tls_status"
 
 admin_status="$(status_code "$BASE_URL/admin/ui")"
 [[ "$admin_status" == "403" ]] || fail "expected /admin/ui to return 403, got $admin_status"

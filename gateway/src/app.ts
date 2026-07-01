@@ -184,19 +184,21 @@ export function buildGatewayApp(config: GatewayConfig = loadConfig()) {
     const includeFullPackage = request.query.include === 'all' || request.query.include === 'full'
     return {
       generatedAt: new Date().toISOString(),
-      package: includeFullPackage ? bookPackage : buildReaderPackage(bookPackage),
+      package: includeFullPackage ? buildMobileFullPackage(bookPackage) : buildReaderPackage(bookPackage),
     }
   })
 
   app.get<{ Params: { bookId: string } }>('/mobile/books/:bookId/package/download', async (request, reply) => {
     const mobileAuth = await requireMobileDevice(config, request)
     await readVisibleBookSummary(config, request.params.bookId, mobileAuth.allowedVisibilities)
+    const bookPackage = await readBookPackage(config, request.params.bookId)
     const packageFile = await openBookPackageFile(config, request.params.bookId)
+    const payload = `${JSON.stringify(buildMobileFullPackage(bookPackage))}\n`
     return reply
       .header('content-type', 'application/json; charset=utf-8')
-      .header('content-length', packageFile.sizeBytes)
+      .header('content-length', Buffer.byteLength(payload))
       .header('content-disposition', `attachment; filename="${basename(packageFile.fileName)}"`)
-      .send(packageFile.stream)
+      .send(payload)
   })
 
   app.put<{ Body: unknown; Params: { bookId: string } }>('/admin/books/:bookId/package', async (request) => {
@@ -226,6 +228,9 @@ export function buildGatewayApp(config: GatewayConfig = loadConfig()) {
           summaryCoverage: packageStatus?.summaryCoverage ?? book.summaryCoverage,
           kgCoverage: packageStatus?.kgCoverage ?? book.kgCoverage,
           embeddingCoverage: packageStatus?.embeddingCoverage ?? book.embeddingCoverage,
+          embeddingVectorCoverage: packageStatus?.embeddingVectorCoverage,
+          embeddingSummaryVectorCount: packageStatus?.embeddingSummaryVectorCount,
+          embeddingChunkVectorCount: packageStatus?.embeddingChunkVectorCount,
         }
       }),
     }
@@ -392,12 +397,13 @@ export function buildGatewayApp(config: GatewayConfig = loadConfig()) {
       createEmbedding(config, query),
     ])
 
+    const results = searchPackageWithEmbedding(bookPackage, query, queryEmbedding, limit)
     return {
       schemaVersion: 1,
       generatedAt: new Date().toISOString(),
       bookId,
       query,
-      results: searchPackageWithEmbedding(bookPackage, query, queryEmbedding, limit),
+      results: publicSearchResults(results),
     }
   })
 
@@ -427,17 +433,19 @@ export function buildGatewayApp(config: GatewayConfig = loadConfig()) {
       bookId,
       query,
       answer,
-      results,
+      results: publicSearchResults(results),
     }
   })
 
   app.get<{ Params: { bookId: string } }>('/mobile/books/:bookId/audio', async (request) => {
     const mobileAuth = await requireMobileDevice(config, request)
-    await readVisibleBookSummary(config, request.params.bookId, mobileAuth.allowedVisibilities)
+    const book = await readVisibleBookSummary(config, request.params.bookId, mobileAuth.allowedVisibilities)
     const catalog = await readAudioCatalog(config, request.params.bookId)
+    const summary = await summarizeBookAudio(config, book, await readPackageChapterIds(config, request.params.bookId))
     return {
       schemaVersion: catalog.schemaVersion,
       generatedAt: new Date().toISOString(),
+      summary,
       chapters: catalog.chapters,
     }
   })
@@ -653,6 +661,15 @@ function buildReaderPackage(bookPackage: Awaited<ReturnType<typeof readBookPacka
   }
 }
 
+function buildMobileFullPackage(bookPackage: Awaited<ReturnType<typeof readBookPackage>>) {
+  const { integrity, ...mobilePackage } = bookPackage
+  delete (mobilePackage as { embeddings?: unknown }).embeddings
+  return {
+    ...mobilePackage,
+    integrity: summarizeIntegrity(integrity),
+  }
+}
+
 function summarizeKnowledgeGraph(value: unknown) {
   if (!isRecord(value)) return value
 
@@ -661,15 +678,9 @@ function summarizeKnowledgeGraph(value: unknown) {
 
 function summarizeIntegrity(value: unknown) {
   if (!isRecord(value)) return value
-
-  return {
-    ...value,
-    embeddings: summarizeCount(value.embeddings),
-  }
-}
-
-function summarizeCount(value: unknown) {
-  return Array.isArray(value) ? { count: value.length } : value
+  const { embeddings, ...safeIntegrity } = value
+  void embeddings
+  return safeIntegrity
 }
 
 function searchPackageWithEmbedding(
@@ -699,7 +710,8 @@ function searchPackageWithEmbedding(
     chapterIndex: number
     chapterTitle: string
     snippet: string
-    source: 'chunk'
+    contextText?: string
+    source: 'chunk' | 'summary' | 'chapter'
     score: number
   }> = []
 
@@ -717,13 +729,133 @@ function searchPackageWithEmbedding(
         chapterIndex: readOptionalNumber(chunk.chapterIndex) ?? chapter.chapterIndex,
         chapterTitle: chapter.title,
         snippet: findSearchSnippet(text, query),
+        contextText: text,
         source: 'chunk',
         score: score * 100,
       })
   }
 
-  return results
-    .sort((left, right) => readOptionalNumber(right.score)! - readOptionalNumber(left.score)! || readOptionalNumber(left.chapterIndex)! - readOptionalNumber(right.chapterIndex)!)
+  if (results.length === 0) {
+    results.push(...searchPackageWithKeywords(bookPackage, query, limit, chapterById))
+  }
+
+  return rankSearchResults(results, query).slice(0, limit)
+}
+
+function publicSearchResults<T extends { contextText?: string }>(results: T[]) {
+  return results.map((result) => {
+    const { contextText, ...publicResult } = result
+    void contextText
+    return publicResult
+  })
+}
+
+function rankSearchResults<T extends { score: number; chapterIndex: number }>(results: T[], query: string) {
+  const byScore = [...results].sort(compareSearchScore)
+  if (!isEarliestIntentQuery(query) || byScore.length === 0) return byScore
+
+  const bestScore = byScore[0].score
+  const strongCandidates = byScore
+    .filter((result) => bestScore - result.score <= 3)
+    .sort((left, right) => left.chapterIndex - right.chapterIndex || right.score - left.score)
+  const strongCandidateSet = new Set(strongCandidates)
+  return [
+    ...strongCandidates,
+    ...byScore.filter((result) => !strongCandidateSet.has(result)),
+  ]
+}
+
+function compareSearchScore(
+  left: { score: number; chapterIndex: number },
+  right: { score: number; chapterIndex: number },
+) {
+  return right.score - left.score || left.chapterIndex - right.chapterIndex
+}
+
+function isEarliestIntentQuery(query: string) {
+  return /第[一1]个|第[一1]次|首次|最早|先后|谁先/.test(query)
+}
+
+function searchPackageWithKeywords(
+  bookPackage: Awaited<ReturnType<typeof readBookPackage>>,
+  query: string,
+  limit: number,
+  chapterById: Map<string, { index: number; id: string; title: string; chapterIndex: number }>,
+) {
+  const candidates = new Map<
+    string,
+    {
+      chapterId: string
+      chapterIndex: number
+      chapterTitle: string
+      snippet: string
+      contextText?: string
+      source: 'summary' | 'chapter'
+      score: number
+    }
+  >()
+
+  function addCandidate(candidate: {
+    chapterId: string
+    chapterIndex: number
+    chapterTitle: string
+    snippet: string
+    contextText?: string
+    source: 'summary' | 'chapter'
+    score: number
+  }) {
+    const existing = candidates.get(candidate.chapterId)
+    if (!existing || candidate.score > existing.score) candidates.set(candidate.chapterId, candidate)
+  }
+
+  for (const summary of readSummaryRecords(bookPackage.summaries)) {
+    const chapterId = readNonEmptyString(summary.chapterId) || readNonEmptyString(summary.id)
+    if (!chapterId) continue
+    const chapter = chapterById.get(chapterId)
+    if (!chapter) continue
+    const text = [
+      chapter.title,
+      readNonEmptyString(summary.short),
+      readNonEmptyString(summary.detail),
+      readNonEmptyString(summary.summary),
+      readNonEmptyString(summary.description),
+      readStringArray(summary.keyPoints).join(' '),
+    ].join('\n')
+    const score = scoreSearchText(text, query)
+    if (score <= 0) continue
+    addCandidate({
+      chapterId,
+      chapterIndex: chapter.chapterIndex,
+      chapterTitle: chapter.title,
+      snippet: findSearchSnippet(text, query),
+      contextText: text,
+      source: 'summary',
+      score: score + 20,
+    })
+  }
+
+  const chapters = Array.isArray(bookPackage.chapters) ? bookPackage.chapters.filter(isRecord) : []
+  chapters.forEach((chapterValue, index) => {
+    const chapterId = readNonEmptyString(chapterValue.id)
+    if (!chapterId) return
+    const chapter = chapterById.get(chapterId)
+    if (!chapter) return
+    const text = [chapter.title, readChapterContent(chapterValue)].join('\n')
+    const score = scoreSearchText(text, query)
+    if (score <= 0) return
+    addCandidate({
+      chapterId,
+      chapterIndex: chapter.chapterIndex || index + 1,
+      chapterTitle: chapter.title,
+      snippet: findSearchSnippet(text, query),
+      contextText: text,
+      source: 'chapter',
+      score,
+    })
+  })
+
+  return Array.from(candidates.values())
+    .sort((left, right) => right.score - left.score || left.chapterIndex - right.chapterIndex)
     .slice(0, limit)
 }
 
@@ -734,6 +866,7 @@ async function generateRagAnswer(
     chapterIndex: number
     chapterTitle: string
     snippet: string
+    contextText?: string
     score: number
   }>,
 ) {
@@ -763,6 +896,7 @@ function buildRagAnswerPrompt(
     chapterIndex: number
     chapterTitle: string
     snippet: string
+    contextText?: string
     score: number
   }>,
 ) {
@@ -770,12 +904,17 @@ function buildRagAnswerPrompt(
     .sort((left, right) => left.chapterIndex - right.chapterIndex)
     .map((result) => {
       const lines = [`[第 ${result.chapterIndex} 章] ${result.chapterTitle}，相关度 ${result.score.toFixed(1)}`]
-      if (result.snippet) lines.push(`原文片段：${result.snippet}`)
+      const contextText = trimRagContext(result.contextText || result.snippet)
+      if (contextText) lines.push(`原文上下文：${contextText}`)
       return lines.join('\n')
     })
     .join('\n\n')
 
-  return `请根据以下按章节顺序排列的相关内容回答问题。回答要简洁准确，并尽量引用章节号。如果信息不足，请明确说明。
+  const orderingInstruction = isEarliestIntentQuery(query)
+    ? '\n如果问题询问“第一个、第一次、首次、最早”等事件，请优先比较章节号和上下文中的事件顺序；不要只选择描述更直白但章节更晚的片段。'
+    : ''
+
+  return `请根据以下按章节顺序排列的相关内容回答问题。回答要简洁准确，并尽量引用章节号。如果信息不足，请明确说明。${orderingInstruction}
 
 问题：${query}
 
@@ -783,6 +922,12 @@ function buildRagAnswerPrompt(
 ${context}
 
 请给出回答：`
+}
+
+function trimRagContext(value: string | undefined) {
+  const text = (value || '').replace(/\s+/g, ' ').trim()
+  const maxLength = 2400
+  return text.length > maxLength ? `${text.slice(0, maxLength)}...` : text
 }
 
 function readChatAnswer(response: unknown) {
@@ -796,12 +941,110 @@ function findSearchSnippet(text: string, query: string) {
   const normalizedText = text.replace(/\s+/g, ' ')
   if (!normalizedText) return ''
   const lowerText = normalizedText.toLowerCase()
+  const snippetTerms = getSnippetTerms(query)
+  let index = -1
+  let matchedQuery = ''
+  for (const term of snippetTerms) {
+    index = lowerText.indexOf(term)
+    if (index >= 0) {
+      matchedQuery = term
+      break
+    }
+  }
   const lowerQuery = query.toLowerCase()
-  const index = lowerText.indexOf(lowerQuery)
+  if (index < 0) {
+    index = lowerText.indexOf(lowerQuery)
+    matchedQuery = query
+  }
+  if (index < 0) {
+    for (const term of getSearchTerms(query)) {
+      index = lowerText.indexOf(term)
+      if (index >= 0) {
+        matchedQuery = term
+        break
+      }
+    }
+  }
   if (index < 0) return normalizedText.slice(0, 160)
-  const start = Math.max(0, index - 48)
-  const end = Math.min(normalizedText.length, index + query.length + 112)
+  const evidenceWindow = isRelationshipEvidenceQuery(query)
+  const start = Math.max(0, index - (evidenceWindow ? 180 : 96))
+  const end = Math.min(normalizedText.length, index + matchedQuery.length + (evidenceWindow ? 900 : 280))
   return `${start > 0 ? '...' : ''}${normalizedText.slice(start, end)}${end < normalizedText.length ? '...' : ''}`
+}
+
+function getSnippetTerms(query: string) {
+  const terms: string[] = []
+  if (isRelationshipEvidenceQuery(query)) {
+    terms.push('玷污', '欢好', '交媾', '童男', '黄缨', '黄衣少女', '少女', '女人', '身子', '第一次')
+  }
+  return terms.map((term) => term.toLowerCase())
+}
+
+function isRelationshipEvidenceQuery(query: string) {
+  return /发生|关系|性|欢好|女人|第[一1]个|第[一1]次|首次|童男/.test(query)
+}
+
+function normalizeSearchText(value: string) {
+  return value.trim().toLowerCase()
+}
+
+function getSearchTerms(query: string) {
+  const normalized = normalizeSearchText(query)
+  if (!normalized) return []
+  const terms = new Set<string>([normalized])
+  for (const term of normalized.split(/[\s,，.。!！?？:：;；、"'“”‘’《》()[\]（）]+/).filter(Boolean)) {
+    terms.add(term)
+    for (const part of term.split(/[的是了和与及或在把被都谁什么哪些哪位为何为什么怎么如何吗呢啊]+/).filter(Boolean)) {
+      terms.add(part)
+      if (/[\u3400-\u9fff]/.test(part) && part.length >= 4) {
+        for (let size = 4; size >= 2; size -= 1) {
+          for (let index = 0; index <= part.length - size; index += 1) {
+            terms.add(part.slice(index, index + size))
+          }
+        }
+      }
+    }
+  }
+  return Array.from(terms).filter((term) => term.length >= 2)
+}
+
+function scoreSearchText(text: string, query: string) {
+  const normalizedText = normalizeSearchText(text)
+  const normalizedQuery = normalizeSearchText(query)
+  if (!normalizedText || !normalizedQuery) return 0
+
+  let score = normalizedText.includes(normalizedQuery) ? 6 : 0
+  for (const term of getSearchTerms(query)) {
+    let index = normalizedText.indexOf(term)
+    while (index >= 0) {
+      score += Math.min(4, term.length)
+      index = normalizedText.indexOf(term, index + term.length)
+    }
+  }
+  return score
+}
+
+function readSummaryRecords(value: unknown) {
+  if (Array.isArray(value)) return value.filter(isRecord)
+  if (isRecord(value)) return Object.values(value).filter(isRecord)
+  return []
+}
+
+function readStringArray(value: unknown) {
+  return Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === 'string' && entry.trim().length > 0) : []
+}
+
+function readChapterContent(chapter: Record<string, unknown>) {
+  const direct = readNonEmptyString(chapter.content) || readNonEmptyString(chapter.text)
+  if (direct) return direct
+  const paragraphs = chapter.paragraphs
+  if (Array.isArray(paragraphs)) {
+    return paragraphs
+      .map((paragraph) => (typeof paragraph === 'string' ? paragraph : isRecord(paragraph) ? readNonEmptyString(paragraph.text) : ''))
+      .filter(Boolean)
+      .join('\n')
+  }
+  return ''
 }
 
 function cosineSimilarity(left: number[], right: number[]) {

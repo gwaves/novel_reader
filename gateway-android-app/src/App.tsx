@@ -147,6 +147,10 @@ type AppUpdateState =
   | { status: 'downloading'; manifest: AppUpdateManifest; message: string }
   | { status: 'error'; manifest?: AppUpdateManifest; message: string }
 
+export type AppUpdateResolution =
+  | { status: 'available'; manifest: AppUpdateManifest; message: string }
+  | { status: 'current'; manifest: AppUpdateManifest; message: string }
+
 type AudioTimelineEntry = {
   id?: string
   text?: string
@@ -203,6 +207,7 @@ export type ReadingProgressStore = {
 }
 
 type ReadingProgressStorage = Pick<Storage, 'getItem' | 'setItem' | 'removeItem'>
+type AudioCacheStorage = Pick<Storage, 'getItem' | 'setItem'>
 
 type FullPackageCache = {
   bookId: string
@@ -413,7 +418,7 @@ function App() {
   const visibleFullPackageProgress = fullPackageProgress?.bookId === selectedBookId ? fullPackageProgress : null
   const displaySummaryCoverage = hasImportedPackage(visibleFullPackageCache) ? 1 : inferredSummaryCoverage(selectedBook, bookPackage, visibleFullPackageCache)
   const displayKgCoverage = inferredKgCoverage(selectedBook, bookPackage, visibleFullPackageCache)
-  const displayEmbeddingCoverage = inferredEmbeddingCoverage(selectedBook, bookPackage, visibleFullPackageCache)
+  const displayRagAvailability = ragAvailability(selectedBook, bookPackage)
   const displayCloudAudioChapterCount = visibleAudioChapters.length || selectedBook?.audioChapterCount || 0
   const displayCachedAudioChapterCount = visibleCachedAudioIds.size || bookCachedAudioCount(selectedLocalBook ?? selectedBook)
   const cacheSummaries = useMemo(() => buildBookCacheSummaries([...displayLocalBooks, ...books], cacheVersion), [books, displayLocalBooks, cacheVersion])
@@ -461,6 +466,7 @@ function App() {
   const chapterAudioRef = useRef<HTMLAudioElement | null>(null)
   const chapterAudioTimelineRef = useRef<ChapterAudioTimelineItem[]>([])
   const activeAudioEntryKeyRef = useRef<string | null>(null)
+  const renderedAudioScrollKeyRef = useRef<string | null>(null)
   const audioManifestRef = useRef<AudioManifest | null>(null)
   const pendingAudioStartTimeRef = useRef<number | null>(null)
   const pendingAudioShouldPlayRef = useRef(false)
@@ -497,6 +503,20 @@ function App() {
   useEffect(() => {
     cloudBookCountRef.current = books.length
   }, [books.length])
+
+  useEffect(() => {
+    if (!audioUrl || !activeTimelineEntry) {
+      renderedAudioScrollKeyRef.current = null
+      return
+    }
+
+    const activeEntryKey = audioEntryKey(activeTimelineEntry)
+    if (renderedAudioScrollKeyRef.current === activeEntryKey) return
+    renderedAudioScrollKeyRef.current = activeEntryKey
+
+    const frame = window.requestAnimationFrame(() => scrollToAudioHighlight())
+    return () => window.cancelAnimationFrame(frame)
+  }, [activeTimelineEntry, audioUrl])
 
   useEffect(() => {
     localStorage.setItem(readerSettingsKey, JSON.stringify(readerSettings))
@@ -781,19 +801,7 @@ function App() {
     try {
       const manifest = normalizeAppUpdateManifest(await gatewayPublicFetch(settings, '/downloads/android-app.json'))
       if (!manifest) throw new Error('更新清单格式无效。')
-      if (manifest.versionCode > buildInfo.versionCode) {
-        setAppUpdateState({
-          status: 'available',
-          manifest,
-          message: `发现新版本 ${manifest.versionName}`,
-        })
-        return
-      }
-      setAppUpdateState({
-        status: 'current',
-        manifest,
-        message: `已是最新版本 ${buildInfo.versionName}`,
-      })
+      setAppUpdateState(resolveAppUpdateManifest(manifest, buildInfo.versionCode, buildInfo.versionName))
     } catch (error) {
       setAppUpdateState((current) => ({
         status: 'error',
@@ -1870,10 +1878,20 @@ function App() {
     if (!target) return
 
     isSpeechAutoScrollingRef.current = true
-    target.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    scrollElementStartToViewportCenter(target, 'smooth', window, getReadableViewportBounds())
     window.setTimeout(() => {
       isSpeechAutoScrollingRef.current = false
     }, 800)
+  }
+
+  function getReadableViewportBounds() {
+    const viewportHeight = window.visualViewport?.height || window.innerHeight || document.documentElement.clientHeight || 0
+    const bottomNavBounds = document.querySelector('.bottom-nav')?.getBoundingClientRect()
+    const visibleBottom =
+      bottomNavBounds && bottomNavBounds.top > 0 && bottomNavBounds.top < viewportHeight
+        ? bottomNavBounds.top
+        : viewportHeight
+    return { top: 0, bottom: visibleBottom }
   }
 
   function clampAudioRatio(value: number): number {
@@ -1984,7 +2002,6 @@ function App() {
       const activeEntryKey = audioEntryKey(activeEntry)
       if (activeAudioEntryKeyRef.current !== activeEntryKey) {
         activeAudioEntryKeyRef.current = activeEntryKey
-        window.setTimeout(() => scrollToAudioHighlight(), 0)
       }
       const currentIndex = findAudioSegmentIndexBySourcePosition(activeEntry, currentTime)
       if (currentIndex != null) {
@@ -2394,7 +2411,7 @@ function App() {
                 <div className="coverage-row">
                   <Coverage label="概要" value={displaySummaryCoverage} />
                   <Coverage label="图谱" value={displayKgCoverage} />
-                  <Coverage label="向量" value={displayEmbeddingCoverage} />
+                  <StatusCoverage label="RAG" value={displayRagAvailability} />
                 </div>
                 <div className="package-line">
                   <span>Package</span>
@@ -3214,7 +3231,7 @@ function sourceLabel(source: RagResult['source']) {
   return '章节全文'
 }
 
-async function searchGatewayRag(settings: GatewaySettings, bookId: string, query: string): Promise<RagResult[]> {
+export async function searchGatewayRag(settings: GatewaySettings, bookId: string, query: string): Promise<RagResult[]> {
   const response = await gatewayPost(settings, '/ai/search', {
     bookId,
     query,
@@ -3227,13 +3244,17 @@ async function searchGatewayRag(settings: GatewaySettings, bookId: string, query
       chapterIndex: readNumber(result.chapterIndex) ?? 0,
       chapterTitle: readString(result.chapterTitle) || '未命名章节',
       snippet: readString(result.snippet),
-      source: 'chunk' as const,
+      source: normalizeRagResultSource(result.source),
       score: readNumber(result.score) ?? 0,
     }))
     .filter((result) => Boolean(result.chapterId))
 }
 
-async function gatewayGenerateRagAnswer(settings: GatewaySettings, bookId: string, query: string): Promise<{ answer: string; results: RagResult[] }> {
+export async function gatewayGenerateRagAnswer(
+  settings: GatewaySettings,
+  bookId: string,
+  query: string,
+): Promise<{ answer: string; results: RagResult[] }> {
   const response = await gatewayPost(settings, '/ai/rag-answer', {
     bookId,
     query,
@@ -3248,11 +3269,15 @@ async function gatewayGenerateRagAnswer(settings: GatewaySettings, bookId: strin
         chapterIndex: readNumber(result.chapterIndex) ?? 0,
         chapterTitle: readString(result.chapterTitle) || '未命名章节',
         snippet: readString(result.snippet),
-        source: 'chunk' as const,
+        source: normalizeRagResultSource(result.source),
         score: readNumber(result.score) ?? 0,
       }))
       .filter((result) => Boolean(result.chapterId)),
   }
+}
+
+function normalizeRagResultSource(value: unknown): RagResult['source'] {
+  return value === 'summary' || value === 'chapter' || value === 'chunk' ? value : 'chunk'
 }
 
 function normalizeSearchText(value: string) {
@@ -3691,6 +3716,18 @@ function Coverage({ label, value }: { label: string; value?: number }) {
         <div style={{ width: `${percent ?? 0}%` }} />
       </div>
       <strong>{percent === null ? '读取中' : `${percent}%`}</strong>
+    </div>
+  )
+}
+
+function StatusCoverage({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="coverage">
+      <span>{label}</span>
+      <div className="meter">
+        <div style={{ width: value === '未加载' ? '0%' : '100%' }} />
+      </div>
+      <strong>{value}</strong>
     </div>
   )
 }
@@ -4414,8 +4451,17 @@ async function deleteBookPackageFromIndexedDb(bookId: string) {
 }
 
 function writeCachedAudio(bookId: string, audioChapter: AudioChapter, payload: AudioCachePayload) {
+  writeCachedAudioToStorage(localStorage, bookId, audioChapter, payload)
+}
+
+export function writeCachedAudioToStorage(
+  storage: AudioCacheStorage,
+  bookId: string,
+  audioChapter: AudioChapter,
+  payload: AudioCachePayload,
+) {
   if (payload.kind !== 'file') return
-  const index = loadAudioCacheIndex()
+  const index = loadAudioCacheIndexFromStorage(storage)
   index[audioCacheKey(bookId, audioChapter.chapterId)] = {
     bookId,
     chapterId: audioChapter.chapterId,
@@ -4425,11 +4471,15 @@ function writeCachedAudio(bookId: string, audioChapter: AudioChapter, payload: A
     cachedAt: new Date().toISOString(),
     updatedAt: audioChapter.updatedAt,
   }
-  saveAudioCacheIndex(index)
+  saveAudioCacheIndexToStorage(storage, index)
 }
 
 function readCachedAudio(bookId: string, chapterId: string): CachedAudio | null {
-  const record = loadAudioCacheIndex()[audioCacheKey(bookId, chapterId)]
+  return readCachedAudioFromStorage(localStorage, bookId, chapterId)
+}
+
+export function readCachedAudioFromStorage(storage: Pick<AudioCacheStorage, 'getItem'>, bookId: string, chapterId: string): CachedAudio | null {
+  const record = loadAudioCacheIndexFromStorage(storage)[audioCacheKey(bookId, chapterId)]
   if (!record?.filePath) return null
   return {
     filePath: record.filePath,
@@ -4439,20 +4489,32 @@ function readCachedAudio(bookId: string, chapterId: string): CachedAudio | null 
 }
 
 function readCachedAudioChapter(bookId: string, chapterId: string): AudioChapter | null {
-  const record = loadAudioCacheIndex()[audioCacheKey(bookId, chapterId)]
+  return readCachedAudioChapterFromStorage(localStorage, bookId, chapterId)
+}
+
+export function readCachedAudioChapterFromStorage(storage: Pick<AudioCacheStorage, 'getItem'>, bookId: string, chapterId: string): AudioChapter | null {
+  const record = loadAudioCacheIndexFromStorage(storage)[audioCacheKey(bookId, chapterId)]
   if (!record?.filePath || record.chapterId !== chapterId) return null
   return record.audioChapter
 }
 
 async function listCachedAudioChapterIds(bookId: string) {
-  return Object.values(loadAudioCacheIndex())
+  return listCachedAudioChapterIdsFromStorage(localStorage, bookId)
+}
+
+export function listCachedAudioChapterIdsFromStorage(storage: Pick<AudioCacheStorage, 'getItem'>, bookId: string) {
+  return Object.values(loadAudioCacheIndexFromStorage(storage))
     .filter((record) => record.bookId === bookId)
     .map((record) => record.chapterId)
 }
 
 function loadAudioCacheIndex(): Record<string, CachedAudioRecord> {
+  return loadAudioCacheIndexFromStorage(localStorage)
+}
+
+export function loadAudioCacheIndexFromStorage(storage: Pick<AudioCacheStorage, 'getItem'>): Record<string, CachedAudioRecord> {
   try {
-    const parsed = JSON.parse(localStorage.getItem(audioCacheIndexKey) || '{}') as unknown
+    const parsed = JSON.parse(storage.getItem(audioCacheIndexKey) || '{}') as unknown
     if (!isRecord(parsed)) return {}
     return Object.fromEntries(
       Object.entries(parsed).filter((entry): entry is [string, CachedAudioRecord] => {
@@ -4462,6 +4524,7 @@ function loadAudioCacheIndex(): Record<string, CachedAudioRecord> {
           typeof record.bookId === 'string' &&
           typeof record.chapterId === 'string' &&
           typeof record.filePath === 'string' &&
+          record.filePath.length > 0 &&
           isAudioChapter(record.audioChapter)
         )
       }),
@@ -4472,8 +4535,12 @@ function loadAudioCacheIndex(): Record<string, CachedAudioRecord> {
 }
 
 function saveAudioCacheIndex(index: Record<string, CachedAudioRecord>) {
+  saveAudioCacheIndexToStorage(localStorage, index)
+}
+
+function saveAudioCacheIndexToStorage(storage: Pick<AudioCacheStorage, 'setItem'>, index: Record<string, CachedAudioRecord>) {
   try {
-    localStorage.setItem(audioCacheIndexKey, JSON.stringify(index))
+    storage.setItem(audioCacheIndexKey, JSON.stringify(index))
   } catch {
     // Audio files remain on disk; this only affects the cached-count display.
   }
@@ -4536,6 +4603,42 @@ export function buildAudioChapterStatusRows(
     isCurrent: chapter.id === currentChapterId,
     audioChapter: audioChapterById.get(chapter.id) ?? null,
   }))
+}
+
+type HighlightScrollTarget = Pick<Element, 'getBoundingClientRect'>
+
+type HighlightScrollViewport = {
+  innerHeight?: number
+  pageYOffset?: number
+  scrollY?: number
+  scrollTo: (options: ScrollToOptions) => void
+  document?: {
+    documentElement?: {
+      clientHeight?: number
+      scrollTop?: number
+    }
+  }
+}
+
+type HighlightScrollBounds = {
+  top?: number
+  bottom?: number
+}
+
+export function scrollElementStartToViewportCenter(
+  target: HighlightScrollTarget,
+  behavior: ScrollBehavior = 'smooth',
+  viewport: HighlightScrollViewport = window,
+  readableBounds: HighlightScrollBounds = {},
+) {
+  const targetBounds = target.getBoundingClientRect()
+  const viewportHeight = viewport.innerHeight || viewport.document?.documentElement?.clientHeight || 0
+  const currentScrollY = viewport.scrollY || viewport.pageYOffset || viewport.document?.documentElement?.scrollTop || 0
+  const visibleTop = Math.max(0, readableBounds.top ?? 0)
+  const visibleBottom = Math.max(visibleTop, Math.min(viewportHeight, readableBounds.bottom ?? viewportHeight))
+  const visibleCenter = visibleTop + (visibleBottom - visibleTop) / 2
+  const targetScrollTop = Math.max(0, targetBounds.top + currentScrollY - visibleCenter)
+  viewport.scrollTo({ top: targetScrollTop, behavior })
 }
 
 function buildBookCacheSummaries(books: BookSummary[], version: number): BookCacheSummary[] {
@@ -4685,7 +4788,7 @@ function readNonEmptyString(value: unknown) {
   return typeof value === 'string' && value.trim() ? value.trim() : ''
 }
 
-function normalizeAppUpdateManifest(value: unknown): AppUpdateManifest | null {
+export function normalizeAppUpdateManifest(value: unknown): AppUpdateManifest | null {
   if (!isRecord(value)) return null
   const versionName = readNonEmptyString(value.versionName) || readNonEmptyString(value.version)
   const latestUrl = readNonEmptyString(value.latestUrl)
@@ -4702,7 +4805,26 @@ function normalizeAppUpdateManifest(value: unknown): AppUpdateManifest | null {
   }
 }
 
-function appUpdateStatusLabel(state: AppUpdateState) {
+export function resolveAppUpdateManifest(
+  manifest: AppUpdateManifest,
+  currentVersionCode: number = buildInfo.versionCode,
+  currentVersionName: string = buildInfo.versionName,
+): AppUpdateResolution {
+  if (manifest.versionCode > currentVersionCode) {
+    return {
+      status: 'available',
+      manifest,
+      message: `发现新版本 ${manifest.versionName}`,
+    }
+  }
+  return {
+    status: 'current',
+    manifest,
+    message: `已是最新版本 ${currentVersionName}`,
+  }
+}
+
+export function appUpdateStatusLabel(state: AppUpdateState) {
   if (state.status === 'checking') return '检查中'
   if (state.status === 'available') return '有新版本'
   if (state.status === 'current') return '已是最新'
@@ -4772,9 +4894,10 @@ function inferredKgCoverage(book: BookSummary | null, bookPackage: BookPackage |
   return hasKnowledgeGraph(bookPackage) || hasImportedKnowledgeGraph(fullPackage) ? 1 : 0
 }
 
-function inferredEmbeddingCoverage(book: BookSummary | null, bookPackage: BookPackage | null, fullPackage: FullPackageCache | null) {
-  void book
-  return hasEmbeddings(bookPackage) || hasImportedEmbeddings(fullPackage) ? 1 : 0
+function ragAvailability(book: BookSummary | null, bookPackage: BookPackage | null) {
+  if ((book?.embeddingCoverage ?? 0) > 0) return '云端'
+  if (bookPackage) return '本地'
+  return '未加载'
 }
 
 function hasImportedPackage(fullPackage: FullPackageCache | null) {
@@ -4791,16 +4914,6 @@ function hasKnowledgeGraph(bookPackage: BookPackage | null) {
   )
 }
 
-function hasEmbeddings(bookPackage: BookPackage | null) {
-  const embeddings = bookPackage?.embeddings
-  return isRecord(embeddings) && (
-    hasNonEmptyArray(embeddings.summaries) ||
-    hasNonEmptyArray(embeddings.chunks) ||
-    hasPositiveCount(embeddings.summaries) ||
-    hasPositiveCount(embeddings.chunks)
-  )
-}
-
 function hasImportedKnowledgeGraph(fullPackage: FullPackageCache | null) {
   const graph = fullPackage?.importStats?.knowledgeGraph
   return Boolean(
@@ -4810,11 +4923,6 @@ function hasImportedKnowledgeGraph(fullPackage: FullPackageCache | null) {
         (graph.entityMentionCount ?? 0) > 0 ||
         (graph.relationMentionCount ?? 0) > 0),
   )
-}
-
-function hasImportedEmbeddings(fullPackage: FullPackageCache | null) {
-  const embeddings = fullPackage?.importStats?.embeddings
-  return Boolean(embeddings && ((embeddings.summaryCount ?? 0) > 0 || (embeddings.chunkCount ?? 0) > 0))
 }
 
 function hasNonEmptyArray(value: unknown) {

@@ -156,6 +156,62 @@ npm run gateway:publish-android-apk -- \
 https://novel.gwaves.net:8888/downloads/ai_novel_reader.apk
 ```
 
+## 192.168.88.100 证书部署约定
+
+真实 Gateway 部署目录固定为 `gwaves@192.168.88.100:/home/gwaves/novel-reader-gateway`。公网 HTTPS 证书由 88.100 上的 Certbot/Let's Encrypt 目录提供，当前路径为 `/home/gwaves/letsencrypt/config`。自动化部署同步 `gateway/` 时不得覆盖该目录，也不要把旧的 `tls/gateway.crt` 自签证书重新接回公网 Nginx。
+
+当前 Compose 内置 Nginx 容器把 `${GATEWAY_LETSENCRYPT_CONFIG_DIR:-/home/gwaves/letsencrypt/config}` 挂载到容器内 `/etc/letsencrypt`，Nginx 配置固定读取：
+
+```text
+/etc/letsencrypt/live/novel.gwaves.net/fullchain.pem
+/etc/letsencrypt/live/novel.gwaves.net/privkey.pem
+```
+
+远端有效证书目录应类似：
+
+```text
+/home/gwaves/letsencrypt/config/
+├── live/
+│   └── novel.gwaves.net/
+│       ├── fullchain.pem -> ../../archive/novel.gwaves.net/fullchain<N>.pem
+│       └── privkey.pem -> ../../archive/novel.gwaves.net/privkey<N>.pem
+└── archive/
+    └── novel.gwaves.net/
+```
+
+`fullchain.pem` 必须是公网 CA 签发的完整证书链，也就是 leaf certificate 加中间证书链；不能只放自签证书，不能只放 leaf certificate。Android 真机检查更新或下载安装 APK 时如果看到 `java.security.cert.CertPathValidatorException: Trust anchor for certification path not found.`，优先按证书链错误处理，不要先改 App 下载逻辑。
+
+证书文件放置或续期后，在 192.168.88.100 上执行：
+
+```bash
+cd /home/gwaves/novel-reader-gateway
+docker compose --profile https up -d gateway-https
+docker compose exec gateway-https nginx -t
+```
+
+发布脚本或手工同步代码到 192.168.88.100 时，必须排除远端运行数据和证书目录：
+
+```bash
+rsync -az --delete \
+  --exclude '.env' \
+  --exclude 'data/' \
+  --exclude 'audio/' \
+  --exclude 'backups/' \
+  --exclude 'tls/' \
+  --exclude 'letsencrypt/' \
+  gateway/ gwaves@192.168.88.100:/home/gwaves/novel-reader-gateway/
+```
+
+上线前必须做严格 TLS 校验，不能用 `curl -k` 作为公网或真机验收依据：
+
+```bash
+openssl s_client -connect novel.gwaves.net:8888 -servername novel.gwaves.net -verify_return_error </dev/null
+curl -I https://novel.gwaves.net:8888/health
+curl https://novel.gwaves.net:8888/downloads/android-app.json
+```
+
+`openssl s_client` 必须返回 `Verify return code: 0 (ok)`；`curl -I` 不能出现 certificate verify failed。如果 `openssl x509 -in /home/gwaves/letsencrypt/config/live/novel.gwaves.net/fullchain.pem -noout -subject -issuer` 显示 `subject` 和 `issuer` 都是 `CN = novel.gwaves.net`，说明仍是自签证书，Android 系统默认不会信任。
+
 ## 反向代理
 
 Nginx 示例：
@@ -243,10 +299,23 @@ server {
   -> nginx 容器 8443
   -> http://gateway:6180
 
+手机/外部客户端误用 HTTP 访问 8888
+  -> http://novel.gwaves.net:8888
+  -> nginx 容器 8443
+  -> 302 Location: https://novel.gwaves.net:8888$request_uri
+
 内网生产流水线
   -> http://192.168.88.100:6180
   -> Gateway 应用
 ```
+
+公网 HTTPS 入口的部署标准：
+
+- `8888` 是对外 TLS 入口，正常访问必须使用 `https://novel.gwaves.net:8888`。
+- 对外 TLS 证书必须能被 Android 系统、Node.js 和常规浏览器信任；自签证书只能用于本地或受控测试，不得作为真机/公网验收通过条件。
+- 如果用户或浏览器误用 `http://novel.gwaves.net:8888/...`，Nginx 必须返回 `302`，并保留原始 path/query 跳转到 `https://novel.gwaves.net:8888/...`。
+- 不要求 Gateway 自身接管公网 `80` 端口；是否处理 `http://novel.gwaves.net` 由外层网络或额外反代决定。
+- Nginx 可用 `error_page 497 =302 https://$host:8888$request_uri;` 处理“明文 HTTP 打到 HTTPS 端口”的场景；默认 server 应跳转到 canonical host，避免未知 Host 暴露应用内容。
 
 ## 验证
 
@@ -261,9 +330,11 @@ curl -H "Authorization: Bearer $GATEWAY_ADMIN_ACCESS_TOKEN" \
 
 curl -kI https://novel.gwaves.net:8888/admin/ui
 curl -I http://192.168.88.100:6180/admin/ui
+curl -I http://novel.gwaves.net:8888/downloads/ai_novel_reader.apk
+curl -I https://novel.gwaves.net:8888/health
 curl -I https://novel.gwaves.net:8888/downloads/ai_novel_reader.apk
 curl https://novel.gwaves.net:8888/downloads/android-app.json
 npm run gateway:security-smoke
 ```
 
-`/health` 可公开访问；公网 Nginx 入口的 `/admin/ui` 应返回 403；未知 Host 或 IP 直连不应返回 200；内网直连 `6180` 可访问管理后台；`/downloads/ai_novel_reader.apk` 应返回 `200` 和 `application/vnd.android.package-archive`；`/admin/*` 和后台 AI/RAG 接口使用 admin bearer token，`/auth/*`、`/mobile/*` 和 MP3 接口使用 mobile bearer token。生产环境未设置 `GATEWAY_ADMIN_ACCESS_TOKEN` 或 `GATEWAY_MOBILE_ACCESS_TOKEN` 时，Gateway 会拒绝启动。
+`/health` 可公开访问，且严格 TLS 校验必须通过；公网 Nginx 入口的 `/admin/ui` 应返回 403；未知 Host 或 IP 直连不应返回 Gateway 应用内容；内网直连 `6180` 可访问管理后台；`http://novel.gwaves.net:8888/downloads/ai_novel_reader.apk` 应返回 `302 Location: https://novel.gwaves.net:8888/downloads/ai_novel_reader.apk`；HTTPS `/downloads/ai_novel_reader.apk` 应返回 `200` 和 `application/vnd.android.package-archive`；`/admin/*` 和后台 AI/RAG 接口使用 admin bearer token，`/auth/*`、`/mobile/*` 和 MP3 接口使用 mobile bearer token。生产环境未设置 `GATEWAY_ADMIN_ACCESS_TOKEN` 或 `GATEWAY_MOBILE_ACCESS_TOKEN` 时，Gateway 会拒绝启动。

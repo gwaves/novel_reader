@@ -108,7 +108,7 @@ Publish it to the Gateway downloads directory:
 npm run gateway:publish-android-apk
 ```
 
-The stable download URL is `/downloads/ai_novel_reader.apk`. The old `mobile-app/` LAN-sync client is deprecated and kept only as historical reference.
+The stable download URL is `/downloads/ai_novel_reader.apk`. The old `mobile-app/` LAN-sync client directory has been removed; historical implementation remains available in Git history.
 
 ## Development
 
