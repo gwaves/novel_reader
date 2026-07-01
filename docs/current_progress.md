@@ -1,3 +1,49 @@
+2026-07-01 更新：当前版本已部署到真实 Gateway，并发布 Android APK build 237 供真机验证。
+- 已在本地完成当前版本编译：`gateway` build、`gateway-android-app` Web build、`gateway/admin-ui` build，以及 Gateway Android debug APK build。
+- 已将 `gateway/` 同步到 `192.168.88.100:/home/gwaves/novel-reader-gateway`，同步时保留远端 `.env`、`data/`、`audio/`、`backups/`、`tls/` 等运行数据；随后执行 `docker compose build gateway && docker compose up -d gateway` 完成服务更新。
+- 更新后真实 Gateway smoke 通过：`/health`、`/mobile/capabilities`、`/admin/books`、`/mobile/session` 均返回 200；token 只从远端 `.env` 读取到进程内使用，未写入文档。
+- 首次生成 build 234 时发现远端已是相同 `versionCode=2000234`，为避免客户端不触发升级，最终以 `GATEWAY_ANDROID_BUILD_NUMBER=237` 构建 clean APK。
+- 已发布 APK 到真实 Gateway downloads：`versionCode=2000237`，固定 latest 为 `/downloads/ai_novel_reader.apk`，版本化文件以远端 `android-app.json` 为准。
+- 远端 manifest 与文件校验通过：`android-app.json` 指向 build 237，latest/versioned APK 均存在且大小一致。
+- 已运行 `npm run gateway:apk-metadata-smoke -- --gateway-url https://novel.gwaves.net:8888`，全部断言通过；本轮更新前的下载目录已备份到远端 `backups/apk-20260701-115001`。
+- 真实设备安装和升级体验由用户继续验证；剩余真实 Gateway 治理缺口仍是：在测试 Gateway 上执行发布回滚 `--apply` 演练并记录 package/audio/APK 恢复结果。
+
+2026-07-01 更新：真实 Gateway APK 发布元数据 smoke 验收完成。
+- 根据 `docs/test-case-matrix.md` 收口 `OPS-PUBLISH-003`：真实 Gateway `https://novel.gwaves.net:8888` 的 `android-app.json`、固定 latest APK 和 versioned APK 必须一致。
+- 新增 `gateway/scripts/apk-metadata-smoke.mjs` 与 npm 入口 `gateway:apk-metadata-smoke`：校验 `/downloads/android-app.json` schema、versionName/versionCode/buildNumber/gitCommit、固定 `latestFileName/latestUrl`、`versionedFileName/versionedUrl` 对齐，以及 latest/versioned APK 的 HTTP 200、Android APK content-type、content-length 大于 0 且大小一致。
+- 修复根项目 `gateway:ops-metrics-smoke` 与新增 `gateway:apk-metadata-smoke` 的 npm 参数透传，确保 `npm run ... -- --gateway-url ...` 能正确传入 gateway 子包脚本。
+- 已在真实 Gateway 运行 `npm run gateway:apk-metadata-smoke -- --gateway-url https://novel.gwaves.net:8888`，全部断言通过；现场 manifest 为 `versionName=0.2.0+build.234.g3fd08e7fe041.dirty`、`versionCode=2000234`，latest/versioned APK 均返回 200，大小均为 4,270,272 bytes。
+- `docs/operations-runbook.md` 和 `docs/release-checklist.md` 已补充 APK metadata smoke 命令。
+- `docs/test-case-matrix.md` 已把 `OPS-PUBLISH-003` 标记为 Existing。
+- 剩余真实 Gateway 治理缺口仍是：在测试 Gateway 上执行发布回滚 `--apply` 演练并记录 package/audio/APK 恢复结果。
+
+2026-07-01 更新：PC EPUB spine 顺序导入回归测试补齐。
+- 根据 `docs/test-case-matrix.md` 补齐 `PC-IMPORT-004`：EPUB manifest 顺序与 OPF spine 顺序不一致时，导入章节必须按照 spine 顺序排列，正文内容可读。
+- 扩展 `tests/e2e/core-flows.spec.ts`：新增最小未压缩 EPUB ZIP fixture 生成器，包含 `META-INF/container.xml`、`OEBPS/content.opf` 和 3 个 XHTML 章节；manifest 故意按第一/第三/第二章声明，spine 按第二/第一/第三章声明。
+- 新增 `imports EPUB chapters in OPF spine order` Playwright 用例：导入 `spine-order-sample.epub` 后，先看到“第二章 先行章节”，连续点击“下一章”依次进入“第一章 后到章节”和“第三章 终章线索”，并断言各章正文可见。
+- 已运行 `npx playwright test tests/e2e/core-flows.spec.ts --grep "EPUB chapters in OPF spine order"`，目标用例通过。
+- 已运行 `npx playwright test tests/e2e/core-flows.spec.ts`，结果 1 个测试文件、11 个用例全部通过。
+- `docs/test-case-matrix.md` 已把 `PC-IMPORT-004` 标记为 Existing。
+
+2026-07-01 更新：真实 Gateway 运维指标 smoke 验收完成。
+- 根据 `docs/test-case-matrix.md` 收口 `OPS-METRIC-001`：在真实 Gateway `https://novel.gwaves.net:8888` 上制造 401、404、package download 和 audio download，并验证 `/admin/metrics`、`/admin/events`、`/admin/requests` 能定位 route、status、bookId 和 downloadKind。
+- 真实环境来源：`192.168.88.100:/home/gwaves/novel-reader-gateway/.env`；执行时只读取 token 到进程内使用，文档和日志不记录 token 值。
+- 真实验收书籍：`9679077f-2288-4bc7-9080-854784fc7f94`（妖刀记，trusted 可见性）；使用受信设备 `7c6bd6bb-e097-4c6c-9422-ec4b6d1d5632` / `LT pad`，音频章节 `1-第1卷第1章：寄魂妖刀，四大剑门`。
+- 修复 `gateway/scripts/ops-metrics-smoke.mjs`：`jsonRequest()` 不再复用已读取 body 的 `request()`，避免真实 smoke 读取 admin JSON 时触发 `Body is unusable`；新增 `--device-id` 与 `--device-name` 参数，支持 trusted 书籍验收。
+- 已运行真实 smoke，全部断言通过：requests last24Hours/errorRate、package download topBooks、request/download 趋势桶、events 401/404/package/audio、requests package/audio downloadKind 与 bookId 均定位成功。
+- `docs/operations-runbook.md` 和 `docs/release-checklist.md` 已补充 trusted 书籍 smoke 的设备参数说明。
+- `docs/test-case-matrix.md` 已把 `OPS-METRIC-001` 标记为 Existing。
+- 剩余真实 Gateway 治理缺口仍是：在测试 Gateway 上执行发布回滚 `--apply` 演练并记录 package/audio/APK 恢复结果。
+
+2026-07-01 更新：PC 超长单章导入与滚动展示回归测试补齐。
+- 根据 `docs/test-case-matrix.md` 补齐 `PC-IMPORT-005`：单章超长 TXT 导入后，阅读器必须能打开章节、渲染首尾正文，并且阅读容器可稳定滚动到底部。
+- 扩展 `tests/e2e/core-flows.spec.ts`：新增 `imports and scrolls a very long single-chapter TXT novel`，构造 260 段单章文本，导入 `long-single-chapter.txt` 后断言章节标题、书名、首段和末段正文均可见于 DOM。
+- 该用例直接操作 `.chapter-reader` 滚动容器，断言 `scrollHeight > clientHeight`，再滚到底部并确认 `scrollTop + clientHeight` 接近 `scrollHeight`，覆盖超长章节展示和滚动能力。
+- 已运行 `npx playwright test tests/e2e/core-flows.spec.ts --grep "very long single-chapter"`，目标用例通过。
+- 已运行 `npx playwright test tests/e2e/core-flows.spec.ts`，结果 1 个测试文件、10 个用例全部通过。
+- `docs/test-case-matrix.md` 已把 `PC-IMPORT-005` 标记为 Existing。
+- 剩余真实 Gateway 治理缺口仍是：在测试 Gateway 上执行回滚 `--apply` 演练并记录 package/audio/APK 恢复结果。
+
 2026-07-01 更新：PC 阅读偏好刷新持久化回归测试补齐。
 - 根据 `docs/test-case-matrix.md` 补齐 `PC-READ-002`：修改阅读页字号、行高、内容宽度、段距和主题后，刷新页面再继续阅读时，控件值和阅读区样式必须保持上次偏好。
 - 增强 `tests/e2e/core-flows.spec.ts` 的本地 SQLite mock：`/api/state` 现在会在测试进程内记住 `PUT` 写入的 state，reload 后按真实本地数据库语义返回；针对该用例补充 `/api/books/:id/chapters` 与 `library-state` mock，覆盖刷新水合路径。

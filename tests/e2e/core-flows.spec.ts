@@ -11,6 +11,160 @@ const sampleNovel = `
 林青在城中遇见旧友阿梨，二人发现密信另有玄机。
 `
 
+type ZipSourceEntry = {
+  path: string
+  content: string
+}
+
+const crcTable = new Uint32Array(256)
+for (let index = 0; index < crcTable.length; index += 1) {
+  let value = index
+  for (let bit = 0; bit < 8; bit += 1) {
+    value = value & 1 ? 0xedb88320 ^ (value >>> 1) : value >>> 1
+  }
+  crcTable[index] = value >>> 0
+}
+
+function crc32(bytes: Uint8Array) {
+  let crc = 0xffffffff
+  for (const byte of bytes) {
+    crc = crcTable[(crc ^ byte) & 0xff] ^ (crc >>> 8)
+  }
+  return (crc ^ 0xffffffff) >>> 0
+}
+
+function uint16(value: number) {
+  return [value & 0xff, (value >>> 8) & 0xff]
+}
+
+function uint32(value: number) {
+  return [value & 0xff, (value >>> 8) & 0xff, (value >>> 16) & 0xff, (value >>> 24) & 0xff]
+}
+
+function makeStoredZip(entries: ZipSourceEntry[]) {
+  const encoder = new TextEncoder()
+  const chunks: Uint8Array[] = []
+  const centralDirectory: Uint8Array[] = []
+  let offset = 0
+
+  for (const entry of entries) {
+    const nameBytes = encoder.encode(entry.path)
+    const data = encoder.encode(entry.content)
+    const checksum = crc32(data)
+    const localHeader = new Uint8Array([
+      ...uint32(0x04034b50),
+      ...uint16(20),
+      ...uint16(0x0800),
+      ...uint16(0),
+      ...uint16(0),
+      ...uint16(0),
+      ...uint32(checksum),
+      ...uint32(data.byteLength),
+      ...uint32(data.byteLength),
+      ...uint16(nameBytes.byteLength),
+      ...uint16(0),
+      ...nameBytes,
+    ])
+
+    chunks.push(localHeader, data)
+    centralDirectory.push(
+      new Uint8Array([
+        ...uint32(0x02014b50),
+        ...uint16(20),
+        ...uint16(20),
+        ...uint16(0x0800),
+        ...uint16(0),
+        ...uint16(0),
+        ...uint16(0),
+        ...uint32(checksum),
+        ...uint32(data.byteLength),
+        ...uint32(data.byteLength),
+        ...uint16(nameBytes.byteLength),
+        ...uint16(0),
+        ...uint16(0),
+        ...uint16(0),
+        ...uint16(0),
+        ...uint32(0),
+        ...uint32(offset),
+        ...nameBytes,
+      ]),
+    )
+    offset += localHeader.byteLength + data.byteLength
+  }
+
+  const centralDirectoryOffset = offset
+  const centralDirectorySize = centralDirectory.reduce((sum, chunk) => sum + chunk.byteLength, 0)
+  const endOfCentralDirectory = new Uint8Array([
+    ...uint32(0x06054b50),
+    ...uint16(0),
+    ...uint16(0),
+    ...uint16(entries.length),
+    ...uint16(entries.length),
+    ...uint32(centralDirectorySize),
+    ...uint32(centralDirectoryOffset),
+    ...uint16(0),
+  ])
+  const size = chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0) + centralDirectorySize + endOfCentralDirectory.byteLength
+  const zip = new Uint8Array(size)
+  let cursor = 0
+
+  for (const chunk of [...chunks, ...centralDirectory, endOfCentralDirectory]) {
+    zip.set(chunk, cursor)
+    cursor += chunk.byteLength
+  }
+
+  return zip
+}
+
+function makeSpineOrderEpub() {
+  return makeStoredZip([
+    {
+      path: 'mimetype',
+      content: 'application/epub+zip',
+    },
+    {
+      path: 'META-INF/container.xml',
+      content: `<?xml version="1.0" encoding="UTF-8"?>
+<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+  <rootfiles>
+    <rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/>
+  </rootfiles>
+</container>`,
+    },
+    {
+      path: 'OEBPS/content.opf',
+      content: `<?xml version="1.0" encoding="UTF-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:title>spine-order-sample</dc:title>
+  </metadata>
+  <manifest>
+    <item id="chapter-one" href="chapter-01.xhtml" media-type="application/xhtml+xml"/>
+    <item id="chapter-three" href="chapter-03.xhtml" media-type="application/xhtml+xml"/>
+    <item id="chapter-two" href="chapter-02.xhtml" media-type="application/xhtml+xml"/>
+  </manifest>
+  <spine>
+    <itemref idref="chapter-two"/>
+    <itemref idref="chapter-one"/>
+    <itemref idref="chapter-three"/>
+  </spine>
+</package>`,
+    },
+    {
+      path: 'OEBPS/chapter-01.xhtml',
+      content: '<html><body><h1>第一章 后到章节</h1><p>第一章正文应当排在第二位。</p></body></html>',
+    },
+    {
+      path: 'OEBPS/chapter-02.xhtml',
+      content: '<html><body><h1>第二章 先行章节</h1><p>第二章正文应当按 spine 排在第一位。</p></body></html>',
+    },
+    {
+      path: 'OEBPS/chapter-03.xhtml',
+      content: '<html><body><h1>第三章 终章线索</h1><p>第三章正文应当排在最后。</p></body></html>',
+    },
+  ])
+}
+
 async function mockLocalServices(page: Page) {
   let storedState: unknown = null
 
@@ -112,6 +266,69 @@ test('imports a TXT novel and opens the reader flow', async ({ page }) => {
   await expect(page.getByText('找到 1 章')).toBeVisible()
   await chapterList.getByRole('button', { name: /第三章 青州旧友/ }).click()
   await expect(page.getByRole('heading', { name: '第三章 青州旧友' })).toBeVisible()
+})
+
+test('imports and scrolls a very long single-chapter TXT novel', async ({ page }) => {
+  const longChapterParagraphs = Array.from(
+    { length: 260 },
+    (_, index) => `超长章节段落 ${index + 1}。林青沿着山路记录线索，确认这一段正文可以稳定渲染和滚动。`,
+  )
+
+  await page.goto('/')
+  await page.locator('input[type="file"][accept*=".txt"]').setInputFiles({
+    name: 'long-single-chapter.txt',
+    mimeType: 'text/plain',
+    buffer: Buffer.from(`第一章 漫长旅途\n${longChapterParagraphs.join('\n')}`),
+  })
+
+  await expect(page.getByRole('heading', { name: '第一章 漫长旅途' })).toBeVisible()
+  await expect(page.getByRole('complementary', { name: '章节目录' })).toContainText('long-single-chapter')
+  await expect(page.locator('.chapter-content')).toContainText('超长章节段落 1。')
+  await expect(page.locator('.chapter-content')).toContainText('超长章节段落 260。')
+
+  const reader = page.locator('.chapter-reader')
+  await expect
+    .poll(() =>
+      reader.evaluate((element) => ({
+        clientHeight: element.clientHeight,
+        scrollHeight: element.scrollHeight,
+      })),
+    )
+    .toEqual(expect.objectContaining({ clientHeight: expect.any(Number), scrollHeight: expect.any(Number) }))
+  await expect.poll(() => reader.evaluate((element) => element.scrollHeight > element.clientHeight)).toBe(true)
+
+  await reader.evaluate((element) => {
+    element.scrollTop = element.scrollHeight
+    element.dispatchEvent(new Event('scroll'))
+  })
+  await expect
+    .poll(() => reader.evaluate((element) => Math.round(element.scrollTop + element.clientHeight)))
+    .toBeGreaterThanOrEqual(await reader.evaluate((element) => Math.round(element.scrollHeight) - 2))
+})
+
+test('imports EPUB chapters in OPF spine order', async ({ page }) => {
+  await page.goto('/')
+  await page.locator('input[type="file"][accept*=".epub"]').setInputFiles({
+    name: 'spine-order-sample.epub',
+    mimeType: 'application/epub+zip',
+    buffer: Buffer.from(makeSpineOrderEpub()),
+  })
+
+  await expect(page.getByRole('heading', { name: '第二章 先行章节' })).toBeVisible()
+  const chapterList = page.getByRole('complementary', { name: '章节目录' })
+  await expect(chapterList).toContainText('spine-order-sample')
+  await expect(chapterList.getByRole('button', { name: /第二章 先行章节/ })).toBeVisible()
+  await expect(chapterList.getByRole('button', { name: /第一章 后到章节/ })).toBeVisible()
+  await expect(chapterList.getByRole('button', { name: /第三章 终章线索/ })).toBeVisible()
+  await expect(page.locator('.chapter-content')).toContainText('第二章正文应当按 spine 排在第一位。')
+
+  await page.locator('.chapter-heading').getByRole('button', { name: '下一章', exact: true }).click()
+  await expect(page.getByRole('heading', { name: '第一章 后到章节' })).toBeVisible()
+  await expect(page.locator('.chapter-content')).toContainText('第一章正文应当排在第二位。')
+
+  await page.locator('.chapter-heading').getByRole('button', { name: '下一章', exact: true }).click()
+  await expect(page.getByRole('heading', { name: '第三章 终章线索' })).toBeVisible()
+  await expect(page.locator('.chapter-content')).toContainText('第三章正文应当排在最后。')
 })
 
 test('persists reader preferences after page reload', async ({ page }) => {

@@ -52,8 +52,8 @@
 | PC-IMPORT-001 | TXT 导入 UTF-8 正常章节 | 干净本地库，选择规则中文章节标题 TXT | 生成书籍、章节、字数，自动进入阅读器 | Unit + E2E | P1 | Existing |
 | PC-IMPORT-002 | TXT 导入 GB18030 自动识别 | 准备 GB18030 样例 | 不需要人工选择编码，章节正文无乱码 | Unit + E2E | P1 | Existing |
 | PC-IMPORT-003 | TXT 异常标题/正文第一回拆章 | 样例含 `正文 第一回` 等边界标题 | 保持历史拆章行为，不误拆正文 | Unit | P1 | Existing |
-| PC-IMPORT-004 | EPUB spine 顺序导入 | 准备多 XHTML spine EPUB | 章节顺序与 OPF spine 一致，正文可读 | Unit + E2E | P1 | Planned |
-| PC-IMPORT-005 | 超长章节导入与展示 | 单章超长文本 | 导入不阻塞，阅读器可展示和滚动 | E2E | P2 | Planned |
+| PC-IMPORT-004 | EPUB spine 顺序导入 | 准备多 XHTML spine EPUB | 章节顺序与 OPF spine 一致，正文可读 | Unit + E2E | P1 | Existing |
+| PC-IMPORT-005 | 超长章节导入与展示 | 单章超长文本 | 导入不阻塞，阅读器可展示和滚动 | E2E | P2 | Existing |
 | PC-READ-001 | 多书阅读进度隔离 | 两本书分别阅读到不同章节/位置 | 切书、重启后各自恢复，不互相覆盖 | Unit + E2E | P0 | Existing |
 | PC-READ-002 | 阅读偏好保存 | 修改主题、字号、行高、宽度等 | 刷新后偏好仍生效 | Unit + E2E | P2 | Existing |
 | PC-READ-003 | 章节切换回到顶部 | 阅读到章节中部后切下一章 | 新章节从顶部开始，不继承旧滚动位置 | E2E | P2 | Existing |
@@ -190,8 +190,8 @@
 | OPS-SEC-002 | 未知 Host/IP 直连 | 公网 Nginx | 不返回 Gateway 应用内容 | Ops | P0 | Manual |
 | OPS-PUBLISH-001 | package 发布后真实可见 | production-pipeline publish 完成 | 远端 `books.json` 与 `/mobile/books` 设备可见性一致 | API + Ops | P0 | Existing |
 | OPS-PUBLISH-002 | audio 发布后 admin refresh | MP3/audio.json 已 rsync | Admin audio coverage 与远端 audio.json 一致 | API + Ops | P0 | Existing |
-| OPS-PUBLISH-003 | APK 发布元数据 | 发布 APK 到 downloads | `android-app.json`、latest APK、versioned APK 一致 | Ops | P1 | Partial |
-| OPS-METRIC-001 | 指标定位错误 | 制造 401/404/500/download | metrics/events 能定位路由、状态、设备和错误类别 | Ops Script + Real Gateway | P1 | Partial |
+| OPS-PUBLISH-003 | APK 发布元数据 | 发布 APK 到 downloads | `android-app.json`、latest APK、versioned APK 一致 | Ops Script + Real Gateway | P1 | Existing |
+| OPS-METRIC-001 | 指标定位错误 | 制造 401/404/500/download | metrics/events 能定位路由、状态、设备和错误类别 | Ops Script + Real Gateway | P1 | Existing |
 | OPS-RUNBOOK-001 | 常见故障排查 | 缺音频、缺 package、鉴权失败、模型失败 | runbook 给出检查路径和修复命令 | Manual | P1 | Existing |
 | OPS-ROLLBACK-001 | 发布回滚 | 发布错误 package/audio/APK | dry-run 可验证回滚输入；`--apply` 可恢复 package/audio/APK | Ops Script + Real Exercise | P0 | Partial |
 

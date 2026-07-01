@@ -4,13 +4,17 @@ const options = parseArgs(process.argv.slice(2))
 
 if (!options.gatewayUrl || !options.adminToken || !options.mobileToken || !options.bookId) {
   fail(
-    'Usage: npm run gateway:ops-metrics-smoke -- --gateway-url <url> --admin-token <token> --mobile-token <token> --book-id <bookId> [--audio-chapter-id <chapterId>] [--error-url <path>]',
+    'Usage: npm run gateway:ops-metrics-smoke -- --gateway-url <url> --admin-token <token> --mobile-token <token> --book-id <bookId> [--device-id <id>] [--device-name <name>] [--audio-chapter-id <chapterId>] [--error-url <path>]',
   )
 }
 
 const gatewayUrl = options.gatewayUrl.replace(/\/+$/, '')
 const adminHeaders = { Authorization: `Bearer ${options.adminToken}` }
-const mobileHeaders = { Authorization: `Bearer ${options.mobileToken}` }
+const mobileHeaders = {
+  Authorization: `Bearer ${options.mobileToken}`,
+  ...(options.deviceId ? { 'X-Device-Id': options.deviceId } : {}),
+  ...(options.deviceName ? { 'X-Device-Name': options.deviceName } : {}),
+}
 const bookId = options.bookId
 const packagePath = `/mobile/books/${encodeURIComponent(bookId)}/package/download`
 const audioPath = options.audioChapterId
@@ -127,7 +131,10 @@ async function request(path, init = {}) {
 }
 
 async function jsonRequest(path, init = {}) {
-  const response = await request(path, init)
+  const response = await fetch(`${gatewayUrl}${path}`, {
+    redirect: 'manual',
+    ...init,
+  })
   if (!response.ok) {
     fail(`${path} returned ${response.status}`)
   }

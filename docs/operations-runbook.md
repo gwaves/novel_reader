@@ -70,6 +70,7 @@ curl -fsS -H "Authorization: Bearer $ADMIN_TOKEN" "$GATEWAY_URL/admin/audio"
 npm run gateway:publish-android-apk
 curl -fsS "$GATEWAY_URL/downloads/android-app.json"
 curl -fsSI "$GATEWAY_URL/downloads/ai_novel_reader.apk"
+npm run gateway:apk-metadata-smoke -- --gateway-url "$GATEWAY_URL"
 ```
 
 验收点：
@@ -101,10 +102,12 @@ npm run gateway:ops-metrics-smoke -- \
   --admin-token "$ADMIN_TOKEN" \
   --mobile-token "$MOBILE_TOKEN" \
   --book-id "<bookId>" \
+  --device-id "<trustedDeviceId>" \
+  --device-name "<trustedDeviceName>" \
   --audio-chapter-id "<chapterId>"
 ```
 
-可选：如果有安全的测试 5xx 路由，可追加 `--error-url "/path-that-returns-500"`。
+可选：如果验证默认可见书籍，可以省略 `--device-id` 和 `--device-name`；如果验证 trusted 书籍，必须传入受信设备信息。若有安全的测试 5xx 路由，可追加 `--error-url "/path-that-returns-500"`。
 
 验收点：
 

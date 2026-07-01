@@ -41,13 +41,14 @@ npm --prefix gateway-android-app run build
 - 确认 Admin 书目、mobile session 可见性、`/mobile/books` 一致。
 - 确认 package 章节、summary/KG/embedding coverage 与 run artifact 一致。
 - 确认 audio manifest、抽样 MP3 下载、Admin audio refresh 一致。
-- 运行 `npm run gateway:ops-metrics-smoke -- --gateway-url "$GATEWAY_URL" --admin-token "$ADMIN_TOKEN" --mobile-token "$MOBILE_TOKEN" --book-id "<bookId>" --audio-chapter-id "<chapterId>"`，确认 `/admin/metrics`、`/admin/events`、`/admin/requests` 能定位本次 401/404/download smoke。
+- 运行 `npm run gateway:ops-metrics-smoke -- --gateway-url "$GATEWAY_URL" --admin-token "$ADMIN_TOKEN" --mobile-token "$MOBILE_TOKEN" --book-id "<bookId>" --device-id "<trustedDeviceId>" --device-name "<trustedDeviceName>" --audio-chapter-id "<chapterId>"`，确认 `/admin/metrics`、`/admin/events`、`/admin/requests` 能定位本次 401/404/download smoke；默认可见书籍可省略设备参数。
 
 ## 4. APK 发布验收
 
 - 构建 Gateway Android App 并生成 build info。
 - 运行 `npm run gateway:publish-android-apk`。
 - 校验 `android-app.json`、固定 latest APK、versioned APK 三者一致。
+- 运行 `npm run gateway:apk-metadata-smoke -- --gateway-url "$GATEWAY_URL"`，确认 latest/versioned APK 均可下载且大小一致。
 - 真机检查更新：高版本显示下载并打开系统安装确认；同版本或低版本显示已是最新。
 
 ## 5. 公网与安全
