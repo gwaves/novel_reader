@@ -178,7 +178,7 @@
 | AND-AUDIO-003 | 批量 MP3 同步停止 | 批量下载中点击停止 | 当前章节结束后不继续新章节 | Android | P1 | Existing |
 | AND-AUDIO-004 | 离线 MP3 播放 | 断网且已有缓存 | 可播放本地 MP3，UI 不误称在线播放 | Android + Manual | P1 | Existing |
 | AND-RAG-001 | Gateway RAG 搜索 | 受信设备、可见书籍 | 搜索成功，embedding 失败时关键词兜底不显示红底误报 | Android | P1 | Existing |
-| AND-UPDATE-001 | 应用内检查更新 | Gateway 发布更高 versionCode | 显示下载并安装，系统安装确认弹出 | Android + Manual | P1 | Manual |
+| AND-UPDATE-001 | 应用内检查更新 | Gateway 发布更高 versionCode | 显示下载并安装，系统安装确认弹出 | Android + Manual | P1 | Existing |
 | AND-UPDATE-002 | 无更新状态 | versionCode 不高于本机 | 显示已是最新，不重复下载 | Android | P2 | Existing |
 
 ## 11. 运维与发布验证

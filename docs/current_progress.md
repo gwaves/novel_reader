@@ -1,3 +1,9 @@
+2026-07-01 更新：小米真机应用内更新验收完成。
+- 从公网下载并安装旧版 `ai_novel_reader-v0.2.0-build.235.g461242a7313d.dirty.apk` 作为基线，保留 App 数据；当前线上 manifest 为 `0.2.0+build.237.g0da2d9e01844` / `versionCode=2000237`。
+- 在 build 235 设置页点击“检查更新”，页面显示“有新版本”、线上版本 `0.2.0+build.237.g0da2d9e01844` 和“下载并安装”按钮。
+- 点击“下载并安装”后，系统焦点切到 MIUI Package Installer `InstallPrepareAlertActivity`，确认系统安装确认弹出；随后退出安装器，并将手机恢复为本地测试 build 244。
+- `AND-UPDATE-001` 已从 Manual 收口为 Existing。
+
 2026-07-01 更新：小米真机切 Tab 阅读进度验收完成。
 - 在 build 244 真机阅读《妖刀记》第 1 章时，将页面滚动到 `scrollY=5120`，切到“设置”再回“阅读”，返回后 `scrollY=5120`，没有跳回章节顶部。
 - 再将页面滚动到 `scrollY=6789`，切到“书库”再回“阅读”，返回后 `scrollY=6789`，localStorage `novel-reader-gateway-reading-progress` 保存同一 `bookId/chapterId` 和 `scrollY=6789`。
