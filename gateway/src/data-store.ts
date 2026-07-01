@@ -48,6 +48,9 @@ export type GatewayBookPackageStatus = {
   summaryCoverage?: number
   kgCoverage?: number
   embeddingCoverage?: number
+  embeddingVectorCoverage?: number
+  embeddingSummaryVectorCount?: number
+  embeddingChunkVectorCount?: number
   status: 'imported' | 'missing' | 'invalid'
   importStatus: 'imported' | 'missing' | 'invalid'
   sizeBytes: number
@@ -265,6 +268,7 @@ async function readBookPackageMetadataUncached(
     statusCode: 500,
   })
   const chapters = Array.isArray(bookPackage.chapters) ? bookPackage.chapters : []
+  const embeddingVectorStats = deriveEmbeddingVectorStats(bookPackage, book.chapterCount)
   const importedAt = readOptionalIsoDate(bookPackage, 'generatedAt') ?? readOptionalIsoDate(bookPackage.book, 'updatedAt')
   return {
     status: {
@@ -276,6 +280,9 @@ async function readBookPackageMetadataUncached(
       summaryCoverage: bookPackage.book.summaryCoverage ?? deriveSummaryCoverage(bookPackage, book.chapterCount),
       kgCoverage: bookPackage.book.kgCoverage ?? deriveKgCoverage(bookPackage, book.chapterCount),
       embeddingCoverage: bookPackage.book.embeddingCoverage ?? deriveEmbeddingCoverage(bookPackage, book.chapterCount),
+      embeddingVectorCoverage: embeddingVectorStats.coverage,
+      embeddingSummaryVectorCount: embeddingVectorStats.summaryCount,
+      embeddingChunkVectorCount: embeddingVectorStats.chunkCount,
       status: 'imported',
       importStatus: 'imported',
       sizeBytes,
@@ -597,6 +604,46 @@ function deriveEmbeddingCoverage(bookPackage: GatewayBookPackage, chapterCount: 
   const chunkChapterCoverage = deriveEmbeddingChapterCoverage(embeddings.chunks, chapterCount)
   if (chunkChapterCoverage !== undefined) return chunkChapterCoverage
   return deriveEmbeddingChapterCoverage(embeddings.summaries, chapterCount)
+}
+
+function deriveEmbeddingVectorStats(bookPackage: GatewayBookPackage, chapterCount: number) {
+  const embeddings = bookPackage.embeddings
+  if (!isRecord(embeddings)) {
+    return {
+      coverage: undefined,
+      summaryCount: 0,
+      chunkCount: 0,
+    }
+  }
+
+  const summaryStats = collectEmbeddingVectorStats(embeddings.summaries)
+  const chunkStats = collectEmbeddingVectorStats(embeddings.chunks)
+  const chapterIds = new Set([...summaryStats.chapterIds, ...chunkStats.chapterIds])
+  return {
+    coverage: chapterCount > 0 ? clampRatio(chapterIds.size / chapterCount) : undefined,
+    summaryCount: summaryStats.count,
+    chunkCount: chunkStats.count,
+  }
+}
+
+function collectEmbeddingVectorStats(value: unknown) {
+  const chapterIds = new Set<string>()
+  let count = 0
+  if (!Array.isArray(value)) return { count, chapterIds }
+
+  for (const item of value) {
+    if (!isRecord(item) || !hasNumericEmbedding(item.embedding)) continue
+    count += 1
+    const chapterId = item.chapterId
+    if (typeof chapterId === 'string' && chapterId.trim()) chapterIds.add(chapterId.trim())
+    if (typeof chapterId === 'number' && Number.isInteger(chapterId)) chapterIds.add(String(chapterId))
+  }
+
+  return { count, chapterIds }
+}
+
+function hasNumericEmbedding(value: unknown) {
+  return Array.isArray(value) && value.length > 0 && value.every((item) => typeof item === 'number' && Number.isFinite(item))
 }
 
 function collectMentionChapterIds(value: unknown, chapterIds: Set<string>) {

@@ -1873,6 +1873,7 @@ async function readBookFromMainDb(dbPath, bookId) {
     if (!chapters.length) throw new Error(`Book has no chapters in main DB: ${bookId}`)
     const summaries = readSummariesForPackage(db, bookId)
     const embeddingCoverage = readEmbeddingCoverageForPackage(db, bookId, chapters.length, summaries.length)
+    const embeddings = readEmbeddingsForPackage(db, bookId)
     const knowledgeGraph = readKnowledgeGraphForPackage(db, bookId)
 
     return {
@@ -1880,6 +1881,7 @@ async function readBookFromMainDb(dbPath, bookId) {
       chapters: chapters.map(plainObject),
       summaries,
       embeddingCoverage,
+      embeddings,
       knowledgeGraph,
     }
   } finally {
@@ -1927,8 +1929,8 @@ function buildGatewayBookPackage(book, generatedAt) {
     knowledgeGraph,
     embeddings: {
       coverage: embeddingCoverage,
-      summaries: [],
-      chunks: [],
+      summaries: book.embeddings.summaries,
+      chunks: book.embeddings.chunks,
     },
   }
 }
@@ -1982,6 +1984,73 @@ function readEmbeddingCoverageForPackage(db, bookId, totalChapters, totalSummari
       models: readEmbeddingModelStats(db, 'chapter_chunk_embeddings', bookId),
     },
   }, totalChapters, totalSummaries)
+}
+
+function readEmbeddingsForPackage(db, bookId) {
+  return {
+    summaries: readSummaryEmbeddingsForPackage(db, bookId),
+    chunks: readChunkEmbeddingsForPackage(db, bookId),
+  }
+}
+
+function readSummaryEmbeddingsForPackage(db, bookId) {
+  if (!sqliteTableExists(db, 'summary_embeddings')) return []
+  return db.prepare(`
+    SELECT
+      chapter_id AS chapterId,
+      model,
+      dimension,
+      embedding_json AS embeddingJson,
+      generated_at AS generatedAt
+    FROM summary_embeddings
+    WHERE book_id = ?
+    ORDER BY chapter_id, model
+  `).all(bookId).map((row) => {
+    const item = plainObject(row)
+    return {
+      chapterId: String(item.chapterId),
+      model: String(item.model || ''),
+      dimension: numberOrDefault(item.dimension, 0),
+      embedding: safeJsonParse(item.embeddingJson, []),
+      generatedAt: item.generatedAt,
+    }
+  })
+}
+
+function readChunkEmbeddingsForPackage(db, bookId) {
+  if (!sqliteTableExists(db, 'chapter_chunk_embeddings')) return []
+  return db.prepare(`
+    SELECT
+      id,
+      chapter_id AS chapterId,
+      chapter_index AS chapterIndex,
+      chunk_index AS chunkIndex,
+      start_offset AS startOffset,
+      end_offset AS endOffset,
+      text,
+      model,
+      dimension,
+      embedding_json AS embeddingJson,
+      generated_at AS generatedAt
+    FROM chapter_chunk_embeddings
+    WHERE book_id = ?
+    ORDER BY chapter_index, chunk_index, model
+  `).all(bookId).map((row) => {
+    const item = plainObject(row)
+    return {
+      id: String(item.id || ''),
+      chapterId: String(item.chapterId),
+      chapterIndex: numberOrDefault(item.chapterIndex, 0),
+      chunkIndex: numberOrDefault(item.chunkIndex, 0),
+      startOffset: numberOrDefault(item.startOffset, 0),
+      endOffset: numberOrDefault(item.endOffset, 0),
+      text: String(item.text || ''),
+      model: String(item.model || ''),
+      dimension: numberOrDefault(item.dimension, 0),
+      embedding: safeJsonParse(item.embeddingJson, []),
+      generatedAt: item.generatedAt,
+    }
+  })
 }
 
 function readKnowledgeGraphForPackage(db, bookId) {

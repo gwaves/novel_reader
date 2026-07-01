@@ -153,6 +153,9 @@ describe('Gateway 管理后台 UI', () => {
               summaryCoverage: 80,
               kgCoverage: 70,
               embeddingCoverage: 60,
+              embeddingVectorCoverage: 50,
+              embeddingSummaryVectorCount: 10,
+              embeddingChunkVectorCount: 90,
             },
             {
               bookId: 'legacy-package',
@@ -230,9 +233,9 @@ describe('Gateway 管理后台 UI', () => {
 
     await user.click(screen.getByRole('button', { name: '数据包' }))
     expect(screen.getByRole('row', { name: /接口书籍 2026-06-29 20:10 可发布 12\.5 MB/ })).toBeInTheDocument()
-    expect(screen.getByText('S 80% · KG 70% · E 60%')).toBeInTheDocument()
+    expect(screen.getByText('S 80% · KG 70% · E报告 60% · 向量 100 (50%)')).toBeInTheDocument()
     const legacyPackageRow = screen.getByRole('row', { name: /旧数据包/ })
-    expect(within(legacyPackageRow).getByText('S - · KG - · E -')).toBeInTheDocument()
+    expect(within(legacyPackageRow).getByText('S - · KG - · E报告 - · 向量 0 (-)')).toBeInTheDocument()
     expect(within(legacyPackageRow).getByText('无')).toBeInTheDocument()
 
     await user.click(screen.getByRole('button', { name: '音频' }))
@@ -255,7 +258,7 @@ describe('Gateway 管理后台 UI', () => {
     const packageMissingSummary = screen.getAllByText('缺失章节')[0].closest('div')!
     expect(packageMissingSummary).toHaveTextContent('51 章')
     expect(packageMissingSummary).toHaveAttribute('title', expect.stringContaining('夜航档案：章节文件缺失 3 章'))
-    expect(document.querySelector('[title="章节文件缺失 3 章；Summary 缺 7 章；KG 缺 18 章；Embedding 缺 13 章"]')).toHaveTextContent('18 章')
+    expect(document.querySelector('[title="章节文件缺失 3 章；Summary 缺 7 章；KG 缺 18 章；Embedding 缺 13 章；Gateway 向量缺 13 章"]')).toHaveTextContent('18 章')
 
     await user.click(screen.getByRole('button', { name: '音频' }))
     expect(screen.getByRole('heading', { name: '音频' })).toBeInTheDocument()

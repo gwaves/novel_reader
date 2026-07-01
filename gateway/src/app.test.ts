@@ -525,7 +525,7 @@ describe('gateway app', () => {
           relationMentions: [],
         },
         embeddings: {
-          chunks: [{ chapterId: 'chapter-1' }],
+          chunks: [{ chapterId: 'chapter-1', embedding: [0.1, 0.2] }],
         },
       }),
       'utf8',
@@ -549,6 +549,9 @@ describe('gateway app', () => {
           summaryCoverage: 1,
           kgCoverage: 1,
           embeddingCoverage: 0.5,
+          embeddingVectorCoverage: 0.5,
+          embeddingChunkVectorCount: 1,
+          embeddingSummaryVectorCount: 0,
         },
       ],
     })
@@ -1376,7 +1379,11 @@ describe('gateway app', () => {
           relationMentions: [],
         },
         embeddings: {
-          chunks: [{ chapterId: 'chapter-1' }],
+          coverage: {
+            chunks: { embeddedChunks: 2, embeddedChapters: 2, totalChapters: 2, coverage: 1 },
+          },
+          chunks: [{ chapterId: 'chapter-1', embedding: [0.1, 0.2] }],
+          summaries: [],
         },
       }),
       'utf8',
@@ -1406,7 +1413,10 @@ describe('gateway app', () => {
           packageChapterCount: 2,
           summaryCoverage: 1,
           kgCoverage: 1,
-          embeddingCoverage: 0.5,
+          embeddingCoverage: 1,
+          embeddingVectorCoverage: 0.5,
+          embeddingChunkVectorCount: 1,
+          embeddingSummaryVectorCount: 0,
           importedAt: '2026-06-26T00:00:00.000Z',
           sizeBytes: expect.any(Number),
           updatedAt: expect.any(String),
@@ -1423,6 +1433,123 @@ describe('gateway app', () => {
       ],
     })
     expect(response.json().packages[0].sizeBytes).toBeGreaterThan(0)
+  })
+
+  it('distinguishes reported embedding coverage from imported vectors in admin package status', async () => {
+    const dataDir = await makeDataDir()
+    await writeFile(
+      join(dataDir, 'books.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        books: [
+          {
+            id: 'book-ready',
+            title: '覆盖率包',
+            chapterCount: 2,
+            updatedAt: '2026-06-25T00:00:00.000Z',
+          },
+        ],
+      }),
+      'utf8',
+    )
+    await mkdir(join(dataDir, 'books', 'book-ready'), { recursive: true })
+    await writeFile(
+      join(dataDir, 'books', 'book-ready', 'package.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        generatedAt: '2026-06-26T00:00:00.000Z',
+        book: {
+          id: 'book-ready',
+          title: '覆盖率包',
+          chapterCount: 2,
+          updatedAt: '2026-06-25T00:00:00.000Z',
+        },
+        chapters: [{ id: 'chapter-1' }, { id: 'chapter-2' }],
+        embeddings: {
+          coverage: {
+            chunks: { embeddedChunks: 2, embeddedChapters: 2, totalChapters: 2, coverage: 1 },
+          },
+          chunks: [],
+          summaries: [],
+        },
+      }),
+      'utf8',
+    )
+    const app = buildTestApp({
+      GATEWAY_DEV_ACCESS_TOKEN: 'dev-token',
+      GATEWAY_DATA_DIR: dataDir,
+    })
+
+    const response = await app.inject({
+      method: 'GET',
+      url: '/admin/packages',
+      headers: { authorization: 'Bearer dev-token' },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect(response.json().packages[0]).toMatchObject({
+      bookId: 'book-ready',
+      embeddingCoverage: 1,
+      embeddingVectorCoverage: 0,
+      embeddingChunkVectorCount: 0,
+      embeddingSummaryVectorCount: 0,
+    })
+  })
+
+  it('imports protected admin packages with embedding vectors preserved for Gateway search', async () => {
+    const dataDir = await makeDataDir()
+    await writeFile(
+      join(dataDir, 'books.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        books: [],
+      }),
+      'utf8',
+    )
+    const app = buildTestApp({
+      GATEWAY_DEV_ACCESS_TOKEN: 'dev-token',
+      GATEWAY_DATA_DIR: dataDir,
+    })
+
+    const importResponse = await app.inject({
+      method: 'PUT',
+      url: '/admin/books/book-a/package',
+      headers: { authorization: 'Bearer dev-token' },
+      payload: {
+        schemaVersion: 1,
+        generatedAt: '2026-06-26T00:00:00.000Z',
+        book: {
+          id: 'book-a',
+          title: '向量包',
+          chapterCount: 1,
+          updatedAt: '2026-06-25T00:00:00.000Z',
+        },
+        chapters: [{ id: 'chapter-1', title: '第一章', content: '正文' }],
+        embeddings: {
+          coverage: {
+            chunks: { embeddedChunks: 1, embeddedChapters: 1, totalChapters: 1, coverage: 1 },
+          },
+          chunks: [{ chapterId: 'chapter-1', text: '正文', embedding: [0.1, 0.2] }],
+          summaries: [{ chapterId: 'chapter-1', embedding: [0.2, 0.3] }],
+        },
+      },
+    })
+    const statusResponse = await app.inject({
+      method: 'GET',
+      url: '/admin/packages',
+      headers: { authorization: 'Bearer dev-token' },
+    })
+    const stored = JSON.parse(await readFile(join(dataDir, 'books', 'book-a', 'package.json'), 'utf8'))
+
+    expect(importResponse.statusCode).toBe(200)
+    expect(stored.embeddings.chunks[0].embedding).toEqual([0.1, 0.2])
+    expect(statusResponse.json().packages[0]).toMatchObject({
+      bookId: 'book-a',
+      embeddingCoverage: 1,
+      embeddingVectorCoverage: 1,
+      embeddingChunkVectorCount: 1,
+      embeddingSummaryVectorCount: 1,
+    })
   })
 
   it('downloads full book packages through the admin API', async () => {

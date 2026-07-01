@@ -977,7 +977,7 @@ function PackagesPage({
                   <td>{item.updatedAt}</td>
                   <td>
                     <span className="coverage">
-                      S {formatCoverage(item.summaryCoverage)} · KG {formatCoverage(item.kgCoverage)} · E {formatCoverage(item.embeddingCoverage)}
+                      S {formatCoverage(item.summaryCoverage)} · KG {formatCoverage(item.kgCoverage)} · E报告 {formatCoverage(item.embeddingCoverage)} · 向量 {formatEmbeddingVectors(item)}
                     </span>
                   </td>
                   <td><PackageMissingCell item={item} /></td>
@@ -1450,6 +1450,11 @@ function emptySystemSummary(): AdminSystemSummary {
 
 function formatCoverage(value: number | null) {
   return value === null ? '-' : `${value}%`
+}
+
+function formatEmbeddingVectors(item: AdminPackage) {
+  const total = item.embeddingChunkVectorCount + item.embeddingSummaryVectorCount
+  return `${total} (${formatCoverage(item.embeddingVectorCoverage)})`
 }
 
 function savePackageBlob(item: AdminPackage, packageBlob: Blob) {

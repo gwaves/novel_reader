@@ -105,6 +105,9 @@ type GatewayPackage = {
   summaryCoverage?: number
   kgCoverage?: number
   embeddingCoverage?: number
+  embeddingVectorCoverage?: number
+  embeddingSummaryVectorCount?: number
+  embeddingChunkVectorCount?: number
   missingChapters?: unknown[]
   checksum?: string
   errorCode?: string
@@ -443,6 +446,9 @@ function mapPackage(item: GatewayPackage): AdminPackage {
   const summaryCoverage = optionalRatioToPercent(item.summaryCoverage)
   const kgCoverage = optionalRatioToPercent(item.kgCoverage)
   const embeddingCoverage = optionalRatioToPercent(item.embeddingCoverage)
+  const embeddingVectorCoverage = optionalRatioToPercent(item.embeddingVectorCoverage)
+  const embeddingSummaryVectorCount = readNumber(item.embeddingSummaryVectorCount)
+  const embeddingChunkVectorCount = readNumber(item.embeddingChunkVectorCount)
   return {
     id: readString(item.id, `${readString(item.bookId, 'package')}-${version}`),
     bookId: readString(item.bookId, 'unknown-book'),
@@ -455,6 +461,9 @@ function mapPackage(item: GatewayPackage): AdminPackage {
     summaryCoverage,
     kgCoverage,
     embeddingCoverage,
+    embeddingVectorCoverage,
+    embeddingSummaryVectorCount,
+    embeddingChunkVectorCount,
     missingChapters,
     validationIssues: buildPackageValidationIssues({
       chapterCount,
@@ -462,6 +471,9 @@ function mapPackage(item: GatewayPackage): AdminPackage {
       summaryCoverage,
       kgCoverage,
       embeddingCoverage,
+      embeddingVectorCoverage,
+      embeddingChunkVectorCount,
+      embeddingSummaryVectorCount,
     }),
     checksum: readString(item.checksum, readString(item.errorCode, '-')),
   }
@@ -625,12 +637,18 @@ function buildPackageValidationIssues({
   summaryCoverage,
   kgCoverage,
   embeddingCoverage,
+  embeddingVectorCoverage,
+  embeddingChunkVectorCount,
+  embeddingSummaryVectorCount,
 }: {
   chapterCount: number
   missingChapters: Array<number | string>
   summaryCoverage: number | null
   kgCoverage: number | null
   embeddingCoverage: number | null
+  embeddingVectorCoverage: number | null
+  embeddingChunkVectorCount: number
+  embeddingSummaryVectorCount: number
 }) {
   const issues: string[] = []
   if (missingChapters.length > 0) issues.push(`章节文件缺失 ${missingChapters.length} 章`)
@@ -643,6 +661,12 @@ function buildPackageValidationIssues({
   for (const [label, coverage] of coverageItems) {
     const missingCount = missingCountFromCoverage(chapterCount, coverage)
     if (missingCount > 0) issues.push(`${label} 缺 ${missingCount} 章`)
+  }
+  if (embeddingCoverage !== null && embeddingCoverage > 0 && embeddingChunkVectorCount === 0 && embeddingSummaryVectorCount === 0) {
+    issues.push('Embedding 报告存在但 Gateway 向量缺失')
+  } else {
+    const missingVectorChapters = missingCountFromCoverage(chapterCount, embeddingVectorCoverage)
+    if (missingVectorChapters > 0) issues.push(`Gateway 向量缺 ${missingVectorChapters} 章`)
   }
 
   return issues

@@ -1,3 +1,11 @@
+2026-07-01 更新：Gateway package embedding 向量治理修正。
+- 定位到生产 `package` 阶段只导出 `embeddings.coverage`，把 `embeddings.summaries` 和 `embeddings.chunks` 固定写成空数组；这会让 Gateway/Admin 显示 `E 100%`，但实际没有可执行向量召回。
+- 修正 `production-pipeline/src/cli.mjs`：打包时从 `summary_embeddings` 与 `chapter_chunk_embeddings` 读取真实向量、模型、维度、chunk 文本和位置，并写入 Gateway 服务端 package；移动端 package 下载仍由 Gateway 动态剥离 `embeddings`。
+- 修正 Gateway package 状态：`embeddingCoverage` 继续表示生产 coverage report，新增 `embeddingVectorCoverage`、`embeddingSummaryVectorCount`、`embeddingChunkVectorCount` 表示当前 package 内真实可用向量。
+- 修正 Admin UI 数据包页：覆盖率列改为 `E报告` + `向量 数量(覆盖率)`，并在 `E报告 > 0` 但 Gateway 向量为 0 时提示“Embedding 报告存在但 Gateway 向量缺失”。
+- 补充 Gateway 侧导入验收：Admin `PUT /admin/books/:bookId/package` 导入带向量 package 后，远端存储保留向量，`/admin/packages` 能报告真实向量数量和覆盖率。
+- 已运行 `node --test --test-name-pattern="packages a main DB book into Gateway package artifacts" production-pipeline/test/import.test.mjs`、`npm --prefix gateway run test -- app.test.ts`（63 passed）、`npm --prefix gateway run build`、`npm --prefix gateway/admin-ui run test -- App.test.tsx`（17 passed）、`npm --prefix gateway/admin-ui run build`。
+
 2026-07-01 更新：移动端完整包不再下载向量。
 - Gateway 移动端普通 package 原本已剥离 `embeddings`，但 `/mobile/books/:bookId/package/download` 仍直接 stream 原始 full package，会把向量/coverage 元数据带到手机并让原生导入误判“导入向量”。
 - 修正 `gateway/src/app.ts`：移动端 `include=full` 与 `package/download` 都动态生成 mobile full package，删除顶层 `embeddings` 和 `integrity.embeddings`；Admin full package 下载保持原始全量包。

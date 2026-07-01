@@ -228,6 +228,9 @@ export function buildGatewayApp(config: GatewayConfig = loadConfig()) {
           summaryCoverage: packageStatus?.summaryCoverage ?? book.summaryCoverage,
           kgCoverage: packageStatus?.kgCoverage ?? book.kgCoverage,
           embeddingCoverage: packageStatus?.embeddingCoverage ?? book.embeddingCoverage,
+          embeddingVectorCoverage: packageStatus?.embeddingVectorCoverage,
+          embeddingSummaryVectorCount: packageStatus?.embeddingSummaryVectorCount,
+          embeddingChunkVectorCount: packageStatus?.embeddingChunkVectorCount,
         }
       }),
     }

@@ -273,6 +273,20 @@ describe('production-pipeline import', () => {
       })
       assert.equal(bookPackage.embeddings.coverage.chunks.embeddedChunks, 2)
       assert.equal(bookPackage.embeddings.coverage.chunks.embeddedChapters, 2)
+      assert.deepEqual(
+        bookPackage.embeddings.summaries.map((embedding) => [embedding.chapterId, embedding.model, embedding.dimension, embedding.embedding]),
+        [
+          ['sample-book:ch00001', 'fake-embedding', 3, [1, 2, 3]],
+          ['sample-book:ch00002', 'fake-embedding', 3, [1, 2, 3]],
+        ],
+      )
+      assert.deepEqual(
+        bookPackage.embeddings.chunks.map((embedding) => [embedding.chapterId, embedding.chapterIndex, embedding.chunkIndex, embedding.text, embedding.embedding]),
+        [
+          ['sample-book:ch00001', 1, 0, '这是第一章内容。', [1, 2, 3]],
+          ['sample-book:ch00002', 2, 0, '这是第二章内容。', [1, 2, 3]],
+        ],
+      )
       assert.equal(bookPackage.knowledgeGraph.entities.length, 2)
       assert.equal(bookPackage.knowledgeGraph.entityMentions.length, 2)
       assert.equal(bookPackage.knowledgeGraph.relations.length, 1)
