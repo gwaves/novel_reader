@@ -186,6 +186,7 @@ describe('RAG search fallback messaging', () => {
               chapterIndex: 2,
               chapterTitle: '第二章',
               snippet: '林青在雨夜醒来。',
+              source: 'summary',
               score: 0.91,
             },
             {
@@ -222,7 +223,7 @@ describe('RAG search fallback messaging', () => {
         chapterIndex: 2,
         chapterTitle: '第二章',
         snippet: '林青在雨夜醒来。',
-        source: 'chunk',
+        source: 'summary',
         score: 0.91,
       },
     ])
@@ -241,6 +242,7 @@ describe('RAG search fallback messaging', () => {
               chapterIndex: 5,
               chapterTitle: '第五章',
               snippet: '线索指向旧码头。',
+              source: 'chapter',
               score: 0.86,
             },
             {
@@ -280,7 +282,7 @@ describe('RAG search fallback messaging', () => {
           chapterIndex: 5,
           chapterTitle: '第五章',
           snippet: '线索指向旧码头。',
-          source: 'chunk',
+          source: 'chapter',
           score: 0.86,
         },
       ],

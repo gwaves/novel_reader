@@ -3244,7 +3244,7 @@ export async function searchGatewayRag(settings: GatewaySettings, bookId: string
       chapterIndex: readNumber(result.chapterIndex) ?? 0,
       chapterTitle: readString(result.chapterTitle) || '未命名章节',
       snippet: readString(result.snippet),
-      source: 'chunk' as const,
+      source: normalizeRagResultSource(result.source),
       score: readNumber(result.score) ?? 0,
     }))
     .filter((result) => Boolean(result.chapterId))
@@ -3269,11 +3269,15 @@ export async function gatewayGenerateRagAnswer(
         chapterIndex: readNumber(result.chapterIndex) ?? 0,
         chapterTitle: readString(result.chapterTitle) || '未命名章节',
         snippet: readString(result.snippet),
-        source: 'chunk' as const,
+        source: normalizeRagResultSource(result.source),
         score: readNumber(result.score) ?? 0,
       }))
       .filter((result) => Boolean(result.chapterId)),
   }
+}
+
+function normalizeRagResultSource(value: unknown): RagResult['source'] {
+  return value === 'summary' || value === 'chapter' || value === 'chunk' ? value : 'chunk'
 }
 
 function normalizeSearchText(value: string) {

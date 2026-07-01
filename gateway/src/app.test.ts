@@ -2715,6 +2715,94 @@ describe('gateway app', () => {
     expect(adminResponse.json().error).toMatchObject({ code: 'invalid_token' })
   })
 
+  it('falls back to keyword RAG search when package embedding vectors are not inlined', async () => {
+    const dataDir = await makeDataDir()
+    await mkdir(join(dataDir, 'books', 'book-a'), { recursive: true })
+    await writeFile(
+      join(dataDir, 'books.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        books: [
+          {
+            id: 'book-a',
+            title: '红楼梦',
+            chapterCount: 2,
+            updatedAt: '2026-06-30T00:00:00.000Z',
+            visibility: 'default',
+          },
+        ],
+      }),
+      'utf8',
+    )
+    await writeFile(
+      join(dataDir, 'books', 'book-a', 'package.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        book: {
+          id: 'book-a',
+          title: '红楼梦',
+          chapterCount: 2,
+          embeddingCoverage: 1,
+          updatedAt: '2026-06-30T00:00:00.000Z',
+          visibility: 'default',
+        },
+        chapters: [
+          { id: 'chapter-1', title: '第一回', index: 1, content: '甄士隐梦幻识通灵，贾雨村风尘怀闺秀。' },
+          { id: 'chapter-2', title: '第二回', index: 2, content: '贾夫人仙逝扬州城，冷子兴演说荣国府。' },
+        ],
+        summaries: [
+          { chapterId: 'chapter-1', short: '甄士隐梦见通灵宝玉，贾雨村寄居葫芦庙。' },
+          { chapterId: 'chapter-2', short: '冷子兴向贾雨村演说荣国府人物。' },
+        ],
+        embeddings: {
+          coverage: {
+            chunks: { embeddedChunks: 2, embeddedChapters: 2, totalChapters: 2, coverage: 1 },
+          },
+          chunks: [],
+          summaries: [],
+        },
+      }),
+      'utf8',
+    )
+    const fetchMock = vi.fn(async () => jsonResponse({ data: [{ embedding: [0.1, 0.2] }] }))
+    vi.stubGlobal('fetch', fetchMock)
+    const app = buildTestApp({
+      GATEWAY_ADMIN_ACCESS_TOKEN: 'admin-token',
+      GATEWAY_MOBILE_ACCESS_TOKEN: 'mobile-token',
+      GATEWAY_DATA_DIR: dataDir,
+      GATEWAY_EMBEDDING_BASE_URL: 'https://embedding.example.test/v1',
+      GATEWAY_EMBEDDING_API_KEY: 'embedding-secret',
+      GATEWAY_EMBEDDING_MODEL: 'text-embedding-test',
+    })
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/ai/search',
+      headers: {
+        authorization: 'Bearer mobile-token',
+        'x-device-id': 'device-a',
+        'x-device-name': '客厅平板',
+      },
+      payload: {
+        bookId: 'book-a',
+        query: '通灵宝玉',
+        limit: 5,
+      },
+    })
+
+    expect(response.statusCode).toBe(200)
+    expect(response.json()).toMatchObject({
+      bookId: 'book-a',
+      results: [
+        expect.objectContaining({
+          chapterId: 'chapter-1',
+          source: expect.stringMatching(/summary|chapter/),
+          snippet: expect.stringContaining('通灵宝玉'),
+        }),
+      ],
+    })
+  })
+
   it('applies device visibility rules to mobile AI search and RAG answer routes', async () => {
     const dataDir = await makeDataDir()
     await mkdir(join(dataDir, 'books', 'trusted-book'), { recursive: true })

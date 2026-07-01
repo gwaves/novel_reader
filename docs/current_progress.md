@@ -1,3 +1,10 @@
+2026-07-01 更新：修复 LT Pad《红楼梦》RAG 搜索空结果。
+- 真实 Gateway 日志显示 LT Pad（deviceId `7c6bd6bb-e097-4c6c-9422-ec4b6d1d5632`）连续请求 `/ai/search` 均返回 200，但客户端无内容；Admin 请求日志只记录状态码，未记录 response body。
+- 定位根因：线上《红楼梦》`package.json` 的 `embeddings.coverage.chunks.coverage=1`，但 `embeddings.chunks` 和 `embeddings.summaries` 实际为空数组；Gateway `/ai/search` 原先只从内联 `embeddings.chunks` 召回，导致 200 + `results: []`。
+- 修复 `gateway/src/app.ts`：保留向量召回优先；当向量 chunk 不存在或召回为空时，从章节概要和章节正文做关键词 fallback，返回 `source=summary/chapter` 的结果；移动端解析 Gateway RAG 结果时保留服务端返回的 `source`。
+- 已运行 `npm --prefix gateway run test -- app.test.ts`（61 passed）、`npm --prefix gateway run build`、`npm --prefix gateway-android-app run test`（33 passed）；已同步并重建 192.168.88.100 Gateway。
+- 真实复测：使用 LT Pad 设备头请求《红楼梦》`/ai/search`，`宝玉 黛玉` 返回 5 条 chapter fallback 结果；`/ai/rag-answer` 返回 200，带 3 条上下文并生成答案。
+
 2026-07-01 更新：小米真机应用内更新验收完成。
 - 从公网下载并安装旧版 `ai_novel_reader-v0.2.0-build.235.g461242a7313d.dirty.apk` 作为基线，保留 App 数据；当前线上 manifest 为 `0.2.0+build.237.g0da2d9e01844` / `versionCode=2000237`。
 - 在 build 235 设置页点击“检查更新”，页面显示“有新版本”、线上版本 `0.2.0+build.237.g0da2d9e01844` 和“下载并安装”按钮。
