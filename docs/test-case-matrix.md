@@ -175,7 +175,7 @@
 | AND-READ-002 | 切 Tab 保存进度 | 阅读页滚动后切设置/书库再返回 | 不跳回章节顶部 | Android | P1 | Partial |
 | AND-AUDIO-001 | 音频目录按书隔离 | 切换有音频书籍 | 音频目录、缓存数、同步进度不串书 | Android | P0 | Existing |
 | AND-AUDIO-002 | 单章 MP3 下载 | 当前章有音频 | 下载到原生私有目录，状态变为已缓存 | Android + Manual | P1 | Existing |
-| AND-AUDIO-003 | 批量 MP3 同步停止 | 批量下载中点击停止 | 当前章节结束后不继续新章节 | Android | P1 | Partial |
+| AND-AUDIO-003 | 批量 MP3 同步停止 | 批量下载中点击停止 | 当前章节结束后不继续新章节 | Android | P1 | Existing |
 | AND-AUDIO-004 | 离线 MP3 播放 | 断网且已有缓存 | 可播放本地 MP3，UI 不误称在线播放 | Android + Manual | P1 | Existing |
 | AND-RAG-001 | Gateway RAG 搜索 | 受信设备、可见书籍 | 搜索成功，embedding 失败时关键词兜底不显示红底误报 | Android | P1 | Existing |
 | AND-UPDATE-001 | 应用内检查更新 | Gateway 发布更高 versionCode | 显示下载并安装，系统安装确认弹出 | Android + Manual | P1 | Manual |
