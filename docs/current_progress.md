@@ -1,3 +1,10 @@
+2026-07-01 更新：真实 Gateway 8888 明文访问已自动 302 到 HTTPS。
+- 根据真机下载入口体验反馈，只处理 `http://novel.gwaves.net:8888/...` 这种明文 HTTP 打到 8888 TLS 端口的场景，不新增或接管 80 端口。
+- `gateway/nginx/gateway-https.conf` 为两个 8443 server 增加 nginx `error_page 497 =302 ...`：`novel.gwaves.net` Host 会跳转到 `https://$host:8888$request_uri`，默认 server 会跳转到 `https://novel.gwaves.net:8888$request_uri`。
+- 已同步配置到 `192.168.88.100:/home/gwaves/novel-reader-gateway/nginx/gateway-https.conf`，并重启 `gateway-https` 容器。
+- 重启时发现远端 `tls/` 目录只有 `gateway.crt/gateway.key`，而 nginx 配置引用 `fullchain.pem/privkey.pem`；已在远端 `tls/` 补充兼容 symlink：`fullchain.pem -> gateway.crt`、`privkey.pem -> gateway.key`，服务恢复正常。
+- 远端本机验证：`curl -I -H "Host: novel.gwaves.net" http://127.0.0.1:8888/downloads/ai_novel_reader.apk` 返回 `302 Location: https://novel.gwaves.net:8888/downloads/ai_novel_reader.apk`；HTTPS 同一路径返回 200，APK content-type 与大小正常。
+
 2026-07-01 更新：当前版本已部署到真实 Gateway，并发布 Android APK build 237 供真机验证。
 - 已在本地完成当前版本编译：`gateway` build、`gateway-android-app` Web build、`gateway/admin-ui` build，以及 Gateway Android debug APK build。
 - 已将 `gateway/` 同步到 `192.168.88.100:/home/gwaves/novel-reader-gateway`，同步时保留远端 `.env`、`data/`、`audio/`、`backups/`、`tls/` 等运行数据；随后执行 `docker compose build gateway && docker compose up -d gateway` 完成服务更新。
