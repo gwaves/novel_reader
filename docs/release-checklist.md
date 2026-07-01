@@ -54,6 +54,7 @@ npm --prefix gateway-android-app run build
 ## 5. 公网与安全
 
 - `/admin/ui` 公网禁止访问。
+- `http://novel.gwaves.net:8888/...` 必须返回 `302` 到同 path/query 的 `https://novel.gwaves.net:8888/...`；不要求本服务接管 80 端口。
 - 未知 Host/IP 直连不返回 Gateway 应用内容。
 - admin token 不能访问 mobile API，mobile token 不能访问 admin API。
 - 错误响应不得泄露上游 API key、数据目录或生产 token。

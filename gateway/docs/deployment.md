@@ -243,10 +243,22 @@ server {
   -> nginx 容器 8443
   -> http://gateway:6180
 
+手机/外部客户端误用 HTTP 访问 8888
+  -> http://novel.gwaves.net:8888
+  -> nginx 容器 8443
+  -> 302 Location: https://novel.gwaves.net:8888$request_uri
+
 内网生产流水线
   -> http://192.168.88.100:6180
   -> Gateway 应用
 ```
+
+公网 HTTPS 入口的部署标准：
+
+- `8888` 是对外 TLS 入口，正常访问必须使用 `https://novel.gwaves.net:8888`。
+- 如果用户或浏览器误用 `http://novel.gwaves.net:8888/...`，Nginx 必须返回 `302`，并保留原始 path/query 跳转到 `https://novel.gwaves.net:8888/...`。
+- 不要求 Gateway 自身接管公网 `80` 端口；是否处理 `http://novel.gwaves.net` 由外层网络或额外反代决定。
+- Nginx 可用 `error_page 497 =302 https://$host:8888$request_uri;` 处理“明文 HTTP 打到 HTTPS 端口”的场景；默认 server 应跳转到 canonical host，避免未知 Host 暴露应用内容。
 
 ## 验证
 
@@ -261,9 +273,10 @@ curl -H "Authorization: Bearer $GATEWAY_ADMIN_ACCESS_TOKEN" \
 
 curl -kI https://novel.gwaves.net:8888/admin/ui
 curl -I http://192.168.88.100:6180/admin/ui
+curl -I http://novel.gwaves.net:8888/downloads/ai_novel_reader.apk
 curl -I https://novel.gwaves.net:8888/downloads/ai_novel_reader.apk
 curl https://novel.gwaves.net:8888/downloads/android-app.json
 npm run gateway:security-smoke
 ```
 
-`/health` 可公开访问；公网 Nginx 入口的 `/admin/ui` 应返回 403；未知 Host 或 IP 直连不应返回 200；内网直连 `6180` 可访问管理后台；`/downloads/ai_novel_reader.apk` 应返回 `200` 和 `application/vnd.android.package-archive`；`/admin/*` 和后台 AI/RAG 接口使用 admin bearer token，`/auth/*`、`/mobile/*` 和 MP3 接口使用 mobile bearer token。生产环境未设置 `GATEWAY_ADMIN_ACCESS_TOKEN` 或 `GATEWAY_MOBILE_ACCESS_TOKEN` 时，Gateway 会拒绝启动。
+`/health` 可公开访问；公网 Nginx 入口的 `/admin/ui` 应返回 403；未知 Host 或 IP 直连不应返回 Gateway 应用内容；内网直连 `6180` 可访问管理后台；`http://novel.gwaves.net:8888/downloads/ai_novel_reader.apk` 应返回 `302 Location: https://novel.gwaves.net:8888/downloads/ai_novel_reader.apk`；HTTPS `/downloads/ai_novel_reader.apk` 应返回 `200` 和 `application/vnd.android.package-archive`；`/admin/*` 和后台 AI/RAG 接口使用 admin bearer token，`/auth/*`、`/mobile/*` 和 MP3 接口使用 mobile bearer token。生产环境未设置 `GATEWAY_ADMIN_ACCESS_TOKEN` 或 `GATEWAY_MOBILE_ACCESS_TOKEN` 时，Gateway 会拒绝启动。

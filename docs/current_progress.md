@@ -1,3 +1,8 @@
+2026-07-01 更新：8888 明文 HTTP 跳 HTTPS 固化为部署标准。
+- `gateway/docs/deployment.md` 已把 `http://novel.gwaves.net:8888/...` 返回 `302 Location: https://novel.gwaves.net:8888/...` 写入公网 HTTPS 入口部署标准，并明确不要求本服务接管 80 端口。
+- `docs/release-checklist.md` 已把 8888 明文到 HTTPS 的 302 作为公网与安全发布必检项。
+- `docs/operations-runbook.md` 已补充对应 curl 验收命令和期望结果。
+
 2026-07-01 更新：真实 Gateway 8888 明文访问已自动 302 到 HTTPS。
 - 根据真机下载入口体验反馈，只处理 `http://novel.gwaves.net:8888/...` 这种明文 HTTP 打到 8888 TLS 端口的场景，不新增或接管 80 端口。
 - `gateway/nginx/gateway-https.conf` 为两个 8443 server 增加 nginx `error_page 497 =302 ...`：`novel.gwaves.net` Host 会跳转到 `https://$host:8888$request_uri`，默认 server 会跳转到 `https://novel.gwaves.net:8888$request_uri`。

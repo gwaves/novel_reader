@@ -85,12 +85,14 @@ npm run gateway:apk-metadata-smoke -- --gateway-url "$GATEWAY_URL"
 ```bash
 curl -i "$PUBLIC_GATEWAY_URL/admin/ui"
 curl -i "https://<public-ip>:8888/health"
+curl -i "http://novel.gwaves.net:8888/downloads/ai_novel_reader.apk"
 npm run gateway:security-smoke -- --gateway-url "$PUBLIC_GATEWAY_URL"
 ```
 
 期望：
 
 - 公网 `/admin/ui` 返回 403 或被 Nginx 阻断。
+- 明文 HTTP 访问 8888 必须返回 302，并跳转到同 path/query 的 HTTPS 8888 地址；这是 Gateway HTTPS 入口部署标准，不要求同时接管 80 端口。
 - 未知 Host/IP 直连不返回 Gateway 应用内容。
 - 内网或受控入口可以访问 Admin UI。
 
