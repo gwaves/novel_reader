@@ -46,7 +46,16 @@ public class GatewayAudioPlugin extends Plugin {
           }
 
           File targetFile = new File(bookDir, safeSegment(chapterId) + ".mp3");
-          tempFile = new File(bookDir, safeSegment(chapterId) + ".tmp");
+          if (targetFile.exists() && targetFile.isFile() && targetFile.length() > 0) {
+            JSObject result = new JSObject();
+            result.put("filePath", targetFile.getAbsolutePath());
+            result.put("sizeBytes", targetFile.length());
+            result.put("cached", true);
+            call.resolve(result);
+            return;
+          }
+
+          tempFile = File.createTempFile(safeSegment(chapterId) + "-", ".tmp", bookDir);
 
           connection = (HttpURLConnection) new URL(url).openConnection();
           connection.setConnectTimeout(15000);

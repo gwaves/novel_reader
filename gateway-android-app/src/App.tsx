@@ -351,6 +351,7 @@ function App() {
   const [audioTime, setAudioTime] = useState(0)
   const [chapterAudioPlaying, setChapterAudioPlaying] = useState(false)
   const [loadingAudio, setLoadingAudio] = useState(false)
+  const [audioPlaybackLoading, setAudioPlaybackLoading] = useState(false)
   const [audioCatalogBookId, setAudioCatalogBookId] = useState<string | null>(null)
   const [addingBookId, setAddingBookId] = useState<string | null>(null)
   const [loadingBooks, setLoadingBooks] = useState(false)
@@ -414,6 +415,7 @@ function App() {
     [cachedAudioBookId, cachedAudioIds, selectedBookId],
   )
   const visibleAudioSyncProgress = audioSyncBookId === selectedBookId ? audioSyncProgress : null
+  const audioSyncRunning = Boolean(audioSyncProgress)
   const visibleFullPackageCache = fullPackageCache?.bookId === selectedBookId ? fullPackageCache : null
   const visibleFullPackageProgress = fullPackageProgress?.bookId === selectedBookId ? fullPackageProgress : null
   const displaySummaryCoverage = hasImportedPackage(visibleFullPackageCache) ? 1 : inferredSummaryCoverage(selectedBook, bookPackage, visibleFullPackageCache)
@@ -1101,7 +1103,7 @@ function App() {
       setMessage('当前章节暂无音频')
       return
     }
-    setLoadingAudio(true)
+    setAudioPlaybackLoading(true)
     try {
       const cachedAudio = readCachedAudio(selectedBookId, currentChapter.id)
       const manifest =
@@ -1145,7 +1147,7 @@ function App() {
       pendingAudioShouldPlayRef.current = false
       setMessage(errorMessage(error))
     } finally {
-      setLoadingAudio(false)
+      setAudioPlaybackLoading(false)
     }
   }
 
@@ -1192,7 +1194,9 @@ function App() {
       const targetChapters =
         limit === 'all'
           ? catalog.filter((chapter) => !readCachedAudio(bookId, chapter.chapterId))
-          : catalog.slice(safeStartIndex, safeStartIndex + (limit === 'current' ? 1 : limit))
+          : catalog
+              .slice(safeStartIndex, safeStartIndex + (limit === 'current' ? 1 : limit))
+              .filter((chapter) => !readCachedAudio(bookId, chapter.chapterId))
       if (targetChapters.length === 0) {
         setMessage(limit === 'all' ? '所有可缓存 MP3 都已下载' : '选中范围暂无可下载 MP3')
         return
@@ -1214,7 +1218,6 @@ function App() {
       setMessage(blockedReason)
       return
     }
-    setLoadingAudio(true)
     audioSyncCancelRequestedRef.current = false
     setAudioSyncBookId(bookId)
     setCachedAudioBookId(bookId)
@@ -1245,7 +1248,6 @@ function App() {
       }
       setMessage(errorMessage(error))
     } finally {
-      setLoadingAudio(false)
       setAudioSyncProgress(null)
       setAudioSyncBookId(null)
       audioSyncCancelRequestedRef.current = false
@@ -2210,10 +2212,10 @@ function App() {
     if (ttsSettings.engine === 'cloud-mp3') {
       return (
         <div className="speech-actions">
-          <button type="button" onClick={() => void (audioUrl ? toggleChapterAudioPlayback() : playCurrentAudio())} disabled={!currentAudio || loadingAudio}>
-            {audioUrl ? (chapterAudioPlaying ? '暂停' : '继续播放') : audioButtonLabel(currentAudio, loadingAudio)}
+          <button type="button" onClick={() => void (audioUrl ? toggleChapterAudioPlayback() : playCurrentAudio())} disabled={isAudioPlaybackDisabled(currentAudio, audioPlaybackLoading)}>
+            {audioUrl ? (chapterAudioPlaying ? '暂停' : '继续播放') : audioButtonLabel(currentAudio, audioPlaybackLoading)}
           </button>
-          <button type="button" onClick={() => void playCurrentAudioFromVisiblePosition()} disabled={!currentAudio || loadingAudio}>
+          <button type="button" onClick={() => void playCurrentAudioFromVisiblePosition()} disabled={isAudioPlaybackDisabled(currentAudio, audioPlaybackLoading)}>
             从当前位置播放
           </button>
         </div>
@@ -3043,16 +3045,16 @@ function App() {
                   停止同步
                 </button>
               ) : null}
-              <button type="button" onClick={() => void syncCurrentBookAudioRange('current')} disabled={!selectedBookId || !currentChapter || loadingAudio || cloudSyncBlocked}>
+              <button type="button" onClick={() => void syncCurrentBookAudioRange('current')} disabled={!selectedBookId || !currentChapter || loadingAudio || audioSyncRunning || cloudSyncBlocked}>
                 当前章节
               </button>
-              <button type="button" onClick={() => void syncCurrentBookAudioRange(10)} disabled={!selectedBookId || !currentChapter || loadingAudio || cloudSyncBlocked}>
+              <button type="button" onClick={() => void syncCurrentBookAudioRange(10)} disabled={!selectedBookId || !currentChapter || loadingAudio || audioSyncRunning || cloudSyncBlocked}>
                 当前起 10 章
               </button>
-              <button type="button" onClick={() => void syncCurrentBookAudioRange(30)} disabled={!selectedBookId || !currentChapter || loadingAudio || cloudSyncBlocked}>
+              <button type="button" onClick={() => void syncCurrentBookAudioRange(30)} disabled={!selectedBookId || !currentChapter || loadingAudio || audioSyncRunning || cloudSyncBlocked}>
                 当前起 30 章
               </button>
-              <button type="button" onClick={() => void syncCurrentBookAudioRange('all')} disabled={!selectedBookId || loadingAudio || cloudSyncBlocked}>
+              <button type="button" onClick={() => void syncCurrentBookAudioRange('all')} disabled={!selectedBookId || loadingAudio || audioSyncRunning || cloudSyncBlocked}>
                 全部未缓存
               </button>
               <button
@@ -4936,6 +4938,10 @@ function hasPositiveCount(value: unknown) {
 function audioButtonLabel(currentAudio: AudioChapter | null, loadingAudio: boolean) {
   if (loadingAudio) return '加载中'
   return currentAudio ? '播放' : '无音频'
+}
+
+export function isAudioPlaybackDisabled(currentAudio: AudioChapter | null, playbackLoading: boolean) {
+  return !currentAudio || playbackLoading
 }
 
 function fullPackageLabel(cache: FullPackageCache | null, status: FullPackageStatus) {
