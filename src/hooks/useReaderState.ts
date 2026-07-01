@@ -1942,7 +1942,7 @@ async function validateLlmConfig(config: ModelConfigDraft): Promise<void> {
         }),
       })
     } catch (error) {
-      throw new Error(`[LLM] 无法连接 Ollama：${errorMessage(error)}`)
+      throw new Error(`[LLM] 无法连接 Ollama：${errorMessage(error)}`, { cause: error })
     }
 
     if (!response.ok) {
@@ -2009,7 +2009,7 @@ async function validateLlmConfig(config: ModelConfigDraft): Promise<void> {
       body: JSON.stringify(validateBody),
     })
   } catch (error) {
-    throw new Error(`[LLM] 无法连接 OpenAI-compatible Base URL：${errorMessage(error)}`)
+    throw new Error(`[LLM] 无法连接 OpenAI-compatible Base URL：${errorMessage(error)}`, { cause: error })
   }
 
   if (!response.ok) {
@@ -2048,7 +2048,7 @@ async function validateEmbeddingConfig(embeddingConfig: EmbeddingConfig): Promis
     try {
       response = await fetch('http://127.0.0.1:5174/api/rag/embeddings/validate', requestInit)
     } catch (error) {
-      throw new Error(`[Embedding] 无法连接 embedding 验证服务：${errorMessage(error)}`)
+      throw new Error(`[Embedding] 无法连接 embedding 验证服务：${errorMessage(error)}`, { cause: error })
     }
   }
 
