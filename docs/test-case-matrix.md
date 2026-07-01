@@ -172,7 +172,7 @@
 | AND-PKG-001 | 单书 package 下载缓存 | 选择大包书籍 | 写入本地缓存，重启后可打开 | Android | P1 | Existing |
 | AND-PKG-002 | 大包存储上限 | 妖刀记/大唐双龙传 package | 不触发 WebView quota 崩溃 | Android + Manual | P1 | Existing |
 | AND-READ-001 | 按书阅读进度 | 多本书交替阅读 | 每本书章节/滚动位置独立恢复 | Android | P0 | Existing |
-| AND-READ-002 | 切 Tab 保存进度 | 阅读页滚动后切设置/书库再返回 | 不跳回章节顶部 | Android | P1 | Partial |
+| AND-READ-002 | 切 Tab 保存进度 | 阅读页滚动后切设置/书库再返回 | 不跳回章节顶部 | Android + Manual | P1 | Existing |
 | AND-AUDIO-001 | 音频目录按书隔离 | 切换有音频书籍 | 音频目录、缓存数、同步进度不串书 | Android | P0 | Existing |
 | AND-AUDIO-002 | 单章 MP3 下载 | 当前章有音频 | 下载到原生私有目录，状态变为已缓存 | Android + Manual | P1 | Existing |
 | AND-AUDIO-003 | 批量 MP3 同步停止 | 批量下载中点击停止 | 当前章节结束后不继续新章节 | Android | P1 | Existing |

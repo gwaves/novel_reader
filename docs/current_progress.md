@@ -1,3 +1,8 @@
+2026-07-01 更新：小米真机切 Tab 阅读进度验收完成。
+- 在 build 244 真机阅读《妖刀记》第 1 章时，将页面滚动到 `scrollY=5120`，切到“设置”再回“阅读”，返回后 `scrollY=5120`，没有跳回章节顶部。
+- 再将页面滚动到 `scrollY=6789`，切到“书库”再回“阅读”，返回后 `scrollY=6789`，localStorage `novel-reader-gateway-reading-progress` 保存同一 `bookId/chapterId` 和 `scrollY=6789`。
+- `AND-READ-002` 已从 Partial 收口为 Existing。
+
 2026-07-01 更新：小米真机错误 token 验收完成。
 - 在 build 243 真机上临时把 `novel-reader-gateway-settings` 中的 mobile token 改为无效值，首次发现页面直接显示上游英文 `Bearer token is invalid.`，不满足矩阵里的中文提示要求。
 - 修复 `gateway-android-app/src/deviceIdentity.ts`：全局 `errorMessage()` 将 `invalid_token` / `Bearer token is invalid.` 统一归一化为“Gateway Token 无效，请在设置页检查 Token 后重试。”；新增单元测试覆盖。
