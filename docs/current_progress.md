@@ -3,7 +3,10 @@
 - 通过 Admin API 将该设备临时切换为 `trusted`，`/mobile/books` 返回 8 本书，包含 default 书籍以及《金麟外传》《大唐双龙传》《妖刀记》等 trusted 可见书籍。
 - 将设备临时切换为 `disabled` 后，`/auth/session` 仍可探活，但 `/mobile/books` 返回 403 `device_disabled`，验证禁用设备的云端书库操作被阻断。
 - 脚本使用 `finally` 将设备恢复为 `default`，复测 `/mobile/books` 回到 5 本默认可见书籍；`AND-CONN-001` 与 `AND-LIB-001` 已从真机/真实 Gateway Manual 收口为 Existing。
-- 继续检查 `AND-PKG-001/002` 与 `AND-AUDIO-002/004` 时，手机处于图案/指纹锁屏，无法通过 ADB 直接操作 App UI；`run-as com.gwaves.novelreader.gateway` 检查 App 私有目录未发现 `files/packages/*/package-full.json` 或原生 MP3 缓存文件，Gateway 最近请求日志也没有 package/audio download 记录，因此大包缓存与 MP3 真机项仍保持待验收状态。
+- 解锁后继续完成《妖刀记》真机大包验收：云端书库显示 293 章、293 可缓存音频；加入书架后普通 package 可打开，完整数据包通过原生插件下载到 `files/packages/9679077f-2288-4bc7-9080-854784fc7f94/package-full.json`，大小 21,039,165 bytes，`package-import.json` 记录 293 章、summary/KG/embedding 导入完成，UI 显示“已导入 20 MB / 导入完成”。
+- 单章 MP3 真机验收完成：第一章音频目录显示 `durationMs=3476280`、`sizeBytes=41716269`；点击播放后原生下载写入 `files/audio/9679077f-2288-4bc7-9080-854784fc7f94/1-_1__1___________.mp3`，大小 41,716,269 bytes，localStorage `audio-cache-index` 指向本地 filePath，按钮进入“暂停”播放状态。
+- 离线播放验收完成：临时关闭 Wi-Fi 与移动数据后，从本地 `_capacitor_file_` MP3 继续播放，WebView audio 状态为 `paused=false`、`readyState=4`；随后已恢复网络、暂停音频，并将设备角色恢复为 `default`。`AND-PKG-001/002` 与 `AND-AUDIO-002/004` 已从 Partial/Manual 收口为 Existing。
+- 验收过程中发现 debug logcat 风险：Capacitor 原生插件调用会在 verbose methodData 中打印下载参数，包含移动端 token；当前文档不记录 token 值，后续发布治理应避免收集/外发未脱敏 logcat，并评估 release 构建的原生调用日志级别。
 
 2026-07-01 更新：Let's Encrypt 证书与小米真机 Gateway 联网验收通过，并修复设备并发写入 bug。
 - 复测真实 Gateway 证书：`novel.gwaves.net:8888` 当前证书 issuer 为 Let's Encrypt `YE2`，严格 TLS `curl -I https://novel.gwaves.net:8888/health` 返回 200；`npm run gateway:security-smoke` 与 `npm run gateway:apk-metadata-smoke -- --gateway-url https://novel.gwaves.net:8888` 均通过。

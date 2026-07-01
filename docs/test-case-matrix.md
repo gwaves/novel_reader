@@ -169,14 +169,14 @@
 | AND-CONN-001 | 首次连接 Gateway | 配置 baseUrl/token/deviceName | session 成功，设备登记，书库同步 | Android + Manual | P1 | Existing |
 | AND-CONN-002 | token 错误 | 错误 mobile token | 显示中文 token 检查提示，不进入假成功状态 | Android | P1 | Partial |
 | AND-LIB-001 | 书库可见性 | default/trusted/disabled 设备 | 显示符合角色的书籍，禁用后云端操作阻断 | Android + Ops | P0 | Existing |
-| AND-PKG-001 | 单书 package 下载缓存 | 选择大包书籍 | 写入本地缓存，重启后可打开 | Android | P1 | Partial |
-| AND-PKG-002 | 大包存储上限 | 妖刀记/大唐双龙传 package | 不触发 WebView quota 崩溃 | Android + Manual | P1 | Manual |
+| AND-PKG-001 | 单书 package 下载缓存 | 选择大包书籍 | 写入本地缓存，重启后可打开 | Android | P1 | Existing |
+| AND-PKG-002 | 大包存储上限 | 妖刀记/大唐双龙传 package | 不触发 WebView quota 崩溃 | Android + Manual | P1 | Existing |
 | AND-READ-001 | 按书阅读进度 | 多本书交替阅读 | 每本书章节/滚动位置独立恢复 | Android | P0 | Existing |
 | AND-READ-002 | 切 Tab 保存进度 | 阅读页滚动后切设置/书库再返回 | 不跳回章节顶部 | Android | P1 | Partial |
 | AND-AUDIO-001 | 音频目录按书隔离 | 切换有音频书籍 | 音频目录、缓存数、同步进度不串书 | Android | P0 | Existing |
-| AND-AUDIO-002 | 单章 MP3 下载 | 当前章有音频 | 下载到原生私有目录，状态变为已缓存 | Android + Manual | P1 | Manual |
+| AND-AUDIO-002 | 单章 MP3 下载 | 当前章有音频 | 下载到原生私有目录，状态变为已缓存 | Android + Manual | P1 | Existing |
 | AND-AUDIO-003 | 批量 MP3 同步停止 | 批量下载中点击停止 | 当前章节结束后不继续新章节 | Android | P1 | Partial |
-| AND-AUDIO-004 | 离线 MP3 播放 | 断网且已有缓存 | 可播放本地 MP3，UI 不误称在线播放 | Android + Manual | P1 | Manual |
+| AND-AUDIO-004 | 离线 MP3 播放 | 断网且已有缓存 | 可播放本地 MP3，UI 不误称在线播放 | Android + Manual | P1 | Existing |
 | AND-RAG-001 | Gateway RAG 搜索 | 受信设备、可见书籍 | 搜索成功，embedding 失败时关键词兜底不显示红底误报 | Android | P1 | Existing |
 | AND-UPDATE-001 | 应用内检查更新 | Gateway 发布更高 versionCode | 显示下载并安装，系统安装确认弹出 | Android + Manual | P1 | Manual |
 | AND-UPDATE-002 | 无更新状态 | versionCode 不高于本机 | 显示已是最新，不重复下载 | Android | P2 | Existing |
