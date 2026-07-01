@@ -8,6 +8,9 @@ const config: CapacitorConfig = {
     androidScheme: 'https',
     cleartext: true,
   },
+  android: {
+    loggingBehavior: 'none',
+  },
 }
 
 export default config

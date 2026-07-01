@@ -15,7 +15,7 @@
     "android:add": "npx cap add android",
     "android:sync": "npm run build && npx cap sync android",
     "android:open": "npx cap open android",
-    "android:copy-assets": "rm -rf android/app/src/main/assets/public && mkdir -p android/app/src/main/assets/public && cp -R dist/. android/app/src/main/assets/public/",
+    "android:copy-assets": "npx cap copy android",
     "android:build-fast": "npm run build && npm run android:copy-assets && cd android && ./gradlew assembleDebug"
   },
   "dependencies": {

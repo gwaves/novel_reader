@@ -1,3 +1,10 @@
+2026-07-01 更新：Gateway Android 原生日志脱敏治理完成。
+- 将 `gateway-android-app/capacitor.config.ts` 设置为 `android.loggingBehavior = none`，避免 debug/测试 APK 的 Capacitor 原生插件 methodData 日志打印下载参数和移动端 token。
+- `android:copy-assets` 改为 `npx cap copy android`，确保 fast build 也同步 Web assets 与 Capacitor config，避免只复制 `dist` 时遗漏原生配置。
+- 已运行 `npm --prefix gateway-android-app run test`、`npm --prefix gateway-android-app run android:sync`、`npm --prefix gateway-android-app run android:build-fast`；测试 APK 内 `assets/capacitor.config.json` 包含 `"loggingBehavior": "none"`。
+- 已安装本地 build 243 到小米真机，临时将测试设备切为 `trusted` 后通过 `GatewayAudio.downloadAudio` 下载《妖刀记》第 3 章 MP3（52,323,021 bytes）；随后 logcat 统计 `methodData=0`、`Authorization=0`、`Bearer=0`、GatewayAudio 原始调用日志 `0`，普通 `token` 命中均为系统音频/语音触发日志；设备角色已恢复为 `default`。
+- 发布治理补充：真实 Gateway/真机验收可保留摘要和状态证据，但不得收集或外发未脱敏 logcat；如需采集 Android 日志，必须确认不会输出 Authorization、mobile token、admin token 或原生下载参数。
+
 2026-07-01 更新：小米真机批量 MP3 同步停止验收完成。
 - 在《妖刀记》已缓存第 1 章 MP3 的基础上，将设备临时切回 `trusted`，从 MP3 管理触发“当前起 10 章”批量同步，并立即点击“停止 MP3 同步”。
 - UI 进入“正在停止 MP3 同步，当前章节完成后停止”，第二章下载完成后显示“后续 10 章 MP3 已停止，已缓存 2/10 章”；本机缓存索引只包含第 1、2 章，私有目录也只新增第 2 章 MP3，没有继续下载第 3-10 章。
@@ -11,7 +18,7 @@
 - 解锁后继续完成《妖刀记》真机大包验收：云端书库显示 293 章、293 可缓存音频；加入书架后普通 package 可打开，完整数据包通过原生插件下载到 `files/packages/9679077f-2288-4bc7-9080-854784fc7f94/package-full.json`，大小 21,039,165 bytes，`package-import.json` 记录 293 章、summary/KG/embedding 导入完成，UI 显示“已导入 20 MB / 导入完成”。
 - 单章 MP3 真机验收完成：第一章音频目录显示 `durationMs=3476280`、`sizeBytes=41716269`；点击播放后原生下载写入 `files/audio/9679077f-2288-4bc7-9080-854784fc7f94/1-_1__1___________.mp3`，大小 41,716,269 bytes，localStorage `audio-cache-index` 指向本地 filePath，按钮进入“暂停”播放状态。
 - 离线播放验收完成：临时关闭 Wi-Fi 与移动数据后，从本地 `_capacitor_file_` MP3 继续播放，WebView audio 状态为 `paused=false`、`readyState=4`；随后已恢复网络、暂停音频，并将设备角色恢复为 `default`。`AND-PKG-001/002` 与 `AND-AUDIO-002/004` 已从 Partial/Manual 收口为 Existing。
-- 验收过程中发现 debug logcat 风险：Capacitor 原生插件调用会在 verbose methodData 中打印下载参数，包含移动端 token；当前文档不记录 token 值，后续发布治理应避免收集/外发未脱敏 logcat，并评估 release 构建的原生调用日志级别。
+- 验收过程中发现 debug logcat 风险：Capacitor 原生插件调用会在 verbose methodData 中打印下载参数，包含移动端 token；当前文档不记录 token 值，已通过 Android `loggingBehavior=none` 收口为发布治理项。
 
 2026-07-01 更新：Let's Encrypt 证书与小米真机 Gateway 联网验收通过，并修复设备并发写入 bug。
 - 复测真实 Gateway 证书：`novel.gwaves.net:8888` 当前证书 issuer 为 Let's Encrypt `YE2`，严格 TLS `curl -I https://novel.gwaves.net:8888/health` 返回 200；`npm run gateway:security-smoke` 与 `npm run gateway:apk-metadata-smoke -- --gateway-url https://novel.gwaves.net:8888` 均通过。

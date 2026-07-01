@@ -49,6 +49,7 @@ npm --prefix gateway-android-app run build
 - 运行 `npm run gateway:publish-android-apk`。
 - 校验 `android-app.json`、固定 latest APK、versioned APK 三者一致。
 - 运行 `npm run gateway:apk-metadata-smoke -- --gateway-url "$GATEWAY_URL"`，确认 latest/versioned APK 均可下载且大小一致。
+- 确认 APK 内 Capacitor Android 配置为 `loggingBehavior=none`；真机 logcat 不得输出 Authorization、mobile/admin token 或原生下载 methodData。
 - 真机检查更新：高版本显示下载并打开系统安装确认；同版本或低版本显示已是最新。
 
 ## 5. 公网与安全
@@ -59,6 +60,7 @@ npm --prefix gateway-android-app run build
 - 未知 Host/IP 直连不返回 Gateway 应用内容。
 - admin token 不能访问 mobile API，mobile token 不能访问 admin API。
 - 错误响应不得泄露上游 API key、数据目录或生产 token。
+- Android 真机日志如需留存，必须先脱敏；不得上传包含 token、Authorization header 或下载参数的原始 logcat。
 
 ## 6. 回滚准备
 

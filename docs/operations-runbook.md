@@ -14,6 +14,7 @@
 | APK 更新不可见 | `/downloads/android-app.json`、`/downloads/ai_novel_reader.apk` | versionCode 未升高；latest/versioned APK 不一致 | 重跑 APK build/publish，校验元数据 |
 | Admin UI 未授权 | admin token、Nginx 入口、`/admin/*` 响应 | token 错误；公网入口被禁止；生产 token 未配置 | 使用内网入口和 admin token |
 | RAG/AI 失败 | Gateway events、上游模型日志 | 设备不可见该书；上游 key/baseUrl/model 错误 | 先确认 book visibility，再检查模型配置 |
+| Android 日志出现敏感参数 | APK 内 `capacitor.config.json`、logcat 采集脚本 | Capacitor debug logging 开启；采集了未脱敏 methodData | 设置 `android.loggingBehavior=none`，重新构建 APK；不得外发未脱敏日志 |
 
 ## 2. Gateway 健康检查
 
@@ -78,6 +79,7 @@ npm run gateway:apk-metadata-smoke -- --gateway-url "$GATEWAY_URL"
 - `android-app.json` 的 `versionName`、`versionCode`、`buildNumber`、`gitCommit` 与 `gateway-android-app/build-info.json` 一致。
 - `latestUrl` 指向 `/downloads/ai_novel_reader.apk`。
 - versioned APK 文件存在，固定 latest APK 与 versioned APK 大小一致。
+- APK 内 `assets/capacitor.config.json` 包含 `android.loggingBehavior=none`，logcat 不输出 Authorization、mobile/admin token 或 Capacitor methodData 下载参数。
 - 手机端只有线上 `versionCode` 高于本机时显示“下载并安装”。
 
 ## 6. 公网安全验收
