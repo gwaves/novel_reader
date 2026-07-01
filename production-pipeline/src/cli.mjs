@@ -2011,7 +2011,7 @@ function readSummaryEmbeddingsForPackage(db, bookId) {
       chapterId: String(item.chapterId),
       model: String(item.model || ''),
       dimension: numberOrDefault(item.dimension, 0),
-      embedding: safeJsonParse(item.embeddingJson, []),
+      embedding: normalizeEmbeddingVectorForPackage(safeJsonParse(item.embeddingJson, [])),
       generatedAt: item.generatedAt,
     }
   })
@@ -2047,10 +2047,17 @@ function readChunkEmbeddingsForPackage(db, bookId) {
       text: String(item.text || ''),
       model: String(item.model || ''),
       dimension: numberOrDefault(item.dimension, 0),
-      embedding: safeJsonParse(item.embeddingJson, []),
+      embedding: normalizeEmbeddingVectorForPackage(safeJsonParse(item.embeddingJson, [])),
       generatedAt: item.generatedAt,
     }
   })
+}
+
+function normalizeEmbeddingVectorForPackage(value) {
+  if (!Array.isArray(value)) return []
+  return value
+    .filter((item) => typeof item === 'number' && Number.isFinite(item))
+    .map((item) => Number(item.toFixed(6)))
 }
 
 function readKnowledgeGraphForPackage(db, bookId) {

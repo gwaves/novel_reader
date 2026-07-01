@@ -1,6 +1,15 @@
+2026-07-01 更新：Gateway RAG 首次/最早类问题召回与答案上下文修正。
+- 真实验证《妖刀记》问题“耿照的第一个发生性关系的女人是谁”时，向量检索已能返回 `source=chunk`，但纯向量排序会偏向第 21/22 章等后文直白片段，且短 snippet 不能给 LLM 足够证据判断“最早/首次”。
+- 修正 `gateway/src/app.ts`：当 query 包含“第一个/第一次/首次/最早”等意图时，在最高分附近候选中优先更早章节；`/ai/search` 仍返回短 snippet，不暴露大段上下文。
+- 修正 `/ai/rag-answer`：内部保留命中 chunk 的完整 `contextText`，prompt 使用完整上下文并明确要求“首次/最早”问题按章节号和事件顺序判断；对外响应仍过滤 `contextText`。
+- 补充 Gateway 回归测试：分数相近时第 3 章早期证据应排在第 21 章后文证据之前，且 `/ai/search` 响应不包含内部上下文字段。
+- 已运行 `npm --prefix gateway run test -- app.test.ts`（64 passed）和 `npm --prefix gateway run build`；已同步并重建 192.168.88.100 Gateway。
+- 真实复测：`/ai/rag-answer` 在完整 chunk 上下文下不再被第 21/22 章短片段带偏，模型从第 3 章完整上下文中识别到更早的“满园春/小闲姑娘”经历；`/ai/search` 响应确认未返回 `contextText`。
+
 2026-07-01 更新：Gateway package embedding 向量治理修正。
 - 定位到生产 `package` 阶段只导出 `embeddings.coverage`，把 `embeddings.summaries` 和 `embeddings.chunks` 固定写成空数组；这会让 Gateway/Admin 显示 `E 100%`，但实际没有可执行向量召回。
 - 修正 `production-pipeline/src/cli.mjs`：打包时从 `summary_embeddings` 与 `chapter_chunk_embeddings` 读取真实向量、模型、维度、chunk 文本和位置，并写入 Gateway 服务端 package；移动端 package 下载仍由 Gateway 动态剥离 `embeddings`。
+- 向量导出时将浮点值收敛到 6 位小数，避免《妖刀记》这类大书在直接 JSON stringify 4096 维全精度向量时触发 `Invalid string length`，同时保留语义检索所需精度。
 - 修正 Gateway package 状态：`embeddingCoverage` 继续表示生产 coverage report，新增 `embeddingVectorCoverage`、`embeddingSummaryVectorCount`、`embeddingChunkVectorCount` 表示当前 package 内真实可用向量。
 - 修正 Admin UI 数据包页：覆盖率列改为 `E报告` + `向量 数量(覆盖率)`，并在 `E报告 > 0` 但 Gateway 向量为 0 时提示“Embedding 报告存在但 Gateway 向量缺失”。
 - 补充 Gateway 侧导入验收：Admin `PUT /admin/books/:bookId/package` 导入带向量 package 后，远端存储保留向量，`/admin/packages` 能报告真实向量数量和覆盖率。

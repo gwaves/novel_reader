@@ -2928,6 +2928,83 @@ describe('gateway app', () => {
     })
   })
 
+  it('prioritizes earlier chapters for first-event RAG searches when vector scores are close', async () => {
+    const dataDir = await makeDataDir()
+    await mkdir(join(dataDir, 'books', 'book-a'), { recursive: true })
+    await writeFile(
+      join(dataDir, 'books.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        books: [
+          {
+            id: 'book-a',
+            title: '妖刀记',
+            chapterCount: 21,
+            updatedAt: '2026-06-30T00:00:00.000Z',
+            visibility: 'default',
+          },
+        ],
+      }),
+      'utf8',
+    )
+    await writeFile(
+      join(dataDir, 'books', 'book-a', 'package.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        book: {
+          id: 'book-a',
+          title: '妖刀记',
+          chapterCount: 21,
+          updatedAt: '2026-06-30T00:00:00.000Z',
+          visibility: 'default',
+        },
+        chapters: [
+          { id: 'chapter-3', title: '早期证据', index: 3 },
+          { id: 'chapter-21', title: '后文证据', index: 21 },
+        ],
+        embeddings: {
+          chunks: [
+            { chapterId: 'chapter-21', chapterIndex: 21, text: '后文更直白地回忆某次关系。', embedding: [0.61, 0.79] },
+            { chapterId: 'chapter-3', chapterIndex: 3, text: '耿照先看到无关景物。黄缨出现在更早章节里的第一次事件。', embedding: [0.59, 0.81] },
+          ],
+        },
+      }),
+      'utf8',
+    )
+    const fetchMock = vi.fn(async () => jsonResponse({ data: [{ embedding: [1, 0] }] }))
+    vi.stubGlobal('fetch', fetchMock)
+    const app = buildTestApp({
+      GATEWAY_MOBILE_ACCESS_TOKEN: 'mobile-token',
+      GATEWAY_DATA_DIR: dataDir,
+      GATEWAY_EMBEDDING_BASE_URL: 'https://embedding.example.test/v1',
+      GATEWAY_EMBEDDING_API_KEY: 'embedding-secret',
+      GATEWAY_EMBEDDING_MODEL: 'text-embedding-test',
+    })
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/ai/search',
+      headers: {
+        authorization: 'Bearer mobile-token',
+        'x-device-id': 'device-a',
+      },
+      payload: {
+        bookId: 'book-a',
+        query: '第一个发生关系的人是谁',
+        limit: 2,
+      },
+    })
+
+    expect(response.statusCode).toBe(200)
+    const results = response.json().results as Array<{ chapterId: string; snippet: string }>
+    expect(results.map((result) => result.chapterId)).toEqual([
+      'chapter-3',
+      'chapter-21',
+    ])
+    expect(results[0].snippet).toContain('黄缨')
+    expect(results[0]).not.toHaveProperty('contextText')
+  })
+
   it('applies device visibility rules to mobile AI search and RAG answer routes', async () => {
     const dataDir = await makeDataDir()
     await mkdir(join(dataDir, 'books', 'trusted-book'), { recursive: true })

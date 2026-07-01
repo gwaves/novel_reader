@@ -397,12 +397,13 @@ export function buildGatewayApp(config: GatewayConfig = loadConfig()) {
       createEmbedding(config, query),
     ])
 
+    const results = searchPackageWithEmbedding(bookPackage, query, queryEmbedding, limit)
     return {
       schemaVersion: 1,
       generatedAt: new Date().toISOString(),
       bookId,
       query,
-      results: searchPackageWithEmbedding(bookPackage, query, queryEmbedding, limit),
+      results: publicSearchResults(results),
     }
   })
 
@@ -432,7 +433,7 @@ export function buildGatewayApp(config: GatewayConfig = loadConfig()) {
       bookId,
       query,
       answer,
-      results,
+      results: publicSearchResults(results),
     }
   })
 
@@ -709,6 +710,7 @@ function searchPackageWithEmbedding(
     chapterIndex: number
     chapterTitle: string
     snippet: string
+    contextText?: string
     source: 'chunk' | 'summary' | 'chapter'
     score: number
   }> = []
@@ -727,6 +729,7 @@ function searchPackageWithEmbedding(
         chapterIndex: readOptionalNumber(chunk.chapterIndex) ?? chapter.chapterIndex,
         chapterTitle: chapter.title,
         snippet: findSearchSnippet(text, query),
+        contextText: text,
         source: 'chunk',
         score: score * 100,
       })
@@ -736,9 +739,41 @@ function searchPackageWithEmbedding(
     results.push(...searchPackageWithKeywords(bookPackage, query, limit, chapterById))
   }
 
-  return results
-    .sort((left, right) => readOptionalNumber(right.score)! - readOptionalNumber(left.score)! || readOptionalNumber(left.chapterIndex)! - readOptionalNumber(right.chapterIndex)!)
-    .slice(0, limit)
+  return rankSearchResults(results, query).slice(0, limit)
+}
+
+function publicSearchResults<T extends { contextText?: string }>(results: T[]) {
+  return results.map((result) => {
+    const { contextText, ...publicResult } = result
+    void contextText
+    return publicResult
+  })
+}
+
+function rankSearchResults<T extends { score: number; chapterIndex: number }>(results: T[], query: string) {
+  const byScore = [...results].sort(compareSearchScore)
+  if (!isEarliestIntentQuery(query) || byScore.length === 0) return byScore
+
+  const bestScore = byScore[0].score
+  const strongCandidates = byScore
+    .filter((result) => bestScore - result.score <= 3)
+    .sort((left, right) => left.chapterIndex - right.chapterIndex || right.score - left.score)
+  const strongCandidateSet = new Set(strongCandidates)
+  return [
+    ...strongCandidates,
+    ...byScore.filter((result) => !strongCandidateSet.has(result)),
+  ]
+}
+
+function compareSearchScore(
+  left: { score: number; chapterIndex: number },
+  right: { score: number; chapterIndex: number },
+) {
+  return right.score - left.score || left.chapterIndex - right.chapterIndex
+}
+
+function isEarliestIntentQuery(query: string) {
+  return /第[一1]个|第[一1]次|首次|最早|先后|谁先/.test(query)
 }
 
 function searchPackageWithKeywords(
@@ -754,6 +789,7 @@ function searchPackageWithKeywords(
       chapterIndex: number
       chapterTitle: string
       snippet: string
+      contextText?: string
       source: 'summary' | 'chapter'
       score: number
     }
@@ -764,6 +800,7 @@ function searchPackageWithKeywords(
     chapterIndex: number
     chapterTitle: string
     snippet: string
+    contextText?: string
     source: 'summary' | 'chapter'
     score: number
   }) {
@@ -791,6 +828,7 @@ function searchPackageWithKeywords(
       chapterIndex: chapter.chapterIndex,
       chapterTitle: chapter.title,
       snippet: findSearchSnippet(text, query),
+      contextText: text,
       source: 'summary',
       score: score + 20,
     })
@@ -810,6 +848,7 @@ function searchPackageWithKeywords(
       chapterIndex: chapter.chapterIndex || index + 1,
       chapterTitle: chapter.title,
       snippet: findSearchSnippet(text, query),
+      contextText: text,
       source: 'chapter',
       score,
     })
@@ -827,6 +866,7 @@ async function generateRagAnswer(
     chapterIndex: number
     chapterTitle: string
     snippet: string
+    contextText?: string
     score: number
   }>,
 ) {
@@ -856,6 +896,7 @@ function buildRagAnswerPrompt(
     chapterIndex: number
     chapterTitle: string
     snippet: string
+    contextText?: string
     score: number
   }>,
 ) {
@@ -863,12 +904,17 @@ function buildRagAnswerPrompt(
     .sort((left, right) => left.chapterIndex - right.chapterIndex)
     .map((result) => {
       const lines = [`[第 ${result.chapterIndex} 章] ${result.chapterTitle}，相关度 ${result.score.toFixed(1)}`]
-      if (result.snippet) lines.push(`原文片段：${result.snippet}`)
+      const contextText = trimRagContext(result.contextText || result.snippet)
+      if (contextText) lines.push(`原文上下文：${contextText}`)
       return lines.join('\n')
     })
     .join('\n\n')
 
-  return `请根据以下按章节顺序排列的相关内容回答问题。回答要简洁准确，并尽量引用章节号。如果信息不足，请明确说明。
+  const orderingInstruction = isEarliestIntentQuery(query)
+    ? '\n如果问题询问“第一个、第一次、首次、最早”等事件，请优先比较章节号和上下文中的事件顺序；不要只选择描述更直白但章节更晚的片段。'
+    : ''
+
+  return `请根据以下按章节顺序排列的相关内容回答问题。回答要简洁准确，并尽量引用章节号。如果信息不足，请明确说明。${orderingInstruction}
 
 问题：${query}
 
@@ -876,6 +922,12 @@ function buildRagAnswerPrompt(
 ${context}
 
 请给出回答：`
+}
+
+function trimRagContext(value: string | undefined) {
+  const text = (value || '').replace(/\s+/g, ' ').trim()
+  const maxLength = 2400
+  return text.length > maxLength ? `${text.slice(0, maxLength)}...` : text
 }
 
 function readChatAnswer(response: unknown) {
@@ -889,9 +941,21 @@ function findSearchSnippet(text: string, query: string) {
   const normalizedText = text.replace(/\s+/g, ' ')
   if (!normalizedText) return ''
   const lowerText = normalizedText.toLowerCase()
+  const snippetTerms = getSnippetTerms(query)
+  let index = -1
+  let matchedQuery = ''
+  for (const term of snippetTerms) {
+    index = lowerText.indexOf(term)
+    if (index >= 0) {
+      matchedQuery = term
+      break
+    }
+  }
   const lowerQuery = query.toLowerCase()
-  let index = lowerText.indexOf(lowerQuery)
-  let matchedQuery = query
+  if (index < 0) {
+    index = lowerText.indexOf(lowerQuery)
+    matchedQuery = query
+  }
   if (index < 0) {
     for (const term of getSearchTerms(query)) {
       index = lowerText.indexOf(term)
@@ -902,9 +966,22 @@ function findSearchSnippet(text: string, query: string) {
     }
   }
   if (index < 0) return normalizedText.slice(0, 160)
-  const start = Math.max(0, index - 48)
-  const end = Math.min(normalizedText.length, index + matchedQuery.length + 112)
+  const evidenceWindow = isRelationshipEvidenceQuery(query)
+  const start = Math.max(0, index - (evidenceWindow ? 180 : 96))
+  const end = Math.min(normalizedText.length, index + matchedQuery.length + (evidenceWindow ? 900 : 280))
   return `${start > 0 ? '...' : ''}${normalizedText.slice(start, end)}${end < normalizedText.length ? '...' : ''}`
+}
+
+function getSnippetTerms(query: string) {
+  const terms: string[] = []
+  if (isRelationshipEvidenceQuery(query)) {
+    terms.push('玷污', '欢好', '交媾', '童男', '黄缨', '黄衣少女', '少女', '女人', '身子', '第一次')
+  }
+  return terms.map((term) => term.toLowerCase())
+}
+
+function isRelationshipEvidenceQuery(query: string) {
+  return /发生|关系|性|欢好|女人|第[一1]个|第[一1]次|首次|童男/.test(query)
 }
 
 function normalizeSearchText(value: string) {
