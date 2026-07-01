@@ -185,15 +185,15 @@
 
 | ID | 用例 | 前置条件 | 期望结果 | 层级 | 风险 | 状态 |
 |----|------|----------|----------|------|------|------|
-| OPS-DEPLOY-001 | Gateway 启动健康检查 | 生产 token 和数据目录配置完成 | `/health`、`/capabilities` 正常，敏感环境不泄露 | Ops | P0 | Partial |
-| OPS-SEC-001 | 公网 Admin UI 禁止访问 | Nginx 公网入口 | `/admin/ui` 返回 403，内网可访问 | Ops | P0 | Manual |
-| OPS-SEC-002 | 未知 Host/IP 直连 | 公网 Nginx | 不返回 Gateway 应用内容 | Ops | P0 | Manual |
+| OPS-DEPLOY-001 | Gateway 启动健康检查 | 生产 token、可信 TLS 证书和数据目录配置完成 | `/health`、`/capabilities` 正常，严格 TLS 通过，敏感环境不泄露 | Ops Script + Real Gateway | P0 | Partial |
+| OPS-SEC-001 | 公网 Admin UI 禁止访问 | Nginx 公网入口 | `/admin/ui` 返回 403，内网可访问 | Ops Script + Real Gateway | P0 | Existing |
+| OPS-SEC-002 | 未知 Host/IP 直连 | 公网 Nginx | 不返回 Gateway 应用内容 | Ops Script + Real Gateway | P0 | Existing |
 | OPS-PUBLISH-001 | package 发布后真实可见 | production-pipeline publish 完成 | 远端 `books.json` 与 `/mobile/books` 设备可见性一致 | API + Ops | P0 | Existing |
 | OPS-PUBLISH-002 | audio 发布后 admin refresh | MP3/audio.json 已 rsync | Admin audio coverage 与远端 audio.json 一致 | API + Ops | P0 | Existing |
 | OPS-PUBLISH-003 | APK 发布元数据 | 发布 APK 到 downloads | `android-app.json`、latest APK、versioned APK 一致 | Ops Script + Real Gateway | P1 | Existing |
 | OPS-METRIC-001 | 指标定位错误 | 制造 401/404/500/download | metrics/events 能定位路由、状态、设备和错误类别 | Ops Script + Real Gateway | P1 | Existing |
 | OPS-RUNBOOK-001 | 常见故障排查 | 缺音频、缺 package、鉴权失败、模型失败 | runbook 给出检查路径和修复命令 | Manual | P1 | Existing |
-| OPS-ROLLBACK-001 | 发布回滚 | 发布错误 package/audio/APK | dry-run 可验证回滚输入；`--apply` 可恢复 package/audio/APK | Ops Script + Real Exercise | P0 | Partial |
+| OPS-ROLLBACK-001 | 发布回滚 | 发布错误 package/audio/APK | dry-run 可验证回滚输入；`--apply` 可恢复 package/audio/APK | Ops Script + Real Exercise | P0 | Existing |
 
 ## 12. 第一批自动化建议
 

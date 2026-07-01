@@ -1,3 +1,12 @@
+2026-07-01 更新：OPS 回滚演练、公网安全和小米真机首轮验收推进。
+- `OPS-ROLLBACK-001` 已在临时测试 Gateway 完成受控演练：使用独立 `GATEWAY_DATA_DIR/GATEWAY_AUDIO_DIR/GATEWAY_DOWNLOADS_DIR` 和 `rollback-book` 构造错误版本，再对 package/audio/APK 分别执行 dry-run 与 `--apply`。
+- package 回滚通过测试 Gateway admin `PUT /admin/books/rollback-book/package` 恢复，验证 `/admin/books` 与 `/admin/books/rollback-book/package/download` 均显示备份版本书名、章节和正文。
+- audio 回滚将错误目录替换为备份目录，验证 `audio.json` 恢复为 `good.mp3`、`durationMs=2222`；APK 回滚将 versioned APK 恢复为 `ai_novel_reader.apk`，并写入带 `rolledBackAt` 的 `android-app.json`。
+- 公网安全实测：真实 Gateway `http://novel.gwaves.net:8888/downloads/ai_novel_reader.apk` 已返回 302 到 HTTPS；公网 `/admin/ui` 返回 403；未知 Host 直连返回空响应/非 200；内网 `health/capabilities/adminBooks/mobileSession` 均为 200。
+- 发现部署健康阻断：当前 8888 TLS 证书为自签 `CN=novel.gwaves.net`，严格 TLS 下 `npm run gateway:apk-metadata-smoke` 与新增严格 TLS security smoke 均失败；关闭 TLS 校验后 APK metadata 本身仍全部通过。
+- 小米真机 `23127PN0CC`（Android 14）已安装 APK `0.2.0+build.237.g0da2d9e01844` / `versionCode=2000237` 并能启动进程；真机连接 Gateway 被同一证书问题阻断，日志为 `SSLHandshakeException: Trust anchor for certification path not found`。
+- `gateway/scripts/security-smoke.sh` 已新增严格 TLS `/health` 检查，避免自签证书再次绕过公网安全门禁；部署说明、Runbook 和发布清单已把可信 TLS 证书列为公网/真机验收标准。
+
 2026-07-01 更新：8888 明文 HTTP 跳 HTTPS 固化为部署标准。
 - `gateway/docs/deployment.md` 已把 `http://novel.gwaves.net:8888/...` 返回 `302 Location: https://novel.gwaves.net:8888/...` 写入公网 HTTPS 入口部署标准，并明确不要求本服务接管 80 端口。
 - `docs/release-checklist.md` 已把 8888 明文到 HTTPS 的 302 作为公网与安全发布必检项。
