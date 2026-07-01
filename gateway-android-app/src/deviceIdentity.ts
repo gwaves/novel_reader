@@ -156,6 +156,10 @@ export function isDeviceUnauthorizedError(error: unknown) {
   )
 }
 
+export function isInvalidTokenError(error: unknown) {
+  return error instanceof GatewayError && (error.code === 'invalid_token' || /bearer token is invalid/i.test(error.message))
+}
+
 export function isDeviceAccessBlockedError(error: unknown) {
   return isDeviceDisabledError(error) || isDeviceUnauthorizedError(error)
 }
@@ -166,6 +170,9 @@ export function errorMessage(error: unknown) {
   }
   if (isDeviceUnauthorizedError(error)) {
     return '设备未授权，不能同步云端书库。请在管理后台确认设备角色后再刷新授权状态。'
+  }
+  if (isInvalidTokenError(error)) {
+    return 'Gateway Token 无效，请在设置页检查 Token 后重试。'
   }
   return error instanceof Error ? error.message : '请求失败'
 }

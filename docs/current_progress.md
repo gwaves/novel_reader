@@ -1,3 +1,10 @@
+2026-07-01 更新：小米真机错误 token 验收完成。
+- 在 build 243 真机上临时把 `novel-reader-gateway-settings` 中的 mobile token 改为无效值，首次发现页面直接显示上游英文 `Bearer token is invalid.`，不满足矩阵里的中文提示要求。
+- 修复 `gateway-android-app/src/deviceIdentity.ts`：全局 `errorMessage()` 将 `invalid_token` / `Bearer token is invalid.` 统一归一化为“Gateway Token 无效，请在设置页检查 Token 后重试。”；新增单元测试覆盖。
+- 安装修复后的本地 build 244 复测：无效 token 时页面显示中文提示，不显示英文上游错误，没有出现“连接成功/已连接”假成功，也没有云端书库数量。
+- 脚本通过 `finally` 从 192.168.88.100 远端 `.env` 恢复真实 mobile token 到本机 localStorage；恢复后页面不再显示 invalid token，书库恢复可用。
+- `AND-CONN-002` 已从 Partial 收口为 Existing。
+
 2026-07-01 更新：Gateway Android 原生日志脱敏治理完成。
 - 将 `gateway-android-app/capacitor.config.ts` 设置为 `android.loggingBehavior = none`，避免 debug/测试 APK 的 Capacitor 原生插件 methodData 日志打印下载参数和移动端 token。
 - `android:copy-assets` 改为 `npx cap copy android`，确保 fast build 也同步 Web assets 与 Capacitor config，避免只复制 `dist` 时遗漏原生配置。
