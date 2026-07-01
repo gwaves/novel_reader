@@ -418,7 +418,7 @@ function App() {
   const visibleFullPackageProgress = fullPackageProgress?.bookId === selectedBookId ? fullPackageProgress : null
   const displaySummaryCoverage = hasImportedPackage(visibleFullPackageCache) ? 1 : inferredSummaryCoverage(selectedBook, bookPackage, visibleFullPackageCache)
   const displayKgCoverage = inferredKgCoverage(selectedBook, bookPackage, visibleFullPackageCache)
-  const displayEmbeddingCoverage = inferredEmbeddingCoverage(selectedBook, bookPackage, visibleFullPackageCache)
+  const displayRagAvailability = ragAvailability(selectedBook, bookPackage)
   const displayCloudAudioChapterCount = visibleAudioChapters.length || selectedBook?.audioChapterCount || 0
   const displayCachedAudioChapterCount = visibleCachedAudioIds.size || bookCachedAudioCount(selectedLocalBook ?? selectedBook)
   const cacheSummaries = useMemo(() => buildBookCacheSummaries([...displayLocalBooks, ...books], cacheVersion), [books, displayLocalBooks, cacheVersion])
@@ -2411,7 +2411,7 @@ function App() {
                 <div className="coverage-row">
                   <Coverage label="概要" value={displaySummaryCoverage} />
                   <Coverage label="图谱" value={displayKgCoverage} />
-                  <Coverage label="向量" value={displayEmbeddingCoverage} />
+                  <StatusCoverage label="RAG" value={displayRagAvailability} />
                 </div>
                 <div className="package-line">
                   <span>Package</span>
@@ -3720,6 +3720,18 @@ function Coverage({ label, value }: { label: string; value?: number }) {
   )
 }
 
+function StatusCoverage({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="coverage">
+      <span>{label}</span>
+      <div className="meter">
+        <div style={{ width: value === '未加载' ? '0%' : '100%' }} />
+      </div>
+      <strong>{value}</strong>
+    </div>
+  )
+}
+
 function findChapterSummary(bookPackage: BookPackage, chapter: Chapter): Record<string, unknown> | null {
   const summaries = bookPackage.summaries
   if (Array.isArray(summaries)) {
@@ -4882,9 +4894,10 @@ function inferredKgCoverage(book: BookSummary | null, bookPackage: BookPackage |
   return hasKnowledgeGraph(bookPackage) || hasImportedKnowledgeGraph(fullPackage) ? 1 : 0
 }
 
-function inferredEmbeddingCoverage(book: BookSummary | null, bookPackage: BookPackage | null, fullPackage: FullPackageCache | null) {
-  void book
-  return hasEmbeddings(bookPackage) || hasImportedEmbeddings(fullPackage) ? 1 : 0
+function ragAvailability(book: BookSummary | null, bookPackage: BookPackage | null) {
+  if ((book?.embeddingCoverage ?? 0) > 0) return '云端'
+  if (bookPackage) return '本地'
+  return '未加载'
 }
 
 function hasImportedPackage(fullPackage: FullPackageCache | null) {
@@ -4901,16 +4914,6 @@ function hasKnowledgeGraph(bookPackage: BookPackage | null) {
   )
 }
 
-function hasEmbeddings(bookPackage: BookPackage | null) {
-  const embeddings = bookPackage?.embeddings
-  return isRecord(embeddings) && (
-    hasNonEmptyArray(embeddings.summaries) ||
-    hasNonEmptyArray(embeddings.chunks) ||
-    hasPositiveCount(embeddings.summaries) ||
-    hasPositiveCount(embeddings.chunks)
-  )
-}
-
 function hasImportedKnowledgeGraph(fullPackage: FullPackageCache | null) {
   const graph = fullPackage?.importStats?.knowledgeGraph
   return Boolean(
@@ -4920,11 +4923,6 @@ function hasImportedKnowledgeGraph(fullPackage: FullPackageCache | null) {
         (graph.entityMentionCount ?? 0) > 0 ||
         (graph.relationMentionCount ?? 0) > 0),
   )
-}
-
-function hasImportedEmbeddings(fullPackage: FullPackageCache | null) {
-  const embeddings = fullPackage?.importStats?.embeddings
-  return Boolean(embeddings && ((embeddings.summaryCount ?? 0) > 0 || (embeddings.chunkCount ?? 0) > 0))
 }
 
 function hasNonEmptyArray(value: unknown) {

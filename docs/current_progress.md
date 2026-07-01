@@ -1,3 +1,8 @@
+2026-07-01 更新：移动端书库 RAG/向量显示口径修正。
+- 根据 LT Pad《红楼梦》验证，移动端书库原先显示“向量 100%”容易误导：向量召回发生在 Gateway，手机端并不下载或持有完整向量。
+- 修正 `gateway-android-app/src/App.tsx`：书库详情的第三个 coverage 项从“向量百分比”改为 `RAG` 状态，显示 `云端` / `本地` / `未加载`；概要和图谱仍按本地阅读包/完整包覆盖率显示。
+- 已运行 `npm --prefix gateway-android-app run test`（33 passed）和 `npm --prefix gateway-android-app run build`。
+
 2026-07-01 更新：修复 LT Pad《红楼梦》RAG 搜索空结果。
 - 真实 Gateway 日志显示 LT Pad（deviceId `7c6bd6bb-e097-4c6c-9422-ec4b6d1d5632`）连续请求 `/ai/search` 均返回 200，但客户端无内容；Admin 请求日志只记录状态码，未记录 response body。
 - 定位根因：线上《红楼梦》`package.json` 的 `embeddings.coverage.chunks.coverage=1`，但 `embeddings.chunks` 和 `embeddings.summaries` 实际为空数组；Gateway `/ai/search` 原先只从内联 `embeddings.chunks` 召回，导致 200 + `results: []`。
