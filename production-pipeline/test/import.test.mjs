@@ -354,6 +354,70 @@ describe('production-pipeline import', () => {
     }
   })
 
+  it('fails package when completed KG chapters have no mention coverage', async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), 'production-pipeline-package-quality-test-'))
+    try {
+      const txtPath = join(tempDir, 'sample.txt')
+      const dbPath = join(tempDir, 'main.sqlite')
+      const runRoot = join(tempDir, 'runs')
+      await writeFile(txtPath, `第一章 开始\n这是第一章内容。\n\n第二章 继续\n这是第二章内容。`, 'utf8')
+      await execFileAsync(process.execPath, [
+        cliPath,
+        'import',
+        '--file',
+        txtPath,
+        '--book-id',
+        'sample-book',
+        '--title',
+        '样书',
+        '--main-db',
+        dbPath,
+        '--run-root',
+        runRoot,
+      ])
+      seedSummaries(dbPath)
+      seedEmbeddings(dbPath)
+      seedKnowledgeGraph(dbPath)
+      seedKgChapterExtractions(dbPath, [
+        ['sample-book:ch00001', { entities: [{ name: '阿甲' }], relations: [] }],
+        ['sample-book:ch00002', { entities: [], relations: [] }],
+      ])
+
+      await assert.rejects(
+        execFileAsync(process.execPath, [
+          cliPath,
+          'package',
+          '--book-id',
+          'sample-book',
+          '--main-db',
+          dbPath,
+          '--run-root',
+          runRoot,
+        ]),
+        (error) => {
+          assert.match(error.stderr, /Package quality gate failed/)
+          assert.match(error.stderr, /KG mentions cover 1\/2/)
+          return true
+        },
+      )
+
+      const runIds = await readdir(join(runRoot, 'sample-book'))
+      assert.equal(runIds.length, 1)
+      const runDir = join(runRoot, 'sample-book', runIds[0])
+      const runJson = JSON.parse(await readFile(join(runDir, 'run.json'), 'utf8'))
+      assert.equal(runJson.status, 'failed')
+      const qualityReport = JSON.parse(await readFile(join(runDir, runJson.stages.package.artifacts.qualityReport), 'utf8'))
+      assert.equal(qualityReport.status, 'failed')
+      assert.equal(qualityReport.errors[0].code, 'kg_mention_coverage_incomplete')
+      assert.deepEqual(
+        qualityReport.errors[0].missingChapters.map((chapter) => chapter.chapterId),
+        ['sample-book:ch00002'],
+      )
+    } finally {
+      await rm(tempDir, { recursive: true, force: true })
+    }
+  })
+
   it('prepares a dry-run publish plan and merged Gateway catalog', async () => {
     const tempDir = await mkdtemp(join(tmpdir(), 'production-pipeline-publish-test-'))
     try {
@@ -1329,6 +1393,82 @@ describe('production-pipeline import', () => {
         assert.equal(extractionCount, 2)
         assert.equal(entityCount, 2)
         assert.equal(relationCount, 1)
+      } finally {
+        db.close()
+      }
+    } finally {
+      await chatServer?.close()
+      await rm(tempDir, { recursive: true, force: true })
+    }
+  })
+
+  it('fails kg when a non-trivial chapter returns an empty extraction', async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), 'production-pipeline-kg-quality-test-'))
+    let chatServer
+    try {
+      chatServer = await startFakeChatServer({ emptyKgWhenPromptIncludes: 'EMPTY_KG' })
+      const txtPath = join(tempDir, 'sample.txt')
+      const dbPath = join(tempDir, 'main.sqlite')
+      const runRoot = join(tempDir, 'runs')
+      await writeFile(txtPath, `第一章 空图谱\n${'EMPTY_KG 阿甲在长安帮助乙门。'.repeat(80)}`, 'utf8')
+      await execFileAsync(process.execPath, [
+        cliPath,
+        'import',
+        '--file',
+        txtPath,
+        '--book-id',
+        'sample-book',
+        '--title',
+        '样书',
+        '--main-db',
+        dbPath,
+        '--run-root',
+        runRoot,
+      ])
+
+      await assert.rejects(
+        execFileAsync(process.execPath, [
+          cliPath,
+          'kg',
+          '--book-id',
+          'sample-book',
+          '--main-db',
+          dbPath,
+          '--run-root',
+          runRoot,
+          '--provider',
+          'openai-compatible',
+          '--base-url',
+          chatServer.url,
+          '--model',
+          'fake-chat',
+          '--empty-min-chars',
+          '100',
+          '--disable-thinking',
+        ]),
+        (error) => {
+          assert.match(error.stderr, /KG completed with failures/)
+          assert.match(error.stderr, /Empty KG extraction/)
+          return true
+        },
+      )
+
+      const runIds = await readdir(join(runRoot, 'sample-book'))
+      assert.equal(runIds.length, 1)
+      const runDir = join(runRoot, 'sample-book', runIds[0])
+      const kgReport = JSON.parse(await readFile(join(runDir, 'artifacts', 'kg-report.json'), 'utf8'))
+      assert.equal(kgReport.completed, 0)
+      assert.equal(kgReport.failed, 1)
+      assert.equal(kgReport.quality.issueCount, 1)
+      assert.equal(kgReport.quality.issues[0].code, 'kg_empty_extraction')
+
+      const db = new DatabaseSync(dbPath, { readOnly: true })
+      try {
+        const row = db.prepare('SELECT status, extraction_json AS extractionJson, error FROM kg_chapter_extractions WHERE chapter_id = ?')
+          .get('sample-book:ch00001')
+        assert.equal(row.status, 'failed')
+        assert.equal(row.extractionJson, null)
+        assert.match(row.error, /Empty KG extraction/)
       } finally {
         db.close()
       }
@@ -2684,6 +2824,33 @@ function seedKnowledgeGraph(dbPath) {
   }
 }
 
+function seedKgChapterExtractions(dbPath, entries) {
+  const db = new DatabaseSync(dbPath)
+  try {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS kg_chapter_extractions (
+        chapter_id TEXT PRIMARY KEY REFERENCES chapters(id) ON DELETE CASCADE,
+        book_id TEXT NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+        status TEXT NOT NULL,
+        extraction_json TEXT,
+        error TEXT,
+        model TEXT,
+        scanned_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      );
+    `)
+    const insert = db.prepare(`
+      INSERT INTO kg_chapter_extractions (chapter_id, book_id, status, extraction_json, error, model, scanned_at, updated_at)
+      VALUES (?, 'sample-book', 'completed', ?, NULL, 'fake-chat', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+    `)
+    for (const [chapterId, extraction] of entries) {
+      insert.run(chapterId, JSON.stringify(extraction))
+    }
+  } finally {
+    db.close()
+  }
+}
+
 function fakeTtsDirectorSource() {
   return `
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
@@ -2864,7 +3031,7 @@ async function startFakeOllamaEmbeddingServer({ models = ['qwen3-embedding:8b'] 
   }
 }
 
-async function startFakeChatServer({ delayMs = 0 } = {}) {
+async function startFakeChatServer({ delayMs = 0, emptyKgWhenPromptIncludes = '' } = {}) {
   const server = createServer(async (request, response) => {
     const url = new URL(request.url, 'http://127.0.0.1')
     if (request.method !== 'POST' || url.pathname !== '/chat/completions') {
@@ -2875,6 +3042,21 @@ async function startFakeChatServer({ delayMs = 0 } = {}) {
     if (delayMs) await sleep(delayMs)
     const prompt = body.messages?.map((message) => message.content).join('\n') || ''
     if (prompt.includes('知识图谱')) {
+      if (emptyKgWhenPromptIncludes && prompt.includes(emptyKgWhenPromptIncludes)) {
+        sendJson(response, {
+          choices: [
+            {
+              message: {
+                content: JSON.stringify({
+                  entities: [],
+                  relations: [],
+                }),
+              },
+            },
+          ],
+        })
+        return
+      }
       sendJson(response, {
         choices: [
           {

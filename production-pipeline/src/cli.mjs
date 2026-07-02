@@ -749,15 +749,26 @@ async function runPackage(options) {
   const mainDbPath = expandPath(options.mainDb || options.mainDbPath || defaultMainDbPath)
   const run = await createRun({ command: 'package', options, mainDbPath, bookId })
   const startedAt = new Date().toISOString()
+  let qualityReportPath = ''
 
   try {
     const book = await readBookFromMainDb(mainDbPath, bookId)
     const generatedAt = new Date().toISOString()
     const bookPackage = buildGatewayBookPackage(book, generatedAt)
+    const qualityReport = buildPackageQualityReport(book, bookPackage, {
+      emptyKgMinChars: clampInteger(options.qualityEmptyKgMinChars, 1000, 0, Number.MAX_SAFE_INTEGER),
+    })
     const gatewayDataDir = join(run.artifactsDir, 'gateway-data')
     const packagePath = join(gatewayDataDir, 'books', bookId, 'package.json')
     const bookSummaryPath = join(gatewayDataDir, 'book-summary.json')
+    qualityReportPath = join(run.artifactsDir, 'quality-report.json')
 
+    await writeJson(qualityReportPath, qualityReport)
+    if (qualityReport.status === 'failed' && !isFlagEnabled(options.allowQualityIssues)) {
+      const error = new Error(`Package quality gate failed: ${qualityReport.errors.map((issue) => issue.message).join('; ')}`)
+      error.qualityReport = qualityReportPath
+      throw error
+    }
     await writeJson(packagePath, bookPackage)
     await writeJson(bookSummaryPath, bookPackage.book)
     await initializeItemsDb(run.itemsDbPath)
@@ -775,6 +786,9 @@ async function runPackage(options) {
         summaryEmbeddingCount: book.embeddingCoverage.summary.embeddedSummaries,
         chunkEmbeddingCount: book.embeddingCoverage.chunks.embeddedChunks,
         wordCount: bookPackage.book.wordCount,
+        qualityStatus: qualityReport.status,
+        qualityErrors: qualityReport.errors.length,
+        qualityWarnings: qualityReport.warnings.length,
       },
     })
     await writeRunJson(run.runJsonPath, {
@@ -795,6 +809,7 @@ async function runPackage(options) {
             gatewayDataDir: relativeRunPath(run.rootDir, gatewayDataDir),
             packageFile: relativeRunPath(run.rootDir, packagePath),
             bookSummary: relativeRunPath(run.rootDir, bookSummaryPath),
+            qualityReport: relativeRunPath(run.rootDir, qualityReportPath),
           },
         },
       },
@@ -806,6 +821,8 @@ async function runPackage(options) {
     console.log(`summaries: ${book.summaries.length}`)
     console.log(`summary embeddings: ${book.embeddingCoverage.summary.embeddedSummaries}/${book.summaries.length}`)
     console.log(`chunk embeddings: ${book.embeddingCoverage.chunks.embeddedChunks}`)
+    console.log(`quality: ${qualityReport.status} (${qualityReport.errors.length} errors, ${qualityReport.warnings.length} warnings)`)
+    console.log(`quality report: ${qualityReportPath}`)
     console.log(`package: ${packagePath}`)
     console.log(`runDir: ${run.rootDir}`)
   } catch (error) {
@@ -824,6 +841,7 @@ async function runPackage(options) {
           startedAt,
           finishedAt,
           error: error.message,
+          artifacts: qualityReportPath ? { qualityReport: relativeRunPath(run.rootDir, qualityReportPath) } : {},
         },
       },
     })
@@ -1003,6 +1021,10 @@ async function runKg(options) {
     const timeoutMs = clampInteger(options.timeoutMs, 600_000, 1_000, 900_000)
     const maxAttempts = clampInteger(options.maxAttempts || options.retries, 3, 1, 10)
     const force = isFlagEnabled(options.force)
+    const qualityOptions = {
+      emptyMinChars: clampInteger(options.emptyMinChars, 1000, 0, Number.MAX_SAFE_INTEGER),
+      allowEmpty: isFlagEnabled(options.allowEmptyKg),
+    }
     const llmConfig = {
       provider,
       model,
@@ -1029,6 +1051,7 @@ async function runKg(options) {
       entityMentions: 0,
       relationMentions: 0,
       errors: [],
+      qualityIssues: [],
     }
     const progress = createStageProgressLogger({
       stage: 'kg',
@@ -1047,6 +1070,7 @@ async function runKg(options) {
       await runDynamicPool(targets, () => runtimeControl.current().concurrency, async (chapter) => {
         try {
           const extraction = await generateChapterKnowledgeGraph(chapter, llmConfig)
+          assertKgExtractionQuality(chapter, extraction, qualityOptions)
           const writeDb = await openMainDbForKg(mainDbPath)
           try {
             const writeResult = writeKgExtraction(writeDb, chapter, {
@@ -1067,6 +1091,7 @@ async function runKg(options) {
             chapterIndex: chapter.chapterIndex,
             error: error instanceof Error ? error.message : String(error),
           })
+          if (error?.qualityIssue) pushLimited(results.qualityIssues, error.qualityIssue)
           const errorDb = await openMainDbForKg(mainDbPath)
           try {
             writeKgExtractionError(errorDb, chapter, model, error)
@@ -1088,6 +1113,12 @@ async function runKg(options) {
       model,
       concurrency,
       controlFile: runtimeControl.path || '',
+      quality: {
+        emptyMinChars: qualityOptions.emptyMinChars,
+        allowEmpty: qualityOptions.allowEmpty,
+        issueCount: results.qualityIssues.length,
+        issues: results.qualityIssues,
+      },
       force,
       dryRun: isFlagEnabled(options.dryRun),
       targetChapters: targets.length,
@@ -1881,6 +1912,7 @@ async function readBookFromMainDbOnce(dbPath, bookId) {
     const embeddingCoverage = readEmbeddingCoverageForPackage(db, bookId, chapters.length, summaries.length)
     const embeddings = readEmbeddingsForPackage(db, bookId)
     const knowledgeGraph = readKnowledgeGraphForPackage(db, bookId)
+    const kgExtractionQuality = readKgExtractionQualityForPackage(db, bookId)
 
     return {
       ...plainObject(book),
@@ -1889,6 +1921,7 @@ async function readBookFromMainDbOnce(dbPath, bookId) {
       embeddingCoverage,
       embeddings,
       knowledgeGraph,
+      kgExtractionQuality,
     }
   } finally {
     db.close()
@@ -2155,6 +2188,133 @@ function readKnowledgeGraphForPackage(db, bookId) {
       ORDER BY chapter_index ASC
     `).all(bookId).map(plainObject) : [],
   })
+}
+
+function readKgExtractionQualityForPackage(db, bookId) {
+  if (!sqliteTableExists(db, 'kg_chapter_extractions')) {
+    return { completed: [], failed: [] }
+  }
+  const rows = db.prepare(`
+    SELECT
+      kgc.chapter_id AS chapterId,
+      kgc.status,
+      kgc.extraction_json AS extractionJson,
+      kgc.error,
+      c.chapter_index AS chapterIndex,
+      c.title,
+      c.content
+    FROM kg_chapter_extractions kgc
+    JOIN chapters c ON c.id = kgc.chapter_id
+    WHERE kgc.book_id = ?
+    ORDER BY c.chapter_index, c.title
+  `).all(bookId).map(plainObject)
+  return {
+    completed: rows.filter((row) => row.status === 'completed').map(normalizeKgExtractionQualityRow),
+    failed: rows.filter((row) => row.status === 'failed').map(normalizeKgExtractionQualityRow),
+  }
+}
+
+function normalizeKgExtractionQualityRow(row) {
+  const extraction = safeJsonParse(row.extractionJson, {})
+  return {
+    chapterId: String(row.chapterId || ''),
+    chapterIndex: numberOrDefault(row.chapterIndex, 0),
+    title: String(row.title || ''),
+    contentLength: String(row.content || '').trim().length,
+    status: String(row.status || ''),
+    error: row.error ? String(row.error) : '',
+    entityCount: safeArray(extraction.entities).length,
+    relationCount: safeArray(extraction.relations).length,
+  }
+}
+
+function buildPackageQualityReport(book, bookPackage, options = {}) {
+  const chapters = safeArray(bookPackage.chapters)
+  const chapterIds = new Set(chapters.map((chapter) => String(chapter.id)))
+  const chapterById = new Map(chapters.map((chapter) => [String(chapter.id), chapter]))
+  const kgMentionedChapterIds = new Set([
+    ...safeArray(bookPackage.knowledgeGraph?.entityMentions).map((mention) => String(mention.chapterId || mention.chapter_id || '')),
+    ...safeArray(bookPackage.knowledgeGraph?.relationMentions).map((mention) => String(mention.chapterId || mention.chapter_id || '')),
+  ].filter((chapterId) => chapterIds.has(chapterId)))
+  const kgExtraction = book.kgExtractionQuality || { completed: [], failed: [] }
+  const completedKgChapterIds = new Set(safeArray(kgExtraction.completed).map((row) => String(row.chapterId || '')).filter(Boolean))
+  const missingKgMentionChapters = [...completedKgChapterIds]
+    .filter((chapterId) => chapterIds.has(chapterId) && !kgMentionedChapterIds.has(chapterId))
+    .map((chapterId) => {
+      const chapter = chapterById.get(chapterId) || {}
+      return {
+        chapterId,
+        chapterIndex: numberOrDefault(chapter.chapterIndex ?? chapter.index, 0),
+        title: String(chapter.title || ''),
+      }
+    })
+  const emptyKgMinChars = numberOrDefault(options.emptyKgMinChars, 1000)
+  const emptyCompletedKgChapters = safeArray(kgExtraction.completed)
+    .filter((row) => numberOrDefault(row.contentLength, 0) >= emptyKgMinChars)
+    .filter((row) => numberOrDefault(row.entityCount, 0) === 0 && numberOrDefault(row.relationCount, 0) === 0)
+    .map((row) => ({
+      chapterId: row.chapterId,
+      chapterIndex: row.chapterIndex,
+      title: row.title,
+      contentLength: row.contentLength,
+    }))
+  const failedKgChapters = safeArray(kgExtraction.failed).map((row) => ({
+    chapterId: row.chapterId,
+    chapterIndex: row.chapterIndex,
+    title: row.title,
+    error: row.error,
+  }))
+  const errors = []
+  const warnings = []
+  if (completedKgChapterIds.size > 0 && missingKgMentionChapters.length > 0) {
+    errors.push({
+      code: 'kg_mention_coverage_incomplete',
+      message: `KG mentions cover ${kgMentionedChapterIds.size}/${completedKgChapterIds.size} completed KG chapters.`,
+      missingChapters: missingKgMentionChapters,
+    })
+  }
+  if (emptyCompletedKgChapters.length > 0) {
+    errors.push({
+      code: 'kg_empty_completed_extraction',
+      message: `${emptyCompletedKgChapters.length} completed KG extraction(s) are empty for chapters with at least ${emptyKgMinChars} chars.`,
+      chapters: emptyCompletedKgChapters,
+    })
+  }
+  if (failedKgChapters.length > 0) {
+    errors.push({
+      code: 'kg_failed_extractions',
+      message: `${failedKgChapters.length} KG extraction(s) are failed.`,
+      chapters: failedKgChapters,
+    })
+  }
+  if (completedKgChapterIds.size === 0 && (
+    safeArray(bookPackage.knowledgeGraph?.entities).length > 0
+    || safeArray(bookPackage.knowledgeGraph?.relations).length > 0
+  )) {
+    warnings.push({
+      code: 'kg_without_extraction_records',
+      message: 'Knowledge graph data exists, but kg_chapter_extractions has no completed rows for this book.',
+    })
+  }
+  return {
+    schemaVersion: 1,
+    generatedAt: new Date().toISOString(),
+    status: errors.length ? 'failed' : 'passed',
+    bookId: String(bookPackage.book?.id || book.id || ''),
+    title: String(bookPackage.book?.title || book.title || ''),
+    chapterCount: chapters.length,
+    checks: {
+      summaryCoverage: bookPackage.book?.summaryCoverage ?? coverageRatio(safeArray(bookPackage.summaries).length, chapters.length),
+      embeddingCoverage: bookPackage.embeddings?.coverage || {},
+      kgMentionCoverage: coverageRatio(kgMentionedChapterIds.size, completedKgChapterIds.size || chapters.length),
+      kgMentionedChapters: kgMentionedChapterIds.size,
+      kgCompletedExtractions: completedKgChapterIds.size,
+      kgFailedExtractions: failedKgChapters.length,
+      emptyKgMinChars,
+    },
+    errors,
+    warnings,
+  }
 }
 
 function normalizeKnowledgeGraphForPackage(knowledgeGraph) {
@@ -3428,7 +3588,15 @@ function buildStageArgs(stage, job, mainDbPath, runInfo, stageOptions = {}) {
     if (isFlagEnabled(job.import?.replace ?? job.replace)) args.push('--replace')
     return args
   }
-  if (stage === 'package') return ['package', ...common]
+  if (stage === 'package') {
+    const packaging = job.package || job.packaging || {}
+    const args = ['package', ...common]
+    if (packaging.qualityEmptyKgMinChars || packaging.quality_empty_kg_min_chars) {
+      args.push('--quality-empty-kg-min-chars', String(packaging.qualityEmptyKgMinChars || packaging.quality_empty_kg_min_chars))
+    }
+    if (isFlagEnabled(packaging.allowQualityIssues || packaging.allow_quality_issues)) args.push('--allow-quality-issues')
+    return args
+  }
   if (stage === 'summary') {
     const summary = { ...(job.llm || {}), ...(job.summary || {}) }
     const args = [
@@ -3474,6 +3642,8 @@ function buildStageArgs(stage, job, mainDbPath, runInfo, stageOptions = {}) {
     if (kg.contentLimit || kg.content_limit) args.push('--content-limit', String(kg.contentLimit || kg.content_limit))
     if (kg.entityLimit || kg.entity_limit) args.push('--entity-limit', String(kg.entityLimit || kg.entity_limit))
     if (kg.relationLimit || kg.relation_limit) args.push('--relation-limit', String(kg.relationLimit || kg.relation_limit))
+    if (kg.emptyMinChars || kg.empty_min_chars) args.push('--empty-min-chars', String(kg.emptyMinChars || kg.empty_min_chars))
+    if (isFlagEnabled(kg.allowEmptyKg || kg.allow_empty_kg)) args.push('--allow-empty-kg')
     if (isFlagEnabled(kg.force)) args.push('--force')
     if (kg.controlFile || kg.control_file) args.push('--control-file', kg.controlFile || kg.control_file)
     if (kg.thinkingEnabled === false || isFlagEnabled(kg.disableThinking)) args.push('--disable-thinking')
@@ -4115,6 +4285,28 @@ function parseKgResponse(raw) {
   }
 }
 
+function assertKgExtractionQuality(chapter, extraction, options = {}) {
+  const allowEmpty = isFlagEnabled(options.allowEmpty)
+  const emptyMinChars = numberOrDefault(options.emptyMinChars, 1000)
+  const contentLength = String(chapter.content || '').trim().length
+  const entityCount = safeArray(extraction?.entities).length
+  const relationCount = safeArray(extraction?.relations).length
+  if (allowEmpty || contentLength < emptyMinChars || entityCount > 0 || relationCount > 0) return
+  const qualityIssue = {
+    code: 'kg_empty_extraction',
+    chapterId: String(chapter.id || ''),
+    chapterIndex: numberOrDefault(chapter.chapterIndex, 0),
+    title: String(chapter.title || ''),
+    contentLength,
+    entityCount,
+    relationCount,
+    message: `Empty KG extraction for non-trivial chapter ${chapter.chapterIndex}.`,
+  }
+  const error = new Error(`${qualityIssue.message} chapterId=${qualityIssue.chapterId} contentLength=${contentLength}`)
+  error.qualityIssue = qualityIssue
+  throw error
+}
+
 function normalizeKgEntity(entity) {
   return {
     name: String(entity?.name || '').trim(),
@@ -4643,6 +4835,9 @@ Options:
   --gateway-admin-token Gateway admin bearer token for optional verify refresh checks.
   --audio-samples      Number of audio chapters whose manifest/download should be sampled in verify. Default: 1.
   --concurrency        Summary/KG/embedding request concurrency.
+  --empty-min-chars    KG quality gate: empty extraction fails at or above this chapter content length. Default: 1000.
+  --allow-empty-kg     Allow KG to complete with an empty extraction for non-trivial chapters.
+  --allow-quality-issues Allow package to write artifacts even when quality checks fail.
   --mode               Embedding mode: all, chunks, or summaries. Default: all.
   --json               Print raw run JSON for status.
   --log-lines          Include this many child log tail lines in status. Default: 8.
