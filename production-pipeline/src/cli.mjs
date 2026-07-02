@@ -1052,6 +1052,7 @@ async function runKg(options) {
       relationMentions: 0,
       errors: [],
       qualityIssues: [],
+      qualityRetries: 0,
     }
     const progress = createStageProgressLogger({
       stage: 'kg',
@@ -1069,8 +1070,8 @@ async function runKg(options) {
     if (!isFlagEnabled(options.dryRun) && targets.length > 0) {
       await runDynamicPool(targets, () => runtimeControl.current().concurrency, async (chapter) => {
         try {
-          const extraction = await generateChapterKnowledgeGraph(chapter, llmConfig)
-          assertKgExtractionQuality(chapter, extraction, qualityOptions)
+          const { extraction, qualityRetries } = await generateQualityCheckedChapterKnowledgeGraph(chapter, llmConfig, qualityOptions)
+          results.qualityRetries += qualityRetries
           const writeDb = await openMainDbForKg(mainDbPath)
           try {
             const writeResult = writeKgExtraction(writeDb, chapter, {
@@ -1118,6 +1119,7 @@ async function runKg(options) {
         allowEmpty: qualityOptions.allowEmpty,
         issueCount: results.qualityIssues.length,
         issues: results.qualityIssues,
+        retries: results.qualityRetries,
       },
       force,
       dryRun: isFlagEnabled(options.dryRun),
@@ -4132,6 +4134,24 @@ async function generateChapterKnowledgeGraph(chapter, config) {
     )
   }, config)
   return parseKgResponse(raw)
+}
+
+async function generateQualityCheckedChapterKnowledgeGraph(chapter, config, qualityOptions = {}) {
+  const maxAttempts = clampInteger(config.maxAttempts, 3, 1, 10)
+  let lastError
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    const extraction = await generateChapterKnowledgeGraph(chapter, config)
+    try {
+      assertKgExtractionQuality(chapter, extraction, qualityOptions)
+      return { extraction, qualityRetries: attempt - 1 }
+    } catch (error) {
+      lastError = error
+      if (!error?.qualityIssue || attempt >= maxAttempts) throw error
+      console.warn(`[${new Date().toISOString()}] kg quality retry: chapter=${chapter.chapterIndex} id=${chapter.id} attempt=${attempt}/${maxAttempts} error=${error.message}`)
+      await sleep(config.retryBaseDelayMs || 1000)
+    }
+  }
+  throw lastError
 }
 
 function buildKgPrompt(chapter, thinkingEnabled, options = {}) {

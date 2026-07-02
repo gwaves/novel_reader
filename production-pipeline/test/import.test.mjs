@@ -1478,6 +1478,78 @@ describe('production-pipeline import', () => {
     }
   })
 
+  it('retries kg quality failures before marking a chapter failed', async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), 'production-pipeline-kg-quality-retry-test-'))
+    let chatServer
+    try {
+      chatServer = await startFakeChatServer({
+        emptyKgWhenPromptIncludes: 'EMPTY_ONCE',
+        emptyKgFailuresBeforeSuccess: 1,
+      })
+      const txtPath = join(tempDir, 'sample.txt')
+      const dbPath = join(tempDir, 'main.sqlite')
+      const runRoot = join(tempDir, 'runs')
+      await writeFile(txtPath, `第一章 重试\n${'EMPTY_ONCE 阿甲在长安帮助乙门。'.repeat(80)}`, 'utf8')
+      await execFileAsync(process.execPath, [
+        cliPath,
+        'import',
+        '--file',
+        txtPath,
+        '--book-id',
+        'sample-book',
+        '--title',
+        '样书',
+        '--main-db',
+        dbPath,
+        '--run-root',
+        runRoot,
+      ])
+
+      const { stdout } = await execFileAsync(process.execPath, [
+        cliPath,
+        'kg',
+        '--book-id',
+        'sample-book',
+        '--main-db',
+        dbPath,
+        '--run-root',
+        runRoot,
+        '--provider',
+        'openai-compatible',
+        '--base-url',
+        chatServer.url,
+        '--model',
+        'fake-chat',
+        '--empty-min-chars',
+        '100',
+        '--max-attempts',
+        '2',
+        '--disable-thinking',
+      ])
+
+      assert.match(stdout, /completed: 1/)
+      assert.match(stdout, /failed: 0/)
+      assert.equal(chatServer.requests.length, 2)
+      const runId = stdout.match(/run: (.+)/)?.[1]?.trim()
+      assert.ok(runId)
+      const kgReport = JSON.parse(await readFile(join(runRoot, 'sample-book', runId, 'artifacts', 'kg-report.json'), 'utf8'))
+      assert.equal(kgReport.quality.retries, 1)
+      assert.equal(kgReport.quality.issueCount, 0)
+
+      const db = new DatabaseSync(dbPath, { readOnly: true })
+      try {
+        const row = db.prepare('SELECT status FROM kg_chapter_extractions WHERE chapter_id = ?')
+          .get('sample-book:ch00001')
+        assert.equal(row.status, 'completed')
+      } finally {
+        db.close()
+      }
+    } finally {
+      await chatServer?.close()
+      await rm(tempDir, { recursive: true, force: true })
+    }
+  })
+
   it('runs embedding as independent job stages and records child artifacts', async () => {
     const tempDir = await mkdtemp(join(tmpdir(), 'production-pipeline-embedding-stage-test-'))
     let embeddingServer
@@ -2973,6 +3045,7 @@ function sleep(ms) {
 }
 
 async function startFakeEmbeddingServer() {
+  const requests = []
   const server = createServer(async (request, response) => {
     const url = new URL(request.url, 'http://127.0.0.1')
     if (request.method !== 'POST' || url.pathname !== '/embeddings') {
@@ -2980,6 +3053,7 @@ async function startFakeEmbeddingServer() {
       return
     }
     const body = await readRequestJson(request)
+    requests.push(body)
     const input = String(body.input || '')
     const base = Math.max(1, input.length % 10)
     sendJson(response, {
@@ -2992,6 +3066,7 @@ async function startFakeEmbeddingServer() {
   })
   const address = server.address()
   return {
+    requests,
     url: `http://127.0.0.1:${address.port}`,
     close: () => new Promise((resolve, reject) => server.close((error) => (error ? reject(error) : resolve()))),
   }
@@ -3031,7 +3106,8 @@ async function startFakeOllamaEmbeddingServer({ models = ['qwen3-embedding:8b'] 
   }
 }
 
-async function startFakeChatServer({ delayMs = 0, emptyKgWhenPromptIncludes = '' } = {}) {
+async function startFakeChatServer({ delayMs = 0, emptyKgWhenPromptIncludes = '', emptyKgFailuresBeforeSuccess = Number.POSITIVE_INFINITY } = {}) {
+  const requests = []
   const server = createServer(async (request, response) => {
     const url = new URL(request.url, 'http://127.0.0.1')
     if (request.method !== 'POST' || url.pathname !== '/chat/completions') {
@@ -3039,10 +3115,19 @@ async function startFakeChatServer({ delayMs = 0, emptyKgWhenPromptIncludes = ''
       return
     }
     const body = await readRequestJson(request)
+    requests.push(body)
     if (delayMs) await sleep(delayMs)
     const prompt = body.messages?.map((message) => message.content).join('\n') || ''
     if (prompt.includes('知识图谱')) {
-      if (emptyKgWhenPromptIncludes && prompt.includes(emptyKgWhenPromptIncludes)) {
+      const matchingEmptyKgRequests = requests.filter((entry) => {
+        const entryPrompt = entry.messages?.map((message) => message.content).join('\n') || ''
+        return entryPrompt.includes('知识图谱') && entryPrompt.includes(emptyKgWhenPromptIncludes)
+      }).length
+      if (
+        emptyKgWhenPromptIncludes
+        && prompt.includes(emptyKgWhenPromptIncludes)
+        && matchingEmptyKgRequests <= emptyKgFailuresBeforeSuccess
+      ) {
         sendJson(response, {
           choices: [
             {
@@ -3120,6 +3205,7 @@ async function startFakeChatServer({ delayMs = 0, emptyKgWhenPromptIncludes = ''
   })
   const address = server.address()
   return {
+    requests,
     url: `http://127.0.0.1:${address.port}`,
     close: () => new Promise((resolve, reject) => server.close((error) => (error ? reject(error) : resolve()))),
   }
