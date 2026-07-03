@@ -1,7 +1,6 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { execFile, spawn } from 'node:child_process'
-import { createHash } from 'node:crypto'
 import { createServer } from 'node:http'
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { basename, dirname, join } from 'node:path'
@@ -707,7 +706,7 @@ describe('production-pipeline import', () => {
     }
   })
 
-  it('ignores configured bookId for import jobs and persists the imported file book id', async () => {
+  it('preserves configured bookId for import jobs instead of replacing it with a file-derived id', async () => {
     const tempDir = await mkdtemp(join(tmpdir(), 'production-pipeline-derived-book-test-'))
     try {
       const txtPath = join(tempDir, 'sample.txt')
@@ -716,11 +715,11 @@ describe('production-pipeline import', () => {
       const jobPath = join(tempDir, 'job.json')
       const sourceText = '第一章 开始\n这是第一章内容。\n\n第二章 继续\n这是第二章内容。'
       await writeFile(txtPath, sourceText, 'utf8')
-      const expectedBookId = `file-${createHash('sha256').update(Buffer.from(sourceText)).digest('hex').slice(0, 24)}`
+      const expectedBookId = 'stable-config-book-id'
       await writeFile(
         jobPath,
         JSON.stringify({
-          bookId: 'stale-config-book-id',
+          bookId: expectedBookId,
           title: '样书',
           mainDbPath: dbPath,
           source: { type: 'txt', file: txtPath },
@@ -774,7 +773,7 @@ describe('production-pipeline import', () => {
       const runRoot = join(tempDir, 'runs')
       const jobPath = join(tempDir, 'job.json')
       const sourceText = `第一章 开始\n这是第一章内容。`
-      const expectedBookId = `file-${createHash('sha256').update(Buffer.from(sourceText)).digest('hex').slice(0, 24)}`
+      const expectedBookId = 'sample-book'
       await writeFile(txtPath, sourceText, 'utf8')
       embeddingServer = await startFakeEmbeddingServer()
       await writeFile(

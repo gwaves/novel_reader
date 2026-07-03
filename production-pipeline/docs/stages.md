@@ -119,7 +119,7 @@ Input:
 
 Output:
 
-- optional TTS source tree from `offline-tts/scripts/tts-director.mjs batch-pipeline`
+- optional TTS source tree from `production-pipeline/scripts/tts-director.mjs batch-pipeline`
 - Gateway-ready copied `chapter.mp3` files
 - copied timeline manifests when present
 - `audio.json` with canonical main DB chapter ids

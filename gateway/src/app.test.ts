@@ -557,6 +557,91 @@ describe('gateway app', () => {
     })
   })
 
+  it('enriches mobile books with package-derived RAG coverage', async () => {
+    const dataDir = await makeDataDir()
+    await writeFile(
+      join(dataDir, 'books.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        books: [
+          {
+            id: 'book-ready',
+            title: '已有包',
+            chapterCount: 2,
+            updatedAt: '2026-06-25T00:00:00.000Z',
+          },
+        ],
+      }),
+      'utf8',
+    )
+    await mkdir(join(dataDir, 'books', 'book-ready'), { recursive: true })
+    await writeFile(
+      join(dataDir, 'books', 'book-ready', 'package.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        generatedAt: '2026-06-26T00:00:00.000Z',
+        book: {
+          id: 'book-ready',
+          title: '已有包',
+          chapterCount: 2,
+          updatedAt: '2026-06-25T00:00:00.000Z',
+        },
+        chapters: [{ id: 'chapter-1' }, { id: 'chapter-2' }],
+        summaries: [{ chapterId: 'chapter-1' }, { chapterId: 'chapter-2' }],
+        knowledgeGraph: {
+          entityMentions: [{ chapterId: 'chapter-1' }, { chapterId: 'chapter-2' }],
+          relationMentions: [],
+        },
+        embeddings: {
+          chunks: [{ chapterId: 'chapter-1', embedding: [0.1, 0.2] }],
+        },
+      }),
+      'utf8',
+    )
+    const app = buildTestApp({
+      GATEWAY_DEV_ACCESS_TOKEN: 'dev-token',
+      GATEWAY_DATA_DIR: dataDir,
+    })
+
+    const listResponse = await app.inject({
+      method: 'GET',
+      url: '/mobile/books',
+      headers: { authorization: 'Bearer dev-token' },
+    })
+    const detailResponse = await app.inject({
+      method: 'GET',
+      url: '/mobile/books/book-ready',
+      headers: { authorization: 'Bearer dev-token' },
+    })
+
+    expect(listResponse.statusCode).toBe(200)
+    expect(listResponse.json()).toMatchObject({
+      books: [
+        {
+          id: 'book-ready',
+          summaryCoverage: 1,
+          kgCoverage: 1,
+          embeddingCoverage: 0.5,
+          embeddingVectorCoverage: 0.5,
+          embeddingChunkVectorCount: 1,
+          embeddingSummaryVectorCount: 0,
+        },
+      ],
+    })
+    expect(detailResponse.statusCode).toBe(200)
+    expect(detailResponse.json()).toMatchObject({
+      book: {
+        id: 'book-ready',
+        summaryCoverage: 1,
+        kgCoverage: 1,
+        embeddingCoverage: 0.5,
+        embeddingVectorCoverage: 0.5,
+        embeddingChunkVectorCount: 1,
+        embeddingSummaryVectorCount: 0,
+      },
+    })
+  })
+
   it('records device names from protected session requests', async () => {
     const dataDir = await makeDataDir()
     const app = buildTestApp({

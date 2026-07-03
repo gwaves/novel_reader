@@ -47,7 +47,7 @@ the configured embedding provider, and writes `summary_embeddings` plus
 service. Use `--mode chunks` to embed chapter text immediately after import,
 `--mode summaries` to embed generated summaries, or `--mode all` for both.
 `audio` can either map an existing
-`audio/chapter.mp3` tree or invoke `offline-tts/scripts/tts-director.mjs
+`audio/chapter.mp3` tree or invoke `production-pipeline/scripts/tts-director.mjs
 batch-pipeline` first via `--tts-config`, then package the generated MP3 files.
 `package` reads durable rows and writes Gateway-ready artifacts under the run
 directory. `publish` uses `rsync` for package/audio files and merges
@@ -77,7 +77,7 @@ The job JSON is the repeatable production contract. It should include:
   batch. `borrowIdle` defaults to `true`, so active stages can borrow the share
   of absent stages; set it to `false` to keep weighted shares reserved. Without
   `llm.scheduler`, existing stage-level concurrency behavior is unchanged.
-  Audio scheduling maps its share to offline TTS `directorConcurrency` and keeps
+  Audio scheduling maps its share to the TTS director `directorConcurrency` and keeps
   `llmChapters` at 1, so chapter-level pipelining does not multiply LLM requests.
 - `summary` / `kg`: optional stage limits or overrides; stage-level `concurrency` overrides `llm.concurrency` when the weighted scheduler is not enabled.
 - `embedding`: provider, base URL, model, concurrency, retries, and timeout.

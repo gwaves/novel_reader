@@ -13,6 +13,7 @@ import { buildCapabilities } from './capabilities.js'
 import { type GatewayConfig, loadConfig } from './config.js'
 import {
   type GatewayBookSummary,
+  type GatewayBookPackageStatus,
   deleteBook,
   openBookPackageFile,
   readBookCatalog,
@@ -160,20 +161,29 @@ export function buildGatewayApp(config: GatewayConfig = loadConfig()) {
     const mobileAuth = await requireMobileDevice(config, request)
     const catalog = await readBookCatalog(config)
     const visibleBooks = catalog.books.filter((book) => canReadBook(mobileAuth.allowedVisibilities, book))
+    const [books, packageStatuses] = await Promise.all([
+      withAudioChapterCounts(config, visibleBooks),
+      readBookPackageStatusesForBooks(config, visibleBooks),
+    ])
+    const packageStatusByBookId = new Map(packageStatuses.map((status) => [status.bookId, status]))
     return {
       schemaVersion: catalog.schemaVersion,
       generatedAt: new Date().toISOString(),
-      books: await withAudioChapterCounts(config, visibleBooks),
+      books: books.map((book) => enrichBookWithPackageCoverage(book, packageStatusByBookId.get(book.id))),
     }
   })
 
   app.get<{ Params: { bookId: string } }>('/mobile/books/:bookId', async (request) => {
     const mobileAuth = await requireMobileDevice(config, request)
     const book = await readVisibleBookSummary(config, request.params.bookId, mobileAuth.allowedVisibilities)
+    const [bookWithAudio, packageStatus] = await Promise.all([
+      withAudioChapterCount(config, book),
+      readBookPackageStatusesForBooks(config, [book]).then((statuses) => statuses[0]),
+    ])
     return {
       schemaVersion: 1,
       generatedAt: new Date().toISOString(),
-      book: await withAudioChapterCount(config, book),
+      book: enrichBookWithPackageCoverage(bookWithAudio, packageStatus),
     }
   })
 
@@ -221,18 +231,7 @@ export function buildGatewayApp(config: GatewayConfig = loadConfig()) {
     return {
       schemaVersion: catalog.schemaVersion,
       generatedAt: new Date().toISOString(),
-      books: books.map((book) => {
-        const packageStatus = packageStatusByBookId.get(book.id)
-        return {
-          ...book,
-          summaryCoverage: packageStatus?.summaryCoverage ?? book.summaryCoverage,
-          kgCoverage: packageStatus?.kgCoverage ?? book.kgCoverage,
-          embeddingCoverage: packageStatus?.embeddingCoverage ?? book.embeddingCoverage,
-          embeddingVectorCoverage: packageStatus?.embeddingVectorCoverage,
-          embeddingSummaryVectorCount: packageStatus?.embeddingSummaryVectorCount,
-          embeddingChunkVectorCount: packageStatus?.embeddingChunkVectorCount,
-        }
-      }),
+      books: books.map((book) => enrichBookWithPackageCoverage(book, packageStatusByBookId.get(book.id))),
     }
   })
 
@@ -639,6 +638,18 @@ async function withAudioChapterCount(config: GatewayConfig, book: GatewayBookSum
   return {
     ...book,
     audioChapterCount: audioCatalog.chapters.length,
+  }
+}
+
+function enrichBookWithPackageCoverage(book: GatewayBookSummary, packageStatus?: GatewayBookPackageStatus) {
+  return {
+    ...book,
+    summaryCoverage: packageStatus?.summaryCoverage ?? book.summaryCoverage,
+    kgCoverage: packageStatus?.kgCoverage ?? book.kgCoverage,
+    embeddingCoverage: packageStatus?.embeddingCoverage ?? book.embeddingCoverage,
+    embeddingVectorCoverage: packageStatus?.embeddingVectorCoverage ?? book.embeddingVectorCoverage,
+    embeddingSummaryVectorCount: packageStatus?.embeddingSummaryVectorCount ?? book.embeddingSummaryVectorCount,
+    embeddingChunkVectorCount: packageStatus?.embeddingChunkVectorCount ?? book.embeddingChunkVectorCount,
   }
 }
 

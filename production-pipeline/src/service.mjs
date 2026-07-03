@@ -462,7 +462,7 @@ function runCommand(store, job, commandSpec) {
 function createProductionV2Spec(body, config) {
   const jobPath = resolve(requiredString(body.jobPath || body.productionJobPath || body.manifestPath || body.manifest, 'jobPath is required.'))
   const jobConfig = readProductionJobConfig(jobPath)
-  const bookId = readString(productionJobImports(jobConfig) ? deriveFileBookId(jobConfig) : (body.bookId || jobConfig.bookId))
+  const bookId = readString(body.bookId || jobConfig.bookId || (productionJobImports(jobConfig) ? deriveFileBookId(jobConfig) : ''))
   const title = readString(body.title || jobConfig.title || bookId)
   const runRoot = resolve(readString(body.productionRunRoot || body.runRoot) || config.productionRunRoot)
   return {

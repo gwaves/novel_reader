@@ -1,3 +1,8 @@
+2026-07-02 更新：TTS 生产链路归并到 production-pipeline。
+- 删除独立 `offline-tts/` 目录，将 TTS director 脚本迁入 `production-pipeline/scripts/tts-director.mjs`，将 TTS 设计、开发计划和 MP3 生产说明迁入 `production-pipeline/docs/tts/`。
+- 将通用 TTS 配置示例迁入 `production-pipeline/config/tts-director.example.json`，并移除示例中的特定小说角色绑定；通用模板默认不预置角色，具体书籍角色音色应写在本地私有配置或具体生产 job 旁路配置中。
+- `production-pipeline` 的 `audio --tts-config` 默认改为调用内置 TTS director，不再依赖旧 `offline-tts/scripts/tts-director.mjs` 路径；相关 README、Gateway 发布说明和产品文档已同步为新的目录归属。
+
 2026-07-01 更新：Gateway RAG 首次/最早类问题召回与答案上下文修正。
 - 真实验证《妖刀记》问题“耿照的第一个发生性关系的女人是谁”时，向量检索已能返回 `source=chunk`，但纯向量排序会偏向第 21/22 章等后文直白片段，且短 snippet 不能给 LLM 足够证据判断“最早/首次”。
 - 修正 `gateway/src/app.ts`：当 query 包含“第一个/第一次/首次/最早”等意图时，在最高分附近候选中优先更早章节；`/ai/search` 仍返回短 snippet，不暴露大段上下文。
@@ -1012,7 +1017,7 @@ SQLite 图谱表
 - README 与 Gateway 开发计划已补充脚本发布路径，PC 端暂不新增发布 UI，后续 MP3 产物也优先按脚本化发布路线推进。
 
 2026-06-26 更新：Gateway MP3 发布链路与新安卓端音频体验已推进。
-- 新增 `gateway/scripts/publish-audio.mjs`，可扫描 offline-tts 输出目录下的 `chNNN-full/audio/chapter.mp3` 与 `manifest.json`，按移动数据包章节序号匹配真实 `chapterId`，复制到 `GATEWAY_AUDIO_DIR/books/<bookId>/` 并生成 `audio.json`。
+- 新增 `gateway/scripts/publish-audio.mjs`，可扫描 TTS 生产输出目录下的 `chNNN-full/audio/chapter.mp3` 与 `manifest.json`，按移动数据包章节序号匹配真实 `chapterId`，复制到 `GATEWAY_AUDIO_DIR/books/<bookId>/` 并生成 `audio.json`。
 - 根脚本新增 `npm run gateway:publish-audio`；该路径是发布到 Gateway 音频目录，不是发布到 Git 目录。
 - Gateway 音频清单新增 `manifestFileName` 与 `timelineVersion`，并提供受保护的 `/mobile/books/:bookId/audio/:chapterId/manifest` 接口供移动端读取 timeline。
 - 新 `gateway-android-app/` 已显示当前章节音频时长、大小和时间轴状态；播放时会拉取 manifest，并根据当前播放时间在正文中高亮对应片段。

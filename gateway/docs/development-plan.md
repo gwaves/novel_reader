@@ -42,7 +42,7 @@ Mobile App
 - `gateway-android-app/`：当前维护的 Gateway Android 客户端，负责默认 Gateway 域名、设备授权、自定义服务地址、缓存、阅读、RAG 和 MP3 播放体验。
 - 旧 `mobile-app/` 局域网同步移动端目录已删除；历史实现请查看 Git 记录。
 - `scripts/local-db-server.mjs`：继续作为本地 PC 端 API，不作为公网服务直接复用。
-- `offline-tts/`：继续负责导演脚本、TTS 合成和 MP3 生产；后续可把产物登记到 Gateway。
+- `production-pipeline/`：继续负责导演脚本、TTS 合成和 MP3 生产；后续可把产物登记到 Gateway。
 
 ## 能力分层
 
@@ -177,7 +177,7 @@ POST /ai/embeddings
 当前进展：
 
 - Gateway 已支持受保护的章节音频清单、MP3 下载和 manifest/timeline 元数据读取。
-- `gateway/scripts/publish-audio.mjs` 可把 offline-tts 输出目录发布到 `GATEWAY_AUDIO_DIR/books/<bookId>/`，并生成 Gateway 使用的 `audio.json`。
+- `gateway/scripts/publish-audio.mjs` 可把 production-pipeline 输出目录发布到 `GATEWAY_AUDIO_DIR/books/<bookId>/`，并生成 Gateway 使用的 `audio.json`。
 - 新的 `gateway-android-app/` 已展示音频时长、大小和时间轴状态；播放时会拉取 manifest，并按当前播放时间在正文中高亮对应片段。
 
 ### Phase 6：部署与运维

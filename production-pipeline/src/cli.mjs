@@ -13,6 +13,7 @@ const defaultRunRoot = 'tmp/production-pipeline/runs'
 const defaultMainDbPath = '~/.novel_reader/novel_reader.sqlite'
 const defaultRemoteRoot = '/home/gwaves/novel-reader-gateway'
 const cliFilePath = fileURLToPath(import.meta.url)
+const defaultTtsDirectorScript = join(dirname(cliFilePath), '..', 'scripts', 'tts-director.mjs')
 const execFileAsync = promisify(execFile)
 let DatabaseSyncCtor
 let bookIngestModule
@@ -3331,7 +3332,7 @@ async function inspectJobPreflight({ checks, job, rawJob, jobPath, mainDbPath })
     if (sourceRoot) addDoctorCheck(checks, 'audio.sourceRoot.exists', existsSync(expandPath(sourceRoot)), expandPath(sourceRoot))
     if (ttsConfig) {
       addDoctorCheck(checks, 'audio.ttsConfig.exists', existsSync(expandPath(ttsConfig)), expandPath(ttsConfig))
-      const directorScript = audio.ttsDirectorScript || audio.tts_director_script || join(dirname(cliFilePath), '..', '..', 'offline-tts', 'scripts', 'tts-director.mjs')
+      const directorScript = audio.ttsDirectorScript || audio.tts_director_script || defaultTtsDirectorScript
       addDoctorCheck(checks, 'audio.ttsDirector.exists', existsSync(expandPath(directorScript)), expandPath(directorScript))
     }
   }
@@ -3403,7 +3404,7 @@ async function hydrateJobConfig(rawJob) {
   if (job.stages.includes('import')) {
     return {
       ...job,
-      bookId: await deriveFileBookId(job),
+      bookId: job.bookId || await deriveFileBookId(job),
     }
   }
   if (job.bookId) return job
@@ -3959,7 +3960,7 @@ async function prepareAudioSourceRoot({ options, run, book }) {
   if (isFlagEnabled(options.dryRun)) return sourceRoot
 
   const chapters = audioChapterSelection(options, book.chapters.length)
-  const directorScript = resolve(options.ttsDirectorScript || join(dirname(cliFilePath), '..', '..', 'offline-tts', 'scripts', 'tts-director.mjs'))
+  const directorScript = resolve(options.ttsDirectorScript || defaultTtsDirectorScript)
   const ttsConfigPath = await prepareTtsDirectorConfigForAudio(options, run)
   const args = [
     directorScript,
@@ -4861,11 +4862,11 @@ Options:
   --mode               Embedding mode: all, chunks, or summaries. Default: all.
   --json               Print raw run JSON for status.
   --log-lines          Include this many child log tail lines in status. Default: 8.
-  --tts-config         Generate MP3 first with offline-tts batch-pipeline, then package it.
+  --tts-config         Generate MP3 first with the production-pipeline TTS director, then package it.
   --chapters           Chapter list/range for TTS generation. Default: full book.
-  --tts-concurrency    TTS segment concurrency passed to offline-tts.
-  --tts-chapters       TTS chapter concurrency passed to offline-tts.
-  --control-file       JSON file polled by offline-tts for live audio concurrency changes.
+  --tts-concurrency    TTS segment concurrency passed to the TTS director.
+  --tts-chapters       TTS chapter concurrency passed to the TTS director.
+  --control-file       JSON file polled by the TTS director for live audio concurrency changes.
   --force              Regenerate existing embedding rows.
   --remote-host        Remote Gateway host for rsync publish.
   --remote-user        Remote SSH user.

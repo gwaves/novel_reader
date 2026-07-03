@@ -15,9 +15,9 @@
     "defaultNarrator": {
       "speaker": "旁白",
       "voice": "白桦",
-      "style": "中文武侠小说男声旁白，低沉、清晰、平静，保留悬疑感和章回小说的停顿。"
+      "style": "中文有声书男声旁白，低沉、清晰、平静，保留必要停顿。"
     },
-    "performanceStyle": "按照中文有声小说的朗读语速和节奏，整体语速略快，吐字清晰，节奏紧凑但不抢字；旁白保留必要停顿，对白保留角色表演感。",
+    "performanceStyle": "按照中文有声小说的朗读语速和节奏，吐字清晰，节奏紧凑但不抢字；旁白保留必要停顿，对白保留角色表演感。",
     "maxCharactersPerRequest": 3000,
     "segmentBatchSize": 30,
     "concurrency": 10
@@ -28,20 +28,7 @@
     "maxDraftAttempts": 3
   },
   "voices": {
-    "characters": [
-      {
-        "name": "采蓝",
-        "aliases": ["蓝裳少女", "蓝姑娘"],
-        "voice": "茉莉",
-        "style": "十六七岁少女声线，清亮柔软，带一点娇怯和梦幻感；声音要更年轻，不要成熟御姐感，语气细腻、自怜，语速略快但吐字清楚。"
-      },
-      {
-        "name": "黄缨",
-        "aliases": ["黄衫少女"],
-        "voice": "冰糖",
-        "style": "十七八岁少女声线，甜亮、俏皮、慵懒，带一点小坏和挑衅；声音要更年轻、更轻盈，不要成熟厚重，语气灵动但吐字清楚。"
-      }
-    ]
+    "characters": []
   },
   "tts": {
     "provider": "mimo",

@@ -24,7 +24,7 @@
 建议把配置放到用户目录：
 
 ```bash
-cp offline-tts/config.example.json ~/.novel_reader/tts-director.config.json
+cp production-pipeline/config/tts-director.example.json ~/.novel_reader/tts-director.config.json
 ```
 
 MIMO key 使用环境变量：
@@ -37,16 +37,16 @@ export MIMO_API_KEY='你的 MIMO API key'
 
 ## 推荐目录
 
-以《妖刀记》为例，建议统一输出到：
+建议按书籍使用稳定的输出目录：
 
 ```text
-tmp/tts/yaodao
+tmp/tts/<book-key>
 ```
 
 每章使用一个独立目录：
 
 ```text
-tmp/tts/yaodao/
+tmp/tts/<book-key>/
   ch001-full/
     director-script.json
     director-script.audit.json
@@ -68,7 +68,7 @@ tmp/tts/yaodao/
 移动端配置时填父目录：
 
 ```text
-/Users/gwaves/Documents/novel_reader/tmp/tts/yaodao
+/Users/gwaves/Documents/novel_reader/tmp/tts/<book-key>
 ```
 
 不要填到 `ch001-full` 或 `audio`。PC 本地服务会在父目录下扫描：
@@ -83,50 +83,50 @@ tmp/tts/yaodao/
 先生成导演脚本：
 
 ```bash
-node offline-tts/scripts/tts-director.mjs \
+node production-pipeline/scripts/tts-director.mjs \
   --config ~/.novel_reader/tts-director.config.json \
   draft-script \
-  --book-id 9679077f-2288-4bc7-9080-854784fc7f94 \
+  --book-id <bookId> \
   --chapter 19 \
   --batch-size 10 \
   --concurrency 3 \
-  --out tmp/tts/yaodao/ch019-full/director-script.json
+  --out tmp/tts/<book-key>/ch019-full/director-script.json
 ```
 
 校验导演脚本：
 
 ```bash
-node offline-tts/scripts/tts-director.mjs \
+node production-pipeline/scripts/tts-director.mjs \
   --config ~/.novel_reader/tts-director.config.json \
   validate-script \
-  --script tmp/tts/yaodao/ch019-full/director-script.json
+  --script tmp/tts/<book-key>/ch019-full/director-script.json
 ```
 
 抽查角色和音色：
 
 ```bash
-node offline-tts/scripts/tts-director.mjs \
+node production-pipeline/scripts/tts-director.mjs \
   --config ~/.novel_reader/tts-director.config.json \
   audit-script \
-  --script tmp/tts/yaodao/ch019-full/director-script.json
+  --script tmp/tts/<book-key>/ch019-full/director-script.json
 ```
 
 合成 MP3：
 
 ```bash
-node offline-tts/scripts/tts-director.mjs \
+node production-pipeline/scripts/tts-director.mjs \
   --config ~/.novel_reader/tts-director.config.json \
   synth \
-  --script tmp/tts/yaodao/ch019-full/director-script.json \
-  --out-dir tmp/tts/yaodao/ch019-full/audio \
+  --script tmp/tts/<book-key>/ch019-full/director-script.json \
+  --out-dir tmp/tts/<book-key>/ch019-full/audio \
   --concurrency 8
 ```
 
 合成完成后，至少应有：
 
 ```text
-tmp/tts/yaodao/ch019-full/audio/chapter.mp3
-tmp/tts/yaodao/ch019-full/audio/manifest.json
+tmp/tts/<book-key>/ch019-full/audio/chapter.mp3
+tmp/tts/<book-key>/ch019-full/audio/manifest.json
 ```
 
 ## 批量生产
@@ -134,10 +134,10 @@ tmp/tts/yaodao/ch019-full/audio/manifest.json
 正式批量生产推荐用 `batch-pipeline`：
 
 ```bash
-node offline-tts/scripts/tts-director.mjs \
+node production-pipeline/scripts/tts-director.mjs \
   --config ~/.novel_reader/tts-director.config.json \
   batch-pipeline \
-  --book-id 9679077f-2288-4bc7-9080-854784fc7f94 \
+  --book-id <bookId> \
   --chapters 1-293 \
   --batch-size 10 \
   --director-concurrency 3 \
@@ -145,7 +145,7 @@ node offline-tts/scripts/tts-director.mjs \
   --tts-concurrency 16 \
   --tts-chapters 2 \
   --resume \
-  --out-root tmp/tts/yaodao
+  --out-root tmp/tts/<book-key>
 ```
 
 参数建议：
@@ -196,26 +196,26 @@ node offline-tts/scripts/tts-director.mjs \
 调试小样可以这样跑：
 
 ```bash
-node offline-tts/scripts/tts-director.mjs \
+node production-pipeline/scripts/tts-director.mjs \
   --config ~/.novel_reader/tts-director.config.json \
   draft-script \
-  --book-id 9679077f-2288-4bc7-9080-854784fc7f94 \
+  --book-id <bookId> \
   --chapter 19 \
   --allow-partial \
   --limit 2000 \
   --batch-size 10 \
   --concurrency 3 \
-  --out tmp/tts/yaodao/ch019-partial/director-script.json
+  --out tmp/tts/<book-key>/ch019-partial/director-script.json
 ```
 
 调试小样合成时：
 
 ```bash
-node offline-tts/scripts/tts-director.mjs \
+node production-pipeline/scripts/tts-director.mjs \
   --config ~/.novel_reader/tts-director.config.json \
   synth \
-  --script tmp/tts/yaodao/ch019-partial/director-script.json \
-  --out-dir tmp/tts/yaodao/ch019-partial/audio \
+  --script tmp/tts/<book-key>/ch019-partial/director-script.json \
+  --out-dir tmp/tts/<book-key>/ch019-partial/audio \
   --allow-partial
 ```
 
@@ -275,7 +275,7 @@ NOVEL_READER_API_HOST=0.0.0.0 node --no-warnings scripts/local-db-server.mjs
 2. PC Web 端为当前书配置章节 MP3 目录，填父目录：
 
 ```text
-/Users/gwaves/Documents/novel_reader/tmp/tts/yaodao
+/Users/gwaves/Documents/novel_reader/tmp/tts/<book-key>
 ```
 
 3. 点击检测，应能看到已生产章节。
@@ -301,7 +301,7 @@ http://192.168.88.22:5174
 ```bash
 node - <<'NODE'
 const fs = require('fs')
-const manifest = JSON.parse(fs.readFileSync('tmp/tts/yaodao/ch019-full/audio/manifest.json', 'utf8'))
+const manifest = JSON.parse(fs.readFileSync('tmp/tts/<book-key>/ch019-full/audio/manifest.json', 'utf8'))
 console.log({
   version: manifest.version,
   timelineVersion: manifest.timelineVersion,
@@ -318,7 +318,7 @@ NODE
 ffprobe -v error \
   -show_entries format=duration \
   -of default=noprint_wrappers=1:nokey=1 \
-  tmp/tts/yaodao/ch019-full/audio/chapter.mp3
+  tmp/tts/<book-key>/ch019-full/audio/chapter.mp3
 ```
 
 如果 Android 播放时出现高亮和声音不一致，优先确认：
