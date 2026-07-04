@@ -3759,7 +3759,7 @@ function App() {
                     setAudioDirectoryDraft(event.target.value)
                     setAudioDirectoryMessage('')
                   }}
-                  placeholder="/Users/gwaves/Documents/novel_reader/tmp/tts/yaodao"
+                  placeholder="/Users/gwaves/Documents/novel_reader/tmp/tts/<book-key>"
                 />
                 <button type="button" onClick={() => void saveAudioDirectory()} disabled={isAudioDirectoryBusy}>
                   保存目录

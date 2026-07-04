@@ -377,11 +377,11 @@ function shellQuoteRemotePath(value) {
 
 function printUsage() {
   console.log(`用法：
-  node gateway/scripts/publish-audio.mjs --book-id <id> --source-root <offline-tts-output> --gateway-audio-dir <dir>
+  node gateway/scripts/publish-audio.mjs --book-id <id> --source-root <production-pipeline-output> --gateway-audio-dir <dir>
 
 常用参数：
   --book-id <id>             书籍 ID
-  --source-root <path>       offline-tts 输出父目录，例如 tmp/tts/yaodao
+  --source-root <path>       production-pipeline 输出父目录，例如 tmp/tts/<book-key>
   --gateway-audio-dir <path> Gateway 音频根目录，默认 GATEWAY_AUDIO_DIR 或 ${defaultAudioDir}
   --package-file <path>      从 package JSON 文件读取章节映射，跳过本地 API
   --source-api <url>         PC 本地 API 地址，默认 ${defaultSourceApi}

@@ -3,6 +3,7 @@ import {
   buildAudioChapterStatusRows,
   gatewayGenerateRagAnswer,
   gatewayUserFacingError,
+  isAudioPlaybackDisabled,
   listCachedAudioChapterIdsFromStorage,
   loadAudioCacheIndexFromStorage,
   loadLatestReadingProgressFromStorage,
@@ -35,6 +36,15 @@ const gatewaySettings = {
 }
 
 describe('reader audio playback availability', () => {
+  it('keeps cached MP3 playback enabled while background audio sync is running', () => {
+    expect(isAudioPlaybackDisabled(cachedChapter, false)).toBe(false)
+  })
+
+  it('disables MP3 playback only when the current chapter is missing or actively loading', () => {
+    expect(isAudioPlaybackDisabled(null, false)).toBe(true)
+    expect(isAudioPlaybackDisabled(cachedChapter, true)).toBe(true)
+  })
+
   it('uses cached MP3 metadata when the remote audio catalog is not loaded', () => {
     expect(resolveCurrentAudio('chapter-46', [], cachedChapter)).toEqual(cachedChapter)
   })

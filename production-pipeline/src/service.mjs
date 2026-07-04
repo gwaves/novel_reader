@@ -34,6 +34,7 @@ export function loadServiceConfig(env = process.env) {
     ),
     token: env.PRODUCTION_PIPELINE_CONSOLE_TOKEN?.trim() || '',
     logLevel: env.PRODUCTION_PIPELINE_CONSOLE_LOG_LEVEL?.trim() || 'info',
+    discoverRuns: env.PRODUCTION_PIPELINE_CONSOLE_DISCOVER_RUNS !== 'false',
   }
 }
 
@@ -92,7 +93,9 @@ export async function buildProductionPipelineService(config = loadServiceConfig(
 
   app.get('/api/jobs', async (request) => {
     const limit = clampInteger(readQueryValue(request.query, 'limit'), 1, 200, 50)
-    await store.discoverProductionRuns()
+    if (config.discoverRuns) {
+      await store.discoverProductionRuns()
+    }
     return {
       generatedAt: new Date().toISOString(),
       jobs: store.listJobs(limit),
@@ -215,7 +218,9 @@ class JobStore {
       }
       this.jobs.set(job.id, job)
     }
-    await this.discoverProductionRuns()
+    if (this.config.discoverRuns) {
+      await this.discoverProductionRuns()
+    }
     await this.persist()
   }
 
@@ -457,7 +462,7 @@ function runCommand(store, job, commandSpec) {
 function createProductionV2Spec(body, config) {
   const jobPath = resolve(requiredString(body.jobPath || body.productionJobPath || body.manifestPath || body.manifest, 'jobPath is required.'))
   const jobConfig = readProductionJobConfig(jobPath)
-  const bookId = readString(productionJobImports(jobConfig) ? deriveFileBookId(jobConfig) : (body.bookId || jobConfig.bookId))
+  const bookId = readString(body.bookId || jobConfig.bookId || (productionJobImports(jobConfig) ? deriveFileBookId(jobConfig) : ''))
   const title = readString(body.title || jobConfig.title || bookId)
   const runRoot = resolve(readString(body.productionRunRoot || body.runRoot) || config.productionRunRoot)
   return {

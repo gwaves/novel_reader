@@ -1,4 +1,4 @@
-# 离线多角色 TTS 设计
+# Production Pipeline TTS 设计
 
 ## 目标
 
@@ -104,11 +104,11 @@ Novel Reader SQLite
   "kind": "novel-reader-tts-director-script",
   "version": 1,
   "source": {
-    "bookId": "9679077f-2288-4bc7-9080-854784fc7f94",
-    "bookTitle": "妖刀记",
-    "chapterId": "1-...",
+    "bookId": "book-id",
+    "bookTitle": "示例书名",
+    "chapterId": "chapter-1",
     "chapterIndex": 1,
-    "chapterTitle": "第1卷第1章：寄魂妖刀，四大剑门",
+    "chapterTitle": "第 1 章",
     "sourceLimit": 2000
   },
   "segments": [
@@ -119,10 +119,10 @@ Novel Reader SQLite
       "speaker": "旁白",
       "characterId": null,
       "voice": "白桦",
-      "style": "中文武侠小说男声旁白，低沉、清晰、平静。",
-      "text": "东海湖阴城郊，断肠湖南岸。",
+      "style": "中文有声书男声旁白，低沉、清晰、平静。",
+      "text": "这是一个示例旁白片段。",
       "sourceStart": 0,
-      "sourceEnd": 14,
+      "sourceEnd": 11,
       "confidence": 1,
       "evidence": "规则切分：引号外旁白。"
     }
@@ -166,12 +166,12 @@ Novel Reader SQLite
     {
       "preSegmentId": "pre-0001",
       "type": "dialogue",
-      "speaker": "黄缨",
+      "speaker": "角色甲",
       "characterId": null,
       "voice": "冰糖",
-      "style": "慵懒、俏皮，略带挑衅。",
+      "style": "年轻、清亮，带少量情绪起伏。",
       "confidence": 0.86,
-      "evidence": "下文直接写到黄缨回应。"
+      "evidence": "上下文直接标明该角色回应。"
     }
   ]
 }
@@ -227,7 +227,7 @@ MIMO V2.5 TTS 有三类模型：
 }
 ```
 
-第一步只对采蓝、黄缨各抽取 2 到 3 个片段做 A/B 实验，不直接替换整章稳定链路。
+第一步只对目标角色各抽取 2 到 3 个片段做 A/B 实验，不直接替换整章稳定链路。
 
 ## 音频输出
 

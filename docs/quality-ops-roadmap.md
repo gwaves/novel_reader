@@ -106,7 +106,7 @@
 交付物：
 
 - `docs/code-review-checklist.md`。
-- 分模块 review 记录：PC Web/API、Gateway、Admin UI、Android App、production-pipeline、offline-tts。
+- 分模块 review 记录：PC Web/API、Gateway、Admin UI、Android App、production-pipeline。
 - 问题分级：P0 数据/安全风险、P1 用户主流程风险、P2 可维护性/性能风险。
 
 Review 重点：

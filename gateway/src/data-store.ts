@@ -15,6 +15,9 @@ export type GatewayBookSummary = {
   summaryCoverage?: number
   kgCoverage?: number
   embeddingCoverage?: number
+  embeddingVectorCoverage?: number
+  embeddingSummaryVectorCount?: number
+  embeddingChunkVectorCount?: number
   audioChapterCount?: number
   updatedAt: string
   visibility: GatewayBookVisibility

@@ -1,6 +1,6 @@
 # 产品功能说明书
 
-更新时间：2026-06-30
+更新时间：2026-07-02
 
 本文档用于把小说阅读助手从快速开发阶段沉淀为可测试、可评审、可运维的产品规格。后续测试用例、系统性 Code Review、监控与发布检查都应以本文档为功能基线。
 
@@ -13,7 +13,7 @@
 | 角色 | 主要目标 | 主要界面 |
 |------|----------|----------|
 | 阅读用户 | 导入小说、阅读、恢复进度、搜索剧情、查看概要和图谱 | PC Web、Gateway Android App |
-| 内容生产者 | 批量生成概要、图谱、embedding、音频和移动数据包 | PC Web、production-pipeline、offline-tts |
+| 内容生产者 | 批量生成概要、图谱、embedding、音频和移动数据包 | PC Web、production-pipeline |
 | 运维/管理员 | 管理 Gateway 书库、数据包、音频、设备授权、请求日志和下载发布 | Gateway Admin UI |
 | 开发/测试人员 | 验证功能契约、回归测试、发布检查和问题定位 | 文档、测试套件、日志、指标接口 |
 
@@ -39,7 +39,7 @@
 
 - `scripts/offline-scanner.mjs` 负责浏览器外批量概要/图谱扫描、续扫、导入导出和数据包生成。
 - `production-pipeline/` 是正式内容生产入口，目标流程为 `import -> summary -> kg -> embedding -> audio -> package -> publish -> verify`。
-- `offline-tts/` 负责多角色导演脚本生成、TTS 合成和章节 MP3 输出。
+- 多角色导演脚本生成、TTS 合成和章节 MP3 输出归属于 `production-pipeline/`，不再维护独立的 TTS 生产目录。
 
 ### 3.4 Gateway 服务
 

@@ -1,6 +1,6 @@
-# 离线多角色 TTS
+# Production Pipeline TTS
 
-这个目录用于开发 PC 端离线批处理工具：把小说章节转换成“导演脚本”，再基于脚本做多角色 TTS 合成。
+这里记录 production-pipeline 内置的多角色 TTS 工具：把小说章节转换成“导演脚本”，再基于脚本做多角色 TTS 合成。
 
 第一阶段的目标不是直接合成整章音频，而是先稳定生成可检查的导演脚本：
 
@@ -12,18 +12,18 @@
 
 ## 文件说明
 
-- `docs/design.md`：总体设计与数据结构。
-- `docs/development-plan.md`：分阶段开发计划。
-- `docs/mp3-production.md`：章节 MP3 生产、输出目录和移动端同步说明。
-- `config.example.json`：本地模型、音色和 TTS 示例配置。
-- `scripts/tts-director.mjs`：Node.js CLI，负责导演脚本生成与校验。
+- `production-pipeline/docs/tts/design.md`：总体设计与数据结构。
+- `production-pipeline/docs/tts/development-plan.md`：分阶段开发计划。
+- `production-pipeline/docs/tts/mp3-production.md`：章节 MP3 生产、输出目录和移动端同步说明。
+- `production-pipeline/config/tts-director.example.json`：本地模型、音色和 TTS 示例配置。
+- `production-pipeline/scripts/tts-director.mjs`：Node.js CLI，负责导演脚本生成与校验。
 
 ## 快速开始
 
 建议把实际配置放在用户数据目录，避免把私有配置提交到仓库：
 
 ```bash
-cp offline-tts/config.example.json ~/.novel_reader/tts-director.config.json
+cp production-pipeline/config/tts-director.example.json ~/.novel_reader/tts-director.config.json
 ```
 
 当前可用的大模型配置：
@@ -41,63 +41,63 @@ cp offline-tts/config.example.json ~/.novel_reader/tts-director.config.json
 测试模型：
 
 ```bash
-node offline-tts/scripts/tts-director.mjs --config offline-tts/config.example.json test-model
+node production-pipeline/scripts/tts-director.mjs --config production-pipeline/config/tts-director.example.json test-model
 ```
 
 列出主数据库书籍：
 
 ```bash
-node offline-tts/scripts/tts-director.mjs --config offline-tts/config.example.json list-books
+node production-pipeline/scripts/tts-director.mjs --config production-pipeline/config/tts-director.example.json list-books
 ```
 
-生成《妖刀记》第 1 章短片段导演脚本：
+生成第 1 章短片段导演脚本：
 
 ```bash
-node offline-tts/scripts/tts-director.mjs \
-  --config offline-tts/config.example.json \
+node production-pipeline/scripts/tts-director.mjs \
+  --config production-pipeline/config/tts-director.example.json \
   draft-script \
-  --book-id 9679077f-2288-4bc7-9080-854784fc7f94 \
+  --book-id <bookId> \
   --chapter 1 \
   --allow-partial \
   --limit 2000 \
   --batch-size 30 \
   --concurrency 10 \
-  --out tmp/tts/yaodao/ch001/director-script.json
+  --out tmp/tts/<book-key>/ch001/director-script.json
 ```
 
 校验导演脚本：
 
 ```bash
-node offline-tts/scripts/tts-director.mjs \
-  --config offline-tts/config.example.json \
+node production-pipeline/scripts/tts-director.mjs \
+  --config production-pipeline/config/tts-director.example.json \
   validate-script \
-  --script tmp/tts/yaodao/ch001/director-script.json
+  --script tmp/tts/<book-key>/ch001/director-script.json
 ```
 
 合成音频并输出 MP3：
 
 ```bash
 MIMO_API_KEY=你的密钥 \
-node offline-tts/scripts/tts-director.mjs \
-  --config offline-tts/config.example.json \
+node production-pipeline/scripts/tts-director.mjs \
+  --config production-pipeline/config/tts-director.example.json \
   synth \
-  --script tmp/tts/yaodao/ch001/director-script.json
+  --script tmp/tts/<book-key>/ch001/director-script.json
 ```
 
 可以通过配置文件 `tts.concurrency` 或命令行参数控制 TTS 并发：
 
 ```bash
-node offline-tts/scripts/tts-director.mjs synth \
-  --script tmp/tts/yaodao/ch001/director-script.json \
-  --out-dir tmp/tts/yaodao/ch001/audio-c3 \
+node production-pipeline/scripts/tts-director.mjs synth \
+  --script tmp/tts/<book-key>/ch001/director-script.json \
+  --out-dir tmp/tts/<book-key>/ch001/audio-c3 \
   --concurrency 8
 ```
 
 批量生成多章时，推荐使用流水线模式，避免多个章节同时压住本地 LLM：
 
 ```bash
-node offline-tts/scripts/tts-director.mjs batch-pipeline \
-  --book-id 9679077f-2288-4bc7-9080-854784fc7f94 \
+node production-pipeline/scripts/tts-director.mjs batch-pipeline \
+  --book-id <bookId> \
   --chapters 19,21-24 \
   --batch-size 10 \
   --director-concurrency 3 \
@@ -105,7 +105,7 @@ node offline-tts/scripts/tts-director.mjs batch-pipeline \
   --tts-concurrency 16 \
   --tts-chapters 2 \
   --resume \
-  --out-root tmp/tts/yaodao
+  --out-root tmp/tts/<book-key>
 ```
 
 这个命令会让章节的 LLM 阶段串行执行；当前一章进入 TTS 阶段后，下一章会立刻开始生成导演脚本。TTS 阶段可按章节并发，默认最多同时合成 2 章。
@@ -122,14 +122,14 @@ node offline-tts/scripts/tts-director.mjs batch-pipeline \
 完整的 MP3 生产流程、产物目录结构和移动端配置方式见：
 
 ```text
-offline-tts/docs/mp3-production.md
+production-pipeline/docs/tts/mp3-production.md
 ```
 
 单独检查导演脚本质量：
 
 ```bash
-node offline-tts/scripts/tts-director.mjs audit-script \
-  --script tmp/tts/yaodao/ch030-full/director-script.json
+node production-pipeline/scripts/tts-director.mjs audit-script \
+  --script tmp/tts/<book-key>/ch030-full/director-script.json
 ```
 
 ## 边界

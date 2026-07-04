@@ -1,7 +1,6 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { execFile, spawn } from 'node:child_process'
-import { createHash } from 'node:crypto'
 import { createServer } from 'node:http'
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { basename, dirname, join } from 'node:path'
@@ -354,6 +353,70 @@ describe('production-pipeline import', () => {
     }
   })
 
+  it('fails package when completed KG chapters have no mention coverage', async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), 'production-pipeline-package-quality-test-'))
+    try {
+      const txtPath = join(tempDir, 'sample.txt')
+      const dbPath = join(tempDir, 'main.sqlite')
+      const runRoot = join(tempDir, 'runs')
+      await writeFile(txtPath, `第一章 开始\n这是第一章内容。\n\n第二章 继续\n这是第二章内容。`, 'utf8')
+      await execFileAsync(process.execPath, [
+        cliPath,
+        'import',
+        '--file',
+        txtPath,
+        '--book-id',
+        'sample-book',
+        '--title',
+        '样书',
+        '--main-db',
+        dbPath,
+        '--run-root',
+        runRoot,
+      ])
+      seedSummaries(dbPath)
+      seedEmbeddings(dbPath)
+      seedKnowledgeGraph(dbPath)
+      seedKgChapterExtractions(dbPath, [
+        ['sample-book:ch00001', { entities: [{ name: '阿甲' }], relations: [] }],
+        ['sample-book:ch00002', { entities: [], relations: [] }],
+      ])
+
+      await assert.rejects(
+        execFileAsync(process.execPath, [
+          cliPath,
+          'package',
+          '--book-id',
+          'sample-book',
+          '--main-db',
+          dbPath,
+          '--run-root',
+          runRoot,
+        ]),
+        (error) => {
+          assert.match(error.stderr, /Package quality gate failed/)
+          assert.match(error.stderr, /KG mentions cover 1\/2/)
+          return true
+        },
+      )
+
+      const runIds = await readdir(join(runRoot, 'sample-book'))
+      assert.equal(runIds.length, 1)
+      const runDir = join(runRoot, 'sample-book', runIds[0])
+      const runJson = JSON.parse(await readFile(join(runDir, 'run.json'), 'utf8'))
+      assert.equal(runJson.status, 'failed')
+      const qualityReport = JSON.parse(await readFile(join(runDir, runJson.stages.package.artifacts.qualityReport), 'utf8'))
+      assert.equal(qualityReport.status, 'failed')
+      assert.equal(qualityReport.errors[0].code, 'kg_mention_coverage_incomplete')
+      assert.deepEqual(
+        qualityReport.errors[0].missingChapters.map((chapter) => chapter.chapterId),
+        ['sample-book:ch00002'],
+      )
+    } finally {
+      await rm(tempDir, { recursive: true, force: true })
+    }
+  })
+
   it('prepares a dry-run publish plan and merged Gateway catalog', async () => {
     const tempDir = await mkdtemp(join(tmpdir(), 'production-pipeline-publish-test-'))
     try {
@@ -643,7 +706,7 @@ describe('production-pipeline import', () => {
     }
   })
 
-  it('ignores configured bookId for import jobs and persists the imported file book id', async () => {
+  it('preserves configured bookId for import jobs instead of replacing it with a file-derived id', async () => {
     const tempDir = await mkdtemp(join(tmpdir(), 'production-pipeline-derived-book-test-'))
     try {
       const txtPath = join(tempDir, 'sample.txt')
@@ -652,11 +715,11 @@ describe('production-pipeline import', () => {
       const jobPath = join(tempDir, 'job.json')
       const sourceText = '第一章 开始\n这是第一章内容。\n\n第二章 继续\n这是第二章内容。'
       await writeFile(txtPath, sourceText, 'utf8')
-      const expectedBookId = `file-${createHash('sha256').update(Buffer.from(sourceText)).digest('hex').slice(0, 24)}`
+      const expectedBookId = 'stable-config-book-id'
       await writeFile(
         jobPath,
         JSON.stringify({
-          bookId: 'stale-config-book-id',
+          bookId: expectedBookId,
           title: '样书',
           mainDbPath: dbPath,
           source: { type: 'txt', file: txtPath },
@@ -710,7 +773,7 @@ describe('production-pipeline import', () => {
       const runRoot = join(tempDir, 'runs')
       const jobPath = join(tempDir, 'job.json')
       const sourceText = `第一章 开始\n这是第一章内容。`
-      const expectedBookId = `file-${createHash('sha256').update(Buffer.from(sourceText)).digest('hex').slice(0, 24)}`
+      const expectedBookId = 'sample-book'
       await writeFile(txtPath, sourceText, 'utf8')
       embeddingServer = await startFakeEmbeddingServer()
       await writeFile(
@@ -1066,9 +1129,14 @@ describe('production-pipeline import', () => {
       const kgReport = JSON.parse(await readFile(join(dirname(runJson.stages.kg.childRunJson), 'artifacts', 'kg-report.json'), 'utf8'))
       const audioRunJson = JSON.parse(await readFile(runJson.stages.audio.childRunJson, 'utf8'))
       const ttsArgs = JSON.parse(await readFile(join(audioRunJson.stages.audio.artifacts.ttsSourceRoot, 'args.json'), 'utf8'))
+      const ttsConfig = JSON.parse(await readFile(join(audioRunJson.stages.audio.artifacts.ttsSourceRoot, 'config.json'), 'utf8'))
       const finalAudioControl = JSON.parse(await readFile(join(audioRunJson.stages.audio.artifacts.ttsSourceRoot, 'control-final.json'), 'utf8'))
       assert.equal(summaryReport.concurrency, 3)
       assert.equal(kgReport.concurrency, 3)
+      assert.equal(ttsConfig.llm.baseUrl, chatServer.url)
+      assert.equal(ttsConfig.llm.model_name, 'fake-chat')
+      assert.equal(ttsConfig.llm.apiKeyEnv, 'LLM_API_KEY')
+      assert.equal(ttsConfig.llm.apiKey, undefined)
       assert.equal(ttsArgs['director-concurrency'], '2')
       assert.equal(ttsArgs['llm-chapters'], '2')
       assert.ok(ttsArgs['control-file'])
@@ -1324,6 +1392,154 @@ describe('production-pipeline import', () => {
         assert.equal(extractionCount, 2)
         assert.equal(entityCount, 2)
         assert.equal(relationCount, 1)
+      } finally {
+        db.close()
+      }
+    } finally {
+      await chatServer?.close()
+      await rm(tempDir, { recursive: true, force: true })
+    }
+  })
+
+  it('fails kg when a non-trivial chapter returns an empty extraction', async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), 'production-pipeline-kg-quality-test-'))
+    let chatServer
+    try {
+      chatServer = await startFakeChatServer({ emptyKgWhenPromptIncludes: 'EMPTY_KG' })
+      const txtPath = join(tempDir, 'sample.txt')
+      const dbPath = join(tempDir, 'main.sqlite')
+      const runRoot = join(tempDir, 'runs')
+      await writeFile(txtPath, `第一章 空图谱\n${'EMPTY_KG 阿甲在长安帮助乙门。'.repeat(80)}`, 'utf8')
+      await execFileAsync(process.execPath, [
+        cliPath,
+        'import',
+        '--file',
+        txtPath,
+        '--book-id',
+        'sample-book',
+        '--title',
+        '样书',
+        '--main-db',
+        dbPath,
+        '--run-root',
+        runRoot,
+      ])
+
+      await assert.rejects(
+        execFileAsync(process.execPath, [
+          cliPath,
+          'kg',
+          '--book-id',
+          'sample-book',
+          '--main-db',
+          dbPath,
+          '--run-root',
+          runRoot,
+          '--provider',
+          'openai-compatible',
+          '--base-url',
+          chatServer.url,
+          '--model',
+          'fake-chat',
+          '--empty-min-chars',
+          '100',
+          '--disable-thinking',
+        ]),
+        (error) => {
+          assert.match(error.stderr, /KG completed with failures/)
+          assert.match(error.stderr, /Empty KG extraction/)
+          return true
+        },
+      )
+
+      const runIds = await readdir(join(runRoot, 'sample-book'))
+      assert.equal(runIds.length, 1)
+      const runDir = join(runRoot, 'sample-book', runIds[0])
+      const kgReport = JSON.parse(await readFile(join(runDir, 'artifacts', 'kg-report.json'), 'utf8'))
+      assert.equal(kgReport.completed, 0)
+      assert.equal(kgReport.failed, 1)
+      assert.equal(kgReport.quality.issueCount, 1)
+      assert.equal(kgReport.quality.issues[0].code, 'kg_empty_extraction')
+
+      const db = new DatabaseSync(dbPath, { readOnly: true })
+      try {
+        const row = db.prepare('SELECT status, extraction_json AS extractionJson, error FROM kg_chapter_extractions WHERE chapter_id = ?')
+          .get('sample-book:ch00001')
+        assert.equal(row.status, 'failed')
+        assert.equal(row.extractionJson, null)
+        assert.match(row.error, /Empty KG extraction/)
+      } finally {
+        db.close()
+      }
+    } finally {
+      await chatServer?.close()
+      await rm(tempDir, { recursive: true, force: true })
+    }
+  })
+
+  it('retries kg quality failures before marking a chapter failed', async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), 'production-pipeline-kg-quality-retry-test-'))
+    let chatServer
+    try {
+      chatServer = await startFakeChatServer({
+        emptyKgWhenPromptIncludes: 'EMPTY_ONCE',
+        emptyKgFailuresBeforeSuccess: 1,
+      })
+      const txtPath = join(tempDir, 'sample.txt')
+      const dbPath = join(tempDir, 'main.sqlite')
+      const runRoot = join(tempDir, 'runs')
+      await writeFile(txtPath, `第一章 重试\n${'EMPTY_ONCE 阿甲在长安帮助乙门。'.repeat(80)}`, 'utf8')
+      await execFileAsync(process.execPath, [
+        cliPath,
+        'import',
+        '--file',
+        txtPath,
+        '--book-id',
+        'sample-book',
+        '--title',
+        '样书',
+        '--main-db',
+        dbPath,
+        '--run-root',
+        runRoot,
+      ])
+
+      const { stdout } = await execFileAsync(process.execPath, [
+        cliPath,
+        'kg',
+        '--book-id',
+        'sample-book',
+        '--main-db',
+        dbPath,
+        '--run-root',
+        runRoot,
+        '--provider',
+        'openai-compatible',
+        '--base-url',
+        chatServer.url,
+        '--model',
+        'fake-chat',
+        '--empty-min-chars',
+        '100',
+        '--max-attempts',
+        '2',
+        '--disable-thinking',
+      ])
+
+      assert.match(stdout, /completed: 1/)
+      assert.match(stdout, /failed: 0/)
+      assert.equal(chatServer.requests.length, 2)
+      const runId = stdout.match(/run: (.+)/)?.[1]?.trim()
+      assert.ok(runId)
+      const kgReport = JSON.parse(await readFile(join(runRoot, 'sample-book', runId, 'artifacts', 'kg-report.json'), 'utf8'))
+      assert.equal(kgReport.quality.retries, 1)
+      assert.equal(kgReport.quality.issueCount, 0)
+
+      const db = new DatabaseSync(dbPath, { readOnly: true })
+      try {
+        const row = db.prepare('SELECT status FROM kg_chapter_extractions WHERE chapter_id = ?')
+          .get('sample-book:ch00001')
+        assert.equal(row.status, 'completed')
       } finally {
         db.close()
       }
@@ -2679,6 +2895,33 @@ function seedKnowledgeGraph(dbPath) {
   }
 }
 
+function seedKgChapterExtractions(dbPath, entries) {
+  const db = new DatabaseSync(dbPath)
+  try {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS kg_chapter_extractions (
+        chapter_id TEXT PRIMARY KEY REFERENCES chapters(id) ON DELETE CASCADE,
+        book_id TEXT NOT NULL REFERENCES books(id) ON DELETE CASCADE,
+        status TEXT NOT NULL,
+        extraction_json TEXT,
+        error TEXT,
+        model TEXT,
+        scanned_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+        updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      );
+    `)
+    const insert = db.prepare(`
+      INSERT INTO kg_chapter_extractions (chapter_id, book_id, status, extraction_json, error, model, scanned_at, updated_at)
+      VALUES (?, 'sample-book', 'completed', ?, NULL, 'fake-chat', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+    `)
+    for (const [chapterId, extraction] of entries) {
+      insert.run(chapterId, JSON.stringify(extraction))
+    }
+  } finally {
+    db.close()
+  }
+}
+
 function fakeTtsDirectorSource() {
   return `
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
@@ -2722,6 +2965,7 @@ if (args._[0] !== 'batch-pipeline') throw new Error('fake director only supports
 await mkdir(args['out-root'], { recursive: true })
 await writeFile(join(args['out-root'], 'args.json'), JSON.stringify(args))
 const config = args.config ? JSON.parse(await readFile(args.config, 'utf8')) : {}
+await writeFile(join(args['out-root'], 'config.json'), JSON.stringify(config))
 console.log('fake director start')
 if (config.fakeDelayMs) {
   await new Promise(resolve => setTimeout(resolve, Number(config.fakeDelayMs)))
@@ -2800,6 +3044,7 @@ function sleep(ms) {
 }
 
 async function startFakeEmbeddingServer() {
+  const requests = []
   const server = createServer(async (request, response) => {
     const url = new URL(request.url, 'http://127.0.0.1')
     if (request.method !== 'POST' || url.pathname !== '/embeddings') {
@@ -2807,6 +3052,7 @@ async function startFakeEmbeddingServer() {
       return
     }
     const body = await readRequestJson(request)
+    requests.push(body)
     const input = String(body.input || '')
     const base = Math.max(1, input.length % 10)
     sendJson(response, {
@@ -2819,6 +3065,7 @@ async function startFakeEmbeddingServer() {
   })
   const address = server.address()
   return {
+    requests,
     url: `http://127.0.0.1:${address.port}`,
     close: () => new Promise((resolve, reject) => server.close((error) => (error ? reject(error) : resolve()))),
   }
@@ -2858,7 +3105,8 @@ async function startFakeOllamaEmbeddingServer({ models = ['qwen3-embedding:8b'] 
   }
 }
 
-async function startFakeChatServer({ delayMs = 0 } = {}) {
+async function startFakeChatServer({ delayMs = 0, emptyKgWhenPromptIncludes = '', emptyKgFailuresBeforeSuccess = Number.POSITIVE_INFINITY } = {}) {
+  const requests = []
   const server = createServer(async (request, response) => {
     const url = new URL(request.url, 'http://127.0.0.1')
     if (request.method !== 'POST' || url.pathname !== '/chat/completions') {
@@ -2866,9 +3114,33 @@ async function startFakeChatServer({ delayMs = 0 } = {}) {
       return
     }
     const body = await readRequestJson(request)
+    requests.push(body)
     if (delayMs) await sleep(delayMs)
     const prompt = body.messages?.map((message) => message.content).join('\n') || ''
     if (prompt.includes('知识图谱')) {
+      const matchingEmptyKgRequests = requests.filter((entry) => {
+        const entryPrompt = entry.messages?.map((message) => message.content).join('\n') || ''
+        return entryPrompt.includes('知识图谱') && entryPrompt.includes(emptyKgWhenPromptIncludes)
+      }).length
+      if (
+        emptyKgWhenPromptIncludes
+        && prompt.includes(emptyKgWhenPromptIncludes)
+        && matchingEmptyKgRequests <= emptyKgFailuresBeforeSuccess
+      ) {
+        sendJson(response, {
+          choices: [
+            {
+              message: {
+                content: JSON.stringify({
+                  entities: [],
+                  relations: [],
+                }),
+              },
+            },
+          ],
+        })
+        return
+      }
       sendJson(response, {
         choices: [
           {
@@ -2932,6 +3204,7 @@ async function startFakeChatServer({ delayMs = 0 } = {}) {
   })
   const address = server.address()
   return {
+    requests,
     url: `http://127.0.0.1:${address.port}`,
     close: () => new Promise((resolve, reject) => server.close((error) => (error ? reject(error) : resolve()))),
   }
