@@ -1926,6 +1926,7 @@ describe('gateway app', () => {
       method: 'GET',
       url: '/mobile/books/missing-book/package',
       headers: authHeaders,
+      remoteAddress: '192.168.88.42',
     })
     const requestsResponse = await app.inject({
       method: 'GET',
@@ -1945,10 +1946,59 @@ describe('gateway app', () => {
           url: '/mobile/books/missing-book/package',
           statusCode: 404,
           durationMs: expect.any(Number),
+          ip: '192.168.88.42',
           bookId: 'missing-book',
         }),
       ],
     })
+  })
+
+  it('uses forwarded client IPs when Gateway runs behind a trusted proxy', async () => {
+    const dataDir = await makeDataDir()
+    const app = buildTestApp({
+      GATEWAY_DEV_ACCESS_TOKEN: 'dev-token',
+      GATEWAY_DATA_DIR: dataDir,
+      GATEWAY_TRUST_PROXY: 'true',
+    })
+    const authHeaders = {
+      authorization: 'Bearer dev-token',
+      'x-forwarded-for': '192.168.88.77, 172.18.0.3',
+      'x-device-id': 'device-forwarded',
+      'x-device-name': 'Forwarded Phone',
+    }
+
+    const sessionResponse = await app.inject({
+      method: 'GET',
+      url: '/auth/session',
+      headers: authHeaders,
+      remoteAddress: '172.18.0.3',
+    })
+    const devicesResponse = await app.inject({
+      method: 'GET',
+      url: '/admin/devices',
+      headers: { authorization: 'Bearer dev-token' },
+    })
+    const requestsResponse = await app.inject({
+      method: 'GET',
+      url: '/admin/requests',
+      headers: { authorization: 'Bearer dev-token' },
+    })
+
+    expect(sessionResponse.statusCode).toBe(200)
+    expect(devicesResponse.json().devices).toEqual([
+      expect.objectContaining({
+        id: 'device-forwarded',
+        lastIp: '192.168.88.77',
+      }),
+    ])
+    expect(requestsResponse.json().requests).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        url: '/auth/session',
+        ip: '192.168.88.77',
+        deviceId: 'device-forwarded',
+        deviceName: 'Forwarded Phone',
+      }),
+    ]))
   })
 
   it('reports book catalog audio counts from the current audio manifests', async () => {

@@ -7,6 +7,8 @@ Gateway 第一版面向两种部署方式：
 
 公网环境不要直接暴露未加 HTTPS 的接口。建议外层统一终止 TLS，再反代到容器内的 `http://127.0.0.1:6180` 或 Docker 网络地址。
 
+如果 Gateway 跑在 Nginx、Caddy、负载均衡或 Docker 反向代理后，必须开启 `GATEWAY_TRUST_PROXY=true`，并让代理传递 `X-Real-IP` / `X-Forwarded-For`。否则 Gateway 只能看到 Docker bridge 或代理容器地址，例如 `172.18.x.x`，设备列表和请求日志里的 IP 就不是客户端真实地址。
+
 生产流水线如果跑在内网另一台机器上，可以同时保留两个入口：
 
 - 内部生产流水线访问 Gateway 应用 HTTP 端口，例如 `http://192.168.88.100:6180`。
@@ -20,6 +22,7 @@ Gateway 第一版面向两种部署方式：
 
 ```bash
 GATEWAY_PUBLIC_BASE_URL=https://reader.example.com
+GATEWAY_TRUST_PROXY=true
 GATEWAY_DEV_ACCESS_TOKEN=
 GATEWAY_ADMIN_ACCESS_TOKEN=replace-with-a-long-random-admin-token
 GATEWAY_MOBILE_ACCESS_TOKEN=replace-with-a-long-random-mobile-token
@@ -239,6 +242,7 @@ server {
         proxy_pass http://127.0.0.1:6180;
         proxy_http_version 1.1;
         proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
         proxy_set_header X-Forwarded-Proto https;
     }
@@ -290,6 +294,8 @@ server {
 ```
 
 `/admin/ui` 是管理后台静态入口。如果公网入口经过家庭路由器 DNAT/SNAT，Nginx 看到的来源地址可能已经变成内网地址，基于 `allow`/`deny` 的内网 ACL 可能失效。推荐在公网 Nginx 入口直接禁止 `/admin/ui`，管理后台改走家里内网直连 `http://192.168.88.100:6180/admin/ui`。上面的 `location ^~ /admin/ui` 必须放在通用 `location /` 前面；管理 API 仍由 Gateway 的 admin bearer token 保护。
+
+注意：内网直连 `http://192.168.88.100:6180` 不经过 Nginx，Docker bridge 模式下容器仍可能只能看到 `172.18.0.1`。如果管理后台本身也必须显示浏览器真实 IP，应让后台走一个带转发头的内网 Nginx 入口，或把 Gateway 改为 host network / host 级反向代理部署。
 
 对应端口关系：
 

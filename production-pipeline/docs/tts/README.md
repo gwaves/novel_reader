@@ -1,14 +1,14 @@
 # Production Pipeline TTS
 
-这里记录 production-pipeline 内置的多角色 TTS 工具：把小说章节转换成“导演脚本”，再基于脚本做多角色 TTS 合成。
+这里记录 production-pipeline 内置的多角色 TTS 工具：把小说章节转换成“导演脚本”，再基于脚本做多角色 TTS 合成，最终产出 Gateway Android 可缓存播放的章节 MP3 和 timeline manifest。
 
-第一阶段的目标不是直接合成整章音频，而是先稳定生成可检查的导演脚本：
+当前生产链路是：
 
 ```text
-章节正文 -> 规则预切分 -> 知识图谱候选角色 -> 第三方大模型角色判定 -> 导演脚本 JSON
+章节正文 -> 规则预切分 -> 知识图谱候选角色 -> 第三方大模型角色判定 -> 导演脚本 JSON -> 多角色 TTS -> chapter.mp3 + manifest.json
 ```
 
-后续 TTS 合成只消费导演脚本，不再直接猜测原文中的角色。
+TTS 合成只消费导演脚本，不直接猜测原文中的角色。正式全书生产优先通过 `production-pipeline` 的 `audio` stage 调用本工具；本页命令仍可用于单章调试、局部返工和质量排查。
 
 ## 文件说明
 
@@ -16,7 +16,7 @@
 - `production-pipeline/docs/tts/development-plan.md`：分阶段开发计划。
 - `production-pipeline/docs/tts/mp3-production.md`：章节 MP3 生产、输出目录和移动端同步说明。
 - `production-pipeline/config/tts-director.example.json`：本地模型、音色和 TTS 示例配置。
-- `production-pipeline/scripts/tts-director.mjs`：Node.js CLI，负责导演脚本生成与校验。
+- `production-pipeline/scripts/tts-director.mjs`：Node.js CLI，负责导演脚本生成、校验、合成与批量流水线。
 
 ## 快速开始
 
@@ -93,7 +93,7 @@ node production-pipeline/scripts/tts-director.mjs synth \
   --concurrency 8
 ```
 
-批量生成多章时，推荐使用流水线模式，避免多个章节同时压住本地 LLM：
+批量生成多章时，可以直接使用流水线模式；全书正式生产则推荐由 `production-pipeline` job 的 `audio` stage 传入同等参数，便于和 `package/publish/verify` 串成一个可恢复运行：
 
 ```bash
 node production-pipeline/scripts/tts-director.mjs batch-pipeline \

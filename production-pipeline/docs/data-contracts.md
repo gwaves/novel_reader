@@ -31,7 +31,7 @@ A job config is the declarative input for production.
     "type": "main-db",
     "mainDbPath": "~/.novel_reader/novel_reader.sqlite"
   },
-  "stages": ["summary", "kg", "embedding", "audio", "package", "publish"],
+  "stages": ["summary", "kg", "embedding", "audio", "package", "publish", "verify"],
   "embedding": {
     "provider": "openai-compatible",
     "baseUrl": "https://example.test/v1",
@@ -41,17 +41,28 @@ A job config is the declarative input for production.
     "retries": 5
   },
   "audio": {
+    "ttsConfig": "~/.novel_reader/tts-director.config.json",
+    "ttsChapters": 2,
+    "ttsConcurrency": 16,
     "chapters": "all",
-    "concurrency": 16
+    "resume": true,
+    "strict": true
   },
   "gateway": {
     "host": "192.168.88.100",
     "user": "gwaves",
     "root": "/home/gwaves/novel-reader-gateway",
-    "url": "https://192.168.88.100:8888"
+    "url": "https://192.168.88.100:8888",
+    "audioDir": "~/novel-reader-gateway/audio",
+    "dataDir": "~/novel-reader-gateway/data"
   }
 }
 ```
+
+`audio.ttsConfig` delegates director-script generation and multi-role TTS to
+`production-pipeline/scripts/tts-director.mjs`. When `publish` and `verify` are
+enabled, the run is not considered complete until Gateway exposes the expected
+package, audio list, sampled MP3 files, and sampled manifest files over HTTP.
 
 ## Run Summary
 
@@ -81,4 +92,3 @@ Minimum columns:
 - `finished_at`
 - `error`
 - `metadata_json`
-

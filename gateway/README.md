@@ -4,7 +4,7 @@
 
 该服务的目标是让移动客户端默认连接一个稳定的公有域名，而不是依赖用户手动配置局域网 IP、LLM 服务、embedding 服务或 MP3 后端地址。移动端只需要完成鉴权并访问 Gateway API，具体的数据读取、AI 检索、embedding 转发、MP3 资源签名与分发由网关服务统一处理。
 
-当前目录先用于沉淀设计、计划和后续实现。Gateway 代码、配置示例、部署脚本、API 文档和测试都应优先放在本目录内，避免与现有本地 SQLite API、旧移动端历史实现或 `production-pipeline/` 混在一起。
+当前目录是 Gateway 服务、配置示例、部署脚本、API 文档、管理后台和测试的维护位置。Gateway 不直接复用本地 SQLite dev API；正式内容由 PC 端或 `production-pipeline` 生成 package、音频与 manifest 后发布到 Gateway 数据目录。
 
 ## 设计原则
 
@@ -13,7 +13,7 @@
 - 公网服务必须默认鉴权、限流、审计，不直接暴露现有本地数据库服务。
 - 音频文件优先通过对象存储或 CDN 分发，Gateway 负责权限校验和短期签名 URL。
 - AI 和 embedding 调用由服务端统一转发，并按用户、设备或访问 token 控制额度。
-- 第一阶段先建立最小可用 API 壳子，再逐步接入书库、阅读数据、AI 检索和 MP3 播放。
+- Gateway 负责移动端鉴权、书库/package 分发、AI/RAG 转发、MP3/manifest 分发、设备角色、后台管理和下载发布。
 
 ## 文档
 
@@ -50,7 +50,7 @@ npm run gateway:dev
 localStorage.setItem('novel-reader-gateway-admin-token', '<GATEWAY_ADMIN_ACCESS_TOKEN>')
 ```
 
-可复制 `.env.example` 中的变量到部署环境。Phase 1 已提供：
+可复制 `.env.example` 中的变量到部署环境。当前已提供：
 
 - `GET /health`
 - `GET /version`
@@ -61,6 +61,7 @@ localStorage.setItem('novel-reader-gateway-admin-token', '<GATEWAY_ADMIN_ACCESS_
 - `GET /mobile/books`（受保护，返回 Gateway 书库索引）
 - `GET /mobile/books/:bookId`（受保护，返回单书摘要）
 - `GET /mobile/books/:bookId/package`（受保护，返回移动端完整数据包）
+- `GET /mobile/books/:bookId/package/download`（受保护，下载移动端完整数据包）
 - `PUT /admin/books/:bookId/package`（受保护，导入 PC 端导出的移动数据包）
 - `GET /admin/books/:bookId/package/download`（受保护，下载后台完整数据包）
 - `GET /admin/books`（受保护，返回后台全量书库视图）
@@ -79,8 +80,11 @@ localStorage.setItem('novel-reader-gateway-admin-token', '<GATEWAY_ADMIN_ACCESS_
 - `GET /admin/ui`（内网管理后台静态入口）
 - `POST /ai/chat`（受保护，转发 OpenAI-compatible chat completions）
 - `POST /ai/embeddings`（受保护，转发 OpenAI-compatible embeddings）
+- `POST /ai/search`（受保护，基于移动数据包执行概要、正文 chunk 与图谱召回）
+- `POST /ai/rag-answer`（受保护，基于检索上下文生成带来源的回答）
 - `GET /mobile/books/:bookId/audio`（受保护，返回本地 MP3 清单）
 - `GET /mobile/books/:bookId/audio/:chapterId/download`（受保护，下载章节 MP3）
+- `GET /mobile/books/:bookId/audio/:chapterId/manifest`（受保护，下载章节 timeline manifest）
 - 统一错误响应格式
 - 基础限流、安全响应头和可选 CORS 配置
 

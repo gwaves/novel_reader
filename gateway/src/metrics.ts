@@ -12,6 +12,9 @@ type RequestSample = {
   statusCode: number
   durationMs: number
   time: number
+  ip: string
+  deviceId?: string
+  deviceName?: string
   bookId?: string
   downloadKind?: 'package' | 'audio'
 }
@@ -53,6 +56,9 @@ export function createGatewayMetrics() {
       statusCode,
       durationMs,
       time: now,
+      ip: request.ip,
+      deviceId: readHeaderValue(request.headers['x-device-id']),
+      deviceName: readHeaderValue(request.headers['x-device-name']),
       ...download,
     }
     samples.push(sample)
@@ -134,9 +140,18 @@ function formatRequestSample(sample: RequestSample) {
     url: sample.url,
     statusCode: sample.statusCode,
     durationMs: sample.durationMs,
+    ip: sample.ip,
+    deviceId: sample.deviceId,
+    deviceName: sample.deviceName,
     bookId: sample.bookId,
     downloadKind: sample.downloadKind,
   }
+}
+
+function readHeaderValue(value: string | string[] | undefined) {
+  const rawValue = Array.isArray(value) ? value[0] : value
+  const normalized = rawValue?.trim()
+  return normalized || undefined
 }
 
 function classifyDownload(url: string): Pick<RequestSample, 'bookId' | 'downloadKind'> {

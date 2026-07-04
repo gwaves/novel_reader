@@ -48,8 +48,9 @@ export function buildGatewayApp(config: GatewayConfig = loadConfig()) {
               paths: ['req.headers.authorization', 'req.headers.cookie'],
               censor: '[redacted]',
             },
-        },
+          },
     bodyLimit: config.maxBodyBytes,
+    trustProxy: config.trustProxy,
     genReqId: (request) => {
       const existingRequestId = request.headers['x-request-id']
       const requestId = Array.isArray(existingRequestId) ? existingRequestId[0] : existingRequestId

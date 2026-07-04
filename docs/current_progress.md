@@ -1,3 +1,10 @@
+2026-07-04 更新：README 与文档体系刷新为 AI 原生小说阅读器口径。
+- 根 README 已重制为图文并茂的项目首页，核心卖点统一为 AI 原生小说阅读器：知识图谱、RAG 剧情问答、多角色有声小说合成、Gateway Android 离线读听和 production-pipeline 发布验证闭环。
+- 使用新连接的 Android 真机补充移动端主要功能截图，保留公开名著内容界面：书库覆盖率、阅读概要、RAG/图谱搜索、音频/TTS 菜单、同步与缓存。原始截图中可能包含设备信息的临时文件已清理。
+- `README.en.md` 和 `README.zh-CN.md` 已同步新定位；中文入口改为根 README 指针，避免两份中文首页继续分叉。
+- 产品规格、Gateway、Gateway Android、production-pipeline 阶段、TTS 和数据契约文档已按当前实现更新，明确 summary/KG/audio/package/publish/verify 是当前生产链路而不是旧计划。
+- 测试矩阵和质量规划同步到 2026-07-04，补充 Android 播放引擎切换与 manifest 高亮相关验收口径。
+
 2026-07-02 更新：TTS 生产链路归并到 production-pipeline。
 - 删除独立 `offline-tts/` 目录，将 TTS director 脚本迁入 `production-pipeline/scripts/tts-director.mjs`，将 TTS 设计、开发计划和 MP3 生产说明迁入 `production-pipeline/docs/tts/`。
 - 将通用 TTS 配置示例迁入 `production-pipeline/config/tts-director.example.json`，并移除示例中的特定小说角色绑定；通用模板默认不预置角色，具体书籍角色音色应写在本地私有配置或具体生产 job 旁路配置中。

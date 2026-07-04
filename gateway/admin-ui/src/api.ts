@@ -504,6 +504,7 @@ function mapAudio(item: GatewayAudio): AdminAudio {
 
 function mapRequestLog(log: GatewayRequestLog): AdminRequestLog {
   const path = readString(log.path, readString(log.url, '/'))
+  const ip = readString(log.ip, '-')
   return {
     id: readString(log.id, readString(log.requestId, `${readString(log.method, 'GET')}-${path}-${readString(log.time, '')}`)),
     time: formatTime(log.time),
@@ -513,7 +514,7 @@ function mapRequestLog(log: GatewayRequestLog): AdminRequestLog {
     durationMs: readNumber(log.durationMs),
     deviceName: readString(log.deviceName, '未知设备'),
     deviceId: readString(log.deviceId, '-'),
-    ip: readString(log.ip, '-'),
+    ip,
   }
 }
 
