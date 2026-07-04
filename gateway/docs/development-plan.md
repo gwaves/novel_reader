@@ -1,5 +1,9 @@
 # Gateway 开发计划
 
+## 当前状态
+
+截至 2026-07-04，Gateway 已从设计计划推进到可用服务：Fastify API、管理后台、设备角色、移动书库/package、AI/RAG、音频目录、MP3 下载、manifest timeline、Android APK 发布和真实 Gateway 部署验证均已落地。本文仍保留阶段计划作为路线记录，后续重点转向质量治理、发布验证、可观测性和移动端体验收口。
+
 ## 背景
 
 当前独立移动端主要通过局域网访问 PC 端本地后端，用户需要配置内网 IP、确保手机和电脑在同一网络，并单独处理 LLM、embedding、TTS/MP3 等后端能力。这个模式适合开发和自用，但对普通用户不够友好，也难以支撑离开局域网后的默认体验。
@@ -188,11 +192,11 @@ POST /ai/embeddings
 
 ## 近期任务
 
-1. 确定 Gateway 技术栈：优先考虑 Node.js + TypeScript，复用项目现有生态。
-2. 设计最小配置文件：监听端口、公开 base URL、token 密钥、上游 AI/embedding base URL、对象存储配置。
-3. 搭建 `/health`、`/version`、`/capabilities` 三个只读接口。
-4. 明确移动端默认连接策略：官方域名优先，自定义域名作为高级设置。
-5. 定义第一版鉴权策略：开发期静态 token，生产期可迁移到邀请码或账号体系。
+1. 继续按 [测试用例矩阵](../../docs/test-case-matrix.md) 补齐 Gateway、Admin UI、Android 和 production-pipeline 的 P0/P1 回归覆盖。
+2. 强化 Gateway 运维视图：请求失败、下载失败、package/audio 健康、设备角色变化和发布事件要能从 Admin UI 或日志快速定位。
+3. 将 package/audio/APK 发布验证固定为发布门禁，特别是 production-pipeline `verify` 对远端 HTTP 可见性的检查。
+4. 继续收口 Android 读听体验：系统 TTS、缓存 MP3、manifest 高亮、RAG 搜索和离线状态的 UI 一致性。
+5. 梳理长期鉴权演进：当前静态 admin/mobile token 保持可运维，后续再评估邀请码、账号体系和 token 轮换。
 
 ## 验收标准
 

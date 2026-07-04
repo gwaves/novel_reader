@@ -196,6 +196,7 @@ describe('Gateway 管理后台 UI', () => {
               url: '/mobile/books/api-book/package',
               statusCode: 503,
               durationMs: 777,
+              ip: '192.168.88.42',
             },
           ],
         })
@@ -243,7 +244,8 @@ describe('Gateway 管理后台 UI', () => {
     expect(screen.getByText('chapter-7、chapter-8、chapter-9、chapter-10')).toBeInTheDocument()
 
     await user.click(screen.getByRole('button', { name: '请求日志' }))
-    expect(screen.getByRole('row', { name: /20:12 GET .*\/mobile\/books\/api-book\/package 503 777ms 未知设备/ })).toBeInTheDocument()
+    expect(screen.getByRole('columnheader', { name: '源 IP' })).toBeInTheDocument()
+    expect(screen.getByRole('row', { name: /20:12 GET .*\/mobile\/books\/api-book\/package 503 777ms 未知设备 .* 192\.168\.88\.42/ })).toBeInTheDocument()
   })
 
   it('API 不可用时用 mock 数据展示数据包、音频和请求日志页面', async () => {

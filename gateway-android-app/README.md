@@ -4,11 +4,16 @@
 
 ## 当前能力
 
-- 保存 Gateway 地址、token 和设备名。
-- 使用 `GET /auth/session` 验证连接，并通过 `X-Device-Name` 登记设备。
-- 使用 `GET /mobile/books` 拉取书库。
-- 使用 `GET /mobile/books/:bookId/package` 读取并缓存单书移动数据包。
-- 使用 Gateway 音频清单、MP3 下载和 manifest timeline 播放章节音频，并在正文中高亮当前播放片段。
+- 保存 Gateway 地址、token、设备名和稳定设备信息。
+- 使用 `GET /auth/session` 验证连接，并通过 `X-Device-*` 请求头登记设备。
+- 根据 Gateway 返回的 default/trusted/disabled 设备角色处理云端访问和本地缓存策略。
+- 使用 `GET /mobile/books` 拉取书库，展示概要、知识图谱、RAG、package 和音频覆盖率。
+- 使用 `GET /mobile/books/:bookId/package` 与 `/mobile/books/:bookId/package/download` 读取并缓存单书移动数据包。
+- 支持章节阅读、阅读进度、阅读偏好、概要查看、知识图谱/RAG 搜索。
+- 支持本地系统 TTS，也支持 Gateway 音频清单、MP3 下载和 manifest timeline 播放章节音频，并在正文中高亮当前播放片段。
+- 支持按书/章节管理 MP3 缓存，避免缓存状态串书。
+- 支持检查 Gateway 发布的 Android APK 更新，并交由 Android 系统确认安装。
+- 日志避免输出 bearer token、上游模型密钥和设备敏感标识。
 
 ## 本地开发
 

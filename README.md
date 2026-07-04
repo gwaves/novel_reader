@@ -2,119 +2,153 @@
 
 [English](README.en.md) | [中文](README.md)
 
-本地优先的小说阅读器，支持 EPUB 导入、RAG 智能搜索、知识图谱抽取和 Gateway Android 移动端。
+AI 原生的小说阅读器：把长篇小说变成可检索、可追踪、可听的智能阅读体验。它不仅能导入和阅读本地书库，还会为整本书生成知识图谱、RAG 检索索引和多角色有声小说音频，让读者可以一边读正文，一边查人物关系、追剧情伏笔、听接近“原声剧”的分角色朗读。
+
+PC 端负责导入、阅读、AI 概要、知识图谱和 RAG 检索；`production-pipeline/` 负责批量生成概要、图谱、embedding、多角色 MP3 和移动数据包；`gateway/` 负责云端分发、鉴权、运维后台和移动 API；`gateway-android-app/` 提供离线阅读、MP3 缓存和应用更新。
 
 ![小说阅读助手视觉图](src/assets/hero.png)
 
-小说阅读助手面向长篇网文和本地书库：阅读时保存进度，AI 按需生成章节概要，知识图谱追踪人物、门派、道具、功法、地点、灵兽、事件和关系，RAG 搜索帮助回答跨章节问题。所有书籍数据默认保存在本地 SQLite 数据库中，AI 功能可接入本地 Ollama 或兼容 OpenAI 的外部模型。
+> 截图中的桌面 demo 使用公开文本《三国志演义》《西游记》；移动端截图只展示缓存管理和公开经典书名，避免展示私人阅读记录或少儿不宜内容。
 
-## 真实界面预览
+## 核心卖点
 
-以下截图来自独立 demo 数据目录，示例书库使用公开文本《三国志演义》《西游记》，不会包含个人阅读记录或私有书籍。
+| 卖点 | 体验 |
+|------|------|
+| AI 原生阅读 | 阅读器不只是展示正文，而是围绕章节、人物、关系、证据和音频生产组织整本书 |
+| 知识图谱 | 自动抽取人物、地点、门派、道具、功法、事件和关系，支持证据跳转、复审、合并和导出 |
+| RAG 剧情问答 | 基于概要、正文 chunk 和图谱实体召回，回答跨章节问题并保留来源依据 |
+| 多角色有声小说合成 | 使用生产流水线生成章节 MP3、角色/旁白时间线和播放高亮，移动端可缓存离线播放 |
+| 移动端连续阅读 | Gateway Android App 同步书库、数据包和音频，在手机上读、搜、听同一本书 |
 
-![Demo 书架首页](docs/screenshots/demo-home-library.png)
-![Demo 阅读器](docs/screenshots/demo-reader.png)
+## 项目快照
+
+| 模块 | 当前能力 | 入口 |
+|------|----------|------|
+| PC AI 阅读器 | TXT/EPUB 导入、阅读进度、概要、知识图谱、RAG、数据库备份恢复 | `npm run dev` |
+| Production Pipeline | `import -> summary -> kg -> embedding -> multi-role audio -> package -> publish -> verify` 全流程生产 | `npm run production-pipeline -- run --job ...` |
+| Gateway 服务 | 移动书库、package/audio 分发、RAG/AI 转发、设备授权、管理后台、指标与事件 | `npm run gateway:dev` |
+| Gateway Android App | Gateway 登录、书库同步、离线 package、章节 MP3 缓存、AI 多角色音频播放、应用更新 | `npm run gateway-android:android:build` |
+| 测试与运维 | 单元、接口、E2E、Android 构建、Gateway smoke、发布检查和 Runbook | `npm run test:smoke` |
+
+## 真实界面
+
+### PC 书库与阅读
+
+| 书库 | 阅读器 |
+|------|--------|
+| ![Demo 书架首页](docs/screenshots/demo-home-library.png) | ![Demo 阅读器](docs/screenshots/demo-reader.png) |
+
+### RAG 搜索
+
 ![Demo 智能搜索](docs/screenshots/demo-search.png)
 
-## Quick Demo
+### Gateway Android 真机
 
-5 分钟内跑通一遍：
+| 书库覆盖率 | 阅读摘要 | RAG / 图谱搜索 |
+|------------|----------|----------------|
+| <img src="docs/screenshots/mobile/mobile-library.png" alt="移动端书库覆盖率" width="260"> | <img src="docs/screenshots/mobile/mobile-reader-summary.png" alt="移动端阅读摘要" width="260"> | <img src="docs/screenshots/mobile/mobile-search-rag.png" alt="移动端 RAG 与知识图谱搜索" width="260"> |
 
-1. 启动应用：
+| 多角色音频 / TTS | 同步与缓存 |
+|------------------|------------|
+| <img src="docs/screenshots/mobile/mobile-audio-menu.png" alt="移动端章节 MP3 与本地 TTS 控制" width="260"> | <img src="docs/screenshots/mobile/mobile-sync-cache.png" alt="移动端同步状态与缓存管理" width="260"> |
 
-   ```bash
-   npm install
-   npm run dev
-   ```
+## 系统架构
 
-2. 打开 `http://127.0.0.1:5173/`，在首页导入一本 `.txt` 或 `.epub` 小说。
-3. 先直接进入阅读页，确认章节切分、目录分页、阅读主题和进度恢复是否符合预期。
-4. 打开“模型配置”，填一组 Ollama 或 OpenAI-compatible 配置。
-5. 回到首页或阅读页，先为几章生成概要，再进入“智能搜索”生成 embedding，问一个跨章节问题。
-6. 最后进入“知识图谱”，扫描当前章节或一段章节范围，查看实体、关系和证据搜索。
+```mermaid
+flowchart LR
+  subgraph PC["PC AI 阅读器"]
+    Import["TXT / EPUB 导入"]
+    Reader["阅读器"]
+    AI["概要 / 知识图谱 / RAG"]
+    DB[("SQLite\n~/.novel_reader")]
+    Import --> DB
+    Reader --> DB
+    AI --> DB
+  end
 
-## 核心亮点
+  subgraph Pipeline["Production Pipeline"]
+    Job["job.json"]
+    Summary["summary"]
+    KG["kg"]
+    Embed["embedding"]
+    Audio["多角色 MP3 + timeline"]
+    Package["mobile package"]
+    Job --> Summary --> Package
+    Job --> KG --> Package
+    Job --> Embed --> Package
+    Job --> Audio
+  end
 
-- **本地优先阅读**：导入 `.txt` 或 `.epub`，自动拆章，保存阅读进度，数据默认存储在 `~/.novel_reader`。
-- **长篇小说 RAG 搜索**：基于章节概要、正文片段和知识图谱召回，生成带章节依据的回答。
-- **知识图谱抽取**：自动整理人物、门派、道具、功法、地点、灵兽、事件和关系，并保留证据。
-- **图谱清理工作流**：支持低置信度复审、实体合并/拆分、关系维护、saved JSON 重放、JSON/GraphML 导出。
-- **多模型配置**：可配置 Ollama 或 OpenAI-compatible 模型，生成模型和 embedding 模型分开校验。
-- **Gateway Android 移动端**：通过 Gateway 同步书库、阅读数据包、RAG 和 MP3 缓存，支持离线阅读与音频播放。
-- **离线批处理 CLI**：在浏览器外批量生成概要或图谱，支持中断续扫和结果导回。
+  subgraph Gateway["Gateway"]
+    API["Mobile API"]
+    Admin["Admin UI"]
+    Assets["package / audio / APK"]
+    Verify["publish verify"]
+    Assets --> API
+    Admin --> Assets
+  end
 
-## 目录
+  subgraph Android["Gateway Android App"]
+    Shelf["书库"]
+    MobileReader["离线阅读"]
+    MP3["MP3 缓存播放"]
+  end
 
-- [真实界面预览](#真实界面预览)
-- [Quick Demo](#quick-demo)
-- [核心亮点](#核心亮点)
-- [功能概览](#功能概览)
-- [快速开始](#快速开始)
-- [详细功能使用说明](#详细功能使用说明)
-  - [1. 导入小说](#1-导入小说)
-  - [2. 阅读器](#2-阅读器)
-  - [3. AI 模型配置](#3-ai-模型配置)
-  - [4. 概要生成](#4-概要生成)
-  - [5. 知识图谱](#5-知识图谱)
-  - [6. RAG 智能搜索](#6-rag-智能搜索)
-  - [7. 数据库备份与恢复](#7-数据库备份与恢复)
-  - [8. 离线扫描器 CLI](#8-离线扫描器-cli)
-- [开发与部署](#开发与部署)
-- [质量、测试与运维规划](#质量测试与运维规划)
-- [项目结构](#项目结构)
-- [注意事项](#注意事项)
+  DB --> Pipeline
+  Package --> Assets
+  Audio --> Assets
+  Verify --> API
+  API --> Shelf --> MobileReader --> MP3
+```
 
-## 功能概览
+## 核心能力
 
-- **本地阅读**：导入 `.txt` 或 `.epub` 小说文件；txt 自动识别 UTF-8 / GB18030 编码并按标题拆章，epub 按 OPF spine 导入 XHTML 章节，章节列表按每 100 章分页。
-- **阅读体验**：方向键或顶部/底部按钮翻页，可调字体大小，阅读进度自动保存，切换章节后自动回到章节顶部。
-- **AI 概要**：为单章、当前页或全书缺失章节生成概要，帮助快速回顾剧情。
-- **RAG 智能搜索**：基于章节概要 embedding 与知识图谱实体召回，跨章节搜索剧情并生成回答。
-- **知识图谱**：从章节中抽取实体与关系，支持扫描、重扫预览、raw extraction 重放、实体/关系维护、LLM 全局共指合并、证据搜索、图谱可视化、JSON/GraphML 导出，以及低置信度复审队列。
-- **多模型配置**：同时配置本地 Ollama 与多个兼容 OpenAI 的外部模型，并为生成模型和 embedding 模型分别校验。
-- **离线扫描器**：在浏览器外批量处理概要或知识图谱任务，支持中断续扫并导回主数据库。
-- **数据本地存储与备份**：导入的章节、阅读进度、概要、设置、知识图谱、embedding 全部持久化到本地 SQLite，并支持浏览器内导出/恢复完整数据库。
-- **Gateway Android 移动端**：`gateway-android-app` 是当前维护的 Android/Capacitor 应用，通过 Gateway 获取书库、单书 package、RAG 检索和 MP3 音频；本地缓存后可离线阅读与播放。旧 `mobile-app/` 局域网同步客户端目录已删除，历史实现可从 Git 记录查阅。
+- **AI 原生阅读**：导入 `.txt` / `.epub` 后，系统围绕章节生成概要、实体、关系、embedding 和音频，读书过程天然带剧情索引。
+- **知识图谱理解长篇小说**：自动抽取人物、门派、道具、功法、地点、事件和关系，保留证据章节，支持编辑、合并、拆分、复审和 GraphML/JSON 导出。
+- **RAG 跨章节问答**：融合章节概要、正文 chunk 和图谱实体召回，适合追踪人物首次出现、道具流转、伏笔回收和剧情前因后果。
+- **多角色有声小说合成**：`production-pipeline/` 可生成分角色/旁白的章节 MP3 和 timeline manifest，移动端播放时能按音频进度高亮正文片段。
+- **移动端离线读听一体**：Gateway Android App 通过 Gateway 获取完整数据包和章节 MP3，缓存后可离线阅读、搜索和播放。
+- **正式生产与发布闭环**：从导入、概要、图谱、embedding、音频、package 到 Gateway 发布和 HTTP 验证，支持续跑、日志、checkpoint 和远端校验。
+- **本地优先与可控部署**：书库数据默认保存在本地 SQLite；Gateway 负责公网鉴权、设备角色、可见范围、指标、事件和 APK 更新。
 
 ## 快速开始
+
+### 1. 启动 PC 阅读器
 
 ```bash
 npm install
 npm run dev
 ```
 
-这会同时启动 Vite 前端和本地 SQLite API 服务：
+默认地址：
 
-- 前端：http://127.0.0.1:5173/
-- API 服务：http://127.0.0.1:5174/
+| 服务 | 地址 |
+|------|------|
+| 前端 | `http://127.0.0.1:5173/` |
+| 本地 SQLite API | `http://127.0.0.1:5174/` |
 
-打开浏览器访问前端地址即可开始使用。
+打开前端后可以导入 `.txt` 或 `.epub`，进入阅读器，再按需配置模型、生成概要、构建知识图谱或使用 RAG 搜索。
 
-数据库默认保存在：
-
-```text
-~/.novel_reader/novel_reader.sqlite
-```
-
-### Gateway Android 移动端快速体验
-
-先启动或连接 Gateway 服务。自托管部署见 [Gateway 部署说明](gateway/docs/deployment.md)，本地开发可运行：
+### 2. 启动 Gateway
 
 ```bash
+npm --prefix gateway install
 npm run gateway:dev
 ```
 
-Android App 工程位于 `gateway-android-app`：
+默认监听 `127.0.0.1:6180`。Gateway 负责移动端 API、管理后台、AI/embedding 转发、package/audio/APK 分发和运行指标。更多部署说明见 [gateway/README.md](gateway/README.md) 与 [gateway/docs/deployment.md](gateway/docs/deployment.md)。
+
+### 3. 构建 Android App
 
 ```bash
 npm --prefix gateway-android-app install
 npm run gateway-android:android:build
 ```
 
-生成的 debug APK 位于：
+Debug APK 输出到：
 
 ```text
-gateway-android-app/android/app/build/outputs/apk/debug/novel_gateway-v<versionName>-debug.apk
+gateway-android-app/android/app/build/outputs/apk/debug/
 ```
 
 发布到 Gateway 下载目录：
@@ -123,359 +157,128 @@ gateway-android-app/android/app/build/outputs/apk/debug/novel_gateway-v<versionN
 npm run gateway:publish-android-apk
 ```
 
-发布后固定下载地址为 `/downloads/ai_novel_reader.apk`。更多说明见 [gateway-android-app/README.md](gateway-android-app/README.md) 与 [Gateway 部署说明](gateway/docs/deployment.md)。
+发布后固定下载路径为 `/downloads/ai_novel_reader.apk`，并写入 `/downloads/android-app.json` 供 App 内更新检查使用。
 
-## 详细功能使用说明
-
-### 1. 导入小说
-
-1. 打开前端页面，点击导入按钮，选择本地 `.txt` 或 `.epub` 小说文件。
-2. txt 会自动检测文件编码（UTF-8 或 GB18030）；epub 会读取 `META-INF/container.xml`、OPF manifest/spine 和 XHTML 正文。
-3. 导入后，小说会被拆分为章节，章节列表按每 100 章分页显示。当前 epub 先导入纯文本章节，不保留原书图片和排版样式。
-4. 点击任意章节即可开始阅读。
-
-### 2. 阅读器
-
-- **翻页**：使用键盘左右方向键，或点击章节顶部/正文底部的上一章/下一章按钮。
-- **字体大小**：在阅读器设置中调整字体大小。
-- **阅读进度**：当前阅读位置会自动保存，下次打开同一本书会自动恢复。
-- **章节跳转**：在侧边章节列表中点击目标章节，或在 AI/概要面板中点击证据章节链接直接跳转。
-- **概要查看**：桌面端在 AI 面板查看当前章或当前页概要，移动端可在概要页查看。
-
-### 3. AI 模型配置
-
-进入设置页面配置 AI 模型：
-
-- **本地 Ollama**：填写 Ollama 地址（如 `http://127.0.0.1:11434`）和模型名（如 `qwen2.5:14b`）。
-- **外部 OpenAI 兼容模型**：填写 Base URL、API Key、模型名、Temperature，可选择是否开启思考模式。
-- **多组配置**：可保存多组外部模型配置，每组独立设置，方便在不同任务间切换。
-- **Embedding 模型**：可为 RAG 搜索单独配置 Ollama 或 OpenAI-compatible embedding 模型；保存配置时会通过本地后端校验 embedding 可用性和向量维度，避免浏览器 CORS 限制。
-- **Temperature**：控制生成随机性，值越低结果越稳定，推荐概要/抽取任务使用较低温度。
-- **思考模式**：部分模型支持先思考再输出，适合复杂抽取任务。
-
-配置完成后，在 AI 面板选择要使用的模型即可。
-
-### 4. 概要生成
-
-- **单章概要**：在当前章节阅读界面，点击 AI 面板中的生成按钮，为当前章生成概要。
-- **当前页概要**：为当前章节列表页（100 章范围）生成一页概要，便于快速把握大段剧情。
-- **批量生成全书缺失概要**：
-  - 在 AI 面板或移动端概要页点击“批量生成全书缺失概要”。
-  - 系统会过滤全书中还没有概要的章节，使用当前并发设置批量调用 AI 生成。
-  - 缺失章节超过 50 章时会弹出确认对话框，避免误触产生大量模型调用。
-  - 单个章节失败不会中断整批任务，最后会报告成功/失败数量。
-- 已生成的概要会保存在本地数据库，无需重复调用模型。
-
-### 5. 知识图谱
-
-知识图谱帮助你在阅读长篇小说的过程中自动整理人物、门派、道具、功法、地点、灵兽、事件等实体，以及它们之间的关系。
-
-#### 5.1 扫描章节
-
-进入“知识图谱”页面：
-
-- **扫描当前章节**：仅抽取当前阅读章节的内容。
-- **扫描范围**：指定起始和结束章节号，批量抽取一段章节。
-- **扫描全书**：为整本书创建扫描任务，并发处理所有章节。
-- **断点续传**：扫描过程中刷新页面或关闭浏览器后，应用启动时会自动恢复 pending 的扫描任务。
-- **停止扫描**：扫描过程中会显示“停止扫描”按钮，点击后worker 会在处理完当前章节后退出，任务状态记为 `cancelled`。
-- **跳过已扫描**：重新扫描时会自动跳过已完成的章节，不会重复调用模型。
-- **覆盖重扫**：勾选“覆盖已完成章节”后可重新调用模型替换对应章节的图谱证据。
-- **重放已保存 JSON**：不调用模型，直接用已保存的章节 extraction 重建局部图谱。
-- **变化预览**：可先预览重扫会新增、更新、删除的实体/关系变化，确认后再写入图谱。
-
-扫描流程：
-
-```text
-章节文本 -> LLM 抽取 -> 保存章节级原始 JSON -> 归一化 -> 写入实体/关系
-```
-
-#### 5.2 实体管理
-
-- **实体列表**：查看当前书籍抽取到的所有实体，支持按类型筛选（人物、门派、道具、功法、地点、灵兽、事件、其他），支持按名称或别名搜索。
-- **实体详情**：点击实体进入详情页，可查看：
-  - 实体名称、类型、别名、描述
-  - 出现次数、关系次数
-  - 首次/末次出现章节
-  - 相关关系列表
-  - 证据章节列表（可点击跳转到阅读器）
-- **编辑实体**：修改实体的名称、类型、别名、描述。
-- **合并实体**：
-  - 在实体详情或实体列表中选择多个实体，合并到一个主实体。
-  - 合并后，别名、出现记录、关系都会迁移到主实体。
-  - 支持批量合并：在实体列表多选后一次性合并。
-- **拆分实体**：
-  - 在实体详情点击“拆分”，可从源实体拆出一个新实体，或拆到已有实体。
-  - 支持选择要迁出的别名、出现章节、关系。
-  - 拆分后会重新计算源实体和新实体的首次/末次出现章节。
-- **删除实体**：删除不需要的实体及其相关数据。
-
-#### 5.3 关系管理
-
-- **关系列表**：查看所有抽取到的关系，支持按关系类型筛选。
-- **关系详情**：查看关系的源实体、目标实体、类型、描述、证据章节列表。
-- **编辑关系**：修改关系类型和描述。
-- **切换源/目标实体**：
-  - 在关系编辑弹窗中，可以把关系的 source 或 target 改成另一个实体。
-  - 如果新端点 + 关系类型已存在，会把当前关系的证据迁移到已有关系并删除旧关系。
-  - 禁止自环端点，禁止跨书实体作为端点。
-- **删除关系**：删除错误的关系。
-
-#### 5.4 图谱视图、搜索与导出
-
-- **实体一跳关系图**：在实体详情中打开“关系图”，用 React Flow 查看该实体的一跳邻居和关系。
-- **全局图谱视图**：在知识图谱页打开“图谱视图”，按实体类型和关系类型查看过滤后的全书关系网络，默认避免一次性渲染过大的全书图。
-- **图谱证据搜索**：按关键词搜索实体提及、关系证据和章节标题，结果可跳转阅读器或详情页。
-- **导出图谱**：支持导出当前书籍的知识图谱为 JSON 或 GraphML，便于备份、分析或导入其他图工具。
-
-#### 5.5 全局共指合并
-
-- **候选组件**：系统会基于角色名称、别名和出现范围找出疑似同一人物的实体组件。
-- **LLM 判定**：可用当前生成模型批量判断同一组件内哪些实体应合并，适合清理“韩立/韩兄/厉飞雨”等角色别名或误拆实体。
-- **安全合并**：合并时会迁移出现证据、别名和关系；如果关系发生冲突，会合并证据并清理旧关系。
-- **任务进度**：共指处理作为独立 `coreference` 图谱任务记录进度，避免和章节扫描任务混在一起。
-
-#### 5.6 复审队列
-
-系统会自动标记低置信度或可疑的实体和关系，方便人工审核：
-
-- **自动标记规则**：
-  - 实体：置信度 < 0.6、类型为 other、名称过短、别名可疑、缺少描述。
-  - 关系：置信度 < 0.6、类型为 related_to、缺少描述、自环。
-- **复审面板**：在知识图谱页面点击“待复审”按钮打开复审队列。
-  - 可按实体/关系筛选。
-  - 支持批量选择，标记为已审、忽略、批量删除或编辑。
-- **状态重置**：编辑、合并、拆分或重扫相关实体/关系后，系统会自动重置 `review_status`，以便重新进入复审判断。
-
-### 6. RAG 智能搜索
-
-RAG 搜索用于回答跨章节问题。它结合章节概要 embedding、正文片段 embedding 和知识图谱实体匹配，适合查找“某个人物什么时候出现”“某件道具后来去了哪里”“某段剧情前因后果”等问题。
-
-使用流程：
-
-1. 在模型配置中设置 embedding 提供商和 embedding 模型。
-2. 进入“搜索”页面，查看当前书籍 embedding 覆盖率。
-3. 如还有缺失章节或正文片段，点击“生成 embedding”，系统会为已有概要的章节批量生成概要向量和正文 chunk 向量。
-4. 输入问题并搜索，系统会返回相关章节、匹配实体、相似度/匹配类型和最相关原文片段。
-5. 有搜索结果后可点击“生成答案”，用当前聊天/生成模型基于检索结果生成回答。
-
-注意：
-
-- RAG 依赖章节概要；建议先批量生成全书缺失概要。
-- embedding 覆盖率低于阈值时，搜索接口会提示先生成 embedding。
-- 搜索结果会用知识图谱实体进行增强，因此图谱质量越好，跨章节检索越准确。
-
-### 7. 数据库备份与恢复
-
-首页提供完整 SQLite 数据库备份和恢复：
-
-- **备份数据库**：导出当前 `novel_reader.sqlite`，包含书架、章节、概要、知识图谱、embedding 和设置。
-- **恢复数据库**：上传一个 SQLite 备份文件。系统会先备份当前数据库，再把上传文件保存为待恢复文件。
-- **重启生效**：恢复操作需要重启本地数据库服务，避免运行中的 SQLite 连接被直接替换。
-
-### 8. 离线扫描器 CLI
-
-`scripts/offline-scanner.mjs` 是一个在浏览器外批量处理概要或知识图谱抽取的 Node.js CLI 工具，适合整书扫描、长时间挂机或服务器环境。
-
-#### 典型工作流
+### 4. 跑生产流水线
 
 ```bash
-# 1. 查看主数据库中的书籍
-node scripts/offline-scanner.mjs list
-
-# 2. 导入指定书籍到离线数据库
-node scripts/offline-scanner.mjs import <bookId>
-
-# 3. 扫描概要、知识图谱或两者
-node scripts/offline-scanner.mjs scan all <bookId>
-
-# 4. 如被中断，可恢复任务
-node scripts/offline-scanner.mjs resume all <bookId>
-
-# 5. 查看进度
-node scripts/offline-scanner.mjs status <bookId>
-
-# 6. 将结果导回主数据库
-node scripts/offline-scanner.mjs export <bookId>
-
-# 7. 或生成单本书数据包，再在首页“离线扫描数据”中导入
-node scripts/offline-scanner.mjs bundle <bookId>
+npm run production-pipeline -- doctor --job production-pipeline/config/example.job.json
+npm run production-pipeline -- run --job production-pipeline/config/example.job.json
+npm run production-pipeline -- status --run <runId|runDir|run.json>
 ```
 
-#### 命令列表
+`doctor` 会先检查源文件、模型配置、TTS 配置和 Gateway 凭据；`run` 执行配置中的阶段；`resume` 可从已有 `run.json` 续跑。发布完成后必须使用 `verify` 检查真实 Gateway HTTP 结果，而不只相信本地日志。
 
-| 命令 | 参数 | 说明 |
-|------|------|------|
-| `list` | — | 列出主数据库中的书籍 |
-| `import` | `<bookId>` | 导入书籍到离线数据库 |
-| `scan` | `<summary\|kg\|all> <bookId>` | 创建并运行扫描任务 |
-| `resume` | `<summary\|kg\|all> <bookId>` | 恢复中断的扫描任务 |
-| `status` | `[bookId]` | 查看进度 |
-| `export` | `<bookId>` | 导出结果到主数据库 |
-| `bundle` | `<bookId> [path]` | 生成单本书离线扫描数据包，供网页导入 |
-| `sync` | — | 从主项目同步模型配置 |
-| `config` | — | 显示当前模型配置 |
-| `stop` | — | 发送优雅停止信号 |
-| `help` | — | 显示帮助 |
+典型全量生产链路：
 
-#### 环境变量
+```text
+导入原文 -> 章节概要 -> 知识图谱 -> RAG embedding -> 多角色音频 -> 移动数据包 -> Gateway 发布 -> 远端验证
+```
 
-| 变量 | 默认值 | 说明 |
-|------|--------|------|
-| `NOVEL_READER_OFFLINE_DB` | `~/.novel_reader/offline.sqlite` | 离线扫描器数据库 |
-| `NOVEL_READER_MAIN_DB` | `~/.novel_reader/novel_reader.sqlite` | 主应用数据库 |
-| `NOVEL_READER_OFFLINE_CONFIG` | `~/.novel_reader/offline-config.json` | 扫描器配置文件 |
-| `OFFLINE_AI_PROVIDER` | — | 覆盖提供商：`ollama` 或 `openai` |
-| `OFFLINE_OLLAMA_MODEL` | — | 覆盖 Ollama 模型 |
-| `OFFLINE_OLLAMA_CONCURRENCY` | — | 覆盖 Ollama 并发数（1-10） |
-| `OFFLINE_OLLAMA_BASE_URL` | — | 覆盖 Ollama Base URL |
-| `OFFLINE_OPENAI_MODEL` | — | 覆盖 OpenAI 模型 |
-| `OFFLINE_OPENAI_CONCURRENCY` | — | 覆盖 OpenAI 并发数（1-10） |
-| `OFFLINE_OPENAI_BASE_URL` | — | 覆盖 OpenAI Base URL |
-| `OFFLINE_OPENAI_API_KEY` | — | 覆盖 OpenAI API Key |
-| `OFFLINE_REQUEST_TIMEOUT_MS` | `300000` | 覆盖单次请求超时 |
+## 功能地图
 
-#### 排错
+### PC AI 阅读器
 
-- 扫描器已内置对瞬态网络错误的重试，最多 3 次，指数退避。
-- 如果某些章节出现 `fetch failed`：
-  - 增加单次请求超时：
-    ```bash
-    OFFLINE_REQUEST_TIMEOUT_MS=600000 node scripts/offline-scanner.mjs resume kg <bookId>
-    ```
-  - 如果本地 Ollama 负载过高，可降低并发：
-    ```bash
-    OFFLINE_OLLAMA_CONCURRENCY=3 node scripts/offline-scanner.mjs resume kg <bookId>
-    ```
+- TXT 自动识别 UTF-8 / GB18030，EPUB 按 OPF spine 导入 XHTML 章节。
+- 章节列表按 100 章分页，支持章节跳转、键盘翻章、字体设置、阅读进度恢复。
+- 首页可备份/恢复完整 SQLite 数据库，包含书籍、章节、概要、图谱、embedding 和设置。
+- 模型配置保存在本地，可为生成模型和 embedding 模型分别选择 provider、base URL、model 和并发策略。
 
-## 开发与部署
+### AI 概要、图谱与 RAG
 
-更多开发资料：
+- 概要支持单章、当前页和全书缺失章节批量生成，失败章节不会中断整批任务。
+- 知识图谱抽取人物、门派、道具、功法、地点、灵兽、事件和关系，并保留章节证据。
+- 图谱支持扫描当前章、范围扫描、全书扫描、断点恢复、跳过已完成、覆盖重扫和 saved JSON 重放。
+- RAG 搜索基于章节概要 embedding、正文 chunk embedding 和图谱实体召回，答案可带来源章节。
 
-- [产品功能说明书](docs/product-spec.md)
-- [正规化测试与运维规划](docs/quality-ops-roadmap.md)
-- [测试用例矩阵](docs/test-case-matrix.md)
-- [系统性 Code Review Checklist](docs/code-review-checklist.md)
-- [运维 Runbook](docs/operations-runbook.md)
-- [发布检查清单](docs/release-checklist.md)
-- [开发文档](docs/development.zh-CN.md)
-- [Backend API Reference](docs/backend-api.md)
-- [Gateway Android App 构建说明](gateway-android-app/README.md)
-- [Gateway 部署说明](gateway/docs/deployment.md)
-- [知识图谱路线图](docs/knowledge-graph-roadmap.md)
-- [当前开发进展](docs/current_progress.md)
+### Gateway 与 Admin UI
 
-### npm 脚本
+- 移动端接口：`/auth/session`、`/mobile/books`、`/mobile/books/:bookId/package`、`/mobile/books/:bookId/audio`、音频下载和 manifest。
+- 管理端接口：书籍、数据包、音频、设备、请求日志、事件、指标、APK 发布元数据。
+- 鉴权区分 `GATEWAY_ADMIN_ACCESS_TOKEN` 和 `GATEWAY_MOBILE_ACCESS_TOKEN`；生产环境不回退 dev token。
+- 支持书籍可见范围、设备角色、公开 APK 下载和安全 smoke 检查。
 
-| 脚本 | 说明 |
+### Gateway Android App
+
+- 保存 Gateway 地址、token、设备名和稳定设备 ID。
+- 拉取云端书库，下载并缓存单书完整 package。
+- 阅读进度、阅读主题、package 缓存、MP3 缓存按书隔离。
+- 支持章节 MP3 下载、manifest timeline 播放高亮、系统 TTS 和 AI 多角色 MP3 两种听书路径。
+- 支持检查 Gateway 发布的最新版 APK，并交由 Android 系统确认安装。
+
+### Production Pipeline
+
+- CLI-first，不依赖 PC 前端开发服务器即可读写 SQLite 和生产产物。
+- 全流程支持 `import`、`summary`、`kg`、`embedding`、`audio`、`package`、`publish`、`verify`。
+- `audio` 阶段可调用 TTS director 生成多角色旁白决策、章节 MP3 和时间线 manifest。
+- 运行状态保存在 `tmp/production-pipeline/runs/<bookId>/<runId>/`，包含 `run.json`、`items.sqlite`、日志、产物和 checkpoint。
+- `publish` 使用文件同步发布大体积 package/audio；`verify` 使用真实 Gateway HTTP API 检查书库、章节、图谱、embedding 覆盖和音频下载。
+
+## 常用命令
+
+| 命令 | 用途 |
 |------|------|
-| `npm run dev` | 同时启动 Vite 和 API 服务 |
-| `npm run api` | 只启动 SQLite API 服务 |
-| `npm run vite:dev` | 只启动 Vite 开发服务器 |
-| `npm run build` | 类型检查并构建生产版本 |
-| `npm run reader` | 预览生产构建（`vite preview`） |
-| `npm run reader:build` | 先构建再预览 |
-| `npm run lint` | 运行 ESLint |
-| `npm run preview` | `reader` 的别名 |
+| `npm run dev` | 同时启动 Vite 前端和本地 SQLite API |
+| `npm run build` | TypeScript 检查并构建 PC 前端 |
+| `npm run test:unit` | 运行 Vitest 单元测试 |
+| `npm run test:e2e` | 运行 Playwright E2E |
+| `npm run test:smoke` | 单元 + E2E smoke |
+| `npm run gateway:dev` | 启动 Gateway |
+| `npm run gateway:test` | 运行 Gateway 测试 |
+| `npm run gateway:admin-ui:build` | 构建 Gateway 管理后台 |
+| `npm run gateway:publish-package` | 发布移动端 package |
+| `npm run gateway:publish-audio` | 发布章节 MP3 与 audio catalog |
+| `npm run gateway:publish-android-apk` | 发布 Android APK |
+| `npm run gateway-android:android:build` | 构建 Gateway Android debug APK |
+| `npm run production-pipeline -- doctor --job <job>` | 生产任务预检查 |
+| `npm run production-pipeline -- run --job <job>` | 执行生产任务 |
+| `npm run production-pipeline -- resume --run <run>` | 续跑生产任务 |
 
-## 质量、测试与运维规划
+## 数据与配置
 
-当前系统已从快速功能开发进入正规化阶段。后续开发以 [产品功能说明书](docs/product-spec.md) 为功能基线，以 [正规化测试与运维规划](docs/quality-ops-roadmap.md) 为执行顺序，逐步补齐测试用例矩阵、系统性 Code Review、监控指标、运维手册和发布检查。
-
-第一批工作重点：
-
-- 建立覆盖 PC 阅读器、AI 概要、知识图谱、RAG、production-pipeline、Gateway、Admin UI 和 Gateway Android App 的测试用例矩阵。
-- 标注现有自动化覆盖、手工验证边界和真机验证边界。
-- 优先自动化鉴权/可见性、数据一致性、发布验证和移动端缓存/进度类高风险用例。
-- 按模块开展 Code Review，并把发现的问题回填到测试矩阵和运维规划。
-- 补齐 Gateway 与 production-pipeline 的指标、事件、日志、发布验证和故障排查手册。
-- 固化真实 Gateway、APK、package/audio 发布验收和回滚记录格式。
-
-### 环境变量
-
-#### 开发服务器（`scripts/dev.mjs`）
-
-| 变量 | 默认值 | 说明 |
-|------|--------|------|
-| `NOVEL_READER_HOST` | `0.0.0.0` | Vite 监听地址 |
-| `NOVEL_READER_PORT` | `5173` | Vite 监听端口 |
-
-#### API 服务（`scripts/local-db-server.mjs`）
-
-| 变量 | 默认值 | 说明 |
-|------|--------|------|
-| `NOVEL_READER_API_HOST` | `127.0.0.1` | API 服务监听地址 |
-| `NOVEL_READER_API_PORT` | `5174` | API 服务监听端口 |
-| `NOVEL_READER_DATA_DIR` | `~/.novel_reader` | 应用数据目录 |
-| `NOVEL_READER_DB_PATH` | `<dataDir>/novel_reader.sqlite` | SQLite 数据库完整路径 |
-| `NOVEL_READER_MOBILE_SYNC_TOKEN` | — | 可选移动端同步 token；设置后 `/api/mobile/*` 需要 Bearer token |
-
-### 修改端口或数据目录
-
-```bash
-# 修改开发服务器端口
-NOVEL_READER_PORT=5174 npm run dev
-
-# 修改数据目录或 API 端口
-NOVEL_READER_DATA_DIR=/path/to/data NOVEL_READER_API_PORT=6174 npm run dev
-```
-
-### 独立阅读实例
-
-如果你不想占用开发端口，可以单独启动一个阅读实例：
-
-```bash
-NOVEL_READER_PORT=6173 npm run reader:build
-```
-
-打开：
-
-```text
-http://127.0.0.1:6173/
-```
-
-也可以自定义监听地址：
-
-```bash
-NOVEL_READER_HOST=0.0.0.0 NOVEL_READER_PORT=6173 npm run reader:build
-```
-
-### 构建
-
-```bash
-npm run lint
-npm run build
-```
-
-`useReaderState.ts` 和 `App.tsx` 中目前存在少量预先存在的 ESLint warning/error。TypeScript 编译和 Vite 构建应都能通过。
+| 项 | 默认位置 / 变量 |
+|----|-----------------|
+| 本地数据目录 | `NOVEL_READER_DATA_DIR`，默认 `~/.novel_reader` |
+| 本地 SQLite | `NOVEL_READER_DB_PATH`，默认 `~/.novel_reader/novel_reader.sqlite` |
+| 前端端口 | `NOVEL_READER_PORT`，默认 `5173` |
+| API 端口 | `NOVEL_READER_API_PORT`，默认 `5174` |
+| Gateway 数据目录 | `GATEWAY_DATA_DIR` |
+| Gateway 音频目录 | `GATEWAY_AUDIO_DIR` |
+| Gateway 下载目录 | `GATEWAY_DOWNLOADS_DIR` |
+| 离线扫描器数据库 | `NOVEL_READER_OFFLINE_DB`，默认 `~/.novel_reader/offline.sqlite` |
 
 ## 项目结构
 
 ```text
 novel_reader/
-├── index.html              # Vite HTML 入口
-├── package.json            # npm 脚本与依赖
-├── vite.config.ts          # Vite 配置
-├── tsconfig*.json          # TypeScript 配置
-├── eslint.config.js        # ESLint 配置
-├── scripts/                # Node.js 后端与 CLI 工具
-│   ├── dev.mjs             # 同时启动 Vite + API
-│   ├── local-db-server.mjs # SQLite REST API 服务
-│   ├── offline-scanner.mjs # 离线批量扫描器 CLI
-│   └── offline-scanner/    # 扫描器模块（config、db、llm、scanner）
-├── gateway-android-app/    # 当前维护的 Gateway Android App（Capacitor + React）
-├── src/                    # React 前端
-│   ├── main.tsx            # 入口
-│   ├── App.tsx             # 桌面端主 UI
-│   ├── hooks/              # React hooks
-│   └── assets/             # 静态资源
-├── public/                 # 公共静态文件
-└── docs/                   # 文档
+├── src/                    # PC React 前端
+├── scripts/                # 本地 SQLite API、开发启动器、离线扫描器
+├── gateway/                # Fastify Gateway 服务与 Admin UI
+├── gateway-android-app/    # Capacitor + React Android App
+├── production-pipeline/    # 正式内容生产流水线
+├── tests/                  # API、单元、E2E 测试
+├── docs/                   # 产品、测试、运维、截图和路线图文档
+└── README.md               # 项目主页
 ```
 
-## 注意事项
+## 文档入口
 
-- 这是一个个人本地 Web 应用。API Key 以明文形式存储在本地 SQLite 数据库中，因此在没有增加后端代理、身份认证和密钥管理之前，请勿将其作为公开多用户服务部署。
-- 若将 API 服务绑定到 `0.0.0.0` 供手机同步，请只在可信局域网使用；需要访问控制时设置 `NOVEL_READER_MOBILE_SYNC_TOKEN`。
-- 离线扫描器与 Web 端通过主数据库的 `app_state` 表共享同一份模型配置。
-- 知识图谱的抽取质量取决于所选模型和提示词，建议对低置信度结果进行人工复审和纠错。
+- [产品功能说明书](docs/product-spec.md)
+- [开发文档](docs/development.zh-CN.md)
+- [Backend API Reference](docs/backend-api.md)
+- [正规化测试与运维规划](docs/quality-ops-roadmap.md)
+- [测试用例矩阵](docs/test-case-matrix.md)
+- [系统性 Code Review Checklist](docs/code-review-checklist.md)
+- [运维 Runbook](docs/operations-runbook.md)
+- [发布检查清单](docs/release-checklist.md)
+- [Gateway 说明](gateway/README.md)
+- [Gateway Android App 说明](gateway-android-app/README.md)
+- [Production Pipeline 说明](production-pipeline/README.md)
+- [知识图谱路线图](docs/knowledge-graph-roadmap.md)
+
+## 安全提示
+
+- 这是本地优先项目，PC 端 API Key 默认保存在本地 SQLite 中；不要把本地 API 当作公开多用户服务裸露部署。
+- Gateway 生产环境必须显式配置 admin/mobile token，不应使用开发 fallback token。
+- 移动端不保存上游 LLM、embedding、TTS 或对象存储密钥；相关调用应由 Gateway 转发和限流。
+- 内容生产产物、MP3、package 和大型运行日志通常不应提交到 Git，发布后用 Gateway HTTP 和文件目录共同验证。

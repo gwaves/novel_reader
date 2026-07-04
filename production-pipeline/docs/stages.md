@@ -19,16 +19,18 @@ single-stage commands remain independently usable.
 Current v2 CLI stages:
 
 - `import`
+- `summary`
+- `kg`
 - `embedding`
 - `audio`
 - `package`
 - `publish`
 - `verify`
 
-Planned but not yet wired into the v2 CLI:
-
-- `summary`
-- `kg`
+For full jobs, `run` normally gates `import` first, then allows `summary`, `kg`,
+`embedding` and `audio` to make progress under the configured stage order and
+barriers, then builds `package`, syncs with `publish`, and proves the remote
+result through `verify`.
 
 ## import
 

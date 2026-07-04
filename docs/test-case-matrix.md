@@ -1,6 +1,6 @@
 # 测试用例矩阵
 
-更新时间：2026-07-01
+更新时间：2026-07-04
 
 本文档是正规化测试阶段的第一版测试设计。它以 [产品功能说明书](product-spec.md) 为功能基线，用于指导后续自动化测试补齐、系统性 Code Review、运维验证和发布回归。
 
@@ -177,6 +177,7 @@
 | AND-AUDIO-002 | 单章 MP3 下载 | 当前章有音频 | 下载到原生私有目录，状态变为已缓存 | Android + Manual | P1 | Existing |
 | AND-AUDIO-003 | 批量 MP3 同步停止 | 批量下载中点击停止 | 当前章节结束后不继续新章节 | Android | P1 | Existing |
 | AND-AUDIO-004 | 离线 MP3 播放 | 断网且已有缓存 | 可播放本地 MP3，UI 不误称在线播放 | Android + Manual | P1 | Existing |
+| AND-AUDIO-005 | 播放引擎切换与 timeline 高亮 | 当前章有系统 TTS 和 Gateway MP3/manifest | 本地 TTS、缓存 MP3、语速和禁用态显示正确；有 manifest 时正文片段随播放高亮，缺失时普通播放 | Android + Manual | P1 | Manual |
 | AND-RAG-001 | Gateway RAG 搜索 | 受信设备、可见书籍 | 搜索成功，embedding 失败时关键词兜底不显示红底误报 | Android | P1 | Existing |
 | AND-UPDATE-001 | 应用内检查更新 | Gateway 发布更高 versionCode | 显示下载并安装，系统安装确认弹出 | Android + Manual | P1 | Existing |
 | AND-UPDATE-002 | 无更新状态 | versionCode 不高于本机 | 显示已是最新，不重复下载 | Android | P2 | Existing |

@@ -1,30 +1,30 @@
 # 产品功能说明书
 
-更新时间：2026-07-02
+更新时间：2026-07-04
 
 本文档用于把小说阅读助手从快速开发阶段沉淀为可测试、可评审、可运维的产品规格。后续测试用例、系统性 Code Review、监控与发布检查都应以本文档为功能基线。
 
 ## 1. 产品定位
 
-小说阅读助手是一个本地优先的长篇小说阅读、知识整理和移动阅读系统。PC 端负责导入、阅读、AI 概要、知识图谱、RAG 检索和内容生产；Gateway 负责向移动端分发书库、数据包、音频、RAG 能力和运维后台；Gateway Android App 负责移动端离线阅读、缓存 MP3 和应用更新。
+小说阅读助手是一个 AI 原生的长篇小说阅读、知识整理和有声化系统。PC 端负责导入、阅读、AI 概要、知识图谱、RAG 检索和内容生产；`production-pipeline` 负责把原文加工成概要、图谱、embedding、多角色音频和移动数据包；Gateway 负责向移动端分发书库、数据包、音频、RAG 能力和运维后台；Gateway Android App 负责移动端离线阅读、系统 TTS、缓存多角色 MP3 和应用更新。
 
 ## 2. 用户角色
 
 | 角色 | 主要目标 | 主要界面 |
 |------|----------|----------|
-| 阅读用户 | 导入小说、阅读、恢复进度、搜索剧情、查看概要和图谱 | PC Web、Gateway Android App |
-| 内容生产者 | 批量生成概要、图谱、embedding、音频和移动数据包 | PC Web、production-pipeline |
+| 阅读用户 | 导入小说、阅读、恢复进度、搜索剧情、查看概要和图谱、听多角色有声小说 | PC Web、Gateway Android App |
+| 内容生产者 | 批量生成概要、图谱、embedding、多角色音频和移动数据包 | PC Web、production-pipeline |
 | 运维/管理员 | 管理 Gateway 书库、数据包、音频、设备授权、请求日志和下载发布 | Gateway Admin UI |
 | 开发/测试人员 | 验证功能契约、回归测试、发布检查和问题定位 | 文档、测试套件、日志、指标接口 |
 
 ## 3. 系统边界
 
-### 3.1 PC 本地阅读器
+### 3.1 PC AI 阅读器
 
 - 导入 `.txt` 和 `.epub` 小说。
 - 自动拆章，展示书架、章节目录和正文。
 - 保存每本书阅读进度，支持章节跳转、键盘/按钮翻页和阅读偏好。
-- 提供模型配置、概要生成、知识图谱、RAG 搜索和数据库备份恢复。
+- 提供模型配置、概要生成、知识图谱、RAG 搜索、证据跳转和数据库备份恢复。
 - 数据默认保存在本机 SQLite：`~/.novel_reader/novel_reader.sqlite`。
 
 ### 3.2 AI 与知识处理
@@ -39,7 +39,7 @@
 
 - `scripts/offline-scanner.mjs` 负责浏览器外批量概要/图谱扫描、续扫、导入导出和数据包生成。
 - `production-pipeline/` 是正式内容生产入口，目标流程为 `import -> summary -> kg -> embedding -> audio -> package -> publish -> verify`。
-- 多角色导演脚本生成、TTS 合成和章节 MP3 输出归属于 `production-pipeline/`，不再维护独立的 TTS 生产目录。
+- 多角色导演脚本生成、TTS 合成、章节 MP3、timeline manifest 和 Gateway 音频清单归属于 `production-pipeline/`，不再维护独立的 TTS 生产目录。
 
 ### 3.4 Gateway 服务
 
@@ -58,8 +58,8 @@
 ### 3.6 Gateway Android App
 
 - 通过 Gateway 连接书库和单书 package。
-- 支持本地缓存书籍、阅读进度、阅读偏好和章节 MP3。
-- 支持离线阅读与本地缓存 MP3 播放。
+- 支持本地缓存书籍、阅读进度、阅读偏好、章节 MP3 和音频 manifest。
+- 支持离线阅读、本地系统 TTS、缓存多角色 MP3 播放和播放时正文片段高亮。
 - 根据设备角色处理 default/trusted/disabled 状态。
 - 支持应用内检查 Gateway 发布的 APK 更新，并交由 Android 系统确认安装。
 
@@ -126,29 +126,30 @@
 ### 4.5 内容生产与发布
 
 1. 内容生产者选择 job JSON。
-2. production-pipeline 执行导入、概要、图谱、embedding、音频、package、发布、验证。
-3. Gateway 接收 package、音频和 APK 下载文件。
+2. production-pipeline 执行导入、概要、图谱、embedding、多角色音频、package、发布、验证。
+3. Gateway 接收 package、MP3、timeline manifest 和 APK 下载文件。
 4. 管理后台显示真实覆盖率、音频健康和发布状态。
 
 验收重点：
 
 - 每个阶段可独立运行、可恢复、可观察。
 - publish/verify 不应只信本地日志，必须检查 Gateway 实际可见结果。
-- package、audio 和 APK 发布元数据要可追踪。
+- package、audio、manifest 和 APK 发布元数据要可追踪。
 
 ### 4.6 Gateway 移动阅读
 
 1. Android App 配置 Gateway 地址、token 和设备名。
 2. App 验证会话并同步书库。
 3. 用户选择书籍，下载 package 并阅读。
-4. 用户可缓存章节 MP3，离线播放。
+4. 用户可使用系统 TTS，也可缓存 production-pipeline 生成的多角色 MP3 离线播放。
 5. App 根据 Gateway 发布元数据检查更新。
 
 验收重点：
 
 - 禁用设备不能继续访问云端资源，但本地缓存阅读应有明确策略。
 - 阅读进度按书保存，切书、切 Tab、重启后不丢失。
-- MP3 缓存状态按书/章节隔离，不串书。
+- TTS / MP3 播放引擎状态清晰；MP3 缓存状态按书/章节隔离，不串书。
+- audio manifest 可用于播放时正文片段高亮，缺失时应优雅降级为普通播放。
 - 更新检查只能提示安装，最终安装必须由 Android 系统确认。
 
 ## 5. 非功能规格

@@ -15,6 +15,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
       ['fatal', 'error', 'warn', 'info', 'debug', 'trace', 'silent'] as const,
       'info',
     ),
+    GATEWAY_TRUST_PROXY: readBoolean(env, 'GATEWAY_TRUST_PROXY', false),
     GATEWAY_DATA_DIR: readString(env, 'GATEWAY_DATA_DIR', join(homedir(), '.novel_reader_gateway')),
     GATEWAY_AUDIO_DIR: readOptionalString(env, 'GATEWAY_AUDIO_DIR'),
     GATEWAY_DOWNLOADS_DIR: readOptionalString(env, 'GATEWAY_DOWNLOADS_DIR'),
@@ -66,6 +67,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     publicBaseUrl: parsed.GATEWAY_PUBLIC_BASE_URL,
     environment: parsed.GATEWAY_ENV,
     logLevel: parsed.GATEWAY_LOG_LEVEL,
+    trustProxy: parsed.GATEWAY_TRUST_PROXY,
     dataDir: parsed.GATEWAY_DATA_DIR,
     audioDir: parsed.GATEWAY_AUDIO_DIR ?? join(parsed.GATEWAY_DATA_DIR, 'audio'),
     downloadsDir: parsed.GATEWAY_DOWNLOADS_DIR ?? join(parsed.GATEWAY_DATA_DIR, 'downloads'),
@@ -134,6 +136,14 @@ function readInteger(
     throw new Error(`${key} must be less than or equal to ${limits.max}.`)
   }
   return value
+}
+
+function readBoolean(env: NodeJS.ProcessEnv, key: string, fallback: boolean) {
+  const rawValue = env[key]?.trim().toLowerCase()
+  if (!rawValue) return fallback
+  if (['1', 'true', 'yes', 'on'].includes(rawValue)) return true
+  if (['0', 'false', 'no', 'off'].includes(rawValue)) return false
+  throw new Error(`${key} must be a boolean.`)
 }
 
 function readEnum<TValue extends string>(

@@ -1125,7 +1125,7 @@ function RequestLogsPage({ requestLogs }: { requestLogs: AdminRequestLog[] }) {
       <section className="panel table-panel">
         <div className="panel-header">
           <h2>请求日志</h2>
-          <span>方法、路径、状态码、耗时和设备</span>
+          <span>方法、路径、状态码、耗时、设备和源 IP</span>
         </div>
         <table className="data-table">
           <thead>
@@ -1137,7 +1137,7 @@ function RequestLogsPage({ requestLogs }: { requestLogs: AdminRequestLog[] }) {
               <th>耗时</th>
               <th>设备</th>
               <th>设备 ID</th>
-              <th>IP</th>
+              <th>源 IP</th>
             </tr>
           </thead>
           <tbody>
