@@ -97,7 +97,7 @@ describe('device identity', () => {
         {},
       ),
     ).toMatchObject({
-      'X-App-Version': '0.2.0',
+      'X-App-Version': '0.7.0',
     })
   })
 

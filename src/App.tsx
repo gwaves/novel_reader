@@ -17,7 +17,7 @@ import {
   readChapterScrollPosition,
   useReaderState,
 } from './hooks/useReaderState.ts'
-import type { AIProvider, Chapter, EmbeddingProvider, OpenAIConfig } from './hooks/useReaderState.ts'
+import type { AIProvider, Chapter, EmbeddingProvider, OpenAIConfig, SummaryKeyPointSource } from './hooks/useReaderState.ts'
 import {
   createRagAnswerUpdate,
   getKgEntityTypeLabel,
@@ -85,6 +85,16 @@ type KgNeighborhood = {
   centerId: string
   entities: KgEntity[]
   relations: KgRelation[]
+}
+
+type SourceRange = {
+  startOffset: number
+  endOffset: number
+}
+
+type SourceParagraph = SourceRange & {
+  text: string
+  key: string
 }
 
 type KgBookGraph = {
@@ -452,6 +462,50 @@ async function generateKnowledgeGraphWithOpenAI(
   return parseJsonObject(payload.choices?.[0]?.message?.content ?? '')
 }
 
+function splitSourceParagraphs(text: string, preserveBlankLines = false): SourceParagraph[] {
+  const paragraphs: SourceParagraph[] = []
+  const lines = text.split('\n')
+  let offset = 0
+
+  lines.forEach((line, index) => {
+    const startOffset = offset
+    const normalized = line.replace(/\r$/, '')
+    const endOffset = startOffset + normalized.length
+    if (preserveBlankLines || normalized.trim()) {
+      paragraphs.push({
+        key: `${index}-${startOffset}`,
+        text: preserveBlankLines ? normalized : normalized.trim(),
+        startOffset,
+        endOffset,
+      })
+    }
+    offset += line.length + 1
+  })
+
+  return paragraphs
+}
+
+function rangesOverlap(left: SourceRange, right: SourceRange | null | undefined) {
+  return Boolean(right && left.startOffset < right.endOffset && left.endOffset > right.startOffset)
+}
+
+function findSourceElement(container: HTMLElement, source: SourceRange) {
+  const elements = Array.from(container.querySelectorAll<HTMLElement>('[data-source-start][data-source-end]'))
+  return (
+    elements.find((element) => {
+      const start = Number(element.dataset.sourceStart)
+      const end = Number(element.dataset.sourceEnd)
+      return Number.isFinite(start) && Number.isFinite(end) && start <= source.startOffset && end >= source.endOffset
+    }) ??
+    elements.find((element) => {
+      const start = Number(element.dataset.sourceStart)
+      const end = Number(element.dataset.sourceEnd)
+      return Number.isFinite(start) && Number.isFinite(end) && start <= source.startOffset && end > source.startOffset
+    }) ??
+    null
+  )
+}
+
 function App() {
   const readerRef = useRef<HTMLElement | null>(null)
   const chapterListRef = useRef<HTMLDivElement | null>(null)
@@ -459,6 +513,7 @@ function App() {
   const readerScrollSaveTimerRef = useRef<number | null>(null)
   const readerProgressFrameRef = useRef<number | null>(null)
   const pendingReaderScrollPositionRef = useRef<{ key: string; top: number } | null>(null)
+  const summaryHighlightTimerRef = useRef<number | null>(null)
   const databaseImportInputRef = useRef<HTMLInputElement | null>(null)
   const offlineImportInputRef = useRef<HTMLInputElement | null>(null)
   const shouldStopScanningRef = useRef(false)
@@ -586,6 +641,7 @@ function App() {
   const [configTab, setConfigTab] = useState<'llm' | 'embedding'>('llm')
   const [readerProgress, setReaderProgress] = useState(0)
   const [selectedReaderText, setSelectedReaderText] = useState('')
+  const [summaryHighlightRange, setSummaryHighlightRange] = useState<SourceRange | null>(null)
 
   const {
     state,
@@ -658,10 +714,17 @@ function App() {
   const activeChapterParagraphs = useMemo(() => {
     if (!activeChapter) return []
 
-    return activeChapter.content.split('\n').map((line, index) => (
-      <p key={`${activeChapter.id}-${index}`}>{line || ' '}</p>
+    return splitSourceParagraphs(activeChapter.content, true).map((paragraph) => (
+      <p
+        className={rangesOverlap(paragraph, summaryHighlightRange) ? 'chapter-source-highlight' : undefined}
+        data-source-start={paragraph.startOffset}
+        data-source-end={paragraph.endOffset}
+        key={`${activeChapter.id}-${paragraph.key}`}
+      >
+        {paragraph.text || ' '}
+      </p>
     ))
-  }, [activeChapter?.content, activeChapter?.id])
+  }, [activeChapter?.content, activeChapter?.id, summaryHighlightRange])
   const onboardingSteps = [
     {
       id: 'import',
@@ -774,6 +837,32 @@ function App() {
       }
     })
   }, [view, activeChapter?.id, state.book?.id])
+
+  useEffect(() => {
+    const frame = window.requestAnimationFrame(() => setSummaryHighlightRange(null))
+    if (summaryHighlightTimerRef.current) {
+      window.clearTimeout(summaryHighlightTimerRef.current)
+      summaryHighlightTimerRef.current = null
+    }
+    return () => window.cancelAnimationFrame(frame)
+  }, [activeChapter?.id])
+
+  function jumpToSummarySource(source: SummaryKeyPointSource) {
+    if (!readerRef.current || typeof source.startOffset !== 'number' || typeof source.endOffset !== 'number') return
+
+    const target = findSourceElement(readerRef.current, source)
+    setSummaryHighlightRange({ startOffset: source.startOffset, endOffset: source.endOffset })
+
+    if (summaryHighlightTimerRef.current) {
+      window.clearTimeout(summaryHighlightTimerRef.current)
+    }
+    summaryHighlightTimerRef.current = window.setTimeout(() => {
+      setSummaryHighlightRange(null)
+      summaryHighlightTimerRef.current = null
+    }, 2000)
+
+    target?.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' })
+  }
 
   useEffect(() => {
     if (view !== 'reader' || !activeChapter) return
@@ -6656,9 +6745,20 @@ function App() {
                 <p>{activeSummary.detail}</p>
                 <h3>必须知道</h3>
                 <ul>
-                  {activeSummary.keyPoints.map((point, index) => (
-                    <li key={`${point}-${index}`}>{point}</li>
-                  ))}
+                  {activeSummary.keyPoints.map((point, index) => {
+                    const source = activeSummary.keyPointSources?.find((entry) => entry.index === index)
+                    return (
+                      <li key={`${point}-${index}`}>
+                        {source ? (
+                          <button type="button" className="summary-source-link" onClick={() => jumpToSummarySource(source)}>
+                            {point}
+                          </button>
+                        ) : (
+                          point
+                        )}
+                      </li>
+                    )
+                  })}
                 </ul>
                 <h3>跳读建议</h3>
                 <p>{activeSummary.skippable}</p>

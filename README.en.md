@@ -77,7 +77,7 @@ Publish it to Gateway downloads:
 npm run gateway:publish-android-apk
 ```
 
-The stable download URL is `/downloads/ai_novel_reader.apk`.
+The stable download URL is `/downloads/novel_gateway.apk`.
 
 ## Documentation
 

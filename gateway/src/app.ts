@@ -2,9 +2,9 @@ import cors from '@fastify/cors'
 import helmet from '@fastify/helmet'
 import rateLimit from '@fastify/rate-limit'
 import Fastify, { type FastifyError, type FastifyReply, type FastifyRequest } from 'fastify'
-import { randomUUID } from 'node:crypto'
+import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto'
 import { createReadStream } from 'node:fs'
-import { readdir, stat } from 'node:fs/promises'
+import { mkdir, readdir, stat, writeFile } from 'node:fs/promises'
 import { extname, join, normalize, relative, basename } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { requireAdminAuth, requireMobileAuth } from './auth.js'
@@ -155,6 +155,42 @@ export function buildGatewayApp(config: GatewayConfig = loadConfig()) {
     return {
       generatedAt: new Date().toISOString(),
       ...(await readDeviceRegistry(config)),
+    }
+  })
+
+  app.post<{ Body: unknown }>('/mobile/logs', async (request) => {
+    const mobileAuth = await requireMobileDevice(config, request)
+    const payload = normalizeMobileLogSubmission(request.body)
+    const receiptId = randomUUID()
+    const receivedAt = new Date().toISOString()
+    const logDir = join(config.dataDir, 'mobile-logs', receivedAt.slice(0, 10))
+    const fileName = `${safeFileSegment(mobileAuth.deviceId)}-${receiptId}.json`
+    await mkdir(logDir, { recursive: true })
+    await writeFile(
+      join(logDir, fileName),
+      `${JSON.stringify(
+        {
+          schemaVersion: 1,
+          receiptId,
+          receivedAt,
+          remoteAddress: request.ip,
+          deviceId: mobileAuth.deviceId,
+          app: payload.app,
+          device: payload.device,
+          state: payload.state,
+          logs: payload.logs,
+        },
+        null,
+        2,
+      )}\n`,
+      'utf8',
+    )
+    request.log.warn({ receiptId, deviceId: mobileAuth.deviceId, entries: payload.logs.length }, 'mobile diagnostics submitted')
+    return {
+      schemaVersion: 1,
+      receiptId,
+      receivedAt,
+      storedEntries: payload.logs.length,
     }
   })
 
@@ -464,6 +500,46 @@ export function buildGatewayApp(config: GatewayConfig = loadConfig()) {
     },
   )
 
+  app.post<{ Params: { bookId: string; chapterId: string } }>(
+    '/mobile/books/:bookId/audio/:chapterId/stream-token',
+    async (request) => {
+      const mobileAuth = await requireMobileDevice(config, request)
+      await readVisibleBookSummary(config, request.params.bookId, mobileAuth.allowedVisibilities)
+      await openAudioFile(config, request.params.bookId, request.params.chapterId)
+      const expiresAtMs = Date.now() + audioStreamTokenTtlMs
+      const token = createAudioStreamToken(config, {
+        bookId: request.params.bookId,
+        chapterId: request.params.chapterId,
+        deviceId: mobileAuth.deviceId,
+        exp: expiresAtMs,
+      })
+      return {
+        schemaVersion: 1,
+        streamUrl: `/mobile/books/${encodeURIComponent(request.params.bookId)}/audio/${encodeURIComponent(request.params.chapterId)}/stream.mp3?token=${encodeURIComponent(token)}`,
+        expiresAt: new Date(expiresAtMs).toISOString(),
+      }
+    },
+  )
+
+  async function handleAudioStream(
+    request: FastifyRequest<{ Params: { bookId: string; chapterId: string }; Querystring: { token?: string } }>,
+    reply: FastifyReply,
+  ) {
+    verifyAudioStreamToken(config, request.query.token, request.params.bookId, request.params.chapterId)
+    const audio = await openAudioFile(config, request.params.bookId, request.params.chapterId)
+    return sendAudioStream(reply, audio, request.headers.range)
+  }
+
+  app.get<{ Params: { bookId: string; chapterId: string }; Querystring: { token?: string } }>(
+    '/mobile/books/:bookId/audio/:chapterId/stream',
+    handleAudioStream,
+  )
+
+  app.get<{ Params: { bookId: string; chapterId: string }; Querystring: { token?: string } }>(
+    '/mobile/books/:bookId/audio/:chapterId/stream.mp3',
+    handleAudioStream,
+  )
+
   app.get<{ Params: { bookId: string; chapterId: string } }>(
     '/mobile/books/:bookId/audio/:chapterId/manifest',
     async (request) => {
@@ -569,6 +645,7 @@ function separatorForPath(path: string) {
 
 type MobileDeviceContext = {
   allowedVisibilities: Array<GatewayBookSummary['visibility']>
+  deviceId: string
 }
 
 async function requireMobileDevice(config: GatewayConfig, request: FastifyRequest): Promise<MobileDeviceContext> {
@@ -580,6 +657,198 @@ async function requireMobileDevice(config: GatewayConfig, request: FastifyReques
   }
   return {
     allowedVisibilities: allowedVisibilitiesForRole(role),
+    deviceId: device?.id ?? auth.deviceId ?? 'unknown-device',
+  }
+}
+
+function normalizeMobileLogSubmission(body: unknown) {
+  if (!isRecord(body)) {
+    throw new GatewayHttpError(400, 'invalid_mobile_logs', 'Mobile logs body must be an object.')
+  }
+  const rawLogs = Array.isArray(body.logs) ? body.logs : []
+  if (rawLogs.length === 0) {
+    throw new GatewayHttpError(400, 'invalid_mobile_logs', 'Mobile logs body must include at least one log entry.')
+  }
+  const logs = rawLogs.slice(-200).map(normalizeMobileLogEntry).filter((entry): entry is Record<string, unknown> => Boolean(entry))
+  if (logs.length === 0) {
+    throw new GatewayHttpError(400, 'invalid_mobile_logs', 'Mobile logs body must include at least one valid log entry.')
+  }
+  return {
+    app: sanitizeLogObject(body.app),
+    device: sanitizeLogObject(body.device),
+    state: sanitizeLogObject(body.state),
+    logs,
+  }
+}
+
+function normalizeMobileLogEntry(value: unknown): Record<string, unknown> | null {
+  if (!isRecord(value)) return null
+  const level = value.level === 'error' || value.level === 'warn' || value.level === 'info' ? value.level : 'info'
+  const message = readNonEmptyString(value.message).slice(0, 800)
+  const timestamp = readNonEmptyString(value.timestamp).slice(0, 80)
+  if (!message || !timestamp) return null
+  return {
+    id: readNonEmptyString(value.id).slice(0, 120),
+    timestamp,
+    level,
+    source: readNonEmptyString(value.source).slice(0, 80),
+    message,
+    context: sanitizeLogObject(value.context),
+  }
+}
+
+function sanitizeLogObject(value: unknown, depth = 0): unknown {
+  if (value == null || typeof value === 'number' || typeof value === 'boolean') return value
+  if (typeof value === 'string') return value.slice(0, 500)
+  if (depth >= 4) return '[truncated]'
+  if (Array.isArray(value)) return value.slice(0, 20).map((entry) => sanitizeLogObject(entry, depth + 1))
+  if (!isRecord(value)) return String(value).slice(0, 200)
+  return Object.fromEntries(
+    Object.entries(value).slice(0, 50).map(([key, entry]) => [
+      key,
+      /token|authorization|password|secret/i.test(key) ? '[redacted]' : sanitizeLogObject(entry, depth + 1),
+    ]),
+  )
+}
+
+function safeFileSegment(value: string) {
+  return value.replace(/[^0-9A-Za-z._-]+/g, '_').slice(0, 120) || 'unknown-device'
+}
+
+const audioStreamTokenTtlMs = 2 * 60 * 60 * 1000
+
+type AudioStreamTokenPayload = {
+  bookId: string
+  chapterId: string
+  deviceId: string
+  exp: number
+}
+
+function createAudioStreamToken(config: GatewayConfig, payload: AudioStreamTokenPayload) {
+  const payloadText = JSON.stringify(payload)
+  const payloadPart = base64UrlEncode(Buffer.from(payloadText, 'utf8'))
+  const signaturePart = signAudioStreamToken(config, payloadPart)
+  return `${payloadPart}.${signaturePart}`
+}
+
+function verifyAudioStreamToken(config: GatewayConfig, token: string | undefined, bookId: string, chapterId: string) {
+  if (!token) {
+    throw new GatewayHttpError(401, 'audio_stream_token_required', 'Audio stream token is required.')
+  }
+  const [payloadPart, signaturePart, extraPart] = token.split('.')
+  if (!payloadPart || !signaturePart || extraPart) {
+    throw new GatewayHttpError(401, 'audio_stream_token_invalid', 'Audio stream token is invalid.')
+  }
+  const expectedSignature = signAudioStreamToken(config, payloadPart)
+  if (!safeEqual(signaturePart, expectedSignature)) {
+    throw new GatewayHttpError(401, 'audio_stream_token_invalid', 'Audio stream token is invalid.')
+  }
+
+  const payload = parseAudioStreamTokenPayload(payloadPart)
+  if (!payload || payload.bookId !== bookId || payload.chapterId !== chapterId || !payload.deviceId) {
+    throw new GatewayHttpError(401, 'audio_stream_token_invalid', 'Audio stream token is invalid.')
+  }
+  if (payload.exp < Date.now()) {
+    throw new GatewayHttpError(401, 'audio_stream_token_expired', 'Audio stream token has expired.')
+  }
+}
+
+function parseAudioStreamTokenPayload(payloadPart: string): AudioStreamTokenPayload | null {
+  try {
+    const value = JSON.parse(Buffer.from(payloadPart, 'base64url').toString('utf8')) as Partial<AudioStreamTokenPayload>
+    if (
+      typeof value.bookId !== 'string' ||
+      typeof value.chapterId !== 'string' ||
+      typeof value.deviceId !== 'string' ||
+      typeof value.exp !== 'number' ||
+      !Number.isFinite(value.exp)
+    ) {
+      return null
+    }
+    return {
+      bookId: value.bookId,
+      chapterId: value.chapterId,
+      deviceId: value.deviceId,
+      exp: value.exp,
+    }
+  } catch {
+    return null
+  }
+}
+
+function signAudioStreamToken(config: GatewayConfig, payloadPart: string) {
+  return base64UrlEncode(createHmac('sha256', requireMobileAccessToken(config)).update(payloadPart).digest())
+}
+
+function requireMobileAccessToken(config: GatewayConfig) {
+  if (!config.auth.mobileAccessToken) {
+    throw new GatewayHttpError(500, 'mobile_auth_not_configured', 'Gateway mobile access token is not configured.')
+  }
+  return config.auth.mobileAccessToken
+}
+
+function base64UrlEncode(buffer: Buffer) {
+  return buffer.toString('base64url')
+}
+
+function safeEqual(left: string, right: string) {
+  const leftBuffer = Buffer.from(left)
+  const rightBuffer = Buffer.from(right)
+  return leftBuffer.length === rightBuffer.length && timingSafeEqual(leftBuffer, rightBuffer)
+}
+
+function sendAudioStream(
+  reply: FastifyReply,
+  audio: Awaited<ReturnType<typeof openAudioFile>>,
+  rangeHeader: string | string[] | undefined,
+) {
+  const range = parseSingleByteRange(Array.isArray(rangeHeader) ? rangeHeader[0] : rangeHeader, audio.sizeBytes)
+  const baseReply = reply
+    .header('content-type', 'audio/mpeg')
+    .header('accept-ranges', 'bytes')
+    .header('access-control-allow-origin', '*')
+    .header('access-control-expose-headers', 'Accept-Ranges, Content-Length, Content-Range')
+    .header('cross-origin-resource-policy', 'cross-origin')
+    .header('content-disposition', `inline; filename="${basename(audio.chapter.fileName)}"`)
+  if (range === 'unsatisfiable') {
+    return baseReply
+      .code(416)
+      .header('content-range', `bytes */${audio.sizeBytes}`)
+      .header('content-length', 0)
+      .send('')
+  }
+  if (!range) {
+    return baseReply.header('content-length', audio.sizeBytes).send(createReadStream(audio.filePath))
+  }
+  return baseReply
+    .code(206)
+    .header('content-range', `bytes ${range.start}-${range.end}/${audio.sizeBytes}`)
+    .header('content-length', range.end - range.start + 1)
+    .send(createReadStream(audio.filePath, { start: range.start, end: range.end }))
+}
+
+function parseSingleByteRange(rangeHeader: string | undefined, sizeBytes: number): { start: number; end: number } | null | 'unsatisfiable' {
+  if (!rangeHeader) return null
+  const match = /^bytes=(\d*)-(\d*)$/.exec(rangeHeader.trim())
+  if (!match || sizeBytes <= 0) return 'unsatisfiable'
+  const [, startText, endText] = match
+  if (!startText && !endText) return 'unsatisfiable'
+  if (!startText) {
+    const suffixLength = Number(endText)
+    if (!Number.isSafeInteger(suffixLength) || suffixLength <= 0) return 'unsatisfiable'
+    return {
+      start: Math.max(0, sizeBytes - suffixLength),
+      end: sizeBytes - 1,
+    }
+  }
+  const start = Number(startText)
+  const requestedEnd = endText ? Number(endText) : sizeBytes - 1
+  if (!Number.isSafeInteger(start) || !Number.isSafeInteger(requestedEnd) || start >= sizeBytes || requestedEnd < start) {
+    return 'unsatisfiable'
+  }
+  return {
+    start,
+    end: Math.min(requestedEnd, sizeBytes - 1),
   }
 }
 

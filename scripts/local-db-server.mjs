@@ -15,6 +15,7 @@ import { dirname, join, resolve } from 'node:path'
 import { createHash, randomUUID } from 'node:crypto'
 import { DatabaseSync } from 'node:sqlite'
 import { gzipSync } from 'node:zlib'
+import { normalizeSummaryKeyPointSources } from './summary-source-locator.mjs'
 
 const host = process.env.NOVEL_READER_API_HOST || '127.0.0.1'
 const port = Number(process.env.NOVEL_READER_API_PORT || 5174)
@@ -74,6 +75,7 @@ db.exec(`
     short TEXT NOT NULL,
     detail TEXT NOT NULL,
     key_points_json TEXT NOT NULL,
+    key_point_sources_json TEXT NOT NULL DEFAULT '[]',
     skippable TEXT NOT NULL,
     generated_by TEXT NOT NULL,
     updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
@@ -214,6 +216,11 @@ try {
 } catch {
   // column may already exist
 }
+try {
+  db.exec(`ALTER TABLE summaries ADD COLUMN key_point_sources_json TEXT NOT NULL DEFAULT '[]'`)
+} catch {
+  // column may already exist
+}
 
 const getStateStatement = db.prepare('SELECT value_json FROM app_state WHERE key = ?')
 const saveStateStatement = db.prepare(`
@@ -261,15 +268,17 @@ const upsertSummaryStatement = db.prepare(`
     short,
     detail,
     key_points_json,
+    key_point_sources_json,
     skippable,
     generated_by,
     updated_at
   )
-  VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+  VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
   ON CONFLICT(chapter_id) DO UPDATE SET
     short = excluded.short,
     detail = excluded.detail,
     key_points_json = excluded.key_points_json,
+    key_point_sources_json = excluded.key_point_sources_json,
     skippable = excluded.skippable,
     generated_by = excluded.generated_by,
     updated_at = excluded.updated_at
@@ -280,6 +289,7 @@ const getSummariesForBookStatement = db.prepare(`
     s.short,
     s.detail,
     s.key_points_json AS keyPointsJson,
+    s.key_point_sources_json AS keyPointSourcesJson,
     s.skippable,
     s.generated_by AS generatedBy
   FROM summaries s
@@ -291,7 +301,8 @@ const getSummaryForChapterStatement = db.prepare(`
     chapter_id AS chapterId,
     short,
     detail,
-    key_points_json AS keyPointsJson
+    key_points_json AS keyPointsJson,
+    key_point_sources_json AS keyPointSourcesJson
   FROM summaries
   WHERE chapter_id = ?
 `)
@@ -555,6 +566,7 @@ const listMobileSummariesStatement = db.prepare(`
     s.short,
     s.detail,
     s.key_points_json AS keyPointsJson,
+    s.key_point_sources_json AS keyPointSourcesJson,
     s.skippable,
     s.generated_by AS generatedBy,
     s.updated_at AS updatedAt
@@ -2926,11 +2938,13 @@ function mapMobileBook(row) {
 }
 
 function mapMobileSummary(row) {
+  const keyPoints = safeJsonParse(row.keyPointsJson, [])
   return {
     chapterId: row.chapterId,
     short: row.short,
     detail: row.detail,
-    keyPoints: safeJsonParse(row.keyPointsJson, []),
+    keyPoints,
+    keyPointSources: normalizeSummaryKeyPointSources(safeJsonParse(row.keyPointSourcesJson, []), keyPoints),
     skippable: row.skippable,
     generatedBy: row.generatedBy,
     updatedAt: row.updatedAt,
@@ -4420,6 +4434,7 @@ function loadSummariesForBook(bookId) {
       short: row.short,
       detail: row.detail,
       keyPoints,
+      keyPointSources: normalizeSummaryKeyPointSources(safeJsonParse(row.keyPointSourcesJson, []), keyPoints),
       skippable: row.skippable,
       generatedBy: row.generatedBy,
     }
@@ -4528,11 +4543,13 @@ function mirrorStructuredState(state) {
 
       const summary = summaries[chapter.id]
       if (summary) {
+        const keyPoints = Array.isArray(summary.keyPoints) ? summary.keyPoints : []
         upsertSummaryStatement.run(
           chapter.id,
           summary.short,
           summary.detail,
-          JSON.stringify(summary.keyPoints ?? []),
+          JSON.stringify(keyPoints),
+          JSON.stringify(normalizeSummaryKeyPointSources(summary.keyPointSources, keyPoints)),
           summary.skippable,
           summary.generatedBy,
         )
@@ -4652,6 +4669,7 @@ function importOfflineBookDataPackage(dataPackage) {
         String(summary.short ?? ''),
         String(summary.detail ?? ''),
         typeof summary.key_points_json === 'string' ? summary.key_points_json : JSON.stringify(summary.key_points_json ?? []),
+        typeof summary.key_point_sources_json === 'string' ? summary.key_point_sources_json : JSON.stringify(summary.key_point_sources_json ?? []),
         String(summary.skippable ?? 'false'),
         String(summary.generated_by ?? 'offline-scanner'),
       )

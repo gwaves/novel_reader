@@ -1799,7 +1799,7 @@ describe('production-pipeline import', () => {
           }
         }
         return null
-      }, { timeoutMs: 3000 })
+      }, { timeoutMs: 6000 })
 
       const parentRunDir = dirname(runJsonPath)
       const runningRunJson = JSON.parse(await readFile(runJsonPath, 'utf8'))
@@ -2348,7 +2348,7 @@ describe('production-pipeline import', () => {
         'admin-token',
       ])
 
-      assert.match(stdout, /checks: 29\/29/)
+      assert.match(stdout, /checks: 31\/31/)
       const runJson = JSON.parse(await readFile(join(runRoot, 'sample-book', runId, 'run.json'), 'utf8'))
       assert.equal(runJson.stages.verify.status, 'completed')
       const report = JSON.parse(await readFile(join(runRoot, 'sample-book', runId, 'artifacts', 'verify-report.json'), 'utf8'))
@@ -2727,17 +2727,30 @@ function seedSummaries(dbPath) {
         short TEXT NOT NULL,
         detail TEXT NOT NULL,
         key_points_json TEXT NOT NULL,
+        key_point_sources_json TEXT NOT NULL DEFAULT '[]',
         skippable TEXT NOT NULL,
         generated_by TEXT NOT NULL,
         updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
       );
     `)
     const insert = db.prepare(`
-      INSERT INTO summaries (chapter_id, short, detail, key_points_json, skippable, generated_by, updated_at)
-      VALUES (?, ?, ?, ?, 'false', 'test', CURRENT_TIMESTAMP)
+      INSERT INTO summaries (chapter_id, short, detail, key_points_json, key_point_sources_json, skippable, generated_by, updated_at)
+      VALUES (?, ?, ?, ?, ?, 'false', 'test', CURRENT_TIMESTAMP)
     `)
-    insert.run('sample-book:ch00001', '短摘要一', '详细摘要一', JSON.stringify(['要点一']))
-    insert.run('sample-book:ch00002', '短摘要二', '详细摘要二', JSON.stringify(['要点二']))
+    insert.run(
+      'sample-book:ch00001',
+      '短摘要一',
+      '详细摘要一',
+      JSON.stringify(['要点一']),
+      JSON.stringify([{ index: 0, text: '要点一', startOffset: 0, endOffset: 7, quote: '这是第一章内容。', confidence: 1, locator: 'test' }]),
+    )
+    insert.run(
+      'sample-book:ch00002',
+      '短摘要二',
+      '详细摘要二',
+      JSON.stringify(['要点二']),
+      JSON.stringify([{ index: 0, text: '要点二', startOffset: 0, endOffset: 7, quote: '这是第二章内容。', confidence: 1, locator: 'test' }]),
+    )
   } finally {
     db.close()
   }

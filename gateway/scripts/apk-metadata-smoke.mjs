@@ -17,11 +17,13 @@ check(typeof manifest?.versionName === 'string' && manifest.versionName.length >
 check(Number.isInteger(manifest?.versionCode) && manifest.versionCode > 0, 'android-app.json has positive versionCode')
 check(Number.isInteger(manifest?.buildNumber) && manifest.buildNumber >= 0, 'android-app.json has buildNumber')
 check(typeof manifest?.gitCommit === 'string' && manifest.gitCommit.length >= 7, 'android-app.json has gitCommit')
-check(manifest?.latestFileName === 'ai_novel_reader.apk', 'latestFileName is fixed')
-check(manifest?.latestUrl === '/downloads/ai_novel_reader.apk', 'latestUrl points to fixed APK')
+check(manifest?.latestFileName === 'novel_gateway.apk', 'latestFileName is fixed')
+check(manifest?.latestUrl === '/downloads/novel_gateway.apk', 'latestUrl points to fixed APK')
 check(
   typeof manifest?.versionedFileName === 'string' &&
     manifest.versionedFileName.length > 0 &&
+    manifest.versionedFileName.startsWith('novel_gateway-v') &&
+    manifest.versionedFileName.endsWith('-debug.apk') &&
     manifest?.versionedUrl === `/downloads/${manifest.versionedFileName}`,
   'versionedUrl matches versionedFileName',
 )

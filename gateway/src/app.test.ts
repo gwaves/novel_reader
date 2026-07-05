@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { createHmac } from 'node:crypto'
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { buildGatewayApp } from './app.js'
@@ -34,6 +35,15 @@ async function makeDataDir() {
   return dataDir
 }
 
+function createTestAudioStreamToken(
+  secret: string,
+  payload: { bookId: string; chapterId: string; deviceId: string; exp: number },
+) {
+  const payloadPart = Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url')
+  const signaturePart = createHmac('sha256', secret).update(payloadPart).digest('base64url')
+  return `${payloadPart}.${signaturePart}`
+}
+
 describe('gateway app', () => {
   it('returns health status', async () => {
     const app = buildTestApp()
@@ -51,19 +61,19 @@ describe('gateway app', () => {
 
   it('serves published Android APK downloads', async () => {
     const downloadsDir = await makeDataDir()
-    await writeFile(join(downloadsDir, 'ai_novel_reader.apk'), 'apk bytes')
+    await writeFile(join(downloadsDir, 'novel_gateway.apk'), 'apk bytes')
     const app = buildTestApp({
       GATEWAY_DOWNLOADS_DIR: downloadsDir,
     })
 
     const response = await app.inject({
       method: 'GET',
-      url: '/downloads/ai_novel_reader.apk',
+      url: '/downloads/novel_gateway.apk',
     })
 
     expect(response.statusCode).toBe(200)
     expect(response.headers['content-type']).toBe('application/vnd.android.package-archive')
-    expect(response.headers['content-disposition']).toBe('attachment; filename="ai_novel_reader.apk"')
+    expect(response.headers['content-disposition']).toBe('attachment; filename="novel_gateway.apk"')
     expect(response.body).toBe('apk bytes')
   })
 
@@ -158,6 +168,85 @@ describe('gateway app', () => {
       service: 'novel-reader-gateway',
       version: '0.1.0',
     })
+  })
+
+  it('stores mobile diagnostic logs with a receipt id', async () => {
+    const dataDir = await makeDataDir()
+    const app = buildTestApp({
+      GATEWAY_DEV_ACCESS_TOKEN: 'dev-token',
+      GATEWAY_DATA_DIR: dataDir,
+    })
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/mobile/logs',
+      headers: {
+        authorization: 'Bearer dev-token',
+        'x-device-id': 'device/with/slash',
+        'x-device-name': 'QA Phone',
+      },
+      payload: {
+        schemaVersion: 1,
+        app: { versionName: '0.7.0' },
+        device: { model: 'Pixel', token: 'client-secret' },
+        state: { selectedBookId: 'book-a' },
+        logs: [
+          {
+            id: 'log-1',
+            timestamp: '2026-07-05T11:00:00.000Z',
+            level: 'error',
+            message: 'MP3 播放失败',
+            source: 'app',
+            context: {
+              action: 'chapterAudioError',
+              token: 'stream-secret',
+            },
+          },
+        ],
+      },
+    })
+
+    expect(response.statusCode).toBe(200)
+    const body = response.json()
+    expect(body).toMatchObject({
+      schemaVersion: 1,
+      storedEntries: 1,
+    })
+    expect(body.receiptId).toEqual(expect.any(String))
+    const logDateDir = join(dataDir, 'mobile-logs', body.receivedAt.slice(0, 10))
+    const files = await readdir(logDateDir)
+    expect(files[0]).toMatch(/^device_with_slash-/)
+    const saved = JSON.parse(await readFile(join(logDateDir, files[0]), 'utf8'))
+    expect(saved).toMatchObject({
+      receiptId: body.receiptId,
+      deviceId: 'device/with/slash',
+      logs: [expect.objectContaining({ message: 'MP3 播放失败' })],
+    })
+    expect(saved.device.token).toBe('[redacted]')
+    expect(saved.logs[0].context.token).toBe('[redacted]')
+  })
+
+  it('rejects empty mobile diagnostic submissions', async () => {
+    const dataDir = await makeDataDir()
+    const app = buildTestApp({
+      GATEWAY_DEV_ACCESS_TOKEN: 'dev-token',
+      GATEWAY_DATA_DIR: dataDir,
+    })
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/mobile/logs',
+      headers: {
+        authorization: 'Bearer dev-token',
+        'x-device-id': 'device-a',
+      },
+      payload: {
+        logs: [],
+      },
+    })
+
+    expect(response.statusCode).toBe(400)
+    expect(response.json().error.code).toBe('invalid_mobile_logs')
   })
 
   it('rejects production config without explicit admin and mobile tokens', () => {
@@ -720,7 +809,7 @@ describe('gateway app', () => {
         'x-device-name': '客厅平板新名',
         'x-device-model': 'Xiaomi Pad 6',
         'x-device-platform': 'android',
-        'x-app-version': '0.2.0',
+        'x-app-version': '0.7.0',
       },
     })
     const devices = JSON.parse(await readFile(join(dataDir, 'devices.json'), 'utf8')) as {
@@ -744,7 +833,7 @@ describe('gateway app', () => {
       name: '客厅平板新名',
       model: 'Xiaomi Pad 6',
       platform: 'android',
-      appVersion: '0.2.0',
+      appVersion: '0.7.0',
       pairingCode: '428193',
       role: 'trusted',
       firstSeenAt: '2026-06-29T00:00:00.000Z',
@@ -765,7 +854,7 @@ describe('gateway app', () => {
       'x-device-name': 'Xiaomi Phone',
       'x-device-model': '23127PN0CC',
       'x-device-platform': 'android',
-      'x-app-version': '0.2.0',
+      'x-app-version': '0.7.0',
     }
 
     const responses = await Promise.all(
@@ -788,7 +877,7 @@ describe('gateway app', () => {
       name: 'Xiaomi Phone',
       model: '23127PN0CC',
       platform: 'android',
-      appVersion: '0.2.0',
+      appVersion: '0.7.0',
     })
   })
 
@@ -3491,6 +3580,156 @@ describe('gateway app', () => {
       timelineVersion: 1,
       timeline: [{ text: '正文' }],
     })
+  })
+
+  it('returns signed MP3 stream URLs and supports byte range playback', async () => {
+    const dataDir = await makeDataDir()
+    const audioDir = await makeDataDir()
+    const bookAudioDir = join(audioDir, 'books', 'book-a')
+    await mkdir(bookAudioDir, { recursive: true })
+    await writeFile(
+      join(dataDir, 'books.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        books: [
+          {
+            id: 'book-a',
+            title: '音频书',
+            chapterCount: 1,
+            updatedAt: '2026-06-25T00:00:00.000Z',
+          },
+        ],
+      }),
+      'utf8',
+    )
+    await mkdir(join(dataDir, 'books', 'book-a'), { recursive: true })
+    await writeFile(
+      join(dataDir, 'books', 'book-a', 'package.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        book: {
+          id: 'book-a',
+          title: '音频书',
+          chapterCount: 1,
+          updatedAt: '2026-06-25T00:00:00.000Z',
+        },
+        chapters: [{ id: 'chapter-1', title: '第一章', content: '正文一' }],
+      }),
+      'utf8',
+    )
+    await writeFile(join(bookAudioDir, 'chapter-1.mp3'), 'fake mp3 data')
+    await writeFile(
+      join(bookAudioDir, 'audio.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        chapters: [
+          {
+            chapterId: 'chapter-1',
+            title: '第一章',
+            fileName: 'chapter-1.mp3',
+          },
+        ],
+      }),
+      'utf8',
+    )
+    const app = buildTestApp({
+      GATEWAY_DEV_ACCESS_TOKEN: 'dev-token',
+      GATEWAY_DATA_DIR: dataDir,
+      GATEWAY_AUDIO_DIR: audioDir,
+    })
+    const headers = {
+      authorization: 'Bearer dev-token',
+      'x-device-id': 'device-a',
+    }
+
+    const tokenResponse = await app.inject({
+      method: 'POST',
+      url: '/mobile/books/book-a/audio/chapter-1/stream-token',
+      headers,
+    })
+
+    expect(tokenResponse.statusCode).toBe(200)
+    expect(tokenResponse.json()).toMatchObject({
+      schemaVersion: 1,
+    })
+    expect(tokenResponse.json().streamUrl).toMatch(/^\/mobile\/books\/book-a\/audio\/chapter-1\/stream\.mp3\?token=/)
+
+    const streamUrl = tokenResponse.json().streamUrl as string
+    const streamResponse = await app.inject({
+      method: 'GET',
+      url: streamUrl,
+    })
+    const rangeResponse = await app.inject({
+      method: 'GET',
+      url: streamUrl,
+      headers: {
+        range: 'bytes=5-7',
+      },
+    })
+    const legacyRangeResponse = await app.inject({
+      method: 'GET',
+      url: streamUrl.replace('/stream.mp3?', '/stream?'),
+      headers: {
+        range: 'bytes=5-7',
+      },
+    })
+    const unsatisfiableRangeResponse = await app.inject({
+      method: 'GET',
+      url: streamUrl,
+      headers: {
+        range: 'bytes=999-1000',
+      },
+    })
+
+    expect(streamResponse.statusCode).toBe(200)
+    expect(streamResponse.headers['accept-ranges']).toBe('bytes')
+    expect(streamResponse.headers['access-control-allow-origin']).toBe('*')
+    expect(streamResponse.headers['access-control-expose-headers']).toContain('Content-Range')
+    expect(streamResponse.headers['cross-origin-resource-policy']).toBe('cross-origin')
+    expect(streamResponse.body).toBe('fake mp3 data')
+    expect(rangeResponse.statusCode).toBe(206)
+    expect(rangeResponse.headers['content-range']).toBe('bytes 5-7/13')
+    expect(rangeResponse.headers['access-control-allow-origin']).toBe('*')
+    expect(rangeResponse.headers['access-control-expose-headers']).toContain('Content-Length')
+    expect(rangeResponse.headers['cross-origin-resource-policy']).toBe('cross-origin')
+    expect(rangeResponse.body).toBe('mp3')
+    expect(legacyRangeResponse.statusCode).toBe(206)
+    expect(legacyRangeResponse.body).toBe('mp3')
+    expect(unsatisfiableRangeResponse.statusCode).toBe(416)
+    expect(unsatisfiableRangeResponse.headers['content-range']).toBe('bytes */13')
+    expect(unsatisfiableRangeResponse.headers['cross-origin-resource-policy']).toBe('cross-origin')
+
+    const tamperedResponse = await app.inject({
+      method: 'GET',
+      url: `${streamUrl}x`,
+    })
+    const expiredToken = createTestAudioStreamToken('dev-token', {
+      bookId: 'book-a',
+      chapterId: 'chapter-1',
+      deviceId: 'device-a',
+      exp: Date.now() - 1000,
+    })
+    const expiredResponse = await app.inject({
+      method: 'GET',
+      url: `/mobile/books/book-a/audio/chapter-1/stream?token=${encodeURIComponent(expiredToken)}`,
+    })
+    const mismatchedToken = createTestAudioStreamToken('dev-token', {
+      bookId: 'book-a',
+      chapterId: 'chapter-2',
+      deviceId: 'device-a',
+      exp: Date.now() + 60_000,
+    })
+    const mismatchedResponse = await app.inject({
+      method: 'GET',
+      url: `/mobile/books/book-a/audio/chapter-1/stream?token=${encodeURIComponent(mismatchedToken)}`,
+    })
+
+    expect(tamperedResponse.statusCode).toBe(401)
+    expect(tamperedResponse.json()).toMatchObject({ error: { code: 'audio_stream_token_invalid' } })
+    expect(expiredResponse.statusCode).toBe(401)
+    expect(expiredResponse.json()).toMatchObject({ error: { code: 'audio_stream_token_expired' } })
+    expect(mismatchedResponse.statusCode).toBe(401)
+    expect(mismatchedResponse.json()).toMatchObject({ error: { code: 'audio_stream_token_invalid' } })
   })
 
   it('protects MP3 downloads with mobile auth, device role, and book visibility', async () => {

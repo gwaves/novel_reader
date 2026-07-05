@@ -44,7 +44,7 @@ export class GatewayError extends Error {
 const fallbackDeviceName = 'Android Phone'
 const fallbackDeviceModel = 'Unknown Android Device'
 const fallbackDevicePlatform = 'android'
-const fallbackAppVersion = '0.2.0'
+const fallbackAppVersion = '0.7.0'
 
 export function loadGatewaySettings(
   storage: StorageLike,

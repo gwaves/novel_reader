@@ -157,7 +157,7 @@ gateway-android-app/android/app/build/outputs/apk/debug/
 npm run gateway:publish-android-apk
 ```
 
-发布后固定下载路径为 `/downloads/ai_novel_reader.apk`，并写入 `/downloads/android-app.json` 供 App 内更新检查使用。
+发布后固定下载路径为 `/downloads/novel_gateway.apk`，并写入 `/downloads/android-app.json` 供 App 内更新检查使用。
 
 ### 4. 跑生产流水线
 

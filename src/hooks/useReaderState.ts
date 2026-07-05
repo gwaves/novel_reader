@@ -20,8 +20,19 @@ export type Summary = {
   short: string
   detail: string
   keyPoints: string[]
+  keyPointSources?: SummaryKeyPointSource[]
   skippable: string
   generatedBy: 'local' | 'ollama' | 'openai'
+}
+
+export type SummaryKeyPointSource = {
+  index: number
+  text: string
+  startOffset: number
+  endOffset: number
+  quote: string
+  confidence: number
+  locator: string
 }
 
 export type LibraryBook = {
@@ -289,9 +300,115 @@ function isBook(value: unknown): value is Book {
 }
 
 function sanitizeSummaries(value: unknown): Record<string, Summary> {
-  return value && typeof value === 'object' && !Array.isArray(value)
-    ? (value as Record<string, Summary>)
-    : {}
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return {}
+  return Object.fromEntries(
+    Object.entries(value as Record<string, unknown>)
+      .map(([chapterId, summary]) => [chapterId, sanitizeSummary(summary)])
+      .filter((entry): entry is [string, Summary] => Boolean(entry[1])),
+  )
+}
+
+function sanitizeSummary(value: unknown): Summary | null {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null
+  const summary = value as Record<string, unknown>
+  const keyPoints = Array.isArray(summary.keyPoints)
+    ? summary.keyPoints.filter((point): point is string => typeof point === 'string' && Boolean(point.trim())).map((point) => point.trim())
+    : []
+  return {
+    short: typeof summary.short === 'string' ? summary.short : '',
+    detail: typeof summary.detail === 'string' ? summary.detail : '',
+    keyPoints,
+    keyPointSources: normalizeSummaryKeyPointSources(summary.keyPointSources, keyPoints),
+    skippable: typeof summary.skippable === 'string' ? summary.skippable : '',
+    generatedBy: summary.generatedBy === 'ollama' || summary.generatedBy === 'openai' ? summary.generatedBy : 'local',
+  }
+}
+
+function normalizeSummaryKeyPointSources(value: unknown, keyPoints: string[] = []): SummaryKeyPointSource[] {
+  if (!Array.isArray(value)) return []
+  return value
+    .map((entry, fallbackIndex): SummaryKeyPointSource | null => {
+      if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return null
+      const source = entry as Record<string, unknown>
+      const index = Number.isInteger(source.index) && (source.index as number) >= 0 ? source.index as number : fallbackIndex
+      const startOffset = Number.isInteger(source.startOffset) && (source.startOffset as number) >= 0 ? source.startOffset as number : null
+      const endOffset = Number.isInteger(source.endOffset) && (source.endOffset as number) >= 0 ? source.endOffset as number : null
+      const text = typeof source.text === 'string' && source.text.trim() ? source.text.trim() : keyPoints[index] ?? ''
+      if (!text || startOffset === null || endOffset === null || endOffset <= startOffset) return null
+      return {
+        index,
+        text,
+        startOffset,
+        endOffset,
+        quote: typeof source.quote === 'string' ? source.quote : '',
+        confidence: typeof source.confidence === 'number' && source.confidence >= 0 && source.confidence <= 1 ? source.confidence : 1,
+        locator: typeof source.locator === 'string' && source.locator.trim() ? source.locator.trim() : 'quote',
+      }
+    })
+    .filter((entry): entry is SummaryKeyPointSource => Boolean(entry))
+}
+
+function locateSummaryKeyPointSources(chapterContent: string, keyPoints: string[], hints: unknown): SummaryKeyPointSource[] {
+  const hintList = Array.isArray(hints) ? hints.filter((hint) => hint && typeof hint === 'object' && !Array.isArray(hint)) as Record<string, unknown>[] : []
+  return keyPoints
+    .map((point, index): SummaryKeyPointSource | null => {
+      const hint = hintList.find((candidate) => candidate.index === index || candidate.text === point)
+      const quotes = [
+        typeof hint?.quote === 'string' ? hint.quote : '',
+        ...(Array.isArray(hint?.quotes) ? hint.quotes.filter((quote): quote is string => typeof quote === 'string') : []),
+        point,
+      ].map((quote) => quote.trim()).filter(Boolean)
+      for (const quote of Array.from(new Set(quotes))) {
+        const located = locateQuoteInText(chapterContent, quote)
+        if (!located) continue
+        return {
+          index,
+          text: point,
+          startOffset: located.startOffset,
+          endOffset: located.endOffset,
+          quote: chapterContent.slice(located.startOffset, located.endOffset),
+          confidence: located.confidence,
+          locator: located.locator,
+        }
+      }
+      return null
+    })
+    .filter((entry): entry is SummaryKeyPointSource => Boolean(entry))
+}
+
+function locateQuoteInText(text: string, quote: string): { startOffset: number; endOffset: number; confidence: number; locator: string } | null {
+  const needle = quote.trim()
+  if (!text || !needle) return null
+  const exact = text.indexOf(needle)
+  if (exact >= 0) return { startOffset: exact, endOffset: exact + needle.length, confidence: 1, locator: 'exact' }
+  const normalizedText = normalizeTextWithMap(text)
+  const normalizedNeedle = normalizeTextForLocation(needle)
+  const normalizedIndex = normalizedText.normalized.indexOf(normalizedNeedle)
+  if (normalizedIndex < 0) return null
+  const startOffset = normalizedText.map[normalizedIndex]
+  const endSource = normalizedText.map[normalizedIndex + normalizedNeedle.length - 1]
+  if (startOffset === undefined || endSource === undefined) return null
+  return { startOffset, endOffset: endSource + 1, confidence: 0.86, locator: 'normalized' }
+}
+
+function normalizeTextWithMap(value: string) {
+  const map: number[] = []
+  let normalized = ''
+  for (let index = 0; index < value.length; index += 1) {
+    const char = normalizeLocationChar(value[index])
+    if (!char) continue
+    normalized += char
+    map.push(index)
+  }
+  return { normalized, map }
+}
+
+function normalizeTextForLocation(value: string) {
+  return Array.from(value).map(normalizeLocationChar).join('')
+}
+
+function normalizeLocationChar(value: string) {
+  return /\s/u.test(value) ? '' : value.normalize('NFKC').toLowerCase()
 }
 
 function sanitizeRecordOfNumbers(value: unknown): Record<string, number> {
@@ -1756,6 +1873,7 @@ function buildSummaryPrompt(chapter: Chapter, thinkingEnabled: boolean): string 
 - short: 一句话概括本章核心情节（不超过 60 字）。
 - detail: 详细概要，包含起因、经过、结果（150-300 字）。
 - keyPoints: 字符串数组，列出本章 3-6 个必须记住的关键信息点。
+- keyPointSources: 数组，必须与 keyPoints 按 index 对齐。每项包含 index、text、quote；quote 必须是本章正文中能支撑该要点的一小段连续原文，尽量 15-80 字，不要编造，不要给 offset。
 - skippable: 判断本章是否可跳读。如果是过渡章、纯回忆、重复描写，返回"可跳读：简要说明原因"；否则返回"不可跳读：简要说明原因"。
 
 只返回 JSON，不要加 markdown 代码块，不要解释。
@@ -1799,6 +1917,7 @@ async function generateWithOllama(
     short: parsed.short || 'Ollama 没有返回一句话概要。',
     detail: parsed.detail || 'Ollama 没有返回详细概要。',
     keyPoints: Array.isArray(parsed.keyPoints) ? parsed.keyPoints.slice(0, 6) : [],
+    keyPointSources: locateSummaryKeyPointSources(chapter.content, Array.isArray(parsed.keyPoints) ? parsed.keyPoints.slice(0, 6) : [], parsed.keyPointSources),
     skippable: parsed.skippable || '暂无跳读建议。',
     generatedBy: 'ollama',
   }
@@ -1871,6 +1990,7 @@ export async function generateWithOpenAICompatible(
     short: parsed.short || '模型没有返回一句话概要。',
     detail: parsed.detail || '模型没有返回详细概要。',
     keyPoints: Array.isArray(parsed.keyPoints) ? parsed.keyPoints.slice(0, 6) : [],
+    keyPointSources: locateSummaryKeyPointSources(chapter.content, Array.isArray(parsed.keyPoints) ? parsed.keyPoints.slice(0, 6) : [], parsed.keyPointSources),
     skippable: parsed.skippable || '暂无跳读建议。',
     generatedBy: 'openai',
   }

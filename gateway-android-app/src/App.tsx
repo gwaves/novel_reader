@@ -8,6 +8,7 @@ import {
   deviceRoleLabel,
   errorMessage,
   getDeviceMetadata,
+  GatewayError,
   isDeviceAccessBlockedError,
   isDeviceDisabledError,
   loadGatewaySettings,
@@ -50,6 +51,31 @@ type Chapter = {
   chapterIndex?: number
 }
 
+type SummaryKeyPointSource = {
+  index: number
+  text: string
+  startOffset: number
+  endOffset: number
+  quote?: string
+  confidence?: number
+  locator?: string
+}
+
+type SummaryKeyPointItem = {
+  text: string
+  source?: SummaryKeyPointSource
+}
+
+type SourceRange = {
+  startOffset: number
+  endOffset: number
+}
+
+type SourceParagraph = SourceRange & {
+  text: string
+  key: string
+}
+
 export type AudioChapter = {
   chapterId: string
   title?: string
@@ -74,6 +100,30 @@ type CachedAudio = {
   manifest: AudioManifest | null
   sizeBytes?: number
 }
+
+type AudioStreamRetryState = {
+  bookId: string
+  currentChapterId: string
+  audioChapterId: string
+  attempted: boolean
+}
+
+type AppLogLevel = 'info' | 'warn' | 'error'
+
+type AppLogEntry = {
+  id: string
+  timestamp: string
+  level: AppLogLevel
+  message: string
+  source?: string
+  context?: unknown
+}
+
+type LogSubmitState =
+  | { status: 'idle'; message?: string }
+  | { status: 'submitting'; message?: string }
+  | { status: 'submitted'; message: string; receiptId?: string }
+  | { status: 'error'; message: string }
 
 type CachedAudioRecord = {
   bookId: string
@@ -170,6 +220,14 @@ type ChapterAudioTimelineItem = {
 
 type ConnectionState = 'idle' | 'checking' | 'connected' | 'error'
 type GatewayTab = 'library' | 'reader' | 'search' | 'settings'
+type SettingsTab = 'reading' | 'audio' | 'sync' | 'diagnostics'
+
+const settingsTabs: Array<{ id: SettingsTab; label: string }> = [
+  { id: 'reading', label: '阅读' },
+  { id: 'audio', label: '音频' },
+  { id: 'sync', label: '同步' },
+  { id: 'diagnostics', label: '诊断' },
+]
 type SearchMode = 'rag' | 'graph'
 type ReaderBackground = 'paper' | 'warm' | 'green' | 'dark'
 
@@ -290,6 +348,7 @@ type GraphResult = {
 const settingsKey = 'novel-reader-gateway-settings'
 const readerSettingsKey = 'novel-reader-gateway-reader-settings'
 const ttsSettingsKey = 'novel-reader-gateway-tts-settings'
+const appLogKey = 'novel-reader-gateway-app-logs'
 const readingProgressKey = 'novel-reader-gateway-reading-progress'
 const fullPackageCacheKey = 'novel-reader-gateway-full-package-cache'
 const fullPackageCacheIndexKey = 'novel-reader-gateway-full-package-cache-index'
@@ -299,6 +358,9 @@ const packageCacheDbName = 'novel-reader-gateway'
 const packageCacheStoreName = 'book-packages'
 const legacyAudioCacheStoreName = 'chapter-audio'
 const defaultGatewayBaseUrl = import.meta.env.VITE_GATEWAY_DEFAULT_BASE_URL ?? 'https://novel.gwaves.net:8888'
+const maxAppLogEntries = 200
+const maxSubmittedLogEntries = 200
+const maxLogMessageLength = 800
 const defaultGatewayToken = import.meta.env.VITE_GATEWAY_DEFAULT_TOKEN ?? '123456'
 const appVersion = buildInfo.versionName
 const NativeAudio = registerPlugin<NativeAudioPlugin>('GatewayAudio')
@@ -332,6 +394,7 @@ const defaultTtsSettings: TtsSettings = {
 
 function App() {
   const [tab, setTab] = useState<GatewayTab>('library')
+  const [settingsTab, setSettingsTab] = useState<SettingsTab>('sync')
   const [settings, setSettings] = useState<GatewaySettings>(() => loadSettings())
   const [readerSettings, setReaderSettings] = useState<ReaderSettings>(() => loadReaderSettings())
   const [ttsSettings, setTtsSettings] = useState<TtsSettings>(() => loadTtsSettings())
@@ -387,7 +450,11 @@ function App() {
   const [activeSpeechSegmentId, setActiveSpeechSegmentId] = useState<string | null>(null)
   const [speechAutoFollowSuspended, setSpeechAutoFollowSuspended] = useState(false)
   const [cacheVersion, setCacheVersion] = useState(0)
+  const [summaryHighlightRange, setSummaryHighlightRange] = useState<SourceRange | null>(null)
   const [clearingCacheKey, setClearingCacheKey] = useState<string | null>(null)
+  const [latestIssue, setLatestIssue] = useState<AppLogEntry | null>(() => loadLatestIssueFromStorage(localStorage))
+  const [appLogCount, setAppLogCount] = useState(() => loadAppLogEntriesFromStorage(localStorage).length)
+  const [logSubmitState, setLogSubmitState] = useState<LogSubmitState>({ status: 'idle' })
 
   const displayLocalBooks = useMemo(
     () => mergeLocalBooksWithCloudMetadata(localBooks, books),
@@ -429,12 +496,12 @@ function App() {
     [currentChapter?.id, selectedBookId, visibleCachedAudioIds],
   )
   const currentAudio = useMemo(
-    () => resolveCurrentAudio(currentChapter?.id, visibleAudioChapters, cachedCurrentAudio),
-    [cachedCurrentAudio, currentChapter?.id, visibleAudioChapters],
+    () => resolveCurrentAudio(currentChapter, visibleAudioChapters, cachedCurrentAudio, selectedBookId ?? undefined),
+    [cachedCurrentAudio, currentChapter, selectedBookId, visibleAudioChapters],
   )
   const audioChapterStatusRows = useMemo(
-    () => buildAudioChapterStatusRows(chapters, visibleAudioChapters, visibleCachedAudioIds, currentChapter?.id),
-    [chapters, currentChapter?.id, visibleAudioChapters, visibleCachedAudioIds],
+    () => buildAudioChapterStatusRows(chapters, visibleAudioChapters, visibleCachedAudioIds, currentChapter?.id, selectedBookId ?? undefined),
+    [chapters, currentChapter?.id, selectedBookId, visibleAudioChapters, visibleCachedAudioIds],
   )
   const activeTimelineEntry = useMemo(
     () => findActiveTimelineEntry(audioManifest, audioTime),
@@ -465,6 +532,7 @@ function App() {
   const nextChapter =
     currentChapterPosition >= 0 && currentChapterPosition < chapters.length - 1 ? chapters[currentChapterPosition + 1] : null
   const lastReaderCenterTapAtRef = useRef(0)
+  const readerCardRef = useRef<HTMLElement | null>(null)
   const chapterAudioRef = useRef<HTMLAudioElement | null>(null)
   const chapterAudioTimelineRef = useRef<ChapterAudioTimelineItem[]>([])
   const activeAudioEntryKeyRef = useRef<string | null>(null)
@@ -472,6 +540,7 @@ function App() {
   const audioManifestRef = useRef<AudioManifest | null>(null)
   const pendingAudioStartTimeRef = useRef<number | null>(null)
   const pendingAudioShouldPlayRef = useRef(false)
+  const audioStreamRetryRef = useRef<AudioStreamRetryState | null>(null)
   const pendingAutoPlayChapterIdRef = useRef<string | null>(null)
   const autoConnectAttemptedRef = useRef(false)
   const autoRestoreAttemptedRef = useRef(false)
@@ -487,6 +556,7 @@ function App() {
   const speechFollowTimerRef = useRef<number | null>(null)
   const isSpeechAutoScrollingRef = useRef(false)
   const playbackEngineTouchedRef = useRef(false)
+  const summaryHighlightTimerRef = useRef<number | null>(null)
   const deviceMetadata = useMemo(() => getDeviceMetadata(appVersion), [])
   const audioSyncCancelRequestedRef = useRef(false)
   const audioDownloadQueueRef = useRef<AudioDownloadQueueItem[]>([])
@@ -494,9 +564,118 @@ function App() {
   const gatewaySessionRef = useRef<GatewaySession | null>(gatewaySession)
   const cloudBookCountRef = useRef(books.length)
 
+  function recordDiagnostic(level: AppLogLevel, message: string, context: Record<string, unknown> = {}) {
+    const entry = appendAppLogToStorage(localStorage, level, message, {
+      ...context,
+      tab,
+      selectedBookId,
+      currentChapterId: currentChapter?.id,
+      currentChapterIndex: currentChapter?.index ?? currentChapter?.chapterIndex,
+    })
+    setAppLogCount(loadAppLogEntriesFromStorage(localStorage).length)
+    if (level === 'error') setLatestIssue(entry)
+    return entry
+  }
+
+  function reportUserError(error: unknown, context: Record<string, unknown> = {}, prefix?: string) {
+    const message = prefix ? `${prefix}：${errorMessage(error)}` : errorMessage(error)
+    recordDiagnostic('error', message, {
+      ...context,
+      error: serializeErrorForLog(error),
+    })
+    setMessage(message)
+    return message
+  }
+
+  async function submitLocalLogs() {
+    if (!isGatewayConfigured(settings)) {
+      reportUserError(new Error('请先配置 Gateway 地址和 Token。'), { action: 'submitLocalLogs' }, '提交日志失败')
+      return
+    }
+    const entries = loadAppLogEntriesFromStorage(localStorage)
+    if (entries.length === 0) {
+      setLogSubmitState({ status: 'idle', message: '暂无可提交日志。' })
+      setMessage('暂无可提交日志')
+      return
+    }
+
+    setLogSubmitState({ status: 'submitting', message: '正在提交日志...' })
+    try {
+      const response = await gatewayPost(settings, '/mobile/logs', {
+        schemaVersion: 1,
+        submittedAt: new Date().toISOString(),
+        app: {
+          versionName: buildInfo.versionName,
+          versionCode: buildInfo.versionCode,
+          buildNumber: buildInfo.buildNumber,
+          gitCommit: buildInfo.gitCommit,
+          dirty: buildInfo.dirty,
+        },
+        device: {
+          id: settings.deviceId,
+          name: settings.deviceName,
+          model: deviceMetadata.model,
+          platform: deviceMetadata.platform,
+        },
+        state: {
+          tab,
+          connectionState,
+          selectedBookId,
+          selectedBookTitle: selectedBook?.title,
+          currentChapterId: currentChapter?.id,
+          currentChapterTitle: currentChapter?.title,
+          currentChapterIndex: currentChapter?.index ?? currentChapter?.chapterIndex,
+          audioCatalogBookId,
+          audioChapterCount: visibleAudioChapters.length,
+          cachedAudioCount: visibleCachedAudioIds.size,
+          speechEngine: ttsSettings.engine,
+        },
+        logs: entries.slice(-maxSubmittedLogEntries),
+      })
+      const receiptId = readString(response.receiptId) || ''
+      const submittedCount = typeof response.storedEntries === 'number' ? response.storedEntries : entries.length
+      const nextMessage = receiptId ? `日志已提交：${receiptId}` : `日志已提交：${submittedCount} 条`
+      setLogSubmitState({ status: 'submitted', message: nextMessage, receiptId })
+      setMessage(nextMessage)
+    } catch (error) {
+      const message = reportUserError(error, { action: 'submitLocalLogs' }, '提交日志失败')
+      setLogSubmitState({ status: 'error', message })
+    }
+  }
+
+  function clearLocalLogs() {
+    clearAppLogsFromStorage(localStorage)
+    setLatestIssue(null)
+    setAppLogCount(0)
+    setLogSubmitState({ status: 'idle', message: '本地日志已清空。' })
+    setMessage('本地日志已清空')
+  }
+
   useEffect(() => {
     localStorage.setItem(settingsKey, JSON.stringify(settings))
   }, [settings])
+
+  useEffect(() => {
+    const handleWindowError = (event: ErrorEvent) => {
+      reportUserError(event.error ?? event.message, {
+        action: 'window.error',
+        filename: event.filename,
+        lineno: event.lineno,
+        colno: event.colno,
+      })
+    }
+    const handleUnhandledRejection = (event: PromiseRejectionEvent) => {
+      reportUserError(event.reason ?? new Error('Unhandled promise rejection'), {
+        action: 'window.unhandledrejection',
+      })
+    }
+    window.addEventListener('error', handleWindowError)
+    window.addEventListener('unhandledrejection', handleUnhandledRejection)
+    return () => {
+      window.removeEventListener('error', handleWindowError)
+      window.removeEventListener('unhandledrejection', handleUnhandledRejection)
+    }
+  }, [])
 
   useEffect(() => {
     gatewaySessionRef.current = gatewaySession
@@ -505,6 +684,32 @@ function App() {
   useEffect(() => {
     cloudBookCountRef.current = books.length
   }, [books.length])
+
+  useEffect(() => {
+    const frame = window.requestAnimationFrame(() => setSummaryHighlightRange(null))
+    if (summaryHighlightTimerRef.current) {
+      window.clearTimeout(summaryHighlightTimerRef.current)
+      summaryHighlightTimerRef.current = null
+    }
+    return () => window.cancelAnimationFrame(frame)
+  }, [currentChapter?.id])
+
+  function jumpToSummarySource(source: SummaryKeyPointSource) {
+    if (!readerCardRef.current) return
+
+    const target = findSourceElement(readerCardRef.current, source)
+    setSummaryHighlightRange({ startOffset: source.startOffset, endOffset: source.endOffset })
+
+    if (summaryHighlightTimerRef.current) {
+      window.clearTimeout(summaryHighlightTimerRef.current)
+    }
+    summaryHighlightTimerRef.current = window.setTimeout(() => {
+      setSummaryHighlightRange(null)
+      summaryHighlightTimerRef.current = null
+    }, 2000)
+
+    target?.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' })
+  }
 
   useEffect(() => {
     if (!audioUrl || !activeTimelineEntry) {
@@ -545,6 +750,22 @@ function App() {
       void stopSpeechReading()
     }
   }, [currentAudio, ttsSettings.engine])
+
+  useEffect(() => {
+    if (currentAudio || !selectedBookId || !currentChapter || visibleAudioChapters.length === 0) return
+    const timeout = window.setTimeout(() => recordDiagnostic('warn', '当前章节未匹配到 MP3 catalog', {
+      action: 'audioCatalogMismatch',
+      bookId: selectedBookId,
+      currentChapterId: currentChapter.id,
+      currentChapterIndex: currentChapter.index ?? currentChapter.chapterIndex,
+      audioCatalogBookId,
+      audioChapterCount: visibleAudioChapters.length,
+      audioChapterSamples: visibleAudioChapters.slice(0, 3).map((chapter) => chapter.chapterId),
+      currentMatchKeys: Array.from(chapterAudioReferenceKeys(selectedBookId, currentChapter)),
+      firstAudioMatchKeys: Array.from(chapterAudioReferenceKeys(selectedBookId, visibleAudioChapters[0]?.chapterId)),
+    }), 0)
+    return () => window.clearTimeout(timeout)
+  }, [audioCatalogBookId, currentAudio, currentChapter, selectedBookId, visibleAudioChapters])
 
   useEffect(() => {
     const pendingChapterId = pendingAutoPlayChapterIdRef.current
@@ -691,7 +912,7 @@ function App() {
 
   useEffect(() => {
     return () => {
-      if (audioUrl) URL.revokeObjectURL(audioUrl)
+      if (audioUrl?.startsWith('blob:')) URL.revokeObjectURL(audioUrl)
     }
   }, [audioUrl])
 
@@ -745,12 +966,12 @@ function App() {
         setConnectionState('error')
         setLibrarySyncState({ status: 'blocked', message: blockedMessage })
         setMessage(blockedMessage)
+        recordDiagnostic('error', blockedMessage, { action: 'refreshBooks', blocked: true })
         return
       }
-      const message = errorMessage(error)
+      const message = reportUserError(error, { action: 'refreshBooks' })
       setConnectionState('error')
       setLibrarySyncState({ status: 'error', message })
-      setMessage(message)
     } finally {
       setLoadingBooks(false)
     }
@@ -794,7 +1015,7 @@ function App() {
       await refreshBooks({ session, roleNotice, previousSession, previousBookCount })
     } catch (error) {
       setConnectionState('error')
-      setMessage(errorMessage(error))
+      reportUserError(error, { action: 'checkSession' })
     }
   }
 
@@ -805,10 +1026,11 @@ function App() {
       if (!manifest) throw new Error('更新清单格式无效。')
       setAppUpdateState(resolveAppUpdateManifest(manifest, buildInfo.versionCode, buildInfo.versionName))
     } catch (error) {
+      const message = reportUserError(error, { action: 'checkAppUpdate' }, '检查更新失败')
       setAppUpdateState((current) => ({
         status: 'error',
         manifest: current.manifest,
-        message: errorMessage(error) || '检查更新失败。',
+        message,
       }))
     }
   }
@@ -820,7 +1042,7 @@ function App() {
       if (Capacitor.isNativePlatform()) {
         await NativeAudio.downloadAndInstallApk({
           url: updateUrl,
-          fileName: manifest.latestFileName || 'ai_novel_reader.apk',
+          fileName: manifest.latestFileName || 'novel_gateway.apk',
         })
         setAppUpdateState({
           status: 'available',
@@ -836,10 +1058,11 @@ function App() {
         message: '已打开下载链接。',
       })
     } catch (error) {
+      const message = reportUserError(error, { action: 'installAppUpdate', versionName: manifest.versionName }, '下载安装包失败')
       setAppUpdateState({
         status: 'error',
         manifest,
-        message: errorMessage(error) || '下载安装包失败。',
+        message,
       })
     }
   }
@@ -910,7 +1133,7 @@ function App() {
       restorePendingScroll()
     } catch (error) {
       if (isDeviceDisabledError(error)) {
-        setMessage(errorMessage(error))
+        reportUserError(error, { action: 'openBook', bookId })
         return
       }
       const cachedPackage = await loadCachedBookPackage(bookId)
@@ -921,7 +1144,10 @@ function App() {
           : null
       setBookPackage(cachedPackage)
       setCurrentChapterId(restoredChapterId ?? cachedChapters[0]?.id ?? null)
-      setMessage(cachedPackage ? `已使用本地缓存：${errorMessage(error)}` : errorMessage(error))
+      const message = cachedPackage
+        ? reportUserError(error, { action: 'openBook', bookId, fallback: 'cachedPackage' }, '已使用本地缓存')
+        : reportUserError(error, { action: 'openBook', bookId })
+      setMessage(message)
       await refreshCachedAudioIds(bookId)
       if (cachedPackage) {
         pendingRestoreScrollRef.current = restoredChapterId ? restoreProgress?.scrollY ?? 0 : 0
@@ -998,10 +1224,27 @@ function App() {
       setFullPackageStatus('imported')
       setFullPackageProgress({ bookId, phase: 'import', status: 'imported', done: 4, total: 4 })
       await refreshLocalLibrary()
+      if (bookId === selectedBookId) {
+        const refreshedPackage = await gatewayFetch(settings, `/mobile/books/${encodeURIComponent(bookId)}/package`)
+          .then((response) => normalizeBookPackage(response.package))
+          .catch(() => loadCachedBookPackage(bookId))
+        if (refreshedPackage) {
+          await cacheBookPackage(bookId, refreshedPackage)
+          const refreshedChapters = packageChapters(refreshedPackage)
+          setBookPackage(refreshedPackage)
+          setCurrentChapterId((currentId) =>
+            currentId && refreshedChapters.some((chapter) => chapter.id === currentId)
+              ? currentId
+              : refreshedChapters[0]?.id ?? null,
+          )
+        }
+        await refreshAudio(bookId, false)
+        await refreshCachedAudioIds(bookId)
+      }
       setMessage('完整数据包已导入')
     } catch (error) {
       setFullPackageStatus('error')
-      setMessage(`完整包同步失败：${errorMessage(error)}`)
+      reportUserError(error, { action: 'syncFullPackage', bookId }, '完整包同步失败')
     }
   }
 
@@ -1044,7 +1287,7 @@ function App() {
       if (isDeviceAccessBlockedError(error)) {
         setConnectionState('error')
       }
-      setMessage(errorMessage(error))
+      reportUserError(error, { action: 'addCloudBookToShelf', bookId })
     } finally {
       setAddingBookId(null)
     }
@@ -1065,13 +1308,21 @@ function App() {
       const nextAudioChapters = Array.isArray(response.chapters) ? response.chapters.filter(isAudioChapter) : []
       setAudioChapters(nextAudioChapters)
       setAudioCatalogBookId(bookId)
+      recordDiagnostic('info', 'MP3 catalog loaded', {
+        action: 'refreshAudio',
+        bookId,
+        count: nextAudioChapters.length,
+        firstChapterId: nextAudioChapters[0]?.chapterId,
+        currentChapterId,
+      })
       await refreshCachedAudioIds(bookId)
       if (showMessage) setMessage(`音频 ${nextAudioChapters.length} 章`)
     } catch (error) {
       if (isDeviceDisabledError(error)) {
         setConnectionState('error')
       }
-      if (showMessage) setMessage(errorMessage(error))
+      const message = reportUserError(error, { action: 'refreshAudio', bookId })
+      if (!showMessage) setMessage(message)
     } finally {
       setLoadingAudio(false)
     }
@@ -1109,20 +1360,16 @@ function App() {
       const manifest =
         cachedAudio?.manifest ??
         (currentAudio?.manifestFileName
-          ? await gatewayFetch(settings, `/mobile/books/${encodeURIComponent(selectedBookId)}/audio/${encodeURIComponent(currentChapter.id)}/manifest`)
+          ? await gatewayFetch(settings, `/mobile/books/${encodeURIComponent(selectedBookId)}/audio/${encodeURIComponent(currentAudio.chapterId)}/manifest`)
               .then(normalizeAudioManifest)
               .catch(() => null)
           : null)
       let playbackUrl = cachedAudio?.filePath ? Capacitor.convertFileSrc(cachedAudio.filePath) : ''
-      let blob: Blob | undefined = cachedAudio?.blob
+      const blob: Blob | undefined = cachedAudio?.blob
+      let usesRemoteStream = false
       if (!cachedAudio) {
-        const cached = await cacheAudioChapter(selectedBookId, currentAudio)
-        if (cached.kind === 'file') {
-          playbackUrl = Capacitor.convertFileSrc(cached.filePath)
-        } else {
-          blob = cached.blob
-        }
-        await refreshCachedAudioIds(selectedBookId)
+        playbackUrl = await createAudioStreamUrl(settings, selectedBookId, currentAudio.chapterId)
+        usesRemoteStream = true
       }
       if (!playbackUrl && blob) {
         playbackUrl = URL.createObjectURL(blob)
@@ -1134,6 +1381,14 @@ function App() {
             ? 0
             : getAudioTimeForSourcePositionInManifest(manifest, options.sourcePosition) ?? 0
       clearAudioUrl()
+      audioStreamRetryRef.current = usesRemoteStream
+        ? {
+            bookId: selectedBookId,
+            currentChapterId: currentChapter.id,
+            audioChapterId: currentAudio.chapterId,
+            attempted: false,
+          }
+        : null
       buildChapterAudioTimeline(manifest?.timeline ?? [])
       audioManifestRef.current = manifest
       pendingAudioStartTimeRef.current = startTime
@@ -1145,7 +1400,12 @@ function App() {
     } catch (error) {
       pendingAudioStartTimeRef.current = null
       pendingAudioShouldPlayRef.current = false
-      setMessage(errorMessage(error))
+      reportUserError(error, {
+        action: 'playCurrentAudio',
+        bookId: selectedBookId,
+        currentChapterId: currentChapter.id,
+        audioChapterId: currentAudio.chapterId,
+      })
     } finally {
       setAudioPlaybackLoading(false)
     }
@@ -1188,7 +1448,7 @@ function App() {
       }
       const startIndex = Math.max(
         0,
-        currentChapterId ? catalog.findIndex((chapter) => chapter.chapterId === currentChapterId) : 0,
+        currentChapter ? catalog.findIndex((chapter) => chapterAudioReferencesMatch(selectedBookId ?? bookId, currentChapter, chapter.chapterId)) : 0,
       )
       const safeStartIndex = startIndex >= 0 ? startIndex : 0
       const targetChapters =
@@ -1207,7 +1467,7 @@ function App() {
       if (isDeviceDisabledError(error)) {
         setConnectionState('error')
       }
-      setMessage(errorMessage(error))
+      reportUserError(error, { action: 'syncCurrentBookAudioRange', bookId, limit })
     }
   }
 
@@ -1246,7 +1506,7 @@ function App() {
       if (isDeviceDisabledError(error)) {
         setConnectionState('error')
       }
-      setMessage(errorMessage(error))
+      reportUserError(error, { action: 'syncBookAudioChapters', bookId, targetCount: chaptersToSync.length, label })
     } finally {
       setAudioSyncProgress(null)
       setAudioSyncBookId(null)
@@ -1303,7 +1563,11 @@ function App() {
           if (isDeviceDisabledError(error)) {
             setConnectionState('error')
           }
-          setMessage(`缓存失败：${errorMessage(error)}`)
+          reportUserError(error, {
+            action: 'processAudioDownloadQueue',
+            bookId: item.bookId,
+            audioChapterId: item.audioChapter.chapterId,
+          }, '缓存失败')
         } finally {
           setAudioDownloadingChapterKey(null)
         }
@@ -1364,7 +1628,7 @@ function App() {
       refreshCacheSummaries()
       setMessage('音频缓存已清除')
     } catch (error) {
-      setMessage(`清除音频缓存失败：${errorMessage(error)}`)
+      reportUserError(error, { action: 'clearBookAudioCache', bookId }, '清除音频缓存失败')
     } finally {
       setClearingCacheKey(null)
     }
@@ -1389,7 +1653,7 @@ function App() {
       refreshCacheSummaries()
       setMessage('完整数据包缓存已清除')
     } catch (error) {
-      setMessage(`清除完整包缓存失败：${errorMessage(error)}`)
+      reportUserError(error, { action: 'clearBookPackageCache', bookId }, '清除完整包缓存失败')
     } finally {
       setClearingCacheKey(null)
     }
@@ -1432,7 +1696,7 @@ function App() {
       refreshCacheSummaries()
       setMessage('本地书已删除')
     } catch (error) {
-      setMessage(`删除本地书失败：${errorMessage(error)}`)
+      reportUserError(error, { action: 'deleteLocalBook', bookId }, '删除本地书失败')
     } finally {
       setClearingCacheKey(null)
     }
@@ -1477,7 +1741,54 @@ function App() {
     setAudioManifest(null)
     setAudioTime(0)
     setChapterAudioPlaying(false)
+    audioStreamRetryRef.current = null
     if (speechPlaybackRef.current.status !== 'playing') setActiveSpeechSegmentId(null)
+  }
+
+  async function handleChapterAudioError(audio: HTMLAudioElement) {
+    const retry = audioStreamRetryRef.current
+    if (!retry || retry.attempted || retry.bookId !== selectedBookId || retry.currentChapterId !== currentChapter?.id) {
+      setChapterAudioPlaying(false)
+      reportUserError(new Error('MP3 播放失败'), {
+        action: 'chapterAudioError',
+        mediaErrorCode: audio.error?.code,
+        mediaNetworkState: audio.networkState,
+        mediaReadyState: audio.readyState,
+        audioSrc: redactUrlForLog(audio.currentSrc || audio.src),
+        retryAvailable: Boolean(retry),
+      })
+      return
+    }
+
+    retry.attempted = true
+    const resumeTime = Number.isFinite(audio.currentTime) ? audio.currentTime : audioTime
+    const manifest = audioManifestRef.current ?? audioManifest
+    setAudioPlaybackLoading(true)
+    try {
+      const playbackUrl = await createAudioStreamUrl(settings, retry.bookId, retry.audioChapterId)
+      clearAudioUrl()
+      audioStreamRetryRef.current = retry
+      buildChapterAudioTimeline(manifest?.timeline ?? [])
+      audioManifestRef.current = manifest
+      pendingAudioStartTimeRef.current = resumeTime
+      pendingAudioShouldPlayRef.current = true
+      setAudioManifest(manifest)
+      setAudioTime(resumeTime)
+      setAudioUrl(playbackUrl)
+      setMessage('在线播放链接已刷新')
+    } catch (error) {
+      audioStreamRetryRef.current = null
+      setChapterAudioPlaying(false)
+      reportUserError(error, {
+        action: 'refreshAudioStreamAfterError',
+        bookId: retry.bookId,
+        currentChapterId: retry.currentChapterId,
+        audioChapterId: retry.audioChapterId,
+        mediaErrorCode: audio.error?.code,
+      })
+    } finally {
+      setAudioPlaybackLoading(false)
+    }
   }
 
   async function toggleChapterAudioPlayback() {
@@ -1488,7 +1799,7 @@ function App() {
     }
 
     if (audio.paused) {
-      await audio.play().catch((error) => setMessage(errorMessage(error)))
+      await audio.play().catch((error) => reportUserError(error, { action: 'toggleChapterAudioPlayback' }))
     } else {
       audio.pause()
     }
@@ -1556,7 +1867,7 @@ function App() {
     setAudioTime(nextTime)
     window.setTimeout(() => scrollToAudioHighlight(true), 0)
     if (shouldPlay) {
-      void audio.play().catch((error) => setMessage(errorMessage(error)))
+      void audio.play().catch((error) => reportUserError(error, { action: 'seekChapterAudio', targetTime: nextTime }))
     }
   }
 
@@ -1757,6 +2068,11 @@ function App() {
     }
   }
 
+  function openSettingsTab(nextSettingsTab: SettingsTab) {
+    setSettingsTab(nextSettingsTab)
+    switchTab('settings')
+  }
+
   function prepareReaderScrollRestore() {
     if (!selectedBookId) return
     const progress = loadReadingProgress(selectedBookId)
@@ -1831,7 +2147,8 @@ function App() {
       return true
     } catch (error) {
       setTtsVoices([])
-      setTtsStatusMessage(errorMessage(error) || '系统 TTS 检测失败。')
+      const message = reportUserError(error, { action: 'refreshTtsAvailability', locale: ttsSettings.locale }, '系统 TTS 检测失败')
+      setTtsStatusMessage(message)
       return false
     }
   }
@@ -1845,7 +2162,8 @@ function App() {
       await NovelReaderTts.openTtsSettings()
       setTtsStatusMessage('请在系统页面选择文字转语音引擎，然后返回本应用重新检测。')
     } catch (error) {
-      setTtsStatusMessage(errorMessage(error) || '无法打开系统语音设置。')
+      const message = reportUserError(error, { action: 'openSystemTtsSettings' }, '无法打开系统语音设置')
+      setTtsStatusMessage(message)
     }
   }
 
@@ -1858,7 +2176,8 @@ function App() {
       await NovelReaderTts.checkTtsData()
       setTtsStatusMessage('请按系统提示安装或启用语音数据，然后返回本应用重新检测。')
     } catch (error) {
-      setTtsStatusMessage(errorMessage(error) || '无法打开系统语音检查。')
+      const message = reportUserError(error, { action: 'openSystemTtsDataCheck' }, '无法打开系统语音检查')
+      setTtsStatusMessage(message)
     }
   }
 
@@ -2118,7 +2437,7 @@ function App() {
     } catch (error) {
       currentUtteranceIdRef.current = null
       speechUtteranceIndexRef.current.clear()
-      const message = errorMessage(error) || '语音朗读失败。'
+      const message = reportUserError(error, { action: 'playSpeechSegment', segmentIndex }, '语音朗读失败')
       setSpeechPlayback({ status: 'error', message })
       setTtsStatusMessage(message)
     }
@@ -2137,7 +2456,7 @@ function App() {
       }
       await playSpeechSegment(startIndexOverride ?? findCurrentVisibleSpeechSegmentIndex() ?? 0)
     } catch (error) {
-      const message = errorMessage(error) || '语音阅读启动失败。'
+      const message = reportUserError(error, { action: 'startSpeechReading' }, '语音阅读启动失败')
       setSpeechPlayback({ status: 'error', message })
       setTtsStatusMessage(message)
     }
@@ -2199,7 +2518,7 @@ function App() {
     if (ttsSettings.engine === 'cloud-mp3') {
       if (chapterAudioPlaying) return `正在播放 MP3 · ${formatDuration(audioTime * 1000)}`
       if (audioUrl) return `MP3 已加载 · ${formatDuration(audioTime * 1000)}`
-      return currentAudio ? '本章可播放缓存 MP3' : '当前章节暂无缓存 MP3'
+      return currentAudio ? '本章可播放章节 MP3' : '当前章节暂无 MP3'
     }
     if (speechPlayback.status === 'playing') return `正在朗读 ${speechPlayback.segmentIndex + 1}/${speechChapter?.segments.length ?? 0}`
     if (speechPlayback.status === 'paused') return `已暂停在 ${speechPlayback.segmentIndex + 1}/${speechChapter?.segments.length ?? 0}`
@@ -2309,7 +2628,7 @@ function App() {
             updateTtsSettings({ ...ttsSettings, engine: 'cloud-mp3' })
           }}
         >
-          缓存 MP3
+          章节 MP3
         </button>
       </div>
     )
@@ -2351,6 +2670,19 @@ function App() {
       ) : null}
 
       {visibleStatusMessage && tab !== 'reader' ? <div className={`status-line status-${connectionState}`}>{visibleStatusMessage}</div> : null}
+      {latestIssue ? (
+        <section className={`issue-banner issue-${latestIssue.level}`} role="alert">
+          <div>
+            <strong>{latestIssue.level === 'error' ? '最近错误' : '诊断提醒'}</strong>
+            <span>{formatDateTime(latestIssue.timestamp)}</span>
+            <p>{latestIssue.message}</p>
+          </div>
+          <div className="issue-actions">
+            <button type="button" onClick={() => openSettingsTab('diagnostics')}>提交日志</button>
+            <button type="button" onClick={() => setLatestIssue(null)}>忽略</button>
+          </div>
+        </section>
+      ) : null}
 
       {tab === 'library' ? (
         <section className="library-page">
@@ -2521,20 +2853,26 @@ function App() {
               {message ? <div className={`status-line reader-status status-${connectionState}`}>{message}</div> : null}
               <article
                 className={`reader-card ${readerSettings.background}`}
+                ref={readerCardRef}
                 onClick={handleReaderTap}
                 style={{ '--reader-font-size': `${readerSettings.fontSize}px` } as CSSProperties}
               >
                 <h2>{currentChapter.title}</h2>
-                <ChapterSummary bookPackage={bookPackage} chapter={currentChapter} />
+                <ChapterSummary bookPackage={bookPackage} chapter={currentChapter} onJumpToSource={jumpToSummarySource} />
                 <div className="chapter-text">
                   {speechChapter ? (
                     <SpeechTextContent
                       speechChapter={speechChapter}
                       activeSegmentId={activeSpeechSegmentId}
                       activeEntry={activeTimelineEntry}
+                      summaryHighlightRange={summaryHighlightRange}
                     />
                   ) : (
-                    <TextContent text={chapterContent(currentChapter)} activeEntry={activeTimelineEntry} />
+                    <TextContent
+                      text={chapterContent(currentChapter)}
+                      activeEntry={activeTimelineEntry}
+                      summaryHighlightRange={summaryHighlightRange}
+                    />
                   )}
                 </div>
               </article>
@@ -2671,31 +3009,154 @@ function App() {
         </section>
       ) : (
         <section className="settings-page" hidden={tab !== 'settings'}>
-          <section className="settings-panel">
-            <div className="app-version-card">
-              <div>
-                <span>AI小说助手</span>
-                <strong>{buildInfo.versionName}</strong>
+          <nav className="settings-tabs segmented-control" aria-label="设置分类">
+            {settingsTabs.map((settingsTabItem) => (
+              <button
+                className={settingsTab === settingsTabItem.id ? 'active' : ''}
+                key={settingsTabItem.id}
+                type="button"
+                onClick={() => setSettingsTab(settingsTabItem.id)}
+              >
+                {settingsTabItem.label}
+              </button>
+            ))}
+          </nav>
+          {settingsTab === 'reading' ? (
+            <section className="settings-card reader-preferences-panel">
+              <div className="section-title">
+                <h2>阅读</h2>
+                <span>{readerSettings.fontSize}px</span>
               </div>
-              <dl>
-                <div>
-                  <dt>构建号</dt>
-                  <dd>{buildInfo.buildNumber}</dd>
+              <div className="settings-card-body">
+                <dl className="settings-summary-grid">
+                  <div>
+                    <dt>当前书籍</dt>
+                    <dd>{selectedBook?.title ?? '未选择'}</dd>
+                  </div>
+                  <div>
+                    <dt>当前章节</dt>
+                    <dd>{currentChapter ? `${Math.max(1, currentChapterPosition + 1)} / ${chapters.length}` : '未打开'}</dd>
+                  </div>
+                </dl>
+                <div className="reader-settings compact-reader-settings">
+                  <strong>字号</strong>
+                  <div className="reader-size-control">
+                    <button type="button" onClick={() => updateReaderFontSize(readerSettings.fontSize - 1)}>A-</button>
+                    <input
+                      aria-label="字体大小"
+                      max={28}
+                      min={15}
+                      type="range"
+                      value={readerSettings.fontSize}
+                      onChange={(event) => updateReaderFontSize(Number(event.target.value))}
+                    />
+                    <button type="button" onClick={() => updateReaderFontSize(readerSettings.fontSize + 1)}>A+</button>
+                    <span>{readerSettings.fontSize}px</span>
+                  </div>
+                  <strong>背景</strong>
+                  <div className="reader-background-control">
+                    {(['paper', 'warm', 'green', 'dark'] as ReaderBackground[]).map((background) => (
+                      <button
+                        aria-label={backgroundLabel(background)}
+                        className={`reader-swatch ${background} ${readerSettings.background === background ? 'active' : ''}`}
+                        key={background}
+                        type="button"
+                        onClick={() => updateReaderBackground(background)}
+                      />
+                    ))}
+                  </div>
                 </div>
-                <div>
-                  <dt>Version Code</dt>
-                  <dd>{buildInfo.versionCode}</dd>
+                <button className="primary-button full-width-button" type="button" onClick={() => switchTab('reader')} disabled={!selectedBookId}>
+                  回到阅读
+                </button>
+              </div>
+            </section>
+          ) : null}
+          {settingsTab === 'audio' ? (
+            <section className="settings-card audio-settings-panel speech-control-panel">
+              <div className="section-title">
+                <h2>音频</h2>
+                <span>{ttsSettings.engine === 'cloud-mp3' ? '章节 MP3' : '本地 TTS'}</span>
+              </div>
+              <div className="settings-card-body">
+                <dl className="settings-summary-grid">
+                  <div>
+                    <dt>当前书籍</dt>
+                    <dd>{selectedBook?.title ?? '未选择'}</dd>
+                  </div>
+                  <div>
+                    <dt>本机音频</dt>
+                    <dd>{displayCachedAudioChapterCount}/{displayCloudAudioChapterCount} 章已缓存</dd>
+                  </div>
+                </dl>
+                {renderPlaybackEngineField()}
+                {renderSpeechRateField()}
+                {ttsSettings.engine === 'local-tts' ? (
+                  <>
+                    <label className="tts-toggle-row">
+                      <input
+                        type="checkbox"
+                        checked={ttsSettings.autoFollow}
+                        onChange={(event) => updateTtsSettings({ ...ttsSettings, autoFollow: event.target.checked })}
+                      />
+                      <span>朗读时跟随正文</span>
+                    </label>
+                    <label className="tts-select-field">
+                      <span>音调</span>
+                      <input
+                        max={MAX_TTS_PITCH}
+                        min={MIN_TTS_PITCH}
+                        step={0.05}
+                        type="number"
+                        value={ttsSettings.pitch}
+                        onChange={(event) => updateTtsSettings({ ...ttsSettings, pitch: Number(event.target.value) })}
+                      />
+                    </label>
+                    <label className="tts-select-field">
+                      <span>语言</span>
+                      <input
+                        value={ttsSettings.locale}
+                        onChange={(event) => updateTtsSettings({ ...ttsSettings, locale: event.target.value })}
+                      />
+                    </label>
+                    {ttsVoices.length > 0 ? (
+                      <label className="tts-select-field">
+                        <span>音色</span>
+                        <select
+                          value={ttsSettings.voiceId}
+                          onChange={(event) => updateTtsSettings({ ...ttsSettings, voiceId: event.target.value })}
+                        >
+                          <option value="">系统默认</option>
+                          {ttsVoices.map((voice) => (
+                            <option key={voice.id} value={voice.id}>
+                              {voice.name || voice.id}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                    ) : null}
+                    <div className="tts-secondary-actions">
+                      <button type="button" onClick={() => void refreshTtsAvailability()}>检测语音</button>
+                      <button type="button" onClick={() => void openSystemTtsSettings()}>系统语音设置</button>
+                      <button type="button" onClick={() => void openSystemTtsDataCheck()}>安装语音包</button>
+                    </div>
+                  </>
+                ) : null}
+                {ttsSettings.engine === 'local-tts' && ttsStatusMessage ? <p className="speech-status">{ttsStatusMessage}</p> : null}
+                <div className="settings-actions">
+                  <button className="primary-button" type="button" onClick={openMp3Manager} disabled={!selectedBookId || loadingAudio}>
+                    MP3 管理
+                  </button>
+                  <button className="secondary-button" type="button" onClick={refreshCacheSummaries}>
+                    刷新缓存
+                  </button>
                 </div>
-                <div>
-                  <dt>提交</dt>
-                  <dd>{`${buildInfo.gitCommit}${buildInfo.dirty ? ' · dirty' : ''}`}</dd>
-                </div>
-                <div>
-                  <dt>构建时间</dt>
-                  <dd>{formatBuildTime(buildInfo.buildTime)}</dd>
-                </div>
-              </dl>
-            </div>
+              </div>
+            </section>
+          ) : null}
+          {settingsTab === 'sync' ? (
+            <>
+          <section className="settings-panel">
             <label>
               <span>Gateway</span>
               <input
@@ -2823,6 +3284,9 @@ function App() {
             )}
           </section>
 
+            </>
+          ) : null}
+          {settingsTab === 'audio' ? (
           <section className="cache-manager">
             <div className="section-title">
               <h2>缓存管理</h2>
@@ -2885,7 +3349,8 @@ function App() {
               <p className="cache-empty">还没有本地缓存。打开书籍或同步音频后会显示在这里。</p>
             )}
           </section>
-
+          ) : null}
+          {settingsTab === 'sync' ? (
           <section className="sync-summary">
             <div className="section-title">
               <h2>同步状态</h2>
@@ -2907,6 +3372,33 @@ function App() {
               <div>
                 <dt>本机音频</dt>
                 <dd>{displayCachedAudioChapterCount}/{displayCloudAudioChapterCount} 章已缓存</dd>
+              </div>
+            </dl>
+          </section>
+          ) : null}
+          {settingsTab === 'diagnostics' ? (
+            <>
+          <section className="app-version-card">
+            <div>
+              <span>AI小说助手</span>
+              <strong>{buildInfo.versionName}</strong>
+            </div>
+            <dl>
+              <div>
+                <dt>构建号</dt>
+                <dd>{buildInfo.buildNumber}</dd>
+              </div>
+              <div>
+                <dt>Version Code</dt>
+                <dd>{buildInfo.versionCode}</dd>
+              </div>
+              <div>
+                <dt>提交</dt>
+                <dd>{`${buildInfo.gitCommit}${buildInfo.dirty ? ' · dirty' : ''}`}</dd>
+              </div>
+              <div>
+                <dt>构建时间</dt>
+                <dd>{formatBuildTime(buildInfo.buildTime)}</dd>
               </div>
             </dl>
           </section>
@@ -2954,6 +3446,40 @@ function App() {
               </button>
             </div>
           </section>
+
+          <section className="diagnostics-panel">
+            <div className="section-title">
+              <h2>问题诊断</h2>
+              <span>{appLogCount} 条</span>
+            </div>
+            <dl>
+              <div>
+                <dt>最近错误</dt>
+                <dd>{latestIssue ? formatDateTime(latestIssue.timestamp) : '无'}</dd>
+              </div>
+              <div>
+                <dt>提交状态</dt>
+                <dd>{logSubmitState.status === 'idle' ? '未提交' : logSubmitState.status === 'submitting' ? '提交中' : logSubmitState.status === 'submitted' ? '已提交' : '失败'}</dd>
+              </div>
+            </dl>
+            {latestIssue ? <p className="diagnostics-message">{latestIssue.message}</p> : null}
+            {logSubmitState.message ? <p className={`diagnostics-message diagnostics-${logSubmitState.status}`}>{logSubmitState.message}</p> : null}
+            <div className="settings-actions">
+              <button
+                className="primary-button"
+                type="button"
+                onClick={() => void submitLocalLogs()}
+                disabled={logSubmitState.status === 'submitting' || appLogCount === 0}
+              >
+                {logSubmitState.status === 'submitting' ? '提交中' : '提交本地日志'}
+              </button>
+              <button className="secondary-button" type="button" onClick={clearLocalLogs} disabled={appLogCount === 0}>
+                清空日志
+              </button>
+            </div>
+          </section>
+            </>
+          ) : null}
         </section>
       )}
 
@@ -3200,6 +3726,7 @@ function App() {
               pendingAudioShouldPlayRef.current = false
             }
           }}
+          onError={(event) => void handleChapterAudioError(event.currentTarget)}
           onPlay={(event) => {
             event.currentTarget.playbackRate = ttsSettings.rate
             setChapterAudioPlaying(true)
@@ -3590,11 +4117,73 @@ function isPresent<T>(value: T | null | undefined): value is T {
   return value != null
 }
 
-function TextContent({ text, activeEntry }: { text: string; activeEntry?: AudioTimelineEntry | null }) {
+function splitSourceParagraphs(text: string): SourceParagraph[] {
+  const paragraphs: SourceParagraph[] = []
+  const lines = text.split('\n')
+  let offset = 0
+
+  lines.forEach((line, index) => {
+    const startOffset = offset
+    const normalized = line.replace(/\r$/, '')
+    const trimmed = normalized.trim()
+    const trimStart = normalized.indexOf(trimmed)
+    if (trimmed) {
+      const paragraphStart = startOffset + Math.max(0, trimStart)
+      paragraphs.push({
+        key: `${index}-${paragraphStart}`,
+        text: trimmed,
+        startOffset: paragraphStart,
+        endOffset: paragraphStart + trimmed.length,
+      })
+    }
+    offset += line.length + 1
+  })
+
+  return paragraphs
+}
+
+function rangesOverlap(left: SourceRange, right: SourceRange | null | undefined) {
+  return Boolean(right && left.startOffset < right.endOffset && left.endOffset > right.startOffset)
+}
+
+function findSourceElement(container: HTMLElement, source: SourceRange) {
+  const elements = Array.from(container.querySelectorAll<HTMLElement>('[data-source-start][data-source-end]'))
+  return (
+    elements.find((element) => {
+      const start = Number(element.dataset.sourceStart)
+      const end = Number(element.dataset.sourceEnd)
+      return Number.isFinite(start) && Number.isFinite(end) && start <= source.startOffset && end >= source.endOffset
+    }) ??
+    elements.find((element) => {
+      const start = Number(element.dataset.sourceStart)
+      const end = Number(element.dataset.sourceEnd)
+      return Number.isFinite(start) && Number.isFinite(end) && start <= source.startOffset && end > source.startOffset
+    }) ??
+    null
+  )
+}
+
+function TextContent({
+  text,
+  activeEntry,
+  summaryHighlightRange,
+}: {
+  text: string
+  activeEntry?: AudioTimelineEntry | null
+  summaryHighlightRange?: SourceRange | null
+}) {
   const highlighted = splitHighlightedText(text, activeEntry)
   if (highlighted) {
     return (
-      <p className="highlighted-text">
+      <p
+        className={
+          rangesOverlap({ startOffset: 0, endOffset: text.length }, summaryHighlightRange)
+            ? 'highlighted-text chapter-source-highlight'
+            : 'highlighted-text'
+        }
+        data-source-start={0}
+        data-source-end={text.length}
+      >
         <span>{highlighted.before}</span>
         <mark data-audio-highlight-anchor="true">{highlighted.active}</mark>
         <span>{highlighted.after}</span>
@@ -3602,17 +4191,21 @@ function TextContent({ text, activeEntry }: { text: string; activeEntry?: AudioT
     )
   }
 
-  const paragraphs = text
-    .split(/\n{2,}|\r?\n/)
-    .map((paragraph) => paragraph.trim())
-    .filter(Boolean)
+  const paragraphs = splitSourceParagraphs(text)
   if (paragraphs.length === 0) {
     return <p className="muted-text">这一章没有正文。</p>
   }
   return (
     <>
-      {paragraphs.map((paragraph, index) => (
-        <p key={`${index}-${paragraph.slice(0, 16)}`}>{paragraph}</p>
+      {paragraphs.map((paragraph) => (
+        <p
+          className={rangesOverlap(paragraph, summaryHighlightRange) ? 'chapter-source-highlight' : undefined}
+          data-source-start={paragraph.startOffset}
+          data-source-end={paragraph.endOffset}
+          key={paragraph.key}
+        >
+          {paragraph.text}
+        </p>
       ))}
     </>
   )
@@ -3622,10 +4215,12 @@ function SpeechTextContent({
   speechChapter,
   activeSegmentId,
   activeEntry,
+  summaryHighlightRange,
 }: {
   speechChapter: ReturnType<typeof createSpeechChapter>
   activeSegmentId: string | null
   activeEntry?: AudioTimelineEntry | null
+  summaryHighlightRange?: SourceRange | null
 }) {
   if (speechChapter.paragraphs.length === 0) {
     return <p className="muted-text">这一章没有正文。</p>
@@ -3637,7 +4232,15 @@ function SpeechTextContent({
         <p key={`speech-paragraph-${paragraph.paragraphIndex}`}>
           {paragraph.segments.map((segment, index) => (
             <span
-              className={segment.id === activeSegmentId ? 'speech-segment active' : 'speech-segment'}
+              className={[
+                'speech-segment',
+                segment.id === activeSegmentId ? 'active' : '',
+                rangesOverlap({ startOffset: segment.startChar, endOffset: segment.endChar }, summaryHighlightRange)
+                  ? 'chapter-source-highlight'
+                  : '',
+              ]
+                .filter(Boolean)
+                .join(' ')}
               data-speech-segment-id={segment.id}
               data-source-start={segment.startChar}
               data-source-end={segment.endChar}
@@ -3678,11 +4281,19 @@ function renderSpeechSegmentText(segment: SpeechSegment, activeEntry?: AudioTime
   )
 }
 
-function ChapterSummary({ bookPackage, chapter }: { bookPackage: BookPackage; chapter: Chapter }) {
+function ChapterSummary({
+  bookPackage,
+  chapter,
+  onJumpToSource,
+}: {
+  bookPackage: BookPackage
+  chapter: Chapter
+  onJumpToSource: (source: SummaryKeyPointSource) => void
+}) {
   const summary = findChapterSummary(bookPackage, chapter)
   const short = summary ? summaryText(summary, ['short', 'brief', 'summary', 'title']) : ''
   const detail = summary ? summaryText(summary, ['detail', 'details', 'content', 'description']) : ''
-  const keyPoints = summary ? summaryList(summary, ['keyPoints', 'keypoints', 'points', 'bullets']) : []
+  const keyPoints = summary ? summaryKeyPointItems(summary) : []
   const skippable = summary ? summaryText(summary, ['skippable', 'skipReason', 'readingTip']) : ''
 
   return (
@@ -3695,7 +4306,22 @@ function ChapterSummary({ bookPackage, chapter }: { bookPackage: BookPackage; ch
           {keyPoints.length > 0 ? (
             <ul>
               {keyPoints.map((point, index) => (
-                <li key={`${chapter.id}-summary-${index}`}>{point}</li>
+                <li key={`${chapter.id}-summary-${index}`}>
+                  {point.source ? (
+                    <button
+                      type="button"
+                      className="summary-source-link"
+                      onClick={(event) => {
+                        event.stopPropagation()
+                        onJumpToSource(point.source!)
+                      }}
+                    >
+                      {point.text}
+                    </button>
+                  ) : (
+                    point.text
+                  )}
+                </li>
               ))}
             </ul>
           ) : null}
@@ -3777,6 +4403,36 @@ function summaryList(summary: Record<string, unknown>, keys: string[]) {
     }
   }
   return []
+}
+
+function summaryKeyPointItems(summary: Record<string, unknown>): SummaryKeyPointItem[] {
+  const keyPoints = summaryList(summary, ['keyPoints', 'keypoints', 'points', 'bullets'])
+  const sourceByIndex = new Map(summaryKeyPointSources(summary, keyPoints).map((source) => [source.index, source]))
+  return keyPoints.map((text, index) => ({ text, source: sourceByIndex.get(index) }))
+}
+
+function summaryKeyPointSources(summary: Record<string, unknown>, keyPoints: string[]): SummaryKeyPointSource[] {
+  const value = summary.keyPointSources
+  if (!Array.isArray(value)) return []
+
+  return value
+    .map((entry, fallbackIndex): SummaryKeyPointSource | null => {
+      if (!isRecord(entry)) return null
+      const index = typeof entry.index === 'number' && Number.isInteger(entry.index) ? entry.index : fallbackIndex
+      const startOffset = readNumber(entry.startOffset)
+      const endOffset = readNumber(entry.endOffset)
+      if (index < 0 || index >= keyPoints.length || startOffset == null || endOffset == null || endOffset <= startOffset) return null
+      return {
+        index,
+        text: readString(entry.text) || keyPoints[index] || '',
+        startOffset,
+        endOffset,
+        quote: readString(entry.quote) || undefined,
+        confidence: readNumber(entry.confidence),
+        locator: readString(entry.locator) || undefined,
+      }
+    })
+    .filter((entry): entry is SummaryKeyPointSource => Boolean(entry))
 }
 
 async function gatewayFetch(settings: GatewaySettings, path: string) {
@@ -3882,6 +4538,19 @@ async function gatewayPost(settings: GatewaySettings, path: string, data: Record
     throw createGatewayError(body, `Gateway HTTP ${response.status}`, response.status)
   }
   return body as Record<string, unknown>
+}
+
+async function createAudioStreamUrl(settings: GatewaySettings, bookId: string, chapterId: string) {
+  const response = await gatewayPost(
+    settings,
+    `/mobile/books/${encodeURIComponent(bookId)}/audio/${encodeURIComponent(chapterId)}/stream-token`,
+    {},
+  )
+  const streamUrl = typeof response.streamUrl === 'string' ? response.streamUrl : ''
+  if (!streamUrl) {
+    throw new Error('Gateway 未返回 MP3 在线播放地址')
+  }
+  return absoluteGatewayUrl(settings, streamUrl)
 }
 
 async function gatewayFetchBlob(settings: GatewaySettings, path: string) {
@@ -4084,6 +4753,116 @@ function parseJsonBody(value: string) {
     return JSON.parse(value) as { error?: { message?: string } } & Record<string, unknown>
   } catch {
     return {}
+  }
+}
+
+export function loadAppLogEntriesFromStorage(storage: Pick<Storage, 'getItem'>): AppLogEntry[] {
+  try {
+    const parsed = JSON.parse(storage.getItem(appLogKey) || '[]') as unknown
+    if (!Array.isArray(parsed)) return []
+    return parsed.map(normalizeAppLogEntry).filter((entry): entry is AppLogEntry => Boolean(entry))
+  } catch {
+    return []
+  }
+}
+
+export function appendAppLogToStorage(
+  storage: Pick<Storage, 'getItem' | 'setItem'>,
+  level: AppLogLevel,
+  message: string,
+  context?: unknown,
+  source = 'app',
+) {
+  const entry: AppLogEntry = {
+    id: createAppLogId(),
+    timestamp: new Date().toISOString(),
+    level,
+    message: String(message || level).slice(0, maxLogMessageLength),
+    source,
+    context: sanitizeLogValue(context),
+  }
+  const entries = [...loadAppLogEntriesFromStorage(storage), entry].slice(-maxAppLogEntries)
+  saveAppLogEntries(storage, entries)
+  return entry
+}
+
+function clearAppLogsFromStorage(storage: Pick<Storage, 'removeItem'>) {
+  storage.removeItem(appLogKey)
+}
+
+function loadLatestIssueFromStorage(storage: Pick<Storage, 'getItem'>) {
+  return [...loadAppLogEntriesFromStorage(storage)].reverse().find((entry) => entry.level === 'error' || entry.level === 'warn') ?? null
+}
+
+function saveAppLogEntries(storage: Pick<Storage, 'setItem'>, entries: AppLogEntry[]) {
+  let safeEntries = entries
+  while (safeEntries.length > 0) {
+    try {
+      storage.setItem(appLogKey, JSON.stringify(safeEntries))
+      return
+    } catch {
+      safeEntries = safeEntries.slice(Math.ceil(safeEntries.length / 2))
+    }
+  }
+}
+
+function normalizeAppLogEntry(value: unknown): AppLogEntry | null {
+  if (!isRecord(value)) return null
+  const level = value.level === 'info' || value.level === 'warn' || value.level === 'error' ? value.level : null
+  const message = typeof value.message === 'string' ? value.message : ''
+  const timestamp = typeof value.timestamp === 'string' ? value.timestamp : ''
+  if (!level || !message || !timestamp) return null
+  return {
+    id: typeof value.id === 'string' && value.id ? value.id : createAppLogId(),
+    timestamp,
+    level,
+    message: message.slice(0, maxLogMessageLength),
+    source: typeof value.source === 'string' ? value.source.slice(0, 80) : undefined,
+    context: sanitizeLogValue(value.context),
+  }
+}
+
+function createAppLogId() {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') return crypto.randomUUID()
+  return `log-${Date.now()}-${Math.random().toString(16).slice(2)}`
+}
+
+function serializeErrorForLog(error: unknown) {
+  if (error instanceof Error) {
+    return {
+      name: error.name,
+      message: error.message,
+      stack: typeof error.stack === 'string' ? error.stack.split('\n').slice(0, 8).join('\n') : undefined,
+      ...(error instanceof GatewayError ? { code: error.code, statusCode: error.statusCode } : {}),
+    }
+  }
+  return sanitizeLogValue(error)
+}
+
+function sanitizeLogValue(value: unknown, depth = 0): unknown {
+  if (value == null || typeof value === 'number' || typeof value === 'boolean') return value
+  if (typeof value === 'string') return value.slice(0, 500)
+  if (depth >= 4) return '[truncated]'
+  if (Array.isArray(value)) return value.slice(0, 20).map((entry) => sanitizeLogValue(entry, depth + 1))
+  if (!isRecord(value)) return String(value).slice(0, 200)
+  return Object.fromEntries(
+    Object.entries(value).slice(0, 40).map(([key, entry]) => [
+      key,
+      /token|authorization|password|secret/i.test(key) ? '[redacted]' : sanitizeLogValue(entry, depth + 1),
+    ]),
+  )
+}
+
+function redactUrlForLog(url: string) {
+  if (!url) return ''
+  try {
+    const parsed = new URL(url)
+    for (const key of Array.from(parsed.searchParams.keys())) {
+      if (/token|secret|key|auth/i.test(key)) parsed.searchParams.set(key, '[redacted]')
+    }
+    return parsed.toString().slice(0, 500)
+  } catch {
+    return url.replace(/([?&](?:token|secret|key|auth)=)[^&]+/gi, '$1[redacted]').slice(0, 500)
   }
 }
 
@@ -4304,6 +5083,17 @@ function formatDate(value: string) {
     year: 'numeric',
     month: '2-digit',
     day: '2-digit',
+  })
+}
+
+function formatDateTime(value: string) {
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return value
+  return date.toLocaleString('zh-CN', {
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
   })
 }
 
@@ -4567,16 +5357,91 @@ export function ragFallbackStatus(error: unknown, fallbackCount: number) {
   return `Gateway embedding 检索失败${reason ? `：${reason}` : ''}；已自动改用本地关键词检索，召回 ${fallbackCount} 个相关章节。`
 }
 
+type ChapterAudioReference =
+  | string
+  | {
+      id?: string
+      chapterId?: string
+      index?: number
+      chapterIndex?: number
+    }
+  | null
+  | undefined
+
 export function resolveCurrentAudio(
-  currentChapterId: string | null | undefined,
+  currentChapter: ChapterAudioReference,
   visibleAudioChapters: AudioChapter[],
   cachedAudioChapter: AudioChapter | null,
+  bookId?: string,
 ) {
+  const currentChapterId = chapterAudioReferenceId(currentChapter)
   if (!currentChapterId) return null
   return (
-    visibleAudioChapters.find((chapter) => chapter.chapterId === currentChapterId) ??
-    (cachedAudioChapter?.chapterId === currentChapterId ? cachedAudioChapter : null)
+    findAudioChapterForReference(currentChapter, visibleAudioChapters, bookId) ??
+    (cachedAudioChapter && chapterAudioReferencesMatch(bookId, currentChapter, cachedAudioChapter.chapterId) ? cachedAudioChapter : null)
   )
+}
+
+function findAudioChapterForReference(reference: ChapterAudioReference, audioChapters: AudioChapter[], bookId?: string) {
+  const exactId = chapterAudioReferenceId(reference)
+  const exact = exactId ? audioChapters.find((chapter) => chapter.chapterId === exactId) : null
+  if (exact) return exact
+  const referenceKeys = chapterAudioReferenceKeys(bookId, reference)
+  return audioChapters.find((chapter) => hasSharedChapterAudioKey(referenceKeys, chapterAudioReferenceKeys(bookId, chapter.chapterId))) ?? null
+}
+
+function chapterAudioReferencesMatch(bookId: string | undefined, left: ChapterAudioReference, right: ChapterAudioReference) {
+  const leftId = chapterAudioReferenceId(left)
+  const rightId = chapterAudioReferenceId(right)
+  if (leftId && rightId && leftId === rightId) return true
+  return hasSharedChapterAudioKey(chapterAudioReferenceKeys(bookId, left), chapterAudioReferenceKeys(bookId, right))
+}
+
+function chapterAudioReferenceId(reference: ChapterAudioReference) {
+  if (!reference) return ''
+  if (typeof reference === 'string') return reference.trim()
+  return (reference.id ?? reference.chapterId ?? '').trim()
+}
+
+function chapterAudioReferenceKeys(bookId: string | undefined, reference: ChapterAudioReference) {
+  const keys = new Set<string>()
+  const id = chapterAudioReferenceId(reference)
+  if (id) {
+    keys.add(`id:${id}`)
+    for (const candidate of chapterAudioIdCandidates(bookId, id)) {
+      const ordinal = chapterOrdinalFromId(candidate)
+      if (ordinal != null) keys.add(`chapter:${ordinal}`)
+    }
+  }
+  if (reference && typeof reference !== 'string') {
+    const index = Number.isSafeInteger(reference.index) && reference.index! > 0 ? reference.index : reference.chapterIndex
+    if (Number.isSafeInteger(index) && index! > 0) keys.add(`chapter:${index}`)
+  }
+  return keys
+}
+
+function chapterAudioIdCandidates(bookId: string | undefined, rawId: string) {
+  const trimmed = rawId.trim()
+  const candidates = new Set<string>([trimmed])
+  if (bookId && trimmed.startsWith(`${bookId}:`)) candidates.add(trimmed.slice(bookId.length + 1))
+  const tail = trimmed.includes(':') ? trimmed.split(':').at(-1) : ''
+  if (tail) candidates.add(tail)
+  return candidates
+}
+
+function chapterOrdinalFromId(id: string) {
+  const normalized = id.trim().toLowerCase()
+  const match = /^(?:ch|chapter[-_]?)0*(\d+)$/.exec(normalized) ?? /^0*(\d+)$/.exec(normalized)
+  if (!match) return null
+  const ordinal = Number(match[1])
+  return Number.isSafeInteger(ordinal) && ordinal > 0 ? ordinal : null
+}
+
+function hasSharedChapterAudioKey(left: Set<string>, right: Set<string>) {
+  for (const key of left) {
+    if (right.has(key)) return true
+  }
+  return false
 }
 
 type AudioChapterStatusRow = {
@@ -4594,16 +5459,22 @@ export function buildAudioChapterStatusRows(
   audioChapters: AudioChapter[],
   cachedAudioIds: Set<string>,
   currentChapterId: string | null | undefined,
+  bookId?: string,
 ): AudioChapterStatusRow[] {
-  const audioChapterById = new Map(audioChapters.map((chapter) => [chapter.chapterId, chapter]))
+  const cachedAudioKeys = new Set(
+    Array.from(cachedAudioIds).flatMap((chapterId) => Array.from(chapterAudioReferenceKeys(bookId, chapterId))),
+  )
   return chapters.map((chapter, index) => ({
     chapterId: chapter.id,
     index: chapter.index ?? chapter.chapterIndex ?? index + 1,
     title: chapter.title,
-    cached: cachedAudioIds.has(chapter.id),
-    hasAudio: audioChapterById.has(chapter.id) || cachedAudioIds.has(chapter.id),
+    cached: cachedAudioIds.has(chapter.id) || hasSharedChapterAudioKey(chapterAudioReferenceKeys(bookId, chapter), cachedAudioKeys),
+    hasAudio:
+      Boolean(findAudioChapterForReference(chapter, audioChapters, bookId)) ||
+      cachedAudioIds.has(chapter.id) ||
+      hasSharedChapterAudioKey(chapterAudioReferenceKeys(bookId, chapter), cachedAudioKeys),
     isCurrent: chapter.id === currentChapterId,
-    audioChapter: audioChapterById.get(chapter.id) ?? null,
+    audioChapter: findAudioChapterForReference(chapter, audioChapters, bookId),
   }))
 }
 
