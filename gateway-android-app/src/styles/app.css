@@ -983,6 +983,7 @@ button:disabled {
 .rate-slider-field {
   display: grid;
   gap: 6px;
+  padding: 0 10px;
 }
 
 .rate-slider-field input[type="range"] {
@@ -993,21 +994,21 @@ button:disabled {
 
 .rate-slider-dots,
 .rate-slider-labels {
-  display: grid;
-  grid-template-columns: repeat(6, minmax(0, 1fr));
-  align-items: center;
+  position: relative;
 }
 
 .rate-slider-dots {
-  padding: 0 8px;
+  height: 12px;
 }
 
 .rate-slider-dots span {
-  justify-self: center;
+  position: absolute;
+  top: 50%;
   width: 7px;
   height: 7px;
   border-radius: 999px;
   background: #cfd9e3;
+  transform: translate(-50%, -50%);
 }
 
 .rate-slider-dots span.active {
@@ -1016,7 +1017,45 @@ button:disabled {
   background: #2f6f73;
 }
 
+.rate-slider-dots span:nth-child(1),
+.rate-slider-labels button:nth-child(1) {
+  left: 0;
+}
+
+.rate-slider-dots span:nth-child(2),
+.rate-slider-labels button:nth-child(2) {
+  left: 20%;
+}
+
+.rate-slider-dots span:nth-child(3),
+.rate-slider-labels button:nth-child(3) {
+  left: 40%;
+}
+
+.rate-slider-dots span:nth-child(4),
+.rate-slider-labels button:nth-child(4) {
+  left: 60%;
+}
+
+.rate-slider-dots span:nth-child(5),
+.rate-slider-labels button:nth-child(5) {
+  left: 80%;
+}
+
+.rate-slider-dots span:nth-child(6),
+.rate-slider-labels button:nth-child(6) {
+  left: 100%;
+}
+
+.rate-slider-labels {
+  height: 24px;
+}
+
 .speech-control-panel .rate-slider-labels button {
+  position: absolute;
+  top: 0;
+  transform: translateX(-50%);
+  min-width: 36px;
   min-height: 24px;
   border: 0;
   background: transparent !important;
