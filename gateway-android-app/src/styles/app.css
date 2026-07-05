@@ -1112,14 +1112,28 @@ button:disabled {
 
 .summary-box ul {
   margin: 10px 0 0;
-  padding-left: 20px;
+  padding-left: 0;
   color: #26313d;
+  list-style: none;
 }
 
 .summary-box li {
+  display: grid;
+  grid-template-columns: 8px minmax(0, 1fr);
+  column-gap: 10px;
+  align-items: start;
   margin-bottom: 6px;
   font-size: var(--reader-font-size, 19px);
   line-height: 1.55;
+}
+
+.summary-box li::before {
+  width: 6px;
+  height: 6px;
+  margin-top: calc((var(--reader-font-size, 19px) * 1.55 - 6px) / 2);
+  border-radius: 50%;
+  background: currentColor;
+  content: '';
 }
 
 .summary-source-link {
