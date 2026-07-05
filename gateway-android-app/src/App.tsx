@@ -102,7 +102,8 @@ type CachedAudio = {
 
 type AudioStreamRetryState = {
   bookId: string
-  chapterId: string
+  currentChapterId: string
+  audioChapterId: string
   attempted: boolean
 }
 
@@ -461,12 +462,12 @@ function App() {
     [currentChapter?.id, selectedBookId, visibleCachedAudioIds],
   )
   const currentAudio = useMemo(
-    () => resolveCurrentAudio(currentChapter?.id, visibleAudioChapters, cachedCurrentAudio),
-    [cachedCurrentAudio, currentChapter?.id, visibleAudioChapters],
+    () => resolveCurrentAudio(currentChapter, visibleAudioChapters, cachedCurrentAudio, selectedBookId ?? undefined),
+    [cachedCurrentAudio, currentChapter, selectedBookId, visibleAudioChapters],
   )
   const audioChapterStatusRows = useMemo(
-    () => buildAudioChapterStatusRows(chapters, visibleAudioChapters, visibleCachedAudioIds, currentChapter?.id),
-    [chapters, currentChapter?.id, visibleAudioChapters, visibleCachedAudioIds],
+    () => buildAudioChapterStatusRows(chapters, visibleAudioChapters, visibleCachedAudioIds, currentChapter?.id, selectedBookId ?? undefined),
+    [chapters, currentChapter?.id, selectedBookId, visibleAudioChapters, visibleCachedAudioIds],
   )
   const activeTimelineEntry = useMemo(
     () => findActiveTimelineEntry(audioManifest, audioTime),
@@ -605,6 +606,20 @@ function App() {
       void stopSpeechReading()
     }
   }, [currentAudio, ttsSettings.engine])
+
+  useEffect(() => {
+    if (currentAudio || !selectedBookId || !currentChapter || visibleAudioChapters.length === 0) return
+    console.warn('[NovelReaderAudio] current chapter did not match MP3 catalog', {
+      bookId: selectedBookId,
+      currentChapterId: currentChapter.id,
+      currentChapterIndex: currentChapter.index ?? currentChapter.chapterIndex,
+      audioCatalogBookId,
+      audioChapterCount: visibleAudioChapters.length,
+      audioChapterSamples: visibleAudioChapters.slice(0, 3).map((chapter) => chapter.chapterId),
+      currentMatchKeys: Array.from(chapterAudioReferenceKeys(selectedBookId, currentChapter)),
+      firstAudioMatchKeys: Array.from(chapterAudioReferenceKeys(selectedBookId, visibleAudioChapters[0]?.chapterId)),
+    })
+  }, [audioCatalogBookId, currentAudio, currentChapter, selectedBookId, visibleAudioChapters])
 
   useEffect(() => {
     const pendingChapterId = pendingAutoPlayChapterIdRef.current
@@ -1142,6 +1157,12 @@ function App() {
       const nextAudioChapters = Array.isArray(response.chapters) ? response.chapters.filter(isAudioChapter) : []
       setAudioChapters(nextAudioChapters)
       setAudioCatalogBookId(bookId)
+      console.info('[NovelReaderAudio] catalog loaded', {
+        bookId,
+        count: nextAudioChapters.length,
+        firstChapterId: nextAudioChapters[0]?.chapterId,
+        currentChapterId,
+      })
       await refreshCachedAudioIds(bookId)
       if (showMessage) setMessage(`音频 ${nextAudioChapters.length} 章`)
     } catch (error) {
@@ -1186,7 +1207,7 @@ function App() {
       const manifest =
         cachedAudio?.manifest ??
         (currentAudio?.manifestFileName
-          ? await gatewayFetch(settings, `/mobile/books/${encodeURIComponent(selectedBookId)}/audio/${encodeURIComponent(currentChapter.id)}/manifest`)
+          ? await gatewayFetch(settings, `/mobile/books/${encodeURIComponent(selectedBookId)}/audio/${encodeURIComponent(currentAudio.chapterId)}/manifest`)
               .then(normalizeAudioManifest)
               .catch(() => null)
           : null)
@@ -1210,7 +1231,8 @@ function App() {
       audioStreamRetryRef.current = usesRemoteStream
         ? {
             bookId: selectedBookId,
-            chapterId: currentChapter.id,
+            currentChapterId: currentChapter.id,
+            audioChapterId: currentAudio.chapterId,
             attempted: false,
           }
         : null
@@ -1268,7 +1290,7 @@ function App() {
       }
       const startIndex = Math.max(
         0,
-        currentChapterId ? catalog.findIndex((chapter) => chapter.chapterId === currentChapterId) : 0,
+        currentChapter ? catalog.findIndex((chapter) => chapterAudioReferencesMatch(selectedBookId ?? bookId, currentChapter, chapter.chapterId)) : 0,
       )
       const safeStartIndex = startIndex >= 0 ? startIndex : 0
       const targetChapters =
@@ -1563,7 +1585,7 @@ function App() {
 
   async function handleChapterAudioError(audio: HTMLAudioElement) {
     const retry = audioStreamRetryRef.current
-    if (!retry || retry.attempted || retry.bookId !== selectedBookId || retry.chapterId !== currentChapter?.id) {
+    if (!retry || retry.attempted || retry.bookId !== selectedBookId || retry.currentChapterId !== currentChapter?.id) {
       setChapterAudioPlaying(false)
       setMessage('MP3 播放失败')
       return
@@ -1574,7 +1596,7 @@ function App() {
     const manifest = audioManifestRef.current ?? audioManifest
     setAudioPlaybackLoading(true)
     try {
-      const playbackUrl = await createAudioStreamUrl(settings, retry.bookId, retry.chapterId)
+      const playbackUrl = await createAudioStreamUrl(settings, retry.bookId, retry.audioChapterId)
       clearAudioUrl()
       audioStreamRetryRef.current = retry
       buildChapterAudioTimeline(manifest?.timeline ?? [])
@@ -4830,16 +4852,91 @@ export function ragFallbackStatus(error: unknown, fallbackCount: number) {
   return `Gateway embedding 检索失败${reason ? `：${reason}` : ''}；已自动改用本地关键词检索，召回 ${fallbackCount} 个相关章节。`
 }
 
+type ChapterAudioReference =
+  | string
+  | {
+      id?: string
+      chapterId?: string
+      index?: number
+      chapterIndex?: number
+    }
+  | null
+  | undefined
+
 export function resolveCurrentAudio(
-  currentChapterId: string | null | undefined,
+  currentChapter: ChapterAudioReference,
   visibleAudioChapters: AudioChapter[],
   cachedAudioChapter: AudioChapter | null,
+  bookId?: string,
 ) {
+  const currentChapterId = chapterAudioReferenceId(currentChapter)
   if (!currentChapterId) return null
   return (
-    visibleAudioChapters.find((chapter) => chapter.chapterId === currentChapterId) ??
-    (cachedAudioChapter?.chapterId === currentChapterId ? cachedAudioChapter : null)
+    findAudioChapterForReference(currentChapter, visibleAudioChapters, bookId) ??
+    (cachedAudioChapter && chapterAudioReferencesMatch(bookId, currentChapter, cachedAudioChapter.chapterId) ? cachedAudioChapter : null)
   )
+}
+
+function findAudioChapterForReference(reference: ChapterAudioReference, audioChapters: AudioChapter[], bookId?: string) {
+  const exactId = chapterAudioReferenceId(reference)
+  const exact = exactId ? audioChapters.find((chapter) => chapter.chapterId === exactId) : null
+  if (exact) return exact
+  const referenceKeys = chapterAudioReferenceKeys(bookId, reference)
+  return audioChapters.find((chapter) => hasSharedChapterAudioKey(referenceKeys, chapterAudioReferenceKeys(bookId, chapter.chapterId))) ?? null
+}
+
+function chapterAudioReferencesMatch(bookId: string | undefined, left: ChapterAudioReference, right: ChapterAudioReference) {
+  const leftId = chapterAudioReferenceId(left)
+  const rightId = chapterAudioReferenceId(right)
+  if (leftId && rightId && leftId === rightId) return true
+  return hasSharedChapterAudioKey(chapterAudioReferenceKeys(bookId, left), chapterAudioReferenceKeys(bookId, right))
+}
+
+function chapterAudioReferenceId(reference: ChapterAudioReference) {
+  if (!reference) return ''
+  if (typeof reference === 'string') return reference.trim()
+  return (reference.id ?? reference.chapterId ?? '').trim()
+}
+
+function chapterAudioReferenceKeys(bookId: string | undefined, reference: ChapterAudioReference) {
+  const keys = new Set<string>()
+  const id = chapterAudioReferenceId(reference)
+  if (id) {
+    keys.add(`id:${id}`)
+    for (const candidate of chapterAudioIdCandidates(bookId, id)) {
+      const ordinal = chapterOrdinalFromId(candidate)
+      if (ordinal != null) keys.add(`chapter:${ordinal}`)
+    }
+  }
+  if (reference && typeof reference !== 'string') {
+    const index = Number.isSafeInteger(reference.index) && reference.index! > 0 ? reference.index : reference.chapterIndex
+    if (Number.isSafeInteger(index) && index! > 0) keys.add(`chapter:${index}`)
+  }
+  return keys
+}
+
+function chapterAudioIdCandidates(bookId: string | undefined, rawId: string) {
+  const trimmed = rawId.trim()
+  const candidates = new Set<string>([trimmed])
+  if (bookId && trimmed.startsWith(`${bookId}:`)) candidates.add(trimmed.slice(bookId.length + 1))
+  const tail = trimmed.includes(':') ? trimmed.split(':').at(-1) : ''
+  if (tail) candidates.add(tail)
+  return candidates
+}
+
+function chapterOrdinalFromId(id: string) {
+  const normalized = id.trim().toLowerCase()
+  const match = /^(?:ch|chapter[-_]?)0*(\d+)$/.exec(normalized) ?? /^0*(\d+)$/.exec(normalized)
+  if (!match) return null
+  const ordinal = Number(match[1])
+  return Number.isSafeInteger(ordinal) && ordinal > 0 ? ordinal : null
+}
+
+function hasSharedChapterAudioKey(left: Set<string>, right: Set<string>) {
+  for (const key of left) {
+    if (right.has(key)) return true
+  }
+  return false
 }
 
 type AudioChapterStatusRow = {
@@ -4857,16 +4954,22 @@ export function buildAudioChapterStatusRows(
   audioChapters: AudioChapter[],
   cachedAudioIds: Set<string>,
   currentChapterId: string | null | undefined,
+  bookId?: string,
 ): AudioChapterStatusRow[] {
-  const audioChapterById = new Map(audioChapters.map((chapter) => [chapter.chapterId, chapter]))
+  const cachedAudioKeys = new Set(
+    Array.from(cachedAudioIds).flatMap((chapterId) => Array.from(chapterAudioReferenceKeys(bookId, chapterId))),
+  )
   return chapters.map((chapter, index) => ({
     chapterId: chapter.id,
     index: chapter.index ?? chapter.chapterIndex ?? index + 1,
     title: chapter.title,
-    cached: cachedAudioIds.has(chapter.id),
-    hasAudio: audioChapterById.has(chapter.id) || cachedAudioIds.has(chapter.id),
+    cached: cachedAudioIds.has(chapter.id) || hasSharedChapterAudioKey(chapterAudioReferenceKeys(bookId, chapter), cachedAudioKeys),
+    hasAudio:
+      Boolean(findAudioChapterForReference(chapter, audioChapters, bookId)) ||
+      cachedAudioIds.has(chapter.id) ||
+      hasSharedChapterAudioKey(chapterAudioReferenceKeys(bookId, chapter), cachedAudioKeys),
     isCurrent: chapter.id === currentChapterId,
-    audioChapter: audioChapterById.get(chapter.id) ?? null,
+    audioChapter: findAudioChapterForReference(chapter, audioChapters, bookId),
   }))
 }
 

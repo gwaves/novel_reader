@@ -60,6 +60,22 @@ describe('reader audio playback availability', () => {
     expect(resolveCurrentAudio('chapter-46', [cloudChapter], cachedChapter)).toEqual(cloudChapter)
   })
 
+  it('matches cloud MP3 chapters by canonical chapter ordinal when local ids use an older form', () => {
+    const cloudChapter: AudioChapter = {
+      chapterId: 'file-96ea5baedc1b3c681739e403:ch00003',
+      fileName: 'ch003-file-96ea5baedc1b3c681739e403-ch00003/chapter.mp3',
+    }
+
+    expect(
+      resolveCurrentAudio(
+        { id: 'chapter-3', index: 3 },
+        [cloudChapter],
+        null,
+        'file-96ea5baedc1b3c681739e403',
+      ),
+    ).toEqual(cloudChapter)
+  })
+
   it('does not use cached metadata from another chapter', () => {
     expect(resolveCurrentAudio('chapter-47', [], cachedChapter)).toBeNull()
   })
@@ -86,6 +102,34 @@ describe('reader audio playback availability', () => {
       expect.objectContaining({ chapterId: 'chapter-45', cached: false, hasAudio: true, isCurrent: false, audioChapter: expect.objectContaining({ chapterId: 'chapter-45' }) }),
       expect.objectContaining({ chapterId: 'chapter-46', cached: true, hasAudio: true, isCurrent: true, audioChapter: expect.objectContaining({ chapterId: 'chapter-46' }) }),
       expect.objectContaining({ chapterId: 'chapter-47', cached: false, hasAudio: false, isCurrent: false, audioChapter: null }),
+    ])
+  })
+
+  it('builds visible MP3 status when package and audio chapter ids differ only by canonical form', () => {
+    const rows = buildAudioChapterStatusRows(
+      [
+        { id: 'chapter-1', title: '第一回', index: 1 },
+        { id: 'chapter-3', title: '第三回', index: 3 },
+      ],
+      [
+        {
+          chapterId: 'file-96ea5baedc1b3c681739e403:ch00003',
+          fileName: 'ch003-file-96ea5baedc1b3c681739e403-ch00003/chapter.mp3',
+        },
+      ],
+      new Set(),
+      'chapter-3',
+      'file-96ea5baedc1b3c681739e403',
+    )
+
+    expect(rows).toEqual([
+      expect.objectContaining({ chapterId: 'chapter-1', hasAudio: false, audioChapter: null }),
+      expect.objectContaining({
+        chapterId: 'chapter-3',
+        hasAudio: true,
+        isCurrent: true,
+        audioChapter: expect.objectContaining({ chapterId: 'file-96ea5baedc1b3c681739e403:ch00003' }),
+      }),
     ])
   })
 })
