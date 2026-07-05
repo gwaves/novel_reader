@@ -162,7 +162,7 @@ function classifyDownload(url: string): Pick<RequestSample, 'bookId' | 'download
       downloadKind: 'package',
     }
   }
-  const audioMatch = /^\/mobile\/books\/([^/]+)\/audio\/[^/]+\/download(?:\?|$)/.exec(url)
+  const audioMatch = /^\/mobile\/books\/([^/]+)\/audio\/[^/]+\/(?:download|stream)(?:\?|$)/.exec(url)
   if (audioMatch) {
     return {
       bookId: decodeURIComponent(audioMatch[1]),

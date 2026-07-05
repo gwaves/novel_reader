@@ -100,6 +100,12 @@ type CachedAudio = {
   sizeBytes?: number
 }
 
+type AudioStreamRetryState = {
+  bookId: string
+  chapterId: string
+  attempted: boolean
+}
+
 type CachedAudioRecord = {
   bookId: string
   chapterId: string
@@ -499,6 +505,7 @@ function App() {
   const audioManifestRef = useRef<AudioManifest | null>(null)
   const pendingAudioStartTimeRef = useRef<number | null>(null)
   const pendingAudioShouldPlayRef = useRef(false)
+  const audioStreamRetryRef = useRef<AudioStreamRetryState | null>(null)
   const pendingAutoPlayChapterIdRef = useRef<string | null>(null)
   const autoConnectAttemptedRef = useRef(false)
   const autoRestoreAttemptedRef = useRef(false)
@@ -744,7 +751,7 @@ function App() {
 
   useEffect(() => {
     return () => {
-      if (audioUrl) URL.revokeObjectURL(audioUrl)
+      if (audioUrl?.startsWith('blob:')) URL.revokeObjectURL(audioUrl)
     }
   }, [audioUrl])
 
@@ -1168,14 +1175,10 @@ function App() {
           : null)
       let playbackUrl = cachedAudio?.filePath ? Capacitor.convertFileSrc(cachedAudio.filePath) : ''
       let blob: Blob | undefined = cachedAudio?.blob
+      let usesRemoteStream = false
       if (!cachedAudio) {
-        const cached = await cacheAudioChapter(selectedBookId, currentAudio)
-        if (cached.kind === 'file') {
-          playbackUrl = Capacitor.convertFileSrc(cached.filePath)
-        } else {
-          blob = cached.blob
-        }
-        await refreshCachedAudioIds(selectedBookId)
+        playbackUrl = await createAudioStreamUrl(settings, selectedBookId, currentAudio.chapterId)
+        usesRemoteStream = true
       }
       if (!playbackUrl && blob) {
         playbackUrl = URL.createObjectURL(blob)
@@ -1187,6 +1190,13 @@ function App() {
             ? 0
             : getAudioTimeForSourcePositionInManifest(manifest, options.sourcePosition) ?? 0
       clearAudioUrl()
+      audioStreamRetryRef.current = usesRemoteStream
+        ? {
+            bookId: selectedBookId,
+            chapterId: currentChapter.id,
+            attempted: false,
+          }
+        : null
       buildChapterAudioTimeline(manifest?.timeline ?? [])
       audioManifestRef.current = manifest
       pendingAudioStartTimeRef.current = startTime
@@ -1530,7 +1540,41 @@ function App() {
     setAudioManifest(null)
     setAudioTime(0)
     setChapterAudioPlaying(false)
+    audioStreamRetryRef.current = null
     if (speechPlaybackRef.current.status !== 'playing') setActiveSpeechSegmentId(null)
+  }
+
+  async function handleChapterAudioError(audio: HTMLAudioElement) {
+    const retry = audioStreamRetryRef.current
+    if (!retry || retry.attempted || retry.bookId !== selectedBookId || retry.chapterId !== currentChapter?.id) {
+      setChapterAudioPlaying(false)
+      setMessage('MP3 播放失败')
+      return
+    }
+
+    retry.attempted = true
+    const resumeTime = Number.isFinite(audio.currentTime) ? audio.currentTime : audioTime
+    const manifest = audioManifestRef.current ?? audioManifest
+    setAudioPlaybackLoading(true)
+    try {
+      const playbackUrl = await createAudioStreamUrl(settings, retry.bookId, retry.chapterId)
+      clearAudioUrl()
+      audioStreamRetryRef.current = retry
+      buildChapterAudioTimeline(manifest?.timeline ?? [])
+      audioManifestRef.current = manifest
+      pendingAudioStartTimeRef.current = resumeTime
+      pendingAudioShouldPlayRef.current = true
+      setAudioManifest(manifest)
+      setAudioTime(resumeTime)
+      setAudioUrl(playbackUrl)
+      setMessage('在线播放链接已刷新')
+    } catch (error) {
+      audioStreamRetryRef.current = null
+      setChapterAudioPlaying(false)
+      setMessage(errorMessage(error))
+    } finally {
+      setAudioPlaybackLoading(false)
+    }
   }
 
   async function toggleChapterAudioPlayback() {
@@ -2252,7 +2296,7 @@ function App() {
     if (ttsSettings.engine === 'cloud-mp3') {
       if (chapterAudioPlaying) return `正在播放 MP3 · ${formatDuration(audioTime * 1000)}`
       if (audioUrl) return `MP3 已加载 · ${formatDuration(audioTime * 1000)}`
-      return currentAudio ? '本章可播放缓存 MP3' : '当前章节暂无缓存 MP3'
+      return currentAudio ? '本章可播放章节 MP3' : '当前章节暂无 MP3'
     }
     if (speechPlayback.status === 'playing') return `正在朗读 ${speechPlayback.segmentIndex + 1}/${speechChapter?.segments.length ?? 0}`
     if (speechPlayback.status === 'paused') return `已暂停在 ${speechPlayback.segmentIndex + 1}/${speechChapter?.segments.length ?? 0}`
@@ -2362,7 +2406,7 @@ function App() {
             updateTtsSettings({ ...ttsSettings, engine: 'cloud-mp3' })
           }}
         >
-          缓存 MP3
+          章节 MP3
         </button>
       </div>
     )
@@ -3259,6 +3303,7 @@ function App() {
               pendingAudioShouldPlayRef.current = false
             }
           }}
+          onError={(event) => void handleChapterAudioError(event.currentTarget)}
           onPlay={(event) => {
             event.currentTarget.playbackRate = ttsSettings.rate
             setChapterAudioPlaying(true)
@@ -4070,6 +4115,19 @@ async function gatewayPost(settings: GatewaySettings, path: string, data: Record
     throw createGatewayError(body, `Gateway HTTP ${response.status}`, response.status)
   }
   return body as Record<string, unknown>
+}
+
+async function createAudioStreamUrl(settings: GatewaySettings, bookId: string, chapterId: string) {
+  const response = await gatewayPost(
+    settings,
+    `/mobile/books/${encodeURIComponent(bookId)}/audio/${encodeURIComponent(chapterId)}/stream-token`,
+    {},
+  )
+  const streamUrl = typeof response.streamUrl === 'string' ? response.streamUrl : ''
+  if (!streamUrl) {
+    throw new Error('Gateway 未返回 MP3 在线播放地址')
+  }
+  return absoluteGatewayUrl(settings, streamUrl)
 }
 
 async function gatewayFetchBlob(settings: GatewaySettings, path: string) {

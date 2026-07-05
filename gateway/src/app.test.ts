@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { createHmac } from 'node:crypto'
 import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -32,6 +33,15 @@ async function makeDataDir() {
   const dataDir = await mkdtemp(join(tmpdir(), 'novel-reader-gateway-test-'))
   dataDirs.push(dataDir)
   return dataDir
+}
+
+function createTestAudioStreamToken(
+  secret: string,
+  payload: { bookId: string; chapterId: string; deviceId: string; exp: number },
+) {
+  const payloadPart = Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url')
+  const signaturePart = createHmac('sha256', secret).update(payloadPart).digest('base64url')
+  return `${payloadPart}.${signaturePart}`
 }
 
 describe('gateway app', () => {
@@ -3491,6 +3501,140 @@ describe('gateway app', () => {
       timelineVersion: 1,
       timeline: [{ text: '正文' }],
     })
+  })
+
+  it('returns signed MP3 stream URLs and supports byte range playback', async () => {
+    const dataDir = await makeDataDir()
+    const audioDir = await makeDataDir()
+    const bookAudioDir = join(audioDir, 'books', 'book-a')
+    await mkdir(bookAudioDir, { recursive: true })
+    await writeFile(
+      join(dataDir, 'books.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        books: [
+          {
+            id: 'book-a',
+            title: '音频书',
+            chapterCount: 1,
+            updatedAt: '2026-06-25T00:00:00.000Z',
+          },
+        ],
+      }),
+      'utf8',
+    )
+    await mkdir(join(dataDir, 'books', 'book-a'), { recursive: true })
+    await writeFile(
+      join(dataDir, 'books', 'book-a', 'package.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        book: {
+          id: 'book-a',
+          title: '音频书',
+          chapterCount: 1,
+          updatedAt: '2026-06-25T00:00:00.000Z',
+        },
+        chapters: [{ id: 'chapter-1', title: '第一章', content: '正文一' }],
+      }),
+      'utf8',
+    )
+    await writeFile(join(bookAudioDir, 'chapter-1.mp3'), 'fake mp3 data')
+    await writeFile(
+      join(bookAudioDir, 'audio.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        chapters: [
+          {
+            chapterId: 'chapter-1',
+            title: '第一章',
+            fileName: 'chapter-1.mp3',
+          },
+        ],
+      }),
+      'utf8',
+    )
+    const app = buildTestApp({
+      GATEWAY_DEV_ACCESS_TOKEN: 'dev-token',
+      GATEWAY_DATA_DIR: dataDir,
+      GATEWAY_AUDIO_DIR: audioDir,
+    })
+    const headers = {
+      authorization: 'Bearer dev-token',
+      'x-device-id': 'device-a',
+    }
+
+    const tokenResponse = await app.inject({
+      method: 'POST',
+      url: '/mobile/books/book-a/audio/chapter-1/stream-token',
+      headers,
+    })
+
+    expect(tokenResponse.statusCode).toBe(200)
+    expect(tokenResponse.json()).toMatchObject({
+      schemaVersion: 1,
+    })
+    expect(tokenResponse.json().streamUrl).toMatch(/^\/mobile\/books\/book-a\/audio\/chapter-1\/stream\?token=/)
+
+    const streamUrl = tokenResponse.json().streamUrl as string
+    const streamResponse = await app.inject({
+      method: 'GET',
+      url: streamUrl,
+    })
+    const rangeResponse = await app.inject({
+      method: 'GET',
+      url: streamUrl,
+      headers: {
+        range: 'bytes=5-7',
+      },
+    })
+    const unsatisfiableRangeResponse = await app.inject({
+      method: 'GET',
+      url: streamUrl,
+      headers: {
+        range: 'bytes=999-1000',
+      },
+    })
+
+    expect(streamResponse.statusCode).toBe(200)
+    expect(streamResponse.headers['accept-ranges']).toBe('bytes')
+    expect(streamResponse.body).toBe('fake mp3 data')
+    expect(rangeResponse.statusCode).toBe(206)
+    expect(rangeResponse.headers['content-range']).toBe('bytes 5-7/13')
+    expect(rangeResponse.body).toBe('mp3')
+    expect(unsatisfiableRangeResponse.statusCode).toBe(416)
+    expect(unsatisfiableRangeResponse.headers['content-range']).toBe('bytes */13')
+
+    const tamperedResponse = await app.inject({
+      method: 'GET',
+      url: `${streamUrl}x`,
+    })
+    const expiredToken = createTestAudioStreamToken('dev-token', {
+      bookId: 'book-a',
+      chapterId: 'chapter-1',
+      deviceId: 'device-a',
+      exp: Date.now() - 1000,
+    })
+    const expiredResponse = await app.inject({
+      method: 'GET',
+      url: `/mobile/books/book-a/audio/chapter-1/stream?token=${encodeURIComponent(expiredToken)}`,
+    })
+    const mismatchedToken = createTestAudioStreamToken('dev-token', {
+      bookId: 'book-a',
+      chapterId: 'chapter-2',
+      deviceId: 'device-a',
+      exp: Date.now() + 60_000,
+    })
+    const mismatchedResponse = await app.inject({
+      method: 'GET',
+      url: `/mobile/books/book-a/audio/chapter-1/stream?token=${encodeURIComponent(mismatchedToken)}`,
+    })
+
+    expect(tamperedResponse.statusCode).toBe(401)
+    expect(tamperedResponse.json()).toMatchObject({ error: { code: 'audio_stream_token_invalid' } })
+    expect(expiredResponse.statusCode).toBe(401)
+    expect(expiredResponse.json()).toMatchObject({ error: { code: 'audio_stream_token_expired' } })
+    expect(mismatchedResponse.statusCode).toBe(401)
+    expect(mismatchedResponse.json()).toMatchObject({ error: { code: 'audio_stream_token_invalid' } })
   })
 
   it('protects MP3 downloads with mobile auth, device role, and book visibility', async () => {
