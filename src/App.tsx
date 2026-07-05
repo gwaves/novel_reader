@@ -839,11 +839,12 @@ function App() {
   }, [view, activeChapter?.id, state.book?.id])
 
   useEffect(() => {
-    setSummaryHighlightRange(null)
+    const frame = window.requestAnimationFrame(() => setSummaryHighlightRange(null))
     if (summaryHighlightTimerRef.current) {
       window.clearTimeout(summaryHighlightTimerRef.current)
       summaryHighlightTimerRef.current = null
     }
+    return () => window.cancelAnimationFrame(frame)
   }, [activeChapter?.id])
 
   function jumpToSummarySource(source: SummaryKeyPointSource) {

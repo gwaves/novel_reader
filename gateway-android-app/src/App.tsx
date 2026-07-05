@@ -686,11 +686,12 @@ function App() {
   }, [books.length])
 
   useEffect(() => {
-    setSummaryHighlightRange(null)
+    const frame = window.requestAnimationFrame(() => setSummaryHighlightRange(null))
     if (summaryHighlightTimerRef.current) {
       window.clearTimeout(summaryHighlightTimerRef.current)
       summaryHighlightTimerRef.current = null
     }
+    return () => window.cancelAnimationFrame(frame)
   }, [currentChapter?.id])
 
   function jumpToSummarySource(source: SummaryKeyPointSource) {
@@ -752,7 +753,7 @@ function App() {
 
   useEffect(() => {
     if (currentAudio || !selectedBookId || !currentChapter || visibleAudioChapters.length === 0) return
-    recordDiagnostic('warn', '当前章节未匹配到 MP3 catalog', {
+    const timeout = window.setTimeout(() => recordDiagnostic('warn', '当前章节未匹配到 MP3 catalog', {
       action: 'audioCatalogMismatch',
       bookId: selectedBookId,
       currentChapterId: currentChapter.id,
@@ -762,7 +763,8 @@ function App() {
       audioChapterSamples: visibleAudioChapters.slice(0, 3).map((chapter) => chapter.chapterId),
       currentMatchKeys: Array.from(chapterAudioReferenceKeys(selectedBookId, currentChapter)),
       firstAudioMatchKeys: Array.from(chapterAudioReferenceKeys(selectedBookId, visibleAudioChapters[0]?.chapterId)),
-    })
+    }), 0)
+    return () => window.clearTimeout(timeout)
   }, [audioCatalogBookId, currentAudio, currentChapter, selectedBookId, visibleAudioChapters])
 
   useEffect(() => {
@@ -1363,7 +1365,7 @@ function App() {
               .catch(() => null)
           : null)
       let playbackUrl = cachedAudio?.filePath ? Capacitor.convertFileSrc(cachedAudio.filePath) : ''
-      let blob: Blob | undefined = cachedAudio?.blob
+      const blob: Blob | undefined = cachedAudio?.blob
       let usesRemoteStream = false
       if (!cachedAudio) {
         playbackUrl = await createAudioStreamUrl(settings, selectedBookId, currentAudio.chapterId)
