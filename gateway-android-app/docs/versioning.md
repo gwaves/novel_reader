@@ -37,8 +37,8 @@ npm run gateway-android:android:build
 - Gateway 请求头 `X-App-Version` 使用同一个 `versionName`。
 - Android `versionName` 和 `versionCode` 从 `build-info.json` 读取，因此安装系统里显示的版本和 App 内一致。
 - `npm run gateway:publish-android-apk` 会把同一份构建信息写入 `/downloads/android-app.json`，并发布：
-  - `/downloads/ai_novel_reader.apk`
-  - `/downloads/ai_novel_reader-v<versionName>.apk`
+  - `/downloads/novel_gateway.apk`
+  - `/downloads/novel_gateway-v<versionName>-debug.apk`
 
 ## 发布建议
 

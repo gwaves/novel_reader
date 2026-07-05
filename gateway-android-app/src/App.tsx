@@ -220,6 +220,14 @@ type ChapterAudioTimelineItem = {
 
 type ConnectionState = 'idle' | 'checking' | 'connected' | 'error'
 type GatewayTab = 'library' | 'reader' | 'search' | 'settings'
+type SettingsTab = 'reading' | 'audio' | 'sync' | 'diagnostics'
+
+const settingsTabs: Array<{ id: SettingsTab; label: string }> = [
+  { id: 'reading', label: '阅读' },
+  { id: 'audio', label: '音频' },
+  { id: 'sync', label: '同步' },
+  { id: 'diagnostics', label: '诊断' },
+]
 type SearchMode = 'rag' | 'graph'
 type ReaderBackground = 'paper' | 'warm' | 'green' | 'dark'
 
@@ -386,6 +394,7 @@ const defaultTtsSettings: TtsSettings = {
 
 function App() {
   const [tab, setTab] = useState<GatewayTab>('library')
+  const [settingsTab, setSettingsTab] = useState<SettingsTab>('sync')
   const [settings, setSettings] = useState<GatewaySettings>(() => loadSettings())
   const [readerSettings, setReaderSettings] = useState<ReaderSettings>(() => loadReaderSettings())
   const [ttsSettings, setTtsSettings] = useState<TtsSettings>(() => loadTtsSettings())
@@ -1031,7 +1040,7 @@ function App() {
       if (Capacitor.isNativePlatform()) {
         await NativeAudio.downloadAndInstallApk({
           url: updateUrl,
-          fileName: manifest.latestFileName || 'ai_novel_reader.apk',
+          fileName: manifest.latestFileName || 'novel_gateway.apk',
         })
         setAppUpdateState({
           status: 'available',
@@ -2057,6 +2066,11 @@ function App() {
     }
   }
 
+  function openSettingsTab(nextSettingsTab: SettingsTab) {
+    setSettingsTab(nextSettingsTab)
+    switchTab('settings')
+  }
+
   function prepareReaderScrollRestore() {
     if (!selectedBookId) return
     const progress = loadReadingProgress(selectedBookId)
@@ -2662,7 +2676,7 @@ function App() {
             <p>{latestIssue.message}</p>
           </div>
           <div className="issue-actions">
-            <button type="button" onClick={() => switchTab('settings')}>提交日志</button>
+            <button type="button" onClick={() => openSettingsTab('diagnostics')}>提交日志</button>
             <button type="button" onClick={() => setLatestIssue(null)}>忽略</button>
           </div>
         </section>
@@ -2993,31 +3007,154 @@ function App() {
         </section>
       ) : (
         <section className="settings-page" hidden={tab !== 'settings'}>
-          <section className="settings-panel">
-            <div className="app-version-card">
-              <div>
-                <span>AI小说助手</span>
-                <strong>{buildInfo.versionName}</strong>
+          <nav className="settings-tabs segmented-control" aria-label="设置分类">
+            {settingsTabs.map((settingsTabItem) => (
+              <button
+                className={settingsTab === settingsTabItem.id ? 'active' : ''}
+                key={settingsTabItem.id}
+                type="button"
+                onClick={() => setSettingsTab(settingsTabItem.id)}
+              >
+                {settingsTabItem.label}
+              </button>
+            ))}
+          </nav>
+          {settingsTab === 'reading' ? (
+            <section className="settings-card reader-preferences-panel">
+              <div className="section-title">
+                <h2>阅读</h2>
+                <span>{readerSettings.fontSize}px</span>
               </div>
-              <dl>
-                <div>
-                  <dt>构建号</dt>
-                  <dd>{buildInfo.buildNumber}</dd>
+              <div className="settings-card-body">
+                <dl className="settings-summary-grid">
+                  <div>
+                    <dt>当前书籍</dt>
+                    <dd>{selectedBook?.title ?? '未选择'}</dd>
+                  </div>
+                  <div>
+                    <dt>当前章节</dt>
+                    <dd>{currentChapter ? `${Math.max(1, currentChapterPosition + 1)} / ${chapters.length}` : '未打开'}</dd>
+                  </div>
+                </dl>
+                <div className="reader-settings compact-reader-settings">
+                  <strong>字号</strong>
+                  <div className="reader-size-control">
+                    <button type="button" onClick={() => updateReaderFontSize(readerSettings.fontSize - 1)}>A-</button>
+                    <input
+                      aria-label="字体大小"
+                      max={28}
+                      min={15}
+                      type="range"
+                      value={readerSettings.fontSize}
+                      onChange={(event) => updateReaderFontSize(Number(event.target.value))}
+                    />
+                    <button type="button" onClick={() => updateReaderFontSize(readerSettings.fontSize + 1)}>A+</button>
+                    <span>{readerSettings.fontSize}px</span>
+                  </div>
+                  <strong>背景</strong>
+                  <div className="reader-background-control">
+                    {(['paper', 'warm', 'green', 'dark'] as ReaderBackground[]).map((background) => (
+                      <button
+                        aria-label={backgroundLabel(background)}
+                        className={`reader-swatch ${background} ${readerSettings.background === background ? 'active' : ''}`}
+                        key={background}
+                        type="button"
+                        onClick={() => updateReaderBackground(background)}
+                      />
+                    ))}
+                  </div>
                 </div>
-                <div>
-                  <dt>Version Code</dt>
-                  <dd>{buildInfo.versionCode}</dd>
+                <button className="primary-button full-width-button" type="button" onClick={() => switchTab('reader')} disabled={!selectedBookId}>
+                  回到阅读
+                </button>
+              </div>
+            </section>
+          ) : null}
+          {settingsTab === 'audio' ? (
+            <section className="settings-card audio-settings-panel speech-control-panel">
+              <div className="section-title">
+                <h2>音频</h2>
+                <span>{ttsSettings.engine === 'cloud-mp3' ? '章节 MP3' : '本地 TTS'}</span>
+              </div>
+              <div className="settings-card-body">
+                <dl className="settings-summary-grid">
+                  <div>
+                    <dt>当前书籍</dt>
+                    <dd>{selectedBook?.title ?? '未选择'}</dd>
+                  </div>
+                  <div>
+                    <dt>本机音频</dt>
+                    <dd>{displayCachedAudioChapterCount}/{displayCloudAudioChapterCount} 章已缓存</dd>
+                  </div>
+                </dl>
+                {renderPlaybackEngineField()}
+                {renderSpeechRateField()}
+                {ttsSettings.engine === 'local-tts' ? (
+                  <>
+                    <label className="tts-toggle-row">
+                      <input
+                        type="checkbox"
+                        checked={ttsSettings.autoFollow}
+                        onChange={(event) => updateTtsSettings({ ...ttsSettings, autoFollow: event.target.checked })}
+                      />
+                      <span>朗读时跟随正文</span>
+                    </label>
+                    <label className="tts-select-field">
+                      <span>音调</span>
+                      <input
+                        max={MAX_TTS_PITCH}
+                        min={MIN_TTS_PITCH}
+                        step={0.05}
+                        type="number"
+                        value={ttsSettings.pitch}
+                        onChange={(event) => updateTtsSettings({ ...ttsSettings, pitch: Number(event.target.value) })}
+                      />
+                    </label>
+                    <label className="tts-select-field">
+                      <span>语言</span>
+                      <input
+                        value={ttsSettings.locale}
+                        onChange={(event) => updateTtsSettings({ ...ttsSettings, locale: event.target.value })}
+                      />
+                    </label>
+                    {ttsVoices.length > 0 ? (
+                      <label className="tts-select-field">
+                        <span>音色</span>
+                        <select
+                          value={ttsSettings.voiceId}
+                          onChange={(event) => updateTtsSettings({ ...ttsSettings, voiceId: event.target.value })}
+                        >
+                          <option value="">系统默认</option>
+                          {ttsVoices.map((voice) => (
+                            <option key={voice.id} value={voice.id}>
+                              {voice.name || voice.id}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                    ) : null}
+                    <div className="tts-secondary-actions">
+                      <button type="button" onClick={() => void refreshTtsAvailability()}>检测语音</button>
+                      <button type="button" onClick={() => void openSystemTtsSettings()}>系统语音设置</button>
+                      <button type="button" onClick={() => void openSystemTtsDataCheck()}>安装语音包</button>
+                    </div>
+                  </>
+                ) : null}
+                {ttsSettings.engine === 'local-tts' && ttsStatusMessage ? <p className="speech-status">{ttsStatusMessage}</p> : null}
+                <div className="settings-actions">
+                  <button className="primary-button" type="button" onClick={openMp3Manager} disabled={!selectedBookId || loadingAudio}>
+                    MP3 管理
+                  </button>
+                  <button className="secondary-button" type="button" onClick={refreshCacheSummaries}>
+                    刷新缓存
+                  </button>
                 </div>
-                <div>
-                  <dt>提交</dt>
-                  <dd>{`${buildInfo.gitCommit}${buildInfo.dirty ? ' · dirty' : ''}`}</dd>
-                </div>
-                <div>
-                  <dt>构建时间</dt>
-                  <dd>{formatBuildTime(buildInfo.buildTime)}</dd>
-                </div>
-              </dl>
-            </div>
+              </div>
+            </section>
+          ) : null}
+          {settingsTab === 'sync' ? (
+            <>
+          <section className="settings-panel">
             <label>
               <span>Gateway</span>
               <input
@@ -3145,6 +3282,9 @@ function App() {
             )}
           </section>
 
+            </>
+          ) : null}
+          {settingsTab === 'audio' ? (
           <section className="cache-manager">
             <div className="section-title">
               <h2>缓存管理</h2>
@@ -3207,7 +3347,8 @@ function App() {
               <p className="cache-empty">还没有本地缓存。打开书籍或同步音频后会显示在这里。</p>
             )}
           </section>
-
+          ) : null}
+          {settingsTab === 'sync' ? (
           <section className="sync-summary">
             <div className="section-title">
               <h2>同步状态</h2>
@@ -3229,6 +3370,33 @@ function App() {
               <div>
                 <dt>本机音频</dt>
                 <dd>{displayCachedAudioChapterCount}/{displayCloudAudioChapterCount} 章已缓存</dd>
+              </div>
+            </dl>
+          </section>
+          ) : null}
+          {settingsTab === 'diagnostics' ? (
+            <>
+          <section className="app-version-card">
+            <div>
+              <span>AI小说助手</span>
+              <strong>{buildInfo.versionName}</strong>
+            </div>
+            <dl>
+              <div>
+                <dt>构建号</dt>
+                <dd>{buildInfo.buildNumber}</dd>
+              </div>
+              <div>
+                <dt>Version Code</dt>
+                <dd>{buildInfo.versionCode}</dd>
+              </div>
+              <div>
+                <dt>提交</dt>
+                <dd>{`${buildInfo.gitCommit}${buildInfo.dirty ? ' · dirty' : ''}`}</dd>
+              </div>
+              <div>
+                <dt>构建时间</dt>
+                <dd>{formatBuildTime(buildInfo.buildTime)}</dd>
               </div>
             </dl>
           </section>
@@ -3308,6 +3476,8 @@ function App() {
               </button>
             </div>
           </section>
+            </>
+          ) : null}
         </section>
       )}
 

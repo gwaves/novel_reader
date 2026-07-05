@@ -111,13 +111,13 @@ Android APK 下载：
 
 ```text
 gateway/data/downloads/
-├── ai_novel_reader.apk
-├── ai_novel_reader-v<versionName>.apk
+├── novel_gateway.apk
+├── novel_gateway-v<versionName>-debug.apk
 └── android-app.json
 ```
 
-- `ai_novel_reader.apk` 是固定最新版文件名，供手机浏览器直接下载安装。
-- `ai_novel_reader-v<versionName>.apk` 是版本归档文件，`versionName` 包含基础版本、构建号和 commit。
+- `novel_gateway.apk` 是固定最新版文件名，供手机浏览器直接下载安装。
+- `novel_gateway-v<versionName>-debug.apk` 是版本归档文件，`versionName` 包含基础版本、构建号和 commit。
 - `android-app.json` 记录当前版本、versionCode、构建号、commit、文件名、URL 和发布时间。
 
 ## 发布 Android APK
@@ -156,7 +156,7 @@ npm run gateway:publish-android-apk -- \
 发布后固定下载地址：
 
 ```text
-https://novel.gwaves.net:8888/downloads/ai_novel_reader.apk
+https://novel.gwaves.net:8888/downloads/novel_gateway.apk
 ```
 
 ## 192.168.88.100 证书部署约定
@@ -336,11 +336,11 @@ curl -H "Authorization: Bearer $GATEWAY_ADMIN_ACCESS_TOKEN" \
 
 curl -kI https://novel.gwaves.net:8888/admin/ui
 curl -I http://192.168.88.100:6180/admin/ui
-curl -I http://novel.gwaves.net:8888/downloads/ai_novel_reader.apk
+curl -I http://novel.gwaves.net:8888/downloads/novel_gateway.apk
 curl -I https://novel.gwaves.net:8888/health
-curl -I https://novel.gwaves.net:8888/downloads/ai_novel_reader.apk
+curl -I https://novel.gwaves.net:8888/downloads/novel_gateway.apk
 curl https://novel.gwaves.net:8888/downloads/android-app.json
 npm run gateway:security-smoke
 ```
 
-`/health` 可公开访问，且严格 TLS 校验必须通过；公网 Nginx 入口的 `/admin/ui` 应返回 403；未知 Host 或 IP 直连不应返回 Gateway 应用内容；内网直连 `6180` 可访问管理后台；`http://novel.gwaves.net:8888/downloads/ai_novel_reader.apk` 应返回 `302 Location: https://novel.gwaves.net:8888/downloads/ai_novel_reader.apk`；HTTPS `/downloads/ai_novel_reader.apk` 应返回 `200` 和 `application/vnd.android.package-archive`；`/admin/*` 和后台 AI/RAG 接口使用 admin bearer token，`/auth/*`、`/mobile/*` 和 MP3 接口使用 mobile bearer token。生产环境未设置 `GATEWAY_ADMIN_ACCESS_TOKEN` 或 `GATEWAY_MOBILE_ACCESS_TOKEN` 时，Gateway 会拒绝启动。
+`/health` 可公开访问，且严格 TLS 校验必须通过；公网 Nginx 入口的 `/admin/ui` 应返回 403；未知 Host 或 IP 直连不应返回 Gateway 应用内容；内网直连 `6180` 可访问管理后台；`http://novel.gwaves.net:8888/downloads/novel_gateway.apk` 应返回 `302 Location: https://novel.gwaves.net:8888/downloads/novel_gateway.apk`；HTTPS `/downloads/novel_gateway.apk` 应返回 `200` 和 `application/vnd.android.package-archive`；`/admin/*` 和后台 AI/RAG 接口使用 admin bearer token，`/auth/*`、`/mobile/*` 和 MP3 接口使用 mobile bearer token。生产环境未设置 `GATEWAY_ADMIN_ACCESS_TOKEN` 或 `GATEWAY_MOBILE_ACCESS_TOKEN` 时，Gateway 会拒绝启动。

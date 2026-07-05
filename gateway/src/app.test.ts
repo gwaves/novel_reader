@@ -61,19 +61,19 @@ describe('gateway app', () => {
 
   it('serves published Android APK downloads', async () => {
     const downloadsDir = await makeDataDir()
-    await writeFile(join(downloadsDir, 'ai_novel_reader.apk'), 'apk bytes')
+    await writeFile(join(downloadsDir, 'novel_gateway.apk'), 'apk bytes')
     const app = buildTestApp({
       GATEWAY_DOWNLOADS_DIR: downloadsDir,
     })
 
     const response = await app.inject({
       method: 'GET',
-      url: '/downloads/ai_novel_reader.apk',
+      url: '/downloads/novel_gateway.apk',
     })
 
     expect(response.statusCode).toBe(200)
     expect(response.headers['content-type']).toBe('application/vnd.android.package-archive')
-    expect(response.headers['content-disposition']).toBe('attachment; filename="ai_novel_reader.apk"')
+    expect(response.headers['content-disposition']).toBe('attachment; filename="novel_gateway.apk"')
     expect(response.body).toBe('apk bytes')
   })
 

@@ -11,7 +11,7 @@
 | 手机看不到书 | `/auth/session`、`/mobile/books`、Admin 书籍 visibility | mobile token 对应设备不是 trusted；书是 hidden/trusted；`books.json` 未包含目标书 | 调整设备角色或书籍 visibility；重新 publish/verify |
 | package 缺失或旧版本 | `/admin/books`、`/mobile/books/:bookId/package?include=full` | rsync 未完成；`books.json` 合并失败；旧 package 未替换 | 重跑 publish，确认 package 文件和 catalog |
 | 音频显示缺章 | 远端 `audio.json`、`/admin/audio`、admin refresh | MP3 未 rsync；`audio.json` 未合并早期章节；refresh 未执行 | 补传 MP3/audio.json，执行 admin audio refresh |
-| APK 更新不可见 | `/downloads/android-app.json`、`/downloads/ai_novel_reader.apk` | versionCode 未升高；latest/versioned APK 不一致 | 重跑 APK build/publish，校验元数据 |
+| APK 更新不可见 | `/downloads/android-app.json`、`/downloads/novel_gateway.apk` | versionCode 未升高；latest/versioned APK 不一致 | 重跑 APK build/publish，校验元数据 |
 | Admin UI 未授权 | admin token、Nginx 入口、`/admin/*` 响应 | token 错误；公网入口被禁止；生产 token 未配置 | 使用内网入口和 admin token |
 | RAG/AI 失败 | Gateway events、上游模型日志 | 设备不可见该书；上游 key/baseUrl/model 错误 | 先确认 book visibility，再检查模型配置 |
 | Android 日志出现敏感参数 | APK 内 `capacitor.config.json`、logcat 采集脚本 | Capacitor debug logging 开启；采集了未脱敏 methodData | 设置 `android.loggingBehavior=none`，重新构建 APK；不得外发未脱敏日志 |
@@ -70,14 +70,14 @@ curl -fsS -H "Authorization: Bearer $ADMIN_TOKEN" "$GATEWAY_URL/admin/audio"
 ```bash
 npm run gateway:publish-android-apk
 curl -fsS "$GATEWAY_URL/downloads/android-app.json"
-curl -fsSI "$GATEWAY_URL/downloads/ai_novel_reader.apk"
+curl -fsSI "$GATEWAY_URL/downloads/novel_gateway.apk"
 npm run gateway:apk-metadata-smoke -- --gateway-url "$GATEWAY_URL"
 ```
 
 验收点：
 
 - `android-app.json` 的 `versionName`、`versionCode`、`buildNumber`、`gitCommit` 与 `gateway-android-app/build-info.json` 一致。
-- `latestUrl` 指向 `/downloads/ai_novel_reader.apk`。
+- `latestUrl` 指向 `/downloads/novel_gateway.apk`。
 - versioned APK 文件存在，固定 latest APK 与 versioned APK 大小一致。
 - APK 内 `assets/capacitor.config.json` 包含 `android.loggingBehavior=none`，logcat 不输出 Authorization、mobile/admin token 或 Capacitor methodData 下载参数。
 - 手机端只有线上 `versionCode` 高于本机时显示“下载并安装”。
@@ -88,7 +88,7 @@ npm run gateway:apk-metadata-smoke -- --gateway-url "$GATEWAY_URL"
 curl -i "$PUBLIC_GATEWAY_URL/admin/ui"
 curl -i "$PUBLIC_GATEWAY_URL/health"
 curl -i "https://<public-ip>:8888/health"
-curl -i "http://novel.gwaves.net:8888/downloads/ai_novel_reader.apk"
+curl -i "http://novel.gwaves.net:8888/downloads/novel_gateway.apk"
 npm run gateway:security-smoke -- --gateway-url "$PUBLIC_GATEWAY_URL"
 ```
 
@@ -159,7 +159,7 @@ npm run gateway:rollback-release -- \
 
 - package 回滚后重新执行 production-pipeline verify，确认 Admin 书目、mobile 可见性和 package coverage。
 - audio 回滚后执行 admin audio refresh，确认 `audio.json`、Admin 汇总和抽样 MP3 下载一致。
-- APK 回滚后确认 `/downloads/android-app.json`、`ai_novel_reader.apk`、versioned APK 一致，并做必要真机更新检查。
+- APK 回滚后确认 `/downloads/android-app.json`、`novel_gateway.apk`、versioned APK 一致，并做必要真机更新检查。
 - 配置：生产 token、Nginx 配置、docker compose 修改前先备份；配置回滚不走本脚本，按目标机器备份恢复。
 
 ## 9. 记录模板

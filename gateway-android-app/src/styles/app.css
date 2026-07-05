@@ -81,6 +81,8 @@ button:disabled {
 .settings-page {
   display: grid;
   gap: 14px;
+  width: min(100%, 820px);
+  margin: 0 auto;
 }
 
 .search-page {
@@ -258,6 +260,83 @@ button:disabled {
 
 .settings-page[hidden] {
   display: none;
+}
+
+.settings-tabs {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  border: 1px solid #d9e1e8;
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 6px;
+}
+
+.settings-tabs button {
+  min-width: 0;
+  min-height: 38px;
+  padding: 0 6px;
+}
+
+.settings-card {
+  border: 1px solid #d9e1e8;
+  border-radius: 8px;
+  background: #ffffff;
+  overflow: hidden;
+}
+
+.settings-card-body {
+  display: grid;
+  gap: 14px;
+  padding: 14px;
+}
+
+.settings-summary-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin: 0;
+}
+
+.settings-summary-grid dt {
+  color: #667584;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.settings-summary-grid dd {
+  margin: 4px 0 0;
+  color: #17202a;
+  font-size: 14px;
+  font-weight: 800;
+  overflow-wrap: anywhere;
+}
+
+.compact-reader-settings {
+  display: grid;
+  gap: 10px;
+  border-top: 1px solid #eef2f6;
+  padding-top: 12px;
+}
+
+.compact-reader-settings strong {
+  color: #17202a;
+  font-size: 14px;
+}
+
+.compact-reader-settings button,
+.audio-settings-panel .tts-secondary-actions button {
+  min-height: 40px;
+  border: 1px solid #cfd9e3;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #26313d;
+  padding: 0 12px;
+  font-weight: 800;
+}
+
+.audio-settings-panel .tts-secondary-actions {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
 }
 
 .settings-panel {
@@ -1900,11 +1979,6 @@ button:disabled {
     max-width: 1080px;
     margin: 0 auto;
     padding-top: 24px;
-  }
-
-  .settings-page {
-    grid-template-columns: minmax(360px, 1fr) minmax(300px, 0.8fr);
-    align-items: start;
   }
 
   .device-identity-card dl {

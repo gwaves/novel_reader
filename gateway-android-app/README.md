@@ -57,7 +57,7 @@ gateway-android-app/android/app/build/outputs/apk/debug/novel_gateway-v<version>
 npm run gateway:publish-android-apk
 ```
 
-发布后固定下载名为 `ai_novel_reader.apk`，对应 URL 为 `/downloads/ai_novel_reader.apk`。
+发布后固定下载名为 `novel_gateway.apk`，对应 URL 为 `/downloads/novel_gateway.apk`。
 
 版本号规则见 [docs/versioning.md](docs/versioning.md)。App 内、Android 安装信息、Gateway 请求头和 `/downloads/android-app.json` 都使用同一份构建信息。
 

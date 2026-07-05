@@ -188,7 +188,7 @@ public class GatewayAudioPlugin extends Plugin {
   @PluginMethod
   public void downloadAndInstallApk(PluginCall call) {
     String url = call.getString("url");
-    String fileName = call.getString("fileName", "ai_novel_reader.apk");
+    String fileName = call.getString("fileName", "novel_gateway.apk");
 
     if (url == null) {
       call.reject("Missing downloadAndInstallApk parameters.");

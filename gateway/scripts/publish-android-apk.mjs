@@ -5,7 +5,7 @@ import { basename, join, resolve } from 'node:path'
 
 const defaultProjectRoot = resolve(new URL('../..', import.meta.url).pathname)
 const defaultApkDir = join(defaultProjectRoot, 'gateway-android-app/android/app/build/outputs/apk/debug')
-const latestFileName = 'ai_novel_reader.apk'
+const latestFileName = 'novel_gateway.apk'
 const buildInfoPath = join(defaultProjectRoot, 'gateway-android-app/build-info.json')
 
 main().catch((error) => {
@@ -24,7 +24,7 @@ async function main() {
   const version = options.version || buildInfo.versionName
   const downloadsDir = resolve(options.downloadsDir || process.env.GATEWAY_DOWNLOADS_DIR || join(process.env.GATEWAY_DATA_DIR || join(process.env.HOME || '.', '.novel_reader_gateway'), 'downloads'))
   const sourceApk = resolve(options.sourceApk || join(defaultApkDir, `novel_gateway-v${buildInfo.versionName}-debug.apk`))
-  const versionedFileName = `ai_novel_reader-v${safeFileVersion(version)}.apk`
+  const versionedFileName = `novel_gateway-v${safeFileVersion(version)}-debug.apk`
 
   await mkdir(downloadsDir, { recursive: true })
   await copyFile(sourceApk, join(downloadsDir, latestFileName))
@@ -145,5 +145,5 @@ function printUsage() {
 说明：
   默认读取 gateway-android-app 的 debug APK，并发布到 GATEWAY_DOWNLOADS_DIR。
   最新版固定文件名：${latestFileName}
-  同时保留版本文件：ai_novel_reader-v<version>.apk`)
+  同时保留版本文件：novel_gateway-v<version>-debug.apk`)
 }

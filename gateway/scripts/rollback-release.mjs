@@ -6,7 +6,7 @@ import { basename, join, resolve } from 'node:path'
 const defaultGatewayDataDir = process.env.GATEWAY_DATA_DIR || join(process.env.HOME || '.', '.novel_reader_gateway')
 const defaultAudioDir = process.env.GATEWAY_AUDIO_DIR || join(defaultGatewayDataDir, 'audio')
 const defaultDownloadsDir = process.env.GATEWAY_DOWNLOADS_DIR || join(defaultGatewayDataDir, 'downloads')
-const latestApkFileName = 'ai_novel_reader.apk'
+const latestApkFileName = 'novel_gateway.apk'
 const defaultTimeoutMs = 120_000
 
 main().catch((error) => {
@@ -97,7 +97,7 @@ async function rollbackApk(options) {
   const versionedFileName = options.versionedApk
     ? basename(options.versionedApk)
     : options.version
-      ? `ai_novel_reader-v${safeFileVersion(options.version)}.apk`
+      ? `novel_gateway-v${safeFileVersion(options.version)}-debug.apk`
       : ''
   if (!versionedFileName) throw new Error('APK 回滚缺少 --versioned-apk 或 --version')
 
@@ -302,7 +302,7 @@ audio 参数：
 
 APK 参数：
   --downloads-dir <path>     Gateway downloads 目录，默认 ${defaultDownloadsDir}
-  --version <version>        使用 downloads/ai_novel_reader-v<version>.apk
+  --version <version>        使用 downloads/novel_gateway-v<version>-debug.apk
   --versioned-apk <path>     直接指定要恢复的 versioned APK
   --android-app-file <path>  指定要恢复的 android-app.json；未提供时基于现有元数据改写 latest/versioned 字段
 `)

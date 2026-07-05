@@ -11,6 +11,9 @@ data/books/<bookId>/package.json
 audio/books/<bookId>/audio.json
 audio/books/<bookId>/chxxx-.../chapter.mp3
 audio/books/<bookId>/chxxx-.../manifest.json
+data/downloads/android-app.json
+data/downloads/novel_gateway.apk
+data/downloads/novel_gateway-v<versionName>-debug.apk
 ```
 
 ## Identity Rules
@@ -23,6 +26,10 @@ audio/books/<bookId>/chxxx-.../manifest.json
   stable book id.
 - `data/books.json` must include the same stable book id, otherwise Gateway can
   serve the package by direct URL but the mobile library will not list the book.
+- Android Gateway packages must use `novel_gateway.apk` for the stable latest
+  file and `novel_gateway-v<versionName>-debug.apk` for archived builds.
+  `android-app.json` must point `latestFileName` / `latestUrl` and
+  `versionedFileName` / `versionedUrl` at those files.
 
 ## Publish
 

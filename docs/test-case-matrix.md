@@ -140,7 +140,7 @@
 | GW-AUDIO-003 | 音频清理/刷新 | admin 调用清理/刷新 | 文件系统和 admin summary 同步更新 | API + Ops | P1 | Existing |
 | GW-AI-001 | mobile RAG 路由鉴权 | 受信设备请求 `/ai/search`/`rag-answer` | 使用 mobile auth，按可见书库校验 bookId | API | P0 | Existing |
 | GW-AI-002 | admin 上游代理鉴权 | 请求 `/ai/chat`/`embeddings` | 使用 admin auth，不暴露上游 key | API | P0 | Existing |
-| GW-DOWNLOAD-001 | APK 下载 | `/downloads/ai_novel_reader.apk` 存在 | 公开可下载，content-type 正确 | API + Ops | P1 | Existing |
+| GW-DOWNLOAD-001 | APK 下载 | `/downloads/novel_gateway.apk` 存在 | 公开可下载，content-type 正确 | API + Ops | P1 | Existing |
 | GW-DOWNLOAD-002 | 下载路径穿越 | 请求 `%2e%2e/books.json` | 返回拒绝，不泄露文件 | API | P0 | Existing |
 | GW-METRICS-001 | metrics 趋势桶 | 产生请求/下载事件 | `/admin/metrics` 返回真实 request/download buckets | API + Ops | P1 | Existing |
 | GW-EVENTS-001 | events 空状态 | 最近无事件 | 返回空数组，Admin UI 不回退 mock | API + UI | P1 | Existing |
