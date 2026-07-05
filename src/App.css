@@ -2348,6 +2348,33 @@ button.kg-relation-row:hover {
   text-indent: 2em;
 }
 
+.chapter-content .chapter-source-highlight {
+  border-radius: 6px;
+  background: rgba(246, 180, 74, 0.28);
+  box-shadow: 0 0 0 4px rgba(246, 180, 74, 0.18);
+  transition: background 0.18s ease, box-shadow 0.18s ease;
+}
+
+.summary-source-link {
+  display: inline;
+  border: 0;
+  background: none;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  line-height: inherit;
+  padding: 0;
+  text-align: left;
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 3px;
+}
+
+.summary-source-link:hover,
+.summary-source-link:focus-visible {
+  color: #1f6b70;
+}
+
 .chapter-bottom-nav {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));

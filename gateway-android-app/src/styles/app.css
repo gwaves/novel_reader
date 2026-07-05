@@ -1122,6 +1122,26 @@ button:disabled {
   line-height: 1.55;
 }
 
+.summary-source-link {
+  display: inline;
+  border: 0;
+  background: none;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  line-height: inherit;
+  padding: 0;
+  text-align: left;
+  text-decoration: underline;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 3px;
+}
+
+.summary-source-link:active,
+.summary-source-link:focus-visible {
+  color: #1f6b70;
+}
+
 .summary-short {
   color: #26313d !important;
   font-weight: 700;
@@ -1165,6 +1185,14 @@ button:disabled {
   margin: 0 0 1em;
 }
 
+.chapter-text .chapter-source-highlight,
+.chapter-text .speech-segment.chapter-source-highlight {
+  border-radius: 5px;
+  background: rgba(255, 200, 112, 0.45);
+  box-shadow: 0 0 0 3px rgba(255, 200, 112, 0.24);
+  transition: background 0.16s ease, box-shadow 0.16s ease;
+}
+
 .chapter-text .highlighted-text {
   white-space: pre-wrap;
 }
@@ -1190,6 +1218,12 @@ button:disabled {
 .reader-card.dark .speech-segment.active {
   background: #d6a85f;
   color: #17202a;
+}
+
+.reader-card.dark .chapter-text .chapter-source-highlight,
+.reader-card.dark .chapter-text .speech-segment.chapter-source-highlight {
+  background: rgba(214, 168, 95, 0.5);
+  box-shadow: 0 0 0 3px rgba(214, 168, 95, 0.25);
 }
 
 .audio-meta {

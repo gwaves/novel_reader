@@ -8,6 +8,11 @@ import { homedir } from 'node:os'
 import { basename, dirname, join, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
+import {
+  locateSummaryKeyPointSources,
+  normalizeSummaryKeyPointSources,
+  summarizeKeyPointSourceCoverage,
+} from '../../scripts/summary-source-locator.mjs'
 
 const defaultRunRoot = 'tmp/production-pipeline/runs'
 const defaultMainDbPath = '~/.novel_reader/novel_reader.sqlite'
@@ -54,6 +59,10 @@ async function main() {
   }
   if (command === 'summary') {
     await runSummary(options)
+    return
+  }
+  if (command === 'summary-locate') {
+    await runSummaryLocate(options)
     return
   }
   if (command === 'kg') {
@@ -758,6 +767,9 @@ async function runPackage(options) {
     const bookPackage = buildGatewayBookPackage(book, generatedAt)
     const qualityReport = buildPackageQualityReport(book, bookPackage, {
       emptyKgMinChars: clampInteger(options.qualityEmptyKgMinChars, 1000, 0, Number.MAX_SAFE_INTEGER),
+      minKeyPointSourceCoverage: Number.isFinite(Number(options.minKeyPointSourceCoverage ?? options.min_key_point_source_coverage))
+        ? Number(options.minKeyPointSourceCoverage ?? options.min_key_point_source_coverage)
+        : 0.8,
     })
     const gatewayDataDir = join(run.artifactsDir, 'gateway-data')
     const packagePath = join(gatewayDataDir, 'books', bookId, 'package.json')
@@ -786,6 +798,9 @@ async function runPackage(options) {
         summaryCount: book.summaries.length,
         summaryEmbeddingCount: book.embeddingCoverage.summary.embeddedSummaries,
         chunkEmbeddingCount: book.embeddingCoverage.chunks.embeddedChunks,
+        keyPointCount: bookPackage.summarySourceCoverage?.keyPointCount ?? 0,
+        keyPointSourceCount: bookPackage.summarySourceCoverage?.keyPointSourceCount ?? 0,
+        keyPointSourceCoverage: bookPackage.summarySourceCoverage?.keyPointSourceCoverage ?? 1,
         wordCount: bookPackage.book.wordCount,
         qualityStatus: qualityReport.status,
         qualityErrors: qualityReport.errors.length,
@@ -820,6 +835,7 @@ async function runPackage(options) {
     console.log(`book: ${bookId} ${book.title}`)
     console.log(`chapters: ${book.chapters.length}`)
     console.log(`summaries: ${book.summaries.length}`)
+    console.log(`key point sources: ${bookPackage.summarySourceCoverage.keyPointSourceCount}/${bookPackage.summarySourceCoverage.keyPointCount}`)
     console.log(`summary embeddings: ${book.embeddingCoverage.summary.embeddedSummaries}/${book.summaries.length}`)
     console.log(`chunk embeddings: ${book.embeddingCoverage.chunks.embeddedChunks}`)
     console.log(`quality: ${qualityReport.status} (${qualityReport.errors.length} errors, ${qualityReport.warnings.length} warnings)`)
@@ -1002,6 +1018,150 @@ async function runSummary(options) {
           error: error.message,
         },
       },
+    })
+    throw error
+  }
+}
+
+async function runSummaryLocate(options) {
+  const bookId = required(options.bookId, 'summary-locate requires --book-id <id>')
+  const model = required(options.model, 'summary-locate requires --model <name>')
+  const provider = String(options.provider || 'openai-compatible').trim()
+  const baseUrl = required(options.baseUrl, 'summary-locate requires --base-url <url>')
+  const mainDbPath = expandPath(options.mainDb || options.mainDbPath || defaultMainDbPath)
+  const run = await createRun({ command: 'summary-locate', options: redactSensitiveOptions(options), mainDbPath, bookId })
+  const startedAt = new Date().toISOString()
+
+  try {
+    const concurrency = clampInteger(options.concurrency, 4, 1, 32)
+    const limit = clampInteger(options.limit, 0, 0, Number.MAX_SAFE_INTEGER)
+    const timeoutMs = clampInteger(options.timeoutMs, 300_000, 1_000, 900_000)
+    const maxAttempts = clampInteger(options.maxAttempts || options.retries, 3, 1, 10)
+    const force = isFlagEnabled(options.force)
+    const llmConfig = {
+      provider,
+      model,
+      baseUrl,
+      apiKey: options.apiKey || process.env.LLM_API_KEY || process.env.OPENAI_API_KEY || '',
+      temperature: Number.isFinite(Number(options.temperature)) ? Number(options.temperature) : 0,
+      thinkingEnabled: !isFlagEnabled(options.disableThinking),
+      timeoutMs,
+      maxAttempts,
+      contentLimit: clampInteger(options.contentLimit || options.content_limit, 14_000, 1_000, 20_000),
+    }
+
+    const db = await openMainDbForSummary(mainDbPath)
+    let targets
+    try {
+      targets = readSummaryLocateTargets(db, { bookId, force, limit })
+    } finally {
+      db.close()
+    }
+
+    const results = { completed: 0, failed: 0, total: targets.length, located: 0, keyPoints: 0, errors: [] }
+    const progress = createStageProgressLogger({
+      stage: 'summary-locate',
+      total: targets.length,
+      getProgress: () => ({ completed: results.completed, failed: results.failed }),
+    })
+    progress.start()
+    if (!isFlagEnabled(options.dryRun) && targets.length > 0) {
+      await runPool(targets, concurrency, async (target) => {
+        try {
+          const keyPoints = safeJsonParse(target.keyPointsJson, []).map(String).filter(Boolean)
+          const hints = await generateSummarySourceHints(target, keyPoints, llmConfig)
+          const keyPointSources = locateSummaryKeyPointSources(target.content, keyPoints, hints)
+          const writeDb = await openMainDbForSummary(mainDbPath)
+          try {
+            writeSummaryKeyPointSources(writeDb, target.chapterId, keyPointSources)
+          } finally {
+            writeDb.close()
+          }
+          results.completed += 1
+          results.keyPoints += keyPoints.length
+          results.located += keyPointSources.length
+        } catch (error) {
+          results.failed += 1
+          pushLimited(results.errors, {
+            chapterId: target.chapterId,
+            chapterIndex: target.chapterIndex,
+            error: error instanceof Error ? error.message : String(error),
+          })
+        }
+        progress.tick()
+      })
+    } else {
+      for (const target of targets) {
+        const keyPoints = safeJsonParse(target.keyPointsJson, []).map(String).filter(Boolean)
+        const keyPointSources = normalizeSummaryKeyPointSources(safeJsonParse(target.keyPointSourcesJson, []), keyPoints)
+        results.keyPoints += keyPoints.length
+        results.located += keyPointSources.length
+      }
+    }
+    progress.finish()
+
+    const finishedAt = new Date().toISOString()
+    const report = {
+      schemaVersion: 1,
+      generatedAt: finishedAt,
+      bookId,
+      dryRun: isFlagEnabled(options.dryRun),
+      targets: results.total,
+      completed: results.completed,
+      failed: results.failed,
+      keyPointCount: results.keyPoints,
+      keyPointSourceCount: results.located,
+      keyPointSourceCoverage: results.keyPoints > 0 ? results.located / results.keyPoints : 1,
+      errors: results.errors,
+    }
+    const reportPath = join(run.artifactsDir, 'summary-locate-report.json')
+    await writeJson(reportPath, report)
+    await initializeItemsDb(run.itemsDbPath)
+    await recordStageItem(run.itemsDbPath, {
+      stage: 'summary-locate',
+      itemId: bookId,
+      itemType: 'book',
+      status: results.failed > 0 ? 'failed' : 'completed',
+      attempts: 1,
+      startedAt,
+      finishedAt,
+      metadata: report,
+    })
+    await writeRunJson(run.runJsonPath, {
+      runId: run.runId,
+      command: 'summary-locate',
+      status: results.failed > 0 ? 'failed' : 'completed',
+      createdAt: run.createdAt,
+      updatedAt: finishedAt,
+      mainDbPath,
+      job: { bookId },
+      stages: {
+        summaryLocate: {
+          status: results.failed > 0 ? 'failed' : 'completed',
+          startedAt,
+          finishedAt,
+          message: `located ${results.located}/${results.keyPoints} key point source ranges.`,
+          artifacts: { summaryLocateReport: relativeRunPath(run.rootDir, reportPath) },
+        },
+      },
+    })
+    console.log(`run: ${run.runId}`)
+    console.log(`book: ${bookId}`)
+    console.log(`summary locate targets: ${results.total}`)
+    console.log(`key point sources: ${results.located}/${results.keyPoints}`)
+    console.log(`report: ${reportPath}`)
+    console.log(`runDir: ${run.rootDir}`)
+  } catch (error) {
+    const finishedAt = new Date().toISOString()
+    await writeRunJson(run.runJsonPath, {
+      runId: run.runId,
+      command: 'summary-locate',
+      status: 'failed',
+      createdAt: run.createdAt,
+      updatedAt: finishedAt,
+      mainDbPath,
+      job: { bookId },
+      stages: { summaryLocate: { status: 'failed', startedAt, finishedAt, error: error.message } },
     })
     throw error
   }
@@ -1638,6 +1798,28 @@ async function runVerify(options) {
         actual: remoteSummaries.map((summary) => summary.chapterId),
         expected: expected.package.summaries.map((summary) => summary.chapterId),
       }))
+      const expectedSourceCoverage = summarizeKeyPointSourceCoverage(expected.package.summaries)
+      const remoteSourceCoverage = summarizeKeyPointSourceCoverage(remoteSummaries)
+      checks.push(assertCheck('package.summaryKeyPointSourceCoverage', sameJson(remoteSourceCoverage, expectedSourceCoverage), {
+        actual: remoteSourceCoverage,
+        expected: expectedSourceCoverage,
+      }))
+      const remoteChapterById = new Map(remoteChapters.map((chapter) => [chapter.id, chapter]))
+      const invalidSources = []
+      for (const summary of remoteSummaries.slice(0, clampInteger(options.summarySourceSampleCount || options.summary_source_samples, 20, 0, 100))) {
+        const chapter = remoteChapterById.get(summary.chapterId)
+        const content = String(chapter?.content || '')
+        const sources = normalizeSummaryKeyPointSources(summary.keyPointSources, summary.keyPoints)
+        for (const source of sources) {
+          const actualQuote = content.slice(source.startOffset, source.endOffset)
+          if (!actualQuote || (source.quote && actualQuote !== source.quote)) {
+            invalidSources.push({ chapterId: summary.chapterId, index: source.index, expected: source.quote, actual: actualQuote })
+          }
+        }
+      }
+      checks.push(assertCheck('package.summaryKeyPointSourceOffsets', invalidSources.length === 0, {
+        invalidSources,
+      }))
     }
     if (expected.package.embeddings?.coverage) {
       checks.push(assertCheck(
@@ -1970,10 +2152,15 @@ function buildGatewayBookPackage(book, generatedAt) {
     short: String(summary.short || ''),
     detail: String(summary.detail || ''),
     keyPoints: safeJsonParse(summary.keyPointsJson, []),
+    keyPointSources: normalizeSummaryKeyPointSources(
+      safeJsonParse(summary.keyPointSourcesJson, []),
+      safeJsonParse(summary.keyPointsJson, []),
+    ),
     skippable: summary.skippable,
     generatedBy: summary.generatedBy,
     updatedAt: summary.updatedAt || generatedAt,
   }))
+  const summarySourceCoverage = summarizeKeyPointSourceCoverage(summaries)
   const knowledgeGraph = normalizeKnowledgeGraphForPackage(book.knowledgeGraph)
   const embeddingCoverage = normalizeEmbeddingCoverage(book.embeddingCoverage, chapters.length, summaries.length)
   const wordCount = chapters.reduce((sum, chapter) => sum + chapter.wordCount, 0)
@@ -1988,6 +2175,7 @@ function buildGatewayBookPackage(book, generatedAt) {
       wordCount,
       summaryCoverage: coverageRatio(summaries.length, chapters.length),
       embeddingCoverage: embeddingCoverage.summary.coverage,
+      keyPointSourceCoverage: summarySourceCoverage.keyPointSourceCoverage,
       updatedAt: book.updatedAt || book.importedAt || generatedAt,
     },
     chapters,
@@ -1998,17 +2186,22 @@ function buildGatewayBookPackage(book, generatedAt) {
       summaries: book.embeddings.summaries,
       chunks: book.embeddings.chunks,
     },
+    summarySourceCoverage,
   }
 }
 
 function readSummariesForPackage(db, bookId) {
   if (!sqliteTableExists(db, 'summaries')) return []
+  const sourceColumn = sqliteColumnExists(db, 'summaries', 'key_point_sources_json')
+    ? 's.key_point_sources_json'
+    : "'[]'"
   return db.prepare(`
     SELECT
       s.chapter_id AS chapterId,
       s.short,
       s.detail,
       s.key_points_json AS keyPointsJson,
+      ${sourceColumn} AS keyPointSourcesJson,
       s.skippable,
       s.generated_by AS generatedBy,
       s.updated_at AS updatedAt
@@ -2267,8 +2460,18 @@ function buildPackageQualityReport(book, bookPackage, options = {}) {
     title: row.title,
     error: row.error,
   }))
+  const summarySourceCoverage = bookPackage.summarySourceCoverage || summarizeKeyPointSourceCoverage(safeArray(bookPackage.summaries))
+  const minKeyPointSourceCoverage = Math.max(0, Math.min(1, Number(options.minKeyPointSourceCoverage ?? 0.8)))
   const errors = []
   const warnings = []
+  if (summarySourceCoverage.keyPointCount > 0 && summarySourceCoverage.keyPointSourceCoverage < minKeyPointSourceCoverage) {
+    errors.push({
+      code: 'summary_key_point_source_coverage_low',
+      message: `Summary key point source coverage ${summarySourceCoverage.keyPointSourceCount}/${summarySourceCoverage.keyPointCount} is below ${(minKeyPointSourceCoverage * 100).toFixed(0)}%.`,
+      coverage: summarySourceCoverage,
+      threshold: minKeyPointSourceCoverage,
+    })
+  }
   if (completedKgChapterIds.size > 0 && missingKgMentionChapters.length > 0) {
     errors.push({
       code: 'kg_mention_coverage_incomplete',
@@ -2308,6 +2511,9 @@ function buildPackageQualityReport(book, bookPackage, options = {}) {
     chapterCount: chapters.length,
     checks: {
       summaryCoverage: bookPackage.book?.summaryCoverage ?? coverageRatio(safeArray(bookPackage.summaries).length, chapters.length),
+      summaryKeyPointSourceCoverage: summarySourceCoverage.keyPointSourceCoverage,
+      summaryKeyPointSources: summarySourceCoverage,
+      minKeyPointSourceCoverage,
       embeddingCoverage: bookPackage.embeddings?.coverage || {},
       kgMentionCoverage: coverageRatio(kgMentionedChapterIds.size, completedKgChapterIds.size || chapters.length),
       kgMentionedChapters: kgMentionedChapterIds.size,
@@ -2462,11 +2668,17 @@ function ensureSummarySchema(db) {
       short TEXT NOT NULL,
       detail TEXT NOT NULL,
       key_points_json TEXT NOT NULL,
+      key_point_sources_json TEXT NOT NULL DEFAULT '[]',
       skippable TEXT NOT NULL,
       generated_by TEXT NOT NULL,
       updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
   `)
+  try {
+    db.exec(`ALTER TABLE summaries ADD COLUMN key_point_sources_json TEXT NOT NULL DEFAULT '[]'`)
+  } catch {
+    // column may already exist
+  }
 }
 
 function readSummaryTargets(db, { bookId, force, limit }) {
@@ -2487,14 +2699,41 @@ function readSummaryTargets(db, { bookId, force, limit }) {
   return limit > 0 ? rows.slice(0, limit) : rows
 }
 
+function readSummaryLocateTargets(db, { bookId, force, limit }) {
+  ensureSummarySchema(db)
+  const rows = db.prepare(`
+    SELECT
+      c.id AS chapterId,
+      c.book_id AS bookId,
+      c.chapter_index AS chapterIndex,
+      c.title,
+      c.content,
+      c.word_count AS wordCount,
+      s.key_points_json AS keyPointsJson,
+      s.key_point_sources_json AS keyPointSourcesJson
+    FROM summaries s
+    JOIN chapters c ON c.id = s.chapter_id
+    WHERE c.book_id = ?
+      AND (
+        ? = 1
+        OR s.key_point_sources_json IS NULL
+        OR s.key_point_sources_json = ''
+        OR s.key_point_sources_json = '[]'
+      )
+    ORDER BY c.chapter_index, c.title
+  `).all(bookId, force ? 1 : 0).map(plainObject)
+  return limit > 0 ? rows.slice(0, limit) : rows
+}
+
 function writeSummary(db, chapterId, summary) {
   db.prepare(`
-    INSERT INTO summaries (chapter_id, short, detail, key_points_json, skippable, generated_by, updated_at)
-    VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+    INSERT INTO summaries (chapter_id, short, detail, key_points_json, key_point_sources_json, skippable, generated_by, updated_at)
+    VALUES (?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
     ON CONFLICT(chapter_id) DO UPDATE SET
       short = excluded.short,
       detail = excluded.detail,
       key_points_json = excluded.key_points_json,
+      key_point_sources_json = excluded.key_point_sources_json,
       skippable = excluded.skippable,
       generated_by = excluded.generated_by,
       updated_at = CURRENT_TIMESTAMP
@@ -2503,9 +2742,19 @@ function writeSummary(db, chapterId, summary) {
     summary.short,
     summary.detail,
     JSON.stringify(summary.keyPoints),
+    JSON.stringify(normalizeSummaryKeyPointSources(summary.keyPointSources, summary.keyPoints)),
     summary.skippable,
     summary.generatedBy,
   )
+}
+
+function writeSummaryKeyPointSources(db, chapterId, keyPointSources) {
+  ensureSummarySchema(db)
+  db.prepare(`
+    UPDATE summaries
+    SET key_point_sources_json = ?, updated_at = CURRENT_TIMESTAMP
+    WHERE chapter_id = ?
+  `).run(JSON.stringify(normalizeSummaryKeyPointSources(keyPointSources)), chapterId)
 }
 
 function ensureKgSchema(db) {
@@ -3313,6 +3562,21 @@ async function inspectJobPreflight({ checks, job, rawJob, jobPath, mainDbPath })
   } else {
     addDoctorCheck(checks, 'mainDb.exists', existsSync(mainDbPath), mainDbPath)
   }
+  if (existsSync(mainDbPath) && statSync(mainDbPath).size > 0) {
+    try {
+      const DatabaseSync = await loadDatabaseSync()
+      const db = new DatabaseSync(mainDbPath, { readOnly: true })
+      try {
+        if (sqliteTableExists(db, 'summaries')) {
+          addDoctorCheck(checks, 'summary.keyPointSourcesColumn', sqliteColumnExists(db, 'summaries', 'key_point_sources_json'), 'summaries.key_point_sources_json')
+        }
+      } finally {
+        db.close()
+      }
+    } catch (error) {
+      addDoctorCheck(checks, 'summary.keyPointSourcesColumn', false, error instanceof Error ? error.message : String(error))
+    }
+  }
 
   const fakeRunInfo = { rootDir: dirname(jobPath) }
   for (const stage of job.stages) {
@@ -3452,7 +3716,7 @@ function buildStageExecutionGroups(stages) {
   const groups = []
   const remaining = [...stages]
   const parallelAfterImport = new Set(['summary', 'kg', 'chunkEmbedding', 'summaryEmbedding', 'audio'])
-  const barriers = new Set(['package', 'publish', 'verify'])
+  const barriers = new Set(['summary-locate', 'package', 'publish', 'verify'])
   let index = 0
   while (index < remaining.length) {
     const stage = remaining[index]
@@ -3621,6 +3885,29 @@ function buildStageArgs(stage, job, mainDbPath, runInfo, stageOptions = {}) {
     if (summary.limit) args.push('--limit', String(summary.limit))
     if (isFlagEnabled(summary.force)) args.push('--force')
     if (summary.thinkingEnabled === false || isFlagEnabled(summary.disableThinking)) args.push('--disable-thinking')
+    return args.filter((arg) => arg !== '')
+  }
+  if (stage === 'summary-locate') {
+    const summaryLocate = { ...(job.llm || {}), ...(job.summary || {}), ...(job.summaryLocate || job.summary_locate || {}) }
+    const args = [
+      'summary-locate',
+      ...common,
+      '--provider',
+      summaryLocate.provider || 'openai-compatible',
+      '--base-url',
+      required(summaryLocate.baseUrl || summaryLocate.base_url, 'summary-locate stage requires job.llm.baseUrl or job.summaryLocate.baseUrl'),
+      '--model',
+      required(summaryLocate.model, 'summary-locate stage requires job.llm.model or job.summaryLocate.model'),
+      '--concurrency',
+      String(stageOptions.concurrency ?? summaryLocate.concurrency ?? 4),
+    ]
+    if (summaryLocate.apiKey) args.push('--api-key', summaryLocate.apiKey)
+    if (summaryLocate.temperature !== undefined) args.push('--temperature', String(summaryLocate.temperature))
+    if (summaryLocate.timeoutMs) args.push('--timeout-ms', String(summaryLocate.timeoutMs))
+    if (summaryLocate.maxAttempts || summaryLocate.retries) args.push('--max-attempts', String(summaryLocate.maxAttempts || summaryLocate.retries))
+    if (summaryLocate.limit) args.push('--limit', String(summaryLocate.limit))
+    if (isFlagEnabled(summaryLocate.force)) args.push('--force')
+    if (summaryLocate.thinkingEnabled === false || isFlagEnabled(summaryLocate.disableThinking)) args.push('--disable-thinking')
     return args.filter((arg) => arg !== '')
   }
   if (stage === 'kg') {
@@ -4114,8 +4401,10 @@ async function generateChapterSummary(chapter, config) {
     )
   }, config)
   const parsed = parseSummaryResponse(raw)
+  const keyPointSources = locateSummaryKeyPointSources(chapter.content, parsed.keyPoints, parsed.keyPointSourceHints)
   return {
     ...parsed,
+    keyPointSources,
     generatedBy: String(config.provider || 'openai-compatible').toLowerCase() === 'ollama' ? 'ollama' : 'openai',
   }
 }
@@ -4197,6 +4486,7 @@ function buildSummaryPrompt(chapter, thinkingEnabled) {
 - short: 一句话概括本章核心情节（不超过 60 字）。
 - detail: 详细概要，包含起因、经过、结果（150-300 字）。
 - keyPoints: 字符串数组，列出本章 3-6 个必须记住的关键信息点。
+- keyPointSources: 数组，必须与 keyPoints 按 index 对齐。每项包含 index、text、quote；quote 必须是本章正文中能支撑该要点的一小段连续原文，尽量 15-80 字，不要编造，不要给 offset。
 - skippable: 判断本章是否可跳读。如果是过渡章、纯回忆、重复描写，返回"可跳读：简要说明原因"；否则返回"不可跳读：简要说明原因"。
 
 只返回 JSON，不要加 markdown 代码块，不要解释。
@@ -4273,6 +4563,7 @@ function parseSummaryResponse(raw) {
       short: String(parsed.short || '模型没有返回一句话概要。'),
       detail: String(parsed.detail || '模型没有返回详细概要。'),
       keyPoints: Array.isArray(parsed.keyPoints) ? parsed.keyPoints.slice(0, 6).map(String) : [],
+      keyPointSourceHints: Array.isArray(parsed.keyPointSources) ? parsed.keyPointSources.slice(0, 6) : [],
       skippable: String(parsed.skippable || '暂无跳读建议。'),
     }
   } catch {
@@ -4280,9 +4571,75 @@ function parseSummaryResponse(raw) {
       short: '模型已返回内容，但不是标准 JSON。',
       detail: String(raw || '').slice(0, 600),
       keyPoints: [],
+      keyPointSourceHints: [],
       skippable: '请重试，或换一个更擅长中文指令的模型。',
     }
   }
+}
+
+async function generateSummarySourceHints(chapter, keyPoints, config) {
+  if (!keyPoints.length) return []
+  const prompt = buildSummaryLocatePrompt(chapter, keyPoints, config)
+  const raw = await retryTransientRequest(async () => {
+    if (String(config.provider || '').toLowerCase() === 'ollama') {
+      return callOllamaGenerate(prompt, config)
+    }
+    return callOpenAICompatibleChat(
+      [
+        { role: 'system', content: '你是长篇网络小说文本定位助手。你必须只输出符合要求的 JSON。' },
+        { role: 'user', content: prompt },
+      ],
+      config,
+    )
+  }, config)
+  return parseSummaryLocateResponse(raw)
+}
+
+function buildSummaryLocatePrompt(chapter, keyPoints, config) {
+  const thinkingInstruction = config.thinkingEnabled
+    ? '请先用 /think 对照要点和正文，但最终输出必须是 JSON，不要输出任何其他内容。'
+    : '请直接输出 JSON，不要输出任何推理过程。'
+  return `${thinkingInstruction}
+
+请为下面每条章节摘要要点，在本章正文中找一段能直接支撑它的连续原文 quote。只返回 JSON：
+{
+  "keyPointSources": [
+    {"index": 0, "text": "原要点", "quote": "正文中的连续原文"}
+  ]
+}
+
+要求：
+- index 必须对应输入 keyPoints 的序号。
+- quote 必须来自正文原文，尽量 15-80 字。
+- 不要返回 offset，不要改写 quote。
+- 找不到可靠原文时，该项 quote 为空字符串。
+
+章节标题：${chapter.title}
+
+keyPoints:
+${keyPoints.map((point, index) => `${index}. ${point}`).join('\n')}
+
+正文：
+${String(chapter.content || '').slice(0, configContentLimit(config))}`
+}
+
+function parseSummaryLocateResponse(raw) {
+  const jsonText = String(raw || '')
+    .trim()
+    .replace(/^```json\s*/i, '')
+    .replace(/^```\s*/i, '')
+    .replace(/```$/i, '')
+    .trim()
+  try {
+    const parsed = JSON.parse(jsonText)
+    return Array.isArray(parsed.keyPointSources) ? parsed.keyPointSources : []
+  } catch {
+    return []
+  }
+}
+
+function configContentLimit(config) {
+  return clampInteger(config?.contentLimit, 14_000, 1_000, 20_000)
 }
 
 function parseKgResponse(raw) {
@@ -4837,6 +5194,7 @@ Usage:
   npm run production-pipeline -- import --file <path> [--book-id <id>] [--title <title>] [--dry-run] [--replace]
   npm run production-pipeline -- package --book-id <id>
   npm run production-pipeline -- summary --book-id <id> --provider <openai|ollama> --base-url <url> --model <name>
+  npm run production-pipeline -- summary-locate --book-id <id> --provider <openai|ollama> --base-url <url> --model <name>
   npm run production-pipeline -- kg --book-id <id> --provider <openai|ollama> --base-url <url> --model <name>
   npm run production-pipeline -- audio --book-id <id> --source-root <path>
   npm run production-pipeline -- audio --book-id <id> --tts-config <path> [--chapters 1-10]
@@ -4859,6 +5217,7 @@ Options:
   --empty-min-chars    KG quality gate: empty extraction fails at or above this chapter content length. Default: 1000.
   --allow-empty-kg     Allow KG to complete with an empty extraction for non-trivial chapters.
   --allow-quality-issues Allow package to write artifacts even when quality checks fail.
+  --min-key-point-source-coverage Package quality gate for clickable summary source coverage. Default: 0.8.
   --mode               Embedding mode: all, chunks, or summaries. Default: all.
   --json               Print raw run JSON for status.
   --log-lines          Include this many child log tail lines in status. Default: 8.

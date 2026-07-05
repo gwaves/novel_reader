@@ -316,6 +316,7 @@ describe('summary generation helpers', () => {
       short: '林青离村遇见白衣客。',
       detail: '林青第一次离开山村，在渡口遇见白衣客，并得到后续线索。',
       keyPoints: ['林青离村', '遇见白衣客', '获得线索'],
+      keyPointSources: [],
       skippable: '不可跳读：主线人物登场。',
       generatedBy: 'openai',
     })

@@ -50,6 +50,31 @@ type Chapter = {
   chapterIndex?: number
 }
 
+type SummaryKeyPointSource = {
+  index: number
+  text: string
+  startOffset: number
+  endOffset: number
+  quote?: string
+  confidence?: number
+  locator?: string
+}
+
+type SummaryKeyPointItem = {
+  text: string
+  source?: SummaryKeyPointSource
+}
+
+type SourceRange = {
+  startOffset: number
+  endOffset: number
+}
+
+type SourceParagraph = SourceRange & {
+  text: string
+  key: string
+}
+
 export type AudioChapter = {
   chapterId: string
   title?: string
@@ -387,6 +412,7 @@ function App() {
   const [activeSpeechSegmentId, setActiveSpeechSegmentId] = useState<string | null>(null)
   const [speechAutoFollowSuspended, setSpeechAutoFollowSuspended] = useState(false)
   const [cacheVersion, setCacheVersion] = useState(0)
+  const [summaryHighlightRange, setSummaryHighlightRange] = useState<SourceRange | null>(null)
   const [clearingCacheKey, setClearingCacheKey] = useState<string | null>(null)
 
   const displayLocalBooks = useMemo(
@@ -465,6 +491,7 @@ function App() {
   const nextChapter =
     currentChapterPosition >= 0 && currentChapterPosition < chapters.length - 1 ? chapters[currentChapterPosition + 1] : null
   const lastReaderCenterTapAtRef = useRef(0)
+  const readerCardRef = useRef<HTMLElement | null>(null)
   const chapterAudioRef = useRef<HTMLAudioElement | null>(null)
   const chapterAudioTimelineRef = useRef<ChapterAudioTimelineItem[]>([])
   const activeAudioEntryKeyRef = useRef<string | null>(null)
@@ -487,6 +514,7 @@ function App() {
   const speechFollowTimerRef = useRef<number | null>(null)
   const isSpeechAutoScrollingRef = useRef(false)
   const playbackEngineTouchedRef = useRef(false)
+  const summaryHighlightTimerRef = useRef<number | null>(null)
   const deviceMetadata = useMemo(() => getDeviceMetadata(appVersion), [])
   const audioSyncCancelRequestedRef = useRef(false)
   const audioDownloadQueueRef = useRef<AudioDownloadQueueItem[]>([])
@@ -505,6 +533,31 @@ function App() {
   useEffect(() => {
     cloudBookCountRef.current = books.length
   }, [books.length])
+
+  useEffect(() => {
+    setSummaryHighlightRange(null)
+    if (summaryHighlightTimerRef.current) {
+      window.clearTimeout(summaryHighlightTimerRef.current)
+      summaryHighlightTimerRef.current = null
+    }
+  }, [currentChapter?.id])
+
+  function jumpToSummarySource(source: SummaryKeyPointSource) {
+    if (!readerCardRef.current) return
+
+    const target = findSourceElement(readerCardRef.current, source)
+    setSummaryHighlightRange({ startOffset: source.startOffset, endOffset: source.endOffset })
+
+    if (summaryHighlightTimerRef.current) {
+      window.clearTimeout(summaryHighlightTimerRef.current)
+    }
+    summaryHighlightTimerRef.current = window.setTimeout(() => {
+      setSummaryHighlightRange(null)
+      summaryHighlightTimerRef.current = null
+    }, 2000)
+
+    target?.scrollIntoView({ behavior: 'smooth', block: 'center', inline: 'nearest' })
+  }
 
   useEffect(() => {
     if (!audioUrl || !activeTimelineEntry) {
@@ -2521,20 +2574,26 @@ function App() {
               {message ? <div className={`status-line reader-status status-${connectionState}`}>{message}</div> : null}
               <article
                 className={`reader-card ${readerSettings.background}`}
+                ref={readerCardRef}
                 onClick={handleReaderTap}
                 style={{ '--reader-font-size': `${readerSettings.fontSize}px` } as CSSProperties}
               >
                 <h2>{currentChapter.title}</h2>
-                <ChapterSummary bookPackage={bookPackage} chapter={currentChapter} />
+                <ChapterSummary bookPackage={bookPackage} chapter={currentChapter} onJumpToSource={jumpToSummarySource} />
                 <div className="chapter-text">
                   {speechChapter ? (
                     <SpeechTextContent
                       speechChapter={speechChapter}
                       activeSegmentId={activeSpeechSegmentId}
                       activeEntry={activeTimelineEntry}
+                      summaryHighlightRange={summaryHighlightRange}
                     />
                   ) : (
-                    <TextContent text={chapterContent(currentChapter)} activeEntry={activeTimelineEntry} />
+                    <TextContent
+                      text={chapterContent(currentChapter)}
+                      activeEntry={activeTimelineEntry}
+                      summaryHighlightRange={summaryHighlightRange}
+                    />
                   )}
                 </div>
               </article>
@@ -3590,11 +3649,73 @@ function isPresent<T>(value: T | null | undefined): value is T {
   return value != null
 }
 
-function TextContent({ text, activeEntry }: { text: string; activeEntry?: AudioTimelineEntry | null }) {
+function splitSourceParagraphs(text: string): SourceParagraph[] {
+  const paragraphs: SourceParagraph[] = []
+  const lines = text.split('\n')
+  let offset = 0
+
+  lines.forEach((line, index) => {
+    const startOffset = offset
+    const normalized = line.replace(/\r$/, '')
+    const trimmed = normalized.trim()
+    const trimStart = normalized.indexOf(trimmed)
+    if (trimmed) {
+      const paragraphStart = startOffset + Math.max(0, trimStart)
+      paragraphs.push({
+        key: `${index}-${paragraphStart}`,
+        text: trimmed,
+        startOffset: paragraphStart,
+        endOffset: paragraphStart + trimmed.length,
+      })
+    }
+    offset += line.length + 1
+  })
+
+  return paragraphs
+}
+
+function rangesOverlap(left: SourceRange, right: SourceRange | null | undefined) {
+  return Boolean(right && left.startOffset < right.endOffset && left.endOffset > right.startOffset)
+}
+
+function findSourceElement(container: HTMLElement, source: SourceRange) {
+  const elements = Array.from(container.querySelectorAll<HTMLElement>('[data-source-start][data-source-end]'))
+  return (
+    elements.find((element) => {
+      const start = Number(element.dataset.sourceStart)
+      const end = Number(element.dataset.sourceEnd)
+      return Number.isFinite(start) && Number.isFinite(end) && start <= source.startOffset && end >= source.endOffset
+    }) ??
+    elements.find((element) => {
+      const start = Number(element.dataset.sourceStart)
+      const end = Number(element.dataset.sourceEnd)
+      return Number.isFinite(start) && Number.isFinite(end) && start <= source.startOffset && end > source.startOffset
+    }) ??
+    null
+  )
+}
+
+function TextContent({
+  text,
+  activeEntry,
+  summaryHighlightRange,
+}: {
+  text: string
+  activeEntry?: AudioTimelineEntry | null
+  summaryHighlightRange?: SourceRange | null
+}) {
   const highlighted = splitHighlightedText(text, activeEntry)
   if (highlighted) {
     return (
-      <p className="highlighted-text">
+      <p
+        className={
+          rangesOverlap({ startOffset: 0, endOffset: text.length }, summaryHighlightRange)
+            ? 'highlighted-text chapter-source-highlight'
+            : 'highlighted-text'
+        }
+        data-source-start={0}
+        data-source-end={text.length}
+      >
         <span>{highlighted.before}</span>
         <mark data-audio-highlight-anchor="true">{highlighted.active}</mark>
         <span>{highlighted.after}</span>
@@ -3602,17 +3723,21 @@ function TextContent({ text, activeEntry }: { text: string; activeEntry?: AudioT
     )
   }
 
-  const paragraphs = text
-    .split(/\n{2,}|\r?\n/)
-    .map((paragraph) => paragraph.trim())
-    .filter(Boolean)
+  const paragraphs = splitSourceParagraphs(text)
   if (paragraphs.length === 0) {
     return <p className="muted-text">这一章没有正文。</p>
   }
   return (
     <>
-      {paragraphs.map((paragraph, index) => (
-        <p key={`${index}-${paragraph.slice(0, 16)}`}>{paragraph}</p>
+      {paragraphs.map((paragraph) => (
+        <p
+          className={rangesOverlap(paragraph, summaryHighlightRange) ? 'chapter-source-highlight' : undefined}
+          data-source-start={paragraph.startOffset}
+          data-source-end={paragraph.endOffset}
+          key={paragraph.key}
+        >
+          {paragraph.text}
+        </p>
       ))}
     </>
   )
@@ -3622,10 +3747,12 @@ function SpeechTextContent({
   speechChapter,
   activeSegmentId,
   activeEntry,
+  summaryHighlightRange,
 }: {
   speechChapter: ReturnType<typeof createSpeechChapter>
   activeSegmentId: string | null
   activeEntry?: AudioTimelineEntry | null
+  summaryHighlightRange?: SourceRange | null
 }) {
   if (speechChapter.paragraphs.length === 0) {
     return <p className="muted-text">这一章没有正文。</p>
@@ -3637,7 +3764,15 @@ function SpeechTextContent({
         <p key={`speech-paragraph-${paragraph.paragraphIndex}`}>
           {paragraph.segments.map((segment, index) => (
             <span
-              className={segment.id === activeSegmentId ? 'speech-segment active' : 'speech-segment'}
+              className={[
+                'speech-segment',
+                segment.id === activeSegmentId ? 'active' : '',
+                rangesOverlap({ startOffset: segment.startChar, endOffset: segment.endChar }, summaryHighlightRange)
+                  ? 'chapter-source-highlight'
+                  : '',
+              ]
+                .filter(Boolean)
+                .join(' ')}
               data-speech-segment-id={segment.id}
               data-source-start={segment.startChar}
               data-source-end={segment.endChar}
@@ -3678,11 +3813,19 @@ function renderSpeechSegmentText(segment: SpeechSegment, activeEntry?: AudioTime
   )
 }
 
-function ChapterSummary({ bookPackage, chapter }: { bookPackage: BookPackage; chapter: Chapter }) {
+function ChapterSummary({
+  bookPackage,
+  chapter,
+  onJumpToSource,
+}: {
+  bookPackage: BookPackage
+  chapter: Chapter
+  onJumpToSource: (source: SummaryKeyPointSource) => void
+}) {
   const summary = findChapterSummary(bookPackage, chapter)
   const short = summary ? summaryText(summary, ['short', 'brief', 'summary', 'title']) : ''
   const detail = summary ? summaryText(summary, ['detail', 'details', 'content', 'description']) : ''
-  const keyPoints = summary ? summaryList(summary, ['keyPoints', 'keypoints', 'points', 'bullets']) : []
+  const keyPoints = summary ? summaryKeyPointItems(summary) : []
   const skippable = summary ? summaryText(summary, ['skippable', 'skipReason', 'readingTip']) : ''
 
   return (
@@ -3695,7 +3838,22 @@ function ChapterSummary({ bookPackage, chapter }: { bookPackage: BookPackage; ch
           {keyPoints.length > 0 ? (
             <ul>
               {keyPoints.map((point, index) => (
-                <li key={`${chapter.id}-summary-${index}`}>{point}</li>
+                <li key={`${chapter.id}-summary-${index}`}>
+                  {point.source ? (
+                    <button
+                      type="button"
+                      className="summary-source-link"
+                      onClick={(event) => {
+                        event.stopPropagation()
+                        onJumpToSource(point.source!)
+                      }}
+                    >
+                      {point.text}
+                    </button>
+                  ) : (
+                    point.text
+                  )}
+                </li>
               ))}
             </ul>
           ) : null}
@@ -3777,6 +3935,36 @@ function summaryList(summary: Record<string, unknown>, keys: string[]) {
     }
   }
   return []
+}
+
+function summaryKeyPointItems(summary: Record<string, unknown>): SummaryKeyPointItem[] {
+  const keyPoints = summaryList(summary, ['keyPoints', 'keypoints', 'points', 'bullets'])
+  const sourceByIndex = new Map(summaryKeyPointSources(summary, keyPoints).map((source) => [source.index, source]))
+  return keyPoints.map((text, index) => ({ text, source: sourceByIndex.get(index) }))
+}
+
+function summaryKeyPointSources(summary: Record<string, unknown>, keyPoints: string[]): SummaryKeyPointSource[] {
+  const value = summary.keyPointSources
+  if (!Array.isArray(value)) return []
+
+  return value
+    .map((entry, fallbackIndex): SummaryKeyPointSource | null => {
+      if (!isRecord(entry)) return null
+      const index = typeof entry.index === 'number' && Number.isInteger(entry.index) ? entry.index : fallbackIndex
+      const startOffset = readNumber(entry.startOffset)
+      const endOffset = readNumber(entry.endOffset)
+      if (index < 0 || index >= keyPoints.length || startOffset == null || endOffset == null || endOffset <= startOffset) return null
+      return {
+        index,
+        text: readString(entry.text) || keyPoints[index] || '',
+        startOffset,
+        endOffset,
+        quote: readString(entry.quote) || undefined,
+        confidence: readNumber(entry.confidence),
+        locator: readString(entry.locator) || undefined,
+      }
+    })
+    .filter((entry): entry is SummaryKeyPointSource => Boolean(entry))
 }
 
 async function gatewayFetch(settings: GatewaySettings, path: string) {
