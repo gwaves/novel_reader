@@ -3604,14 +3604,21 @@ describe('gateway app', () => {
 
     expect(streamResponse.statusCode).toBe(200)
     expect(streamResponse.headers['accept-ranges']).toBe('bytes')
+    expect(streamResponse.headers['access-control-allow-origin']).toBe('*')
+    expect(streamResponse.headers['access-control-expose-headers']).toContain('Content-Range')
+    expect(streamResponse.headers['cross-origin-resource-policy']).toBe('cross-origin')
     expect(streamResponse.body).toBe('fake mp3 data')
     expect(rangeResponse.statusCode).toBe(206)
     expect(rangeResponse.headers['content-range']).toBe('bytes 5-7/13')
+    expect(rangeResponse.headers['access-control-allow-origin']).toBe('*')
+    expect(rangeResponse.headers['access-control-expose-headers']).toContain('Content-Length')
+    expect(rangeResponse.headers['cross-origin-resource-policy']).toBe('cross-origin')
     expect(rangeResponse.body).toBe('mp3')
     expect(legacyRangeResponse.statusCode).toBe(206)
     expect(legacyRangeResponse.body).toBe('mp3')
     expect(unsatisfiableRangeResponse.statusCode).toBe(416)
     expect(unsatisfiableRangeResponse.headers['content-range']).toBe('bytes */13')
+    expect(unsatisfiableRangeResponse.headers['cross-origin-resource-policy']).toBe('cross-origin')
 
     const tamperedResponse = await app.inject({
       method: 'GET',

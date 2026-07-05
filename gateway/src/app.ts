@@ -716,6 +716,9 @@ function sendAudioStream(
   const baseReply = reply
     .header('content-type', 'audio/mpeg')
     .header('accept-ranges', 'bytes')
+    .header('access-control-allow-origin', '*')
+    .header('access-control-expose-headers', 'Accept-Ranges, Content-Length, Content-Range')
+    .header('cross-origin-resource-policy', 'cross-origin')
     .header('content-disposition', `inline; filename="${basename(audio.chapter.fileName)}"`)
   if (range === 'unsatisfiable') {
     return baseReply
