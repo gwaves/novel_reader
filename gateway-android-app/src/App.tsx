@@ -1058,6 +1058,23 @@ function App() {
       setFullPackageStatus('imported')
       setFullPackageProgress({ bookId, phase: 'import', status: 'imported', done: 4, total: 4 })
       await refreshLocalLibrary()
+      if (bookId === selectedBookId) {
+        const refreshedPackage = await gatewayFetch(settings, `/mobile/books/${encodeURIComponent(bookId)}/package`)
+          .then((response) => normalizeBookPackage(response.package))
+          .catch(() => loadCachedBookPackage(bookId))
+        if (refreshedPackage) {
+          await cacheBookPackage(bookId, refreshedPackage)
+          const refreshedChapters = packageChapters(refreshedPackage)
+          setBookPackage(refreshedPackage)
+          setCurrentChapterId((currentId) =>
+            currentId && refreshedChapters.some((chapter) => chapter.id === currentId)
+              ? currentId
+              : refreshedChapters[0]?.id ?? null,
+          )
+        }
+        await refreshAudio(bookId, false)
+        await refreshCachedAudioIds(bookId)
+      }
       setMessage('完整数据包已导入')
     } catch (error) {
       setFullPackageStatus('error')
