@@ -187,7 +187,7 @@ describe('gateway app', () => {
       },
       payload: {
         schemaVersion: 1,
-        app: { versionName: '0.2.0' },
+        app: { versionName: '0.7.0' },
         device: { model: 'Pixel', token: 'client-secret' },
         state: { selectedBookId: 'book-a' },
         logs: [
@@ -809,7 +809,7 @@ describe('gateway app', () => {
         'x-device-name': '客厅平板新名',
         'x-device-model': 'Xiaomi Pad 6',
         'x-device-platform': 'android',
-        'x-app-version': '0.2.0',
+        'x-app-version': '0.7.0',
       },
     })
     const devices = JSON.parse(await readFile(join(dataDir, 'devices.json'), 'utf8')) as {
@@ -833,7 +833,7 @@ describe('gateway app', () => {
       name: '客厅平板新名',
       model: 'Xiaomi Pad 6',
       platform: 'android',
-      appVersion: '0.2.0',
+      appVersion: '0.7.0',
       pairingCode: '428193',
       role: 'trusted',
       firstSeenAt: '2026-06-29T00:00:00.000Z',
@@ -854,7 +854,7 @@ describe('gateway app', () => {
       'x-device-name': 'Xiaomi Phone',
       'x-device-model': '23127PN0CC',
       'x-device-platform': 'android',
-      'x-app-version': '0.2.0',
+      'x-app-version': '0.7.0',
     }
 
     const responses = await Promise.all(
@@ -877,7 +877,7 @@ describe('gateway app', () => {
       name: 'Xiaomi Phone',
       model: '23127PN0CC',
       platform: 'android',
-      appVersion: '0.2.0',
+      appVersion: '0.7.0',
     })
   })
 

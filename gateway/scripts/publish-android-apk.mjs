@@ -140,7 +140,7 @@ function printUsage() {
   console.log(`用法：
   npm run gateway:publish-android-apk
   npm run gateway:publish-android-apk -- --downloads-dir /srv/novel-reader/downloads
-  npm run gateway:publish-android-apk -- --source-apk path/to/app.apk --version 0.2.0
+  npm run gateway:publish-android-apk -- --source-apk path/to/app.apk --version 0.7.0
 
 说明：
   默认读取 gateway-android-app 的 debug APK，并发布到 GATEWAY_DOWNLOADS_DIR。

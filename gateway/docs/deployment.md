@@ -134,7 +134,7 @@ npm run gateway-android:android:build
 npm run gateway:publish-android-apk
 ```
 
-脚本默认读取 `gateway-android-app/android/app/build/outputs/apk/debug/novel_gateway-v<versionName>-debug.apk`，并发布到 `GATEWAY_DOWNLOADS_DIR`；未设置时使用 `GATEWAY_DATA_DIR/downloads`，再未设置时使用 `~/.novel_reader_gateway/downloads`。`versionName` 由 `gateway-android-app/scripts/generate-build-info.mjs` 自动生成，格式类似 `0.2.0+build.228.g3fcfd98db346`。
+脚本默认读取 `gateway-android-app/android/app/build/outputs/apk/debug/novel_gateway-v<versionName>-debug.apk`，并发布到 `GATEWAY_DOWNLOADS_DIR`；未设置时使用 `GATEWAY_DATA_DIR/downloads`，再未设置时使用 `~/.novel_reader_gateway/downloads`。`versionName` 由 `gateway-android-app/scripts/generate-build-info.mjs` 自动生成，格式类似 `0.7.0+build.228.g3fcfd98db346`。
 
 如果 Gateway 部署在远端机器，推荐先在本机发布到临时目录，再同步到远端 Compose 挂载的下载目录。例如网关机器 `192.168.88.100` 使用 `~/novel-reader-gateway/data:/data`：
 
@@ -148,8 +148,8 @@ rsync -az /tmp/novel-reader-downloads/ \
 
 ```bash
 npm run gateway:publish-android-apk -- \
-  --source-apk 'gateway-android-app/android/app/build/outputs/apk/debug/novel_gateway-v0.2.0+build.228.g3fcfd98db346-debug.apk' \
-  --version '0.2.0+build.228.g3fcfd98db346' \
+  --source-apk 'gateway-android-app/android/app/build/outputs/apk/debug/novel_gateway-v0.7.0+build.228.g3fcfd98db346-debug.apk' \
+  --version '0.7.0+build.228.g3fcfd98db346' \
   --downloads-dir gateway/data/downloads
 ```
 
