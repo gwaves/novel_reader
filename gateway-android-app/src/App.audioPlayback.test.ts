@@ -1,9 +1,11 @@
 import { describe, expect, it, vi } from 'vitest'
 import {
   buildAudioChapterStatusRows,
+  appendAppLogToStorage,
   gatewayGenerateRagAnswer,
   gatewayUserFacingError,
   isAudioPlaybackDisabled,
+  loadAppLogEntriesFromStorage,
   listCachedAudioChapterIdsFromStorage,
   loadAudioCacheIndexFromStorage,
   loadLatestReadingProgressFromStorage,
@@ -131,6 +133,43 @@ describe('reader audio playback availability', () => {
         audioChapter: expect.objectContaining({ chapterId: 'file-96ea5baedc1b3c681739e403:ch00003' }),
       }),
     ])
+  })
+})
+
+describe('local diagnostics log', () => {
+  it('keeps local log entries and redacts sensitive context', () => {
+    const storage = createMemoryStorage()
+
+    const entry = appendAppLogToStorage(storage, 'error', 'MP3 播放失败', {
+      action: 'chapterAudioError',
+      token: 'stream-secret',
+      nested: {
+        authorization: 'Bearer secret',
+      },
+    })
+
+    const entries = loadAppLogEntriesFromStorage(storage)
+    expect(entries).toHaveLength(1)
+    expect(entries[0]).toEqual(expect.objectContaining({ id: entry.id, level: 'error', message: 'MP3 播放失败' }))
+    expect(entries[0].context).toEqual(
+      expect.objectContaining({
+        token: '[redacted]',
+        nested: expect.objectContaining({ authorization: '[redacted]' }),
+      }),
+    )
+  })
+
+  it('keeps only the latest local diagnostics entries', () => {
+    const storage = createMemoryStorage()
+
+    for (let index = 0; index < 205; index += 1) {
+      appendAppLogToStorage(storage, 'info', `log-${index}`)
+    }
+
+    const entries = loadAppLogEntriesFromStorage(storage)
+    expect(entries).toHaveLength(200)
+    expect(entries[0].message).toBe('log-5')
+    expect(entries.at(-1)?.message).toBe('log-204')
   })
 })
 

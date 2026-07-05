@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { createHmac } from 'node:crypto'
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { buildGatewayApp } from './app.js'
@@ -168,6 +168,85 @@ describe('gateway app', () => {
       service: 'novel-reader-gateway',
       version: '0.1.0',
     })
+  })
+
+  it('stores mobile diagnostic logs with a receipt id', async () => {
+    const dataDir = await makeDataDir()
+    const app = buildTestApp({
+      GATEWAY_DEV_ACCESS_TOKEN: 'dev-token',
+      GATEWAY_DATA_DIR: dataDir,
+    })
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/mobile/logs',
+      headers: {
+        authorization: 'Bearer dev-token',
+        'x-device-id': 'device/with/slash',
+        'x-device-name': 'QA Phone',
+      },
+      payload: {
+        schemaVersion: 1,
+        app: { versionName: '0.2.0' },
+        device: { model: 'Pixel', token: 'client-secret' },
+        state: { selectedBookId: 'book-a' },
+        logs: [
+          {
+            id: 'log-1',
+            timestamp: '2026-07-05T11:00:00.000Z',
+            level: 'error',
+            message: 'MP3 播放失败',
+            source: 'app',
+            context: {
+              action: 'chapterAudioError',
+              token: 'stream-secret',
+            },
+          },
+        ],
+      },
+    })
+
+    expect(response.statusCode).toBe(200)
+    const body = response.json()
+    expect(body).toMatchObject({
+      schemaVersion: 1,
+      storedEntries: 1,
+    })
+    expect(body.receiptId).toEqual(expect.any(String))
+    const logDateDir = join(dataDir, 'mobile-logs', body.receivedAt.slice(0, 10))
+    const files = await readdir(logDateDir)
+    expect(files[0]).toMatch(/^device_with_slash-/)
+    const saved = JSON.parse(await readFile(join(logDateDir, files[0]), 'utf8'))
+    expect(saved).toMatchObject({
+      receiptId: body.receiptId,
+      deviceId: 'device/with/slash',
+      logs: [expect.objectContaining({ message: 'MP3 播放失败' })],
+    })
+    expect(saved.device.token).toBe('[redacted]')
+    expect(saved.logs[0].context.token).toBe('[redacted]')
+  })
+
+  it('rejects empty mobile diagnostic submissions', async () => {
+    const dataDir = await makeDataDir()
+    const app = buildTestApp({
+      GATEWAY_DEV_ACCESS_TOKEN: 'dev-token',
+      GATEWAY_DATA_DIR: dataDir,
+    })
+
+    const response = await app.inject({
+      method: 'POST',
+      url: '/mobile/logs',
+      headers: {
+        authorization: 'Bearer dev-token',
+        'x-device-id': 'device-a',
+      },
+      payload: {
+        logs: [],
+      },
+    })
+
+    expect(response.statusCode).toBe(400)
+    expect(response.json().error.code).toBe('invalid_mobile_logs')
   })
 
   it('rejects production config without explicit admin and mobile tokens', () => {

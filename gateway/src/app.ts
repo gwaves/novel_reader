@@ -4,7 +4,7 @@ import rateLimit from '@fastify/rate-limit'
 import Fastify, { type FastifyError, type FastifyReply, type FastifyRequest } from 'fastify'
 import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto'
 import { createReadStream } from 'node:fs'
-import { readdir, stat } from 'node:fs/promises'
+import { mkdir, readdir, stat, writeFile } from 'node:fs/promises'
 import { extname, join, normalize, relative, basename } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { requireAdminAuth, requireMobileAuth } from './auth.js'
@@ -155,6 +155,42 @@ export function buildGatewayApp(config: GatewayConfig = loadConfig()) {
     return {
       generatedAt: new Date().toISOString(),
       ...(await readDeviceRegistry(config)),
+    }
+  })
+
+  app.post<{ Body: unknown }>('/mobile/logs', async (request) => {
+    const mobileAuth = await requireMobileDevice(config, request)
+    const payload = normalizeMobileLogSubmission(request.body)
+    const receiptId = randomUUID()
+    const receivedAt = new Date().toISOString()
+    const logDir = join(config.dataDir, 'mobile-logs', receivedAt.slice(0, 10))
+    const fileName = `${safeFileSegment(mobileAuth.deviceId)}-${receiptId}.json`
+    await mkdir(logDir, { recursive: true })
+    await writeFile(
+      join(logDir, fileName),
+      `${JSON.stringify(
+        {
+          schemaVersion: 1,
+          receiptId,
+          receivedAt,
+          remoteAddress: request.ip,
+          deviceId: mobileAuth.deviceId,
+          app: payload.app,
+          device: payload.device,
+          state: payload.state,
+          logs: payload.logs,
+        },
+        null,
+        2,
+      )}\n`,
+      'utf8',
+    )
+    request.log.warn({ receiptId, deviceId: mobileAuth.deviceId, entries: payload.logs.length }, 'mobile diagnostics submitted')
+    return {
+      schemaVersion: 1,
+      receiptId,
+      receivedAt,
+      storedEntries: payload.logs.length,
     }
   })
 
@@ -623,6 +659,60 @@ async function requireMobileDevice(config: GatewayConfig, request: FastifyReques
     allowedVisibilities: allowedVisibilitiesForRole(role),
     deviceId: device?.id ?? auth.deviceId ?? 'unknown-device',
   }
+}
+
+function normalizeMobileLogSubmission(body: unknown) {
+  if (!isRecord(body)) {
+    throw new GatewayHttpError(400, 'invalid_mobile_logs', 'Mobile logs body must be an object.')
+  }
+  const rawLogs = Array.isArray(body.logs) ? body.logs : []
+  if (rawLogs.length === 0) {
+    throw new GatewayHttpError(400, 'invalid_mobile_logs', 'Mobile logs body must include at least one log entry.')
+  }
+  const logs = rawLogs.slice(-200).map(normalizeMobileLogEntry).filter((entry): entry is Record<string, unknown> => Boolean(entry))
+  if (logs.length === 0) {
+    throw new GatewayHttpError(400, 'invalid_mobile_logs', 'Mobile logs body must include at least one valid log entry.')
+  }
+  return {
+    app: sanitizeLogObject(body.app),
+    device: sanitizeLogObject(body.device),
+    state: sanitizeLogObject(body.state),
+    logs,
+  }
+}
+
+function normalizeMobileLogEntry(value: unknown): Record<string, unknown> | null {
+  if (!isRecord(value)) return null
+  const level = value.level === 'error' || value.level === 'warn' || value.level === 'info' ? value.level : 'info'
+  const message = readNonEmptyString(value.message).slice(0, 800)
+  const timestamp = readNonEmptyString(value.timestamp).slice(0, 80)
+  if (!message || !timestamp) return null
+  return {
+    id: readNonEmptyString(value.id).slice(0, 120),
+    timestamp,
+    level,
+    source: readNonEmptyString(value.source).slice(0, 80),
+    message,
+    context: sanitizeLogObject(value.context),
+  }
+}
+
+function sanitizeLogObject(value: unknown, depth = 0): unknown {
+  if (value == null || typeof value === 'number' || typeof value === 'boolean') return value
+  if (typeof value === 'string') return value.slice(0, 500)
+  if (depth >= 4) return '[truncated]'
+  if (Array.isArray(value)) return value.slice(0, 20).map((entry) => sanitizeLogObject(entry, depth + 1))
+  if (!isRecord(value)) return String(value).slice(0, 200)
+  return Object.fromEntries(
+    Object.entries(value).slice(0, 50).map(([key, entry]) => [
+      key,
+      /token|authorization|password|secret/i.test(key) ? '[redacted]' : sanitizeLogObject(entry, depth + 1),
+    ]),
+  )
+}
+
+function safeFileSegment(value: string) {
+  return value.replace(/[^0-9A-Za-z._-]+/g, '_').slice(0, 120) || 'unknown-device'
 }
 
 const audioStreamTokenTtlMs = 2 * 60 * 60 * 1000

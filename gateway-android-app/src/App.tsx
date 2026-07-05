@@ -8,6 +8,7 @@ import {
   deviceRoleLabel,
   errorMessage,
   getDeviceMetadata,
+  GatewayError,
   isDeviceAccessBlockedError,
   isDeviceDisabledError,
   loadGatewaySettings,
@@ -106,6 +107,23 @@ type AudioStreamRetryState = {
   audioChapterId: string
   attempted: boolean
 }
+
+type AppLogLevel = 'info' | 'warn' | 'error'
+
+type AppLogEntry = {
+  id: string
+  timestamp: string
+  level: AppLogLevel
+  message: string
+  source?: string
+  context?: unknown
+}
+
+type LogSubmitState =
+  | { status: 'idle'; message?: string }
+  | { status: 'submitting'; message?: string }
+  | { status: 'submitted'; message: string; receiptId?: string }
+  | { status: 'error'; message: string }
 
 type CachedAudioRecord = {
   bookId: string
@@ -322,6 +340,7 @@ type GraphResult = {
 const settingsKey = 'novel-reader-gateway-settings'
 const readerSettingsKey = 'novel-reader-gateway-reader-settings'
 const ttsSettingsKey = 'novel-reader-gateway-tts-settings'
+const appLogKey = 'novel-reader-gateway-app-logs'
 const readingProgressKey = 'novel-reader-gateway-reading-progress'
 const fullPackageCacheKey = 'novel-reader-gateway-full-package-cache'
 const fullPackageCacheIndexKey = 'novel-reader-gateway-full-package-cache-index'
@@ -331,6 +350,9 @@ const packageCacheDbName = 'novel-reader-gateway'
 const packageCacheStoreName = 'book-packages'
 const legacyAudioCacheStoreName = 'chapter-audio'
 const defaultGatewayBaseUrl = import.meta.env.VITE_GATEWAY_DEFAULT_BASE_URL ?? 'https://novel.gwaves.net:8888'
+const maxAppLogEntries = 200
+const maxSubmittedLogEntries = 200
+const maxLogMessageLength = 800
 const defaultGatewayToken = import.meta.env.VITE_GATEWAY_DEFAULT_TOKEN ?? '123456'
 const appVersion = buildInfo.versionName
 const NativeAudio = registerPlugin<NativeAudioPlugin>('GatewayAudio')
@@ -421,6 +443,9 @@ function App() {
   const [cacheVersion, setCacheVersion] = useState(0)
   const [summaryHighlightRange, setSummaryHighlightRange] = useState<SourceRange | null>(null)
   const [clearingCacheKey, setClearingCacheKey] = useState<string | null>(null)
+  const [latestIssue, setLatestIssue] = useState<AppLogEntry | null>(() => loadLatestIssueFromStorage(localStorage))
+  const [appLogCount, setAppLogCount] = useState(() => loadAppLogEntriesFromStorage(localStorage).length)
+  const [logSubmitState, setLogSubmitState] = useState<LogSubmitState>({ status: 'idle' })
 
   const displayLocalBooks = useMemo(
     () => mergeLocalBooksWithCloudMetadata(localBooks, books),
@@ -530,9 +555,118 @@ function App() {
   const gatewaySessionRef = useRef<GatewaySession | null>(gatewaySession)
   const cloudBookCountRef = useRef(books.length)
 
+  function recordDiagnostic(level: AppLogLevel, message: string, context: Record<string, unknown> = {}) {
+    const entry = appendAppLogToStorage(localStorage, level, message, {
+      ...context,
+      tab,
+      selectedBookId,
+      currentChapterId: currentChapter?.id,
+      currentChapterIndex: currentChapter?.index ?? currentChapter?.chapterIndex,
+    })
+    setAppLogCount(loadAppLogEntriesFromStorage(localStorage).length)
+    if (level === 'error') setLatestIssue(entry)
+    return entry
+  }
+
+  function reportUserError(error: unknown, context: Record<string, unknown> = {}, prefix?: string) {
+    const message = prefix ? `${prefix}：${errorMessage(error)}` : errorMessage(error)
+    recordDiagnostic('error', message, {
+      ...context,
+      error: serializeErrorForLog(error),
+    })
+    setMessage(message)
+    return message
+  }
+
+  async function submitLocalLogs() {
+    if (!isGatewayConfigured(settings)) {
+      reportUserError(new Error('请先配置 Gateway 地址和 Token。'), { action: 'submitLocalLogs' }, '提交日志失败')
+      return
+    }
+    const entries = loadAppLogEntriesFromStorage(localStorage)
+    if (entries.length === 0) {
+      setLogSubmitState({ status: 'idle', message: '暂无可提交日志。' })
+      setMessage('暂无可提交日志')
+      return
+    }
+
+    setLogSubmitState({ status: 'submitting', message: '正在提交日志...' })
+    try {
+      const response = await gatewayPost(settings, '/mobile/logs', {
+        schemaVersion: 1,
+        submittedAt: new Date().toISOString(),
+        app: {
+          versionName: buildInfo.versionName,
+          versionCode: buildInfo.versionCode,
+          buildNumber: buildInfo.buildNumber,
+          gitCommit: buildInfo.gitCommit,
+          dirty: buildInfo.dirty,
+        },
+        device: {
+          id: settings.deviceId,
+          name: settings.deviceName,
+          model: deviceMetadata.model,
+          platform: deviceMetadata.platform,
+        },
+        state: {
+          tab,
+          connectionState,
+          selectedBookId,
+          selectedBookTitle: selectedBook?.title,
+          currentChapterId: currentChapter?.id,
+          currentChapterTitle: currentChapter?.title,
+          currentChapterIndex: currentChapter?.index ?? currentChapter?.chapterIndex,
+          audioCatalogBookId,
+          audioChapterCount: visibleAudioChapters.length,
+          cachedAudioCount: visibleCachedAudioIds.size,
+          speechEngine: ttsSettings.engine,
+        },
+        logs: entries.slice(-maxSubmittedLogEntries),
+      })
+      const receiptId = readString(response.receiptId) || ''
+      const submittedCount = typeof response.storedEntries === 'number' ? response.storedEntries : entries.length
+      const nextMessage = receiptId ? `日志已提交：${receiptId}` : `日志已提交：${submittedCount} 条`
+      setLogSubmitState({ status: 'submitted', message: nextMessage, receiptId })
+      setMessage(nextMessage)
+    } catch (error) {
+      const message = reportUserError(error, { action: 'submitLocalLogs' }, '提交日志失败')
+      setLogSubmitState({ status: 'error', message })
+    }
+  }
+
+  function clearLocalLogs() {
+    clearAppLogsFromStorage(localStorage)
+    setLatestIssue(null)
+    setAppLogCount(0)
+    setLogSubmitState({ status: 'idle', message: '本地日志已清空。' })
+    setMessage('本地日志已清空')
+  }
+
   useEffect(() => {
     localStorage.setItem(settingsKey, JSON.stringify(settings))
   }, [settings])
+
+  useEffect(() => {
+    const handleWindowError = (event: ErrorEvent) => {
+      reportUserError(event.error ?? event.message, {
+        action: 'window.error',
+        filename: event.filename,
+        lineno: event.lineno,
+        colno: event.colno,
+      })
+    }
+    const handleUnhandledRejection = (event: PromiseRejectionEvent) => {
+      reportUserError(event.reason ?? new Error('Unhandled promise rejection'), {
+        action: 'window.unhandledrejection',
+      })
+    }
+    window.addEventListener('error', handleWindowError)
+    window.addEventListener('unhandledrejection', handleUnhandledRejection)
+    return () => {
+      window.removeEventListener('error', handleWindowError)
+      window.removeEventListener('unhandledrejection', handleUnhandledRejection)
+    }
+  }, [])
 
   useEffect(() => {
     gatewaySessionRef.current = gatewaySession
@@ -609,7 +743,8 @@ function App() {
 
   useEffect(() => {
     if (currentAudio || !selectedBookId || !currentChapter || visibleAudioChapters.length === 0) return
-    console.warn('[NovelReaderAudio] current chapter did not match MP3 catalog', {
+    recordDiagnostic('warn', '当前章节未匹配到 MP3 catalog', {
+      action: 'audioCatalogMismatch',
       bookId: selectedBookId,
       currentChapterId: currentChapter.id,
       currentChapterIndex: currentChapter.index ?? currentChapter.chapterIndex,
@@ -820,12 +955,12 @@ function App() {
         setConnectionState('error')
         setLibrarySyncState({ status: 'blocked', message: blockedMessage })
         setMessage(blockedMessage)
+        recordDiagnostic('error', blockedMessage, { action: 'refreshBooks', blocked: true })
         return
       }
-      const message = errorMessage(error)
+      const message = reportUserError(error, { action: 'refreshBooks' })
       setConnectionState('error')
       setLibrarySyncState({ status: 'error', message })
-      setMessage(message)
     } finally {
       setLoadingBooks(false)
     }
@@ -869,7 +1004,7 @@ function App() {
       await refreshBooks({ session, roleNotice, previousSession, previousBookCount })
     } catch (error) {
       setConnectionState('error')
-      setMessage(errorMessage(error))
+      reportUserError(error, { action: 'checkSession' })
     }
   }
 
@@ -880,10 +1015,11 @@ function App() {
       if (!manifest) throw new Error('更新清单格式无效。')
       setAppUpdateState(resolveAppUpdateManifest(manifest, buildInfo.versionCode, buildInfo.versionName))
     } catch (error) {
+      const message = reportUserError(error, { action: 'checkAppUpdate' }, '检查更新失败')
       setAppUpdateState((current) => ({
         status: 'error',
         manifest: current.manifest,
-        message: errorMessage(error) || '检查更新失败。',
+        message,
       }))
     }
   }
@@ -911,10 +1047,11 @@ function App() {
         message: '已打开下载链接。',
       })
     } catch (error) {
+      const message = reportUserError(error, { action: 'installAppUpdate', versionName: manifest.versionName }, '下载安装包失败')
       setAppUpdateState({
         status: 'error',
         manifest,
-        message: errorMessage(error) || '下载安装包失败。',
+        message,
       })
     }
   }
@@ -985,7 +1122,7 @@ function App() {
       restorePendingScroll()
     } catch (error) {
       if (isDeviceDisabledError(error)) {
-        setMessage(errorMessage(error))
+        reportUserError(error, { action: 'openBook', bookId })
         return
       }
       const cachedPackage = await loadCachedBookPackage(bookId)
@@ -996,7 +1133,10 @@ function App() {
           : null
       setBookPackage(cachedPackage)
       setCurrentChapterId(restoredChapterId ?? cachedChapters[0]?.id ?? null)
-      setMessage(cachedPackage ? `已使用本地缓存：${errorMessage(error)}` : errorMessage(error))
+      const message = cachedPackage
+        ? reportUserError(error, { action: 'openBook', bookId, fallback: 'cachedPackage' }, '已使用本地缓存')
+        : reportUserError(error, { action: 'openBook', bookId })
+      setMessage(message)
       await refreshCachedAudioIds(bookId)
       if (cachedPackage) {
         pendingRestoreScrollRef.current = restoredChapterId ? restoreProgress?.scrollY ?? 0 : 0
@@ -1093,7 +1233,7 @@ function App() {
       setMessage('完整数据包已导入')
     } catch (error) {
       setFullPackageStatus('error')
-      setMessage(`完整包同步失败：${errorMessage(error)}`)
+      reportUserError(error, { action: 'syncFullPackage', bookId }, '完整包同步失败')
     }
   }
 
@@ -1136,7 +1276,7 @@ function App() {
       if (isDeviceAccessBlockedError(error)) {
         setConnectionState('error')
       }
-      setMessage(errorMessage(error))
+      reportUserError(error, { action: 'addCloudBookToShelf', bookId })
     } finally {
       setAddingBookId(null)
     }
@@ -1157,7 +1297,8 @@ function App() {
       const nextAudioChapters = Array.isArray(response.chapters) ? response.chapters.filter(isAudioChapter) : []
       setAudioChapters(nextAudioChapters)
       setAudioCatalogBookId(bookId)
-      console.info('[NovelReaderAudio] catalog loaded', {
+      recordDiagnostic('info', 'MP3 catalog loaded', {
+        action: 'refreshAudio',
         bookId,
         count: nextAudioChapters.length,
         firstChapterId: nextAudioChapters[0]?.chapterId,
@@ -1169,7 +1310,8 @@ function App() {
       if (isDeviceDisabledError(error)) {
         setConnectionState('error')
       }
-      if (showMessage) setMessage(errorMessage(error))
+      const message = reportUserError(error, { action: 'refreshAudio', bookId })
+      if (!showMessage) setMessage(message)
     } finally {
       setLoadingAudio(false)
     }
@@ -1247,7 +1389,12 @@ function App() {
     } catch (error) {
       pendingAudioStartTimeRef.current = null
       pendingAudioShouldPlayRef.current = false
-      setMessage(errorMessage(error))
+      reportUserError(error, {
+        action: 'playCurrentAudio',
+        bookId: selectedBookId,
+        currentChapterId: currentChapter.id,
+        audioChapterId: currentAudio.chapterId,
+      })
     } finally {
       setAudioPlaybackLoading(false)
     }
@@ -1309,7 +1456,7 @@ function App() {
       if (isDeviceDisabledError(error)) {
         setConnectionState('error')
       }
-      setMessage(errorMessage(error))
+      reportUserError(error, { action: 'syncCurrentBookAudioRange', bookId, limit })
     }
   }
 
@@ -1348,7 +1495,7 @@ function App() {
       if (isDeviceDisabledError(error)) {
         setConnectionState('error')
       }
-      setMessage(errorMessage(error))
+      reportUserError(error, { action: 'syncBookAudioChapters', bookId, targetCount: chaptersToSync.length, label })
     } finally {
       setAudioSyncProgress(null)
       setAudioSyncBookId(null)
@@ -1405,7 +1552,11 @@ function App() {
           if (isDeviceDisabledError(error)) {
             setConnectionState('error')
           }
-          setMessage(`缓存失败：${errorMessage(error)}`)
+          reportUserError(error, {
+            action: 'processAudioDownloadQueue',
+            bookId: item.bookId,
+            audioChapterId: item.audioChapter.chapterId,
+          }, '缓存失败')
         } finally {
           setAudioDownloadingChapterKey(null)
         }
@@ -1466,7 +1617,7 @@ function App() {
       refreshCacheSummaries()
       setMessage('音频缓存已清除')
     } catch (error) {
-      setMessage(`清除音频缓存失败：${errorMessage(error)}`)
+      reportUserError(error, { action: 'clearBookAudioCache', bookId }, '清除音频缓存失败')
     } finally {
       setClearingCacheKey(null)
     }
@@ -1491,7 +1642,7 @@ function App() {
       refreshCacheSummaries()
       setMessage('完整数据包缓存已清除')
     } catch (error) {
-      setMessage(`清除完整包缓存失败：${errorMessage(error)}`)
+      reportUserError(error, { action: 'clearBookPackageCache', bookId }, '清除完整包缓存失败')
     } finally {
       setClearingCacheKey(null)
     }
@@ -1534,7 +1685,7 @@ function App() {
       refreshCacheSummaries()
       setMessage('本地书已删除')
     } catch (error) {
-      setMessage(`删除本地书失败：${errorMessage(error)}`)
+      reportUserError(error, { action: 'deleteLocalBook', bookId }, '删除本地书失败')
     } finally {
       setClearingCacheKey(null)
     }
@@ -1587,7 +1738,14 @@ function App() {
     const retry = audioStreamRetryRef.current
     if (!retry || retry.attempted || retry.bookId !== selectedBookId || retry.currentChapterId !== currentChapter?.id) {
       setChapterAudioPlaying(false)
-      setMessage('MP3 播放失败')
+      reportUserError(new Error('MP3 播放失败'), {
+        action: 'chapterAudioError',
+        mediaErrorCode: audio.error?.code,
+        mediaNetworkState: audio.networkState,
+        mediaReadyState: audio.readyState,
+        audioSrc: redactUrlForLog(audio.currentSrc || audio.src),
+        retryAvailable: Boolean(retry),
+      })
       return
     }
 
@@ -1610,7 +1768,13 @@ function App() {
     } catch (error) {
       audioStreamRetryRef.current = null
       setChapterAudioPlaying(false)
-      setMessage(errorMessage(error))
+      reportUserError(error, {
+        action: 'refreshAudioStreamAfterError',
+        bookId: retry.bookId,
+        currentChapterId: retry.currentChapterId,
+        audioChapterId: retry.audioChapterId,
+        mediaErrorCode: audio.error?.code,
+      })
     } finally {
       setAudioPlaybackLoading(false)
     }
@@ -1624,7 +1788,7 @@ function App() {
     }
 
     if (audio.paused) {
-      await audio.play().catch((error) => setMessage(errorMessage(error)))
+      await audio.play().catch((error) => reportUserError(error, { action: 'toggleChapterAudioPlayback' }))
     } else {
       audio.pause()
     }
@@ -1692,7 +1856,7 @@ function App() {
     setAudioTime(nextTime)
     window.setTimeout(() => scrollToAudioHighlight(true), 0)
     if (shouldPlay) {
-      void audio.play().catch((error) => setMessage(errorMessage(error)))
+      void audio.play().catch((error) => reportUserError(error, { action: 'seekChapterAudio', targetTime: nextTime }))
     }
   }
 
@@ -1967,7 +2131,8 @@ function App() {
       return true
     } catch (error) {
       setTtsVoices([])
-      setTtsStatusMessage(errorMessage(error) || '系统 TTS 检测失败。')
+      const message = reportUserError(error, { action: 'refreshTtsAvailability', locale: ttsSettings.locale }, '系统 TTS 检测失败')
+      setTtsStatusMessage(message)
       return false
     }
   }
@@ -1981,7 +2146,8 @@ function App() {
       await NovelReaderTts.openTtsSettings()
       setTtsStatusMessage('请在系统页面选择文字转语音引擎，然后返回本应用重新检测。')
     } catch (error) {
-      setTtsStatusMessage(errorMessage(error) || '无法打开系统语音设置。')
+      const message = reportUserError(error, { action: 'openSystemTtsSettings' }, '无法打开系统语音设置')
+      setTtsStatusMessage(message)
     }
   }
 
@@ -1994,7 +2160,8 @@ function App() {
       await NovelReaderTts.checkTtsData()
       setTtsStatusMessage('请按系统提示安装或启用语音数据，然后返回本应用重新检测。')
     } catch (error) {
-      setTtsStatusMessage(errorMessage(error) || '无法打开系统语音检查。')
+      const message = reportUserError(error, { action: 'openSystemTtsDataCheck' }, '无法打开系统语音检查')
+      setTtsStatusMessage(message)
     }
   }
 
@@ -2254,7 +2421,7 @@ function App() {
     } catch (error) {
       currentUtteranceIdRef.current = null
       speechUtteranceIndexRef.current.clear()
-      const message = errorMessage(error) || '语音朗读失败。'
+      const message = reportUserError(error, { action: 'playSpeechSegment', segmentIndex }, '语音朗读失败')
       setSpeechPlayback({ status: 'error', message })
       setTtsStatusMessage(message)
     }
@@ -2273,7 +2440,7 @@ function App() {
       }
       await playSpeechSegment(startIndexOverride ?? findCurrentVisibleSpeechSegmentIndex() ?? 0)
     } catch (error) {
-      const message = errorMessage(error) || '语音阅读启动失败。'
+      const message = reportUserError(error, { action: 'startSpeechReading' }, '语音阅读启动失败')
       setSpeechPlayback({ status: 'error', message })
       setTtsStatusMessage(message)
     }
@@ -2487,6 +2654,19 @@ function App() {
       ) : null}
 
       {visibleStatusMessage && tab !== 'reader' ? <div className={`status-line status-${connectionState}`}>{visibleStatusMessage}</div> : null}
+      {latestIssue ? (
+        <section className={`issue-banner issue-${latestIssue.level}`} role="alert">
+          <div>
+            <strong>{latestIssue.level === 'error' ? '最近错误' : '诊断提醒'}</strong>
+            <span>{formatDateTime(latestIssue.timestamp)}</span>
+            <p>{latestIssue.message}</p>
+          </div>
+          <div className="issue-actions">
+            <button type="button" onClick={() => switchTab('settings')}>提交日志</button>
+            <button type="button" onClick={() => setLatestIssue(null)}>忽略</button>
+          </div>
+        </section>
+      ) : null}
 
       {tab === 'library' ? (
         <section className="library-page">
@@ -3093,6 +3273,38 @@ function App() {
                 disabled={appUpdateState.status !== 'available'}
               >
                 {appUpdateState.status === 'downloading' ? '下载中' : '下载并安装'}
+              </button>
+            </div>
+          </section>
+
+          <section className="diagnostics-panel">
+            <div className="section-title">
+              <h2>问题诊断</h2>
+              <span>{appLogCount} 条</span>
+            </div>
+            <dl>
+              <div>
+                <dt>最近错误</dt>
+                <dd>{latestIssue ? formatDateTime(latestIssue.timestamp) : '无'}</dd>
+              </div>
+              <div>
+                <dt>提交状态</dt>
+                <dd>{logSubmitState.status === 'idle' ? '未提交' : logSubmitState.status === 'submitting' ? '提交中' : logSubmitState.status === 'submitted' ? '已提交' : '失败'}</dd>
+              </div>
+            </dl>
+            {latestIssue ? <p className="diagnostics-message">{latestIssue.message}</p> : null}
+            {logSubmitState.message ? <p className={`diagnostics-message diagnostics-${logSubmitState.status}`}>{logSubmitState.message}</p> : null}
+            <div className="settings-actions">
+              <button
+                className="primary-button"
+                type="button"
+                onClick={() => void submitLocalLogs()}
+                disabled={logSubmitState.status === 'submitting' || appLogCount === 0}
+              >
+                {logSubmitState.status === 'submitting' ? '提交中' : '提交本地日志'}
+              </button>
+              <button className="secondary-button" type="button" onClick={clearLocalLogs} disabled={appLogCount === 0}>
+                清空日志
               </button>
             </div>
           </section>
@@ -4372,6 +4584,116 @@ function parseJsonBody(value: string) {
   }
 }
 
+export function loadAppLogEntriesFromStorage(storage: Pick<Storage, 'getItem'>): AppLogEntry[] {
+  try {
+    const parsed = JSON.parse(storage.getItem(appLogKey) || '[]') as unknown
+    if (!Array.isArray(parsed)) return []
+    return parsed.map(normalizeAppLogEntry).filter((entry): entry is AppLogEntry => Boolean(entry))
+  } catch {
+    return []
+  }
+}
+
+export function appendAppLogToStorage(
+  storage: Pick<Storage, 'getItem' | 'setItem'>,
+  level: AppLogLevel,
+  message: string,
+  context?: unknown,
+  source = 'app',
+) {
+  const entry: AppLogEntry = {
+    id: createAppLogId(),
+    timestamp: new Date().toISOString(),
+    level,
+    message: String(message || level).slice(0, maxLogMessageLength),
+    source,
+    context: sanitizeLogValue(context),
+  }
+  const entries = [...loadAppLogEntriesFromStorage(storage), entry].slice(-maxAppLogEntries)
+  saveAppLogEntries(storage, entries)
+  return entry
+}
+
+function clearAppLogsFromStorage(storage: Pick<Storage, 'removeItem'>) {
+  storage.removeItem(appLogKey)
+}
+
+function loadLatestIssueFromStorage(storage: Pick<Storage, 'getItem'>) {
+  return [...loadAppLogEntriesFromStorage(storage)].reverse().find((entry) => entry.level === 'error' || entry.level === 'warn') ?? null
+}
+
+function saveAppLogEntries(storage: Pick<Storage, 'setItem'>, entries: AppLogEntry[]) {
+  let safeEntries = entries
+  while (safeEntries.length > 0) {
+    try {
+      storage.setItem(appLogKey, JSON.stringify(safeEntries))
+      return
+    } catch {
+      safeEntries = safeEntries.slice(Math.ceil(safeEntries.length / 2))
+    }
+  }
+}
+
+function normalizeAppLogEntry(value: unknown): AppLogEntry | null {
+  if (!isRecord(value)) return null
+  const level = value.level === 'info' || value.level === 'warn' || value.level === 'error' ? value.level : null
+  const message = typeof value.message === 'string' ? value.message : ''
+  const timestamp = typeof value.timestamp === 'string' ? value.timestamp : ''
+  if (!level || !message || !timestamp) return null
+  return {
+    id: typeof value.id === 'string' && value.id ? value.id : createAppLogId(),
+    timestamp,
+    level,
+    message: message.slice(0, maxLogMessageLength),
+    source: typeof value.source === 'string' ? value.source.slice(0, 80) : undefined,
+    context: sanitizeLogValue(value.context),
+  }
+}
+
+function createAppLogId() {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') return crypto.randomUUID()
+  return `log-${Date.now()}-${Math.random().toString(16).slice(2)}`
+}
+
+function serializeErrorForLog(error: unknown) {
+  if (error instanceof Error) {
+    return {
+      name: error.name,
+      message: error.message,
+      stack: typeof error.stack === 'string' ? error.stack.split('\n').slice(0, 8).join('\n') : undefined,
+      ...(error instanceof GatewayError ? { code: error.code, statusCode: error.statusCode } : {}),
+    }
+  }
+  return sanitizeLogValue(error)
+}
+
+function sanitizeLogValue(value: unknown, depth = 0): unknown {
+  if (value == null || typeof value === 'number' || typeof value === 'boolean') return value
+  if (typeof value === 'string') return value.slice(0, 500)
+  if (depth >= 4) return '[truncated]'
+  if (Array.isArray(value)) return value.slice(0, 20).map((entry) => sanitizeLogValue(entry, depth + 1))
+  if (!isRecord(value)) return String(value).slice(0, 200)
+  return Object.fromEntries(
+    Object.entries(value).slice(0, 40).map(([key, entry]) => [
+      key,
+      /token|authorization|password|secret/i.test(key) ? '[redacted]' : sanitizeLogValue(entry, depth + 1),
+    ]),
+  )
+}
+
+function redactUrlForLog(url: string) {
+  if (!url) return ''
+  try {
+    const parsed = new URL(url)
+    for (const key of Array.from(parsed.searchParams.keys())) {
+      if (/token|secret|key|auth/i.test(key)) parsed.searchParams.set(key, '[redacted]')
+    }
+    return parsed.toString().slice(0, 500)
+  } catch {
+    return url.replace(/([?&](?:token|secret|key|auth)=)[^&]+/gi, '$1[redacted]').slice(0, 500)
+  }
+}
+
 function capacitorDataToBlob(value: unknown) {
   if (value instanceof Blob) return value
   if (typeof value === 'string') {
@@ -4589,6 +4911,17 @@ function formatDate(value: string) {
     year: 'numeric',
     month: '2-digit',
     day: '2-digit',
+  })
+}
+
+function formatDateTime(value: string) {
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return value
+  return date.toLocaleString('zh-CN', {
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
   })
 }
 

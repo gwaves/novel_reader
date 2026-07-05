@@ -480,6 +480,63 @@ button:disabled {
   color: #9a3324;
 }
 
+.diagnostics-panel {
+  display: grid;
+  grid-column: 1 / -1;
+  gap: 12px;
+  border: 1px solid #d9e1e8;
+  border-radius: 8px;
+  background: #ffffff;
+  padding: 14px;
+}
+
+.diagnostics-panel .section-title {
+  margin: -14px -14px 0;
+}
+
+.diagnostics-panel dl {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin: 0;
+}
+
+.diagnostics-panel dt {
+  color: #667584;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.diagnostics-panel dd {
+  margin: 3px 0 0;
+  color: #17202a;
+  font-size: 13px;
+  font-weight: 800;
+  overflow-wrap: anywhere;
+}
+
+.diagnostics-message {
+  margin: 0;
+  border-radius: 8px;
+  background: #eef5f5;
+  color: #2f6f73;
+  padding: 10px 12px;
+  font-size: 13px;
+  font-weight: 800;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.diagnostics-error {
+  background: #fde6e1;
+  color: #9a3324;
+}
+
+.diagnostics-submitted {
+  background: #dff4e8;
+  color: #1f6b45;
+}
+
 .cache-book-list {
   display: grid;
   gap: 10px;
@@ -598,6 +655,69 @@ button:disabled {
 .status-checking {
   background: #e8eef5;
   color: #506070;
+}
+
+.issue-banner {
+  display: grid;
+  gap: 10px;
+  margin: 12px 0;
+  border: 1px solid #f0b8ae;
+  border-left: 4px solid #c94635;
+  border-radius: 8px;
+  background: #fff8f6;
+  color: #26313d;
+  padding: 12px;
+}
+
+.issue-banner.issue-warn {
+  border-color: #ead19b;
+  border-left-color: #b7791f;
+  background: #fffaf0;
+}
+
+.issue-banner strong,
+.issue-banner span {
+  display: block;
+}
+
+.issue-banner strong {
+  color: #9a3324;
+  font-size: 14px;
+}
+
+.issue-banner.issue-warn strong {
+  color: #8a5a12;
+}
+
+.issue-banner span {
+  margin-top: 2px;
+  color: #667584;
+  font-size: 12px;
+  font-weight: 800;
+}
+
+.issue-banner p {
+  margin: 8px 0 0;
+  color: #26313d;
+  font-size: 13px;
+  font-weight: 800;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.issue-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.issue-actions button {
+  min-height: 38px;
+  border: 1px solid #cfd9e3;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #26313d;
+  font-weight: 800;
 }
 
 .visibility-notice {
