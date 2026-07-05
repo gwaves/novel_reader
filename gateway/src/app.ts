@@ -479,19 +479,29 @@ export function buildGatewayApp(config: GatewayConfig = loadConfig()) {
       })
       return {
         schemaVersion: 1,
-        streamUrl: `/mobile/books/${encodeURIComponent(request.params.bookId)}/audio/${encodeURIComponent(request.params.chapterId)}/stream?token=${encodeURIComponent(token)}`,
+        streamUrl: `/mobile/books/${encodeURIComponent(request.params.bookId)}/audio/${encodeURIComponent(request.params.chapterId)}/stream.mp3?token=${encodeURIComponent(token)}`,
         expiresAt: new Date(expiresAtMs).toISOString(),
       }
     },
   )
 
+  async function handleAudioStream(
+    request: FastifyRequest<{ Params: { bookId: string; chapterId: string }; Querystring: { token?: string } }>,
+    reply: FastifyReply,
+  ) {
+    verifyAudioStreamToken(config, request.query.token, request.params.bookId, request.params.chapterId)
+    const audio = await openAudioFile(config, request.params.bookId, request.params.chapterId)
+    return sendAudioStream(reply, audio, request.headers.range)
+  }
+
   app.get<{ Params: { bookId: string; chapterId: string }; Querystring: { token?: string } }>(
     '/mobile/books/:bookId/audio/:chapterId/stream',
-    async (request, reply) => {
-      verifyAudioStreamToken(config, request.query.token, request.params.bookId, request.params.chapterId)
-      const audio = await openAudioFile(config, request.params.bookId, request.params.chapterId)
-      return sendAudioStream(reply, audio, request.headers.range)
-    },
+    handleAudioStream,
+  )
+
+  app.get<{ Params: { bookId: string; chapterId: string }; Querystring: { token?: string } }>(
+    '/mobile/books/:bookId/audio/:chapterId/stream.mp3',
+    handleAudioStream,
   )
 
   app.get<{ Params: { bookId: string; chapterId: string } }>(

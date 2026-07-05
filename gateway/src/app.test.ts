@@ -3573,7 +3573,7 @@ describe('gateway app', () => {
     expect(tokenResponse.json()).toMatchObject({
       schemaVersion: 1,
     })
-    expect(tokenResponse.json().streamUrl).toMatch(/^\/mobile\/books\/book-a\/audio\/chapter-1\/stream\?token=/)
+    expect(tokenResponse.json().streamUrl).toMatch(/^\/mobile\/books\/book-a\/audio\/chapter-1\/stream\.mp3\?token=/)
 
     const streamUrl = tokenResponse.json().streamUrl as string
     const streamResponse = await app.inject({
@@ -3583,6 +3583,13 @@ describe('gateway app', () => {
     const rangeResponse = await app.inject({
       method: 'GET',
       url: streamUrl,
+      headers: {
+        range: 'bytes=5-7',
+      },
+    })
+    const legacyRangeResponse = await app.inject({
+      method: 'GET',
+      url: streamUrl.replace('/stream.mp3?', '/stream?'),
       headers: {
         range: 'bytes=5-7',
       },
@@ -3601,6 +3608,8 @@ describe('gateway app', () => {
     expect(rangeResponse.statusCode).toBe(206)
     expect(rangeResponse.headers['content-range']).toBe('bytes 5-7/13')
     expect(rangeResponse.body).toBe('mp3')
+    expect(legacyRangeResponse.statusCode).toBe(206)
+    expect(legacyRangeResponse.body).toBe('mp3')
     expect(unsatisfiableRangeResponse.statusCode).toBe(416)
     expect(unsatisfiableRangeResponse.headers['content-range']).toBe('bytes */13')
 
