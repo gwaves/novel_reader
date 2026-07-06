@@ -348,7 +348,8 @@ PATCH /admin/devices/:deviceId
 ```json
 {
   "name": "客厅平板",
-  "role": "trusted"
+  "role": "trusted",
+  "note": "客厅平板，给父母看书用"
 }
 ```
 

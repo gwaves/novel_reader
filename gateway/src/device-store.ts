@@ -10,6 +10,7 @@ export type GatewayDeviceRole = 'default' | 'trusted' | 'disabled'
 export type GatewayDeviceRecord = {
   id: string
   name: string
+  note?: string
   model?: string
   platform?: string
   appVersion?: string
@@ -68,7 +69,7 @@ export async function touchGatewayDevice(config: GatewayConfig, auth: GatewayAut
 export async function updateGatewayDevice(
   config: GatewayConfig,
   deviceId: string,
-  patch: { name?: unknown; role?: unknown },
+  patch: { name?: unknown; role?: unknown; note?: unknown },
 ) {
   const registry = await readDeviceRegistry(config)
   const device = registry.devices.find((candidate) => candidate.id === deviceId)
@@ -87,6 +88,17 @@ export async function updateGatewayDevice(
       throw new GatewayHttpError(400, 'invalid_device_update', 'Device role is invalid.')
     }
     device.role = patch.role
+  }
+  if (patch.note !== undefined) {
+    if (typeof patch.note !== 'string') {
+      throw new GatewayHttpError(400, 'invalid_device_update', 'Device note must be a string.')
+    }
+    const note = patch.note.trim().slice(0, 80)
+    if (note) {
+      device.note = note
+    } else {
+      delete device.note
+    }
   }
 
   await writeDeviceRegistry(config, registry)
@@ -142,6 +154,7 @@ function normalizeDevice(device: unknown): GatewayDeviceRecord[] {
     {
       id,
       name,
+      note: readOptionalString(device, 'note')?.slice(0, 80),
       model: readOptionalString(device, 'model'),
       platform: readOptionalString(device, 'platform'),
       appVersion: readOptionalString(device, 'appVersion'),

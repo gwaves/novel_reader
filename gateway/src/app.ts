@@ -152,9 +152,11 @@ export function buildGatewayApp(config: GatewayConfig = loadConfig()) {
   app.get('/auth/devices', async (request) => {
     const auth = requireMobileAuth(config, request)
     await touchGatewayDevice(config, auth, request.ip)
+    const registry = await readDeviceRegistry(config)
     return {
       generatedAt: new Date().toISOString(),
-      ...(await readDeviceRegistry(config)),
+      ...registry,
+      devices: registry.devices.map(stripAdminDeviceFields),
     }
   })
 
@@ -862,6 +864,12 @@ function buildSessionAuth(auth: ReturnType<typeof requireMobileAuth>, device?: G
     allowedVisibilities: allowedVisibilitiesForRole(role),
     pairingCode: device?.pairingCode,
   }
+}
+
+function stripAdminDeviceFields(device: GatewayDeviceRecord): Omit<GatewayDeviceRecord, 'note'> {
+  const publicDevice = { ...device }
+  delete publicDevice.note
+  return publicDevice
 }
 
 function allowedVisibilitiesForRole(role: GatewayDeviceRecord['role']): Array<GatewayBookSummary['visibility']> {

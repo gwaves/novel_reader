@@ -561,6 +561,23 @@ input {
   color: #1f2937;
 }
 
+.drawer-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin: -4px 0 12px;
+}
+
+.drawer-actions small {
+  color: #64748b;
+  font-size: 12px;
+}
+
+.drawer-actions .table-action {
+  width: auto;
+}
+
 .checkbox-group {
   display: grid;
   gap: 8px;
@@ -678,6 +695,14 @@ input {
 .table-action:disabled {
   cursor: wait;
   opacity: 0.62;
+}
+
+.note-save-button:disabled {
+  cursor: not-allowed;
+}
+
+.note-save-button.saving:disabled {
+  cursor: wait;
 }
 
 .table-file-input {
