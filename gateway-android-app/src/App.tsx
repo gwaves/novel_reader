@@ -2239,11 +2239,6 @@ function App() {
     }
   }
 
-  function openSettingsTab(nextSettingsTab: SettingsTab) {
-    setSettingsTab(nextSettingsTab)
-    switchTab('settings')
-  }
-
   function prepareReaderScrollRestore() {
     if (!selectedBookId) return
     const progress = loadReadingProgress(selectedBookId)

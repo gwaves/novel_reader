@@ -1193,16 +1193,39 @@ function DeviceDrawer({
   retryAction?: RetryAction
   noteRetryAction?: RetryAction
 }) {
-  const [noteDraft, setNoteDraft] = useState('')
-
-  useEffect(() => {
-    setNoteDraft(device?.note ?? '')
-  }, [device?.id, device?.note])
-
   if (!device) {
     return <aside className="drawer empty">选择一台设备查看验证码、连接信息和授权角色。</aside>
   }
 
+  return (
+    <DeviceDrawerContent
+      key={device.id}
+      device={device}
+      onUpdate={onUpdate}
+      operationStatus={operationStatus}
+      noteOperationStatus={noteOperationStatus}
+      retryAction={retryAction}
+      noteRetryAction={noteRetryAction}
+    />
+  )
+}
+
+function DeviceDrawerContent({
+  device,
+  onUpdate,
+  operationStatus,
+  noteOperationStatus,
+  retryAction,
+  noteRetryAction,
+}: {
+  device: AdminDevice
+  onUpdate: (deviceId: string, patch: Partial<AdminDevice>) => void
+  operationStatus?: OperationStatus
+  noteOperationStatus?: OperationStatus
+  retryAction?: RetryAction
+  noteRetryAction?: RetryAction
+}) {
+  const [noteDraft, setNoteDraft] = useState(device.note ?? '')
   const normalizedNote = noteDraft.trim().slice(0, 80)
   const noteChanged = normalizedNote !== device.note
 
