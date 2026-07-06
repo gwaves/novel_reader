@@ -745,6 +745,16 @@ describe('gateway app', () => {
         'x-device-name': 'Android Phone',
       },
     })
+    const noteResponse = await app.inject({
+      method: 'PATCH',
+      url: '/admin/devices/legacy:android-phone',
+      headers: {
+        authorization: 'Bearer dev-token',
+      },
+      payload: {
+        note: '后台备注',
+      },
+    })
     const devicesResponse = await app.inject({
       method: 'GET',
       url: '/auth/devices',
@@ -754,6 +764,7 @@ describe('gateway app', () => {
     })
 
     expect(sessionResponse.statusCode).toBe(200)
+    expect(noteResponse.statusCode).toBe(200)
     expect(sessionResponse.json()).toMatchObject({
       auth: {
         deviceName: 'Android Phone',
@@ -770,6 +781,7 @@ describe('gateway app', () => {
         },
       ],
     })
+    expect(devicesResponse.json().devices[0]).not.toHaveProperty('note')
   })
 
   it('records stable device metadata and returns role-scoped session auth', async () => {
@@ -782,6 +794,7 @@ describe('gateway app', () => {
           {
             id: 'device-1',
             name: '客厅平板',
+            note: '客厅固定阅读设备',
             model: 'Xiaomi Pad',
             platform: 'android',
             appVersion: '0.1.0',
@@ -828,9 +841,11 @@ describe('gateway app', () => {
         pairingCode: '428193',
       },
     })
+    expect(response.json().auth).not.toHaveProperty('note')
     expect(devices.devices[0]).toMatchObject({
       id: 'device-1',
       name: '客厅平板新名',
+      note: '客厅固定阅读设备',
       model: 'Xiaomi Pad 6',
       platform: 'android',
       appVersion: '0.7.0',
@@ -1176,6 +1191,7 @@ describe('gateway app', () => {
           {
             id: 'device-a',
             name: '旧设备',
+            note: '初始备注',
             pairingCode: '333333',
             role: 'default',
             firstSeenAt: '2026-06-29T00:00:00.000Z',
@@ -1216,7 +1232,13 @@ describe('gateway app', () => {
       method: 'PATCH',
       url: '/admin/devices/device-a',
       headers: authHeaders,
-      payload: { name: '客厅平板', role: 'trusted' },
+      payload: { name: '客厅平板', role: 'trusted', note: '客厅平板，给父母看书用，超过八十字会被截断'.repeat(4) },
+    })
+    const clearedNoteResponse = await app.inject({
+      method: 'PATCH',
+      url: '/admin/devices/device-a',
+      headers: authHeaders,
+      payload: { note: '  ' },
     })
 
     expect(booksBefore.statusCode).toBe(200)
@@ -1243,6 +1265,7 @@ describe('gateway app', () => {
     expect(devicesBefore.json().devices[0]).toMatchObject({
       id: 'device-a',
       role: 'default',
+      note: '初始备注',
     })
     expect(deviceResponse.statusCode).toBe(200)
     expect(deviceResponse.json().device).toMatchObject({
@@ -1250,6 +1273,9 @@ describe('gateway app', () => {
       name: '客厅平板',
       role: 'trusted',
     })
+    expect(deviceResponse.json().device.note).toBe('客厅平板，给父母看书用，超过八十字会被截断'.repeat(4).slice(0, 80))
+    expect(clearedNoteResponse.statusCode).toBe(200)
+    expect(clearedNoteResponse.json().device).not.toHaveProperty('note')
   })
 
   it('enforces patched device roles on mobile APIs', async () => {

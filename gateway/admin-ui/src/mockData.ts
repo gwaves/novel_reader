@@ -60,6 +60,7 @@ export type AdminAudio = {
 export type AdminDevice = {
   id: string
   name: string
+  note: string
   model: string
   platform: string
   appVersion: string
@@ -354,6 +355,7 @@ export const initialDevices: AdminDevice[] = [
   {
     id: 'device-living-room-pad',
     name: '客厅小米平板',
+    note: '客厅阅读设备',
     model: 'Xiaomi Pad 6',
     platform: 'android',
     appVersion: '0.1.0',
@@ -368,6 +370,7 @@ export const initialDevices: AdminDevice[] = [
   {
     id: 'device-trusted-tablet',
     name: '书房阅读器',
+    note: '书房固定设备',
     model: 'Lenovo Tab',
     platform: 'android',
     appVersion: '0.1.0',
@@ -382,6 +385,7 @@ export const initialDevices: AdminDevice[] = [
   {
     id: 'device-disabled-phone',
     name: '旧手机',
+    note: '已停用',
     model: 'Android Phone',
     platform: 'android',
     appVersion: '0.0.8',

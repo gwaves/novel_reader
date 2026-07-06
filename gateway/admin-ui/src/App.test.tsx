@@ -78,6 +78,7 @@ describe('Gateway 管理后台 UI', () => {
             {
               id: 'api-device',
               name: '接口平板',
+              note: '接口测试设备',
               model: 'Android Tablet',
               platform: 'android',
               appVersion: '0.1.0',
@@ -351,16 +352,57 @@ describe('Gateway 管理后台 UI', () => {
 
     await user.click(screen.getByRole('button', { name: '设备' }))
 
-    const row = screen.getByRole('row', { name: /客厅小米平板 428193 普通 192\.168\.88\.23 2分钟前/ })
+    const row = screen.getByRole('row', { name: /客厅小米平板 客厅阅读设备 428193 普通 192\.168\.88\.23 2分钟前/ })
+    expect(within(row).getByText('客厅阅读设备')).toBeInTheDocument()
     expect(within(row).getByText('428193')).toBeInTheDocument()
     expect(within(row).getByText('普通')).toBeInTheDocument()
 
     await user.click(row)
     expect(screen.getByRole('heading', { name: '客厅小米平板' })).toBeInTheDocument()
+    expect(screen.getByLabelText('备注')).toHaveValue('客厅阅读设备')
 
     await user.selectOptions(screen.getByLabelText('设备角色'), 'trusted')
     expect(screen.getByText('当前角色：受信')).toBeInTheDocument()
     expect(within(row).getByText('受信')).toBeInTheDocument()
+  })
+
+  it('设备备注保存后同步列表和详情', async () => {
+    window.localStorage.setItem(adminTokenStorageKey, 'device-note-token')
+    const noteRequests: Array<{ body: string; authorization: string }> = []
+    vi.spyOn(window, 'fetch').mockImplementation(async (input, init) => {
+      const url = String(input)
+      if (url === '/admin/devices/device-living-room-pad' && init?.method === 'PATCH') {
+        const authorization = init.headers instanceof Headers ? init.headers.get('authorization') ?? '' : ''
+        noteRequests.push({
+          body: String(init.body),
+          authorization,
+        })
+        return jsonResponse({})
+      }
+      throw new TypeError('api offline')
+    })
+
+    const user = userEvent.setup()
+    render(<App />)
+    await screen.findByText(/API 不可用，正在显示 mock 数据/)
+
+    await user.click(screen.getByRole('button', { name: '设备' }))
+    const row = screen.getByRole('row', { name: /客厅小米平板 客厅阅读设备 428193 普通 192\.168\.88\.23/ })
+    await user.click(row)
+
+    await user.clear(screen.getByLabelText('备注'))
+    await user.type(screen.getByLabelText('备注'), '给父母看书用')
+    await user.click(screen.getByRole('button', { name: '保存备注' }))
+
+    expect(await screen.findByText('保存成功')).toBeInTheDocument()
+    expect(within(row).getByText('给父母看书用')).toBeInTheDocument()
+    expect(screen.getByLabelText('备注')).toHaveValue('给父母看书用')
+    expect(noteRequests).toEqual([
+      {
+        body: JSON.stringify({ note: '给父母看书用' }),
+        authorization: 'Bearer device-note-token',
+      },
+    ])
   })
 
   it('数据包下载操作成功和失败时显示行级状态，并携带管理员 Token', async () => {
@@ -784,7 +826,7 @@ describe('Gateway 管理后台 UI', () => {
     await screen.findByText(/API 不可用，正在显示 mock 数据/)
 
     await user.click(screen.getByRole('button', { name: '设备' }))
-    const row = screen.getByRole('row', { name: /客厅小米平板 428193 普通 192\.168\.88\.23/ })
+    const row = screen.getByRole('row', { name: /客厅小米平板 客厅阅读设备 428193 普通 192\.168\.88\.23/ })
     await user.click(row)
 
     await user.selectOptions(screen.getByLabelText('设备角色'), 'disabled')

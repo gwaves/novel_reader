@@ -1,7 +1,7 @@
 {
   "name": "novel_reader",
   "private": true,
-  "version": "0.8.3",
+  "version": "0.8.4",
   "description": "Offline-first novel reader with EPUB import, RAG search, knowledge graph extraction, and an Android companion app.",
   "license": "MIT",
   "author": "gwaves",

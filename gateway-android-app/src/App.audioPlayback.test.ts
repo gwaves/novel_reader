@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import {
   buildAudioChapterStatusRows,
+  buildSubmittedAppLogs,
   appendAppLogToStorage,
   gatewayGenerateRagAnswer,
   gatewayUserFacingError,
@@ -18,6 +19,7 @@ import {
   scrollElementStartToViewportCenter,
   searchGatewayRag,
   writeCachedAudioToStorage,
+  updateCachedAudioManifestInStorage,
   saveReadingProgressToStorage,
   type AudioChapter,
 } from './App'
@@ -171,6 +173,20 @@ describe('local diagnostics log', () => {
     expect(entries[0].message).toBe('log-5')
     expect(entries.at(-1)?.message).toBe('log-204')
   })
+
+  it('includes the current visible issue when localStorage could not persist it', () => {
+    const storage = createMemoryStorage()
+    const stored = appendAppLogToStorage(storage, 'info', 'MP3 catalog loaded')
+    const latestIssue = {
+      id: 'visible-quota-error',
+      timestamp: '2026-07-06T09:46:00.000Z',
+      level: 'error' as const,
+      message: "完整包同步失败：Failed to execute 'setItem' on 'Storage': quota exceeded",
+      source: 'app',
+    }
+
+    expect(buildSubmittedAppLogs(loadAppLogEntriesFromStorage(storage), latestIssue)).toEqual([stored, latestIssue])
+  })
 })
 
 describe('audio cache storage', () => {
@@ -204,6 +220,66 @@ describe('audio cache storage', () => {
     )
     expect(listCachedAudioChapterIdsFromStorage(storage, 'book-a')).toEqual(['chapter-1'])
     expect(listCachedAudioChapterIdsFromStorage(storage, 'book-b')).toEqual(['chapter-1'])
+  })
+
+  it('keeps cached MP3 timeline manifests for offline position playback', () => {
+    const storage = createMemoryStorage()
+
+    writeCachedAudioToStorage(
+      storage,
+      'book-a',
+      { chapterId: 'chapter-1', fileName: 'book-a-chapter-1.mp3', sizeBytes: 1024 },
+      {
+        kind: 'file',
+        filePath: '/audio/book-a/chapter-1.mp3',
+        manifestFilePath: '/audio/book-a/chapter-1.manifest.json',
+        manifest: {
+          timeline: [
+            { startTime: 12, endTime: 18, sourceStart: 100, sourceEnd: 160 },
+          ],
+        },
+        sizeBytes: 1024,
+      },
+    )
+
+    expect(readCachedAudioFromStorage(storage, 'book-a', 'chapter-1')).toEqual(
+      expect.objectContaining({
+        filePath: '/audio/book-a/chapter-1.mp3',
+        manifestFilePath: '/audio/book-a/chapter-1.manifest.json',
+        manifest: expect.objectContaining({
+          timeline: [expect.objectContaining({ startTime: 12, sourceStart: 100 })],
+        }),
+      }),
+    )
+  })
+
+  it('backfills cached MP3 timeline manifests without replacing the audio file', () => {
+    const storage = createMemoryStorage()
+    writeCachedAudioToStorage(
+      storage,
+      'book-a',
+      { chapterId: 'chapter-1', fileName: 'book-a-chapter-1.mp3', sizeBytes: 1024 },
+      { kind: 'file', filePath: '/audio/book-a/chapter-1.mp3', sizeBytes: 1024 },
+    )
+
+    updateCachedAudioManifestInStorage(storage, 'book-a', 'chapter-1', {
+      manifestFilePath: '/audio/book-a/chapter-1.manifest.json',
+      manifest: {
+        timeline: [
+          { startTime: 30, endTime: 45, sourceStart: 200, sourceEnd: 260 },
+        ],
+      },
+    })
+
+    expect(readCachedAudioFromStorage(storage, 'book-a', 'chapter-1')).toEqual(
+      expect.objectContaining({
+        filePath: '/audio/book-a/chapter-1.mp3',
+        manifestFilePath: '/audio/book-a/chapter-1.manifest.json',
+        manifest: expect.objectContaining({
+          timeline: [expect.objectContaining({ startTime: 30, sourceStart: 200 })],
+        }),
+      }),
+    )
   })
 
   it('ignores broken cache records instead of leaking them into visible counts', () => {

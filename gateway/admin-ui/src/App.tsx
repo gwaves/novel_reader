@@ -10,6 +10,7 @@ import {
   loadAdminOverviewData,
   patchBookLabels,
   patchBookVisibility,
+  patchDeviceNote,
   patchDeviceRole,
   refreshBookAudio,
   type AdminDashboardData,
@@ -232,19 +233,21 @@ function App() {
     }
     try {
       if (patch.role) await patchDeviceRole(deviceId, patch.role)
+      if (patch.note !== undefined) await patchDeviceNote(deviceId, patch.note)
       setDeviceOperationStatus((current) => ({ ...current, [operationKey]: { state: 'success', message: '保存成功' } }))
     } catch {
       setDevices((current) => current.map((device) => (device.id === deviceId ? previous : device)))
       setDeviceOperationStatus((current) => ({ ...current, [operationKey]: { state: 'failed', message: '保存失败，已回滚' } }))
       setDeviceRetryActions((current) => ({
         ...current,
-        [operationKey]: { label: '重试保存设备角色', run: () => void saveDevicePatch(deviceId, patch, operationKey) },
+        [operationKey]: { label: patch.note !== undefined ? '重试保存设备备注' : '重试保存设备角色', run: () => void saveDevicePatch(deviceId, patch, operationKey) },
       }))
     }
   }
 
   const updateDevice = (deviceId: string, patch: Partial<AdminDevice>) => {
     if (patch.role) void saveDevicePatch(deviceId, patch, `${deviceId}:role`)
+    if (patch.note !== undefined) void saveDevicePatch(deviceId, { note: patch.note }, `${deviceId}:note`)
   }
 
   const handleDownloadPackage = async (item: AdminPackage) => {
@@ -419,7 +422,9 @@ function App() {
               onSelect={setSelectedDeviceId}
               onUpdate={updateDevice}
               operationStatus={selectedDevice ? deviceOperationStatus[`${selectedDevice.id}:role`] : undefined}
+              noteOperationStatus={selectedDevice ? deviceOperationStatus[`${selectedDevice.id}:note`] : undefined}
               retryAction={selectedDevice ? deviceRetryActions[`${selectedDevice.id}:role`] : undefined}
+              noteRetryAction={selectedDevice ? deviceRetryActions[`${selectedDevice.id}:note`] : undefined}
             />
           )}
           {!isInitialLoading && activeView === 'packages' && (
@@ -868,14 +873,18 @@ function DevicesPage({
   onSelect,
   onUpdate,
   operationStatus,
+  noteOperationStatus,
   retryAction,
+  noteRetryAction,
 }: {
   devices: AdminDevice[]
   selectedDevice: AdminDevice | null
   onSelect: (deviceId: string) => void
   onUpdate: (deviceId: string, patch: Partial<AdminDevice>) => void
   operationStatus?: OperationStatus
+  noteOperationStatus?: OperationStatus
   retryAction?: RetryAction
+  noteRetryAction?: RetryAction
 }) {
   return (
     <section className="split-view">
@@ -888,6 +897,7 @@ function DevicesPage({
           <thead>
             <tr>
               <th>设备名</th>
+              <th>备注</th>
               <th>验证码</th>
               <th>角色</th>
               <th>最近 IP</th>
@@ -902,6 +912,7 @@ function DevicesPage({
                 onClick={() => onSelect(device.id)}
               >
                 <td><strong>{device.name}</strong></td>
+                <td>{device.note ? <span>{device.note}</span> : <span className="muted">无</span>}</td>
                 <td><code>{device.pairingCode}</code></td>
                 <td><Badge tone={device.role}>{roleNames[device.role]}</Badge></td>
                 <td>{device.lastIp}</td>
@@ -912,7 +923,14 @@ function DevicesPage({
         </table>
       </div>
 
-      <DeviceDrawer device={selectedDevice} onUpdate={onUpdate} operationStatus={operationStatus} retryAction={retryAction} />
+      <DeviceDrawer
+        device={selectedDevice}
+        onUpdate={onUpdate}
+        operationStatus={operationStatus}
+        noteOperationStatus={noteOperationStatus}
+        retryAction={retryAction}
+        noteRetryAction={noteRetryAction}
+      />
     </section>
   )
 }
@@ -1164,16 +1182,52 @@ function DeviceDrawer({
   device,
   onUpdate,
   operationStatus,
+  noteOperationStatus,
   retryAction,
+  noteRetryAction,
 }: {
   device: AdminDevice | null
   onUpdate: (deviceId: string, patch: Partial<AdminDevice>) => void
   operationStatus?: OperationStatus
+  noteOperationStatus?: OperationStatus
   retryAction?: RetryAction
+  noteRetryAction?: RetryAction
 }) {
   if (!device) {
     return <aside className="drawer empty">选择一台设备查看验证码、连接信息和授权角色。</aside>
   }
+
+  return (
+    <DeviceDrawerContent
+      key={device.id}
+      device={device}
+      onUpdate={onUpdate}
+      operationStatus={operationStatus}
+      noteOperationStatus={noteOperationStatus}
+      retryAction={retryAction}
+      noteRetryAction={noteRetryAction}
+    />
+  )
+}
+
+function DeviceDrawerContent({
+  device,
+  onUpdate,
+  operationStatus,
+  noteOperationStatus,
+  retryAction,
+  noteRetryAction,
+}: {
+  device: AdminDevice
+  onUpdate: (deviceId: string, patch: Partial<AdminDevice>) => void
+  operationStatus?: OperationStatus
+  noteOperationStatus?: OperationStatus
+  retryAction?: RetryAction
+  noteRetryAction?: RetryAction
+}) {
+  const [noteDraft, setNoteDraft] = useState(device.note ?? '')
+  const normalizedNote = noteDraft.trim().slice(0, 80)
+  const noteChanged = normalizedNote !== device.note
 
   return (
     <aside className="drawer" aria-label="设备详情">
@@ -1198,6 +1252,29 @@ function DeviceDrawer({
       <OperationNote status={operationStatus} retryAction={retryAction} />
 
       <p className="current-state">当前角色：{roleNames[device.role]}</p>
+
+      <label className="field">
+        <span>备注</span>
+        <input
+          value={noteDraft}
+          maxLength={80}
+          onChange={(event) => setNoteDraft(event.target.value)}
+          disabled={noteOperationStatus?.state === 'saving'}
+          placeholder="位置、用途或负责人"
+        />
+      </label>
+      <div className="drawer-actions">
+        <small>{noteDraft.length}/80</small>
+        <button
+          type="button"
+          className={`table-action note-save-button ${noteOperationStatus?.state === 'saving' ? 'saving' : ''}`}
+          disabled={!noteChanged || noteOperationStatus?.state === 'saving'}
+          onClick={() => onUpdate(device.id, { note: normalizedNote })}
+        >
+          保存备注
+        </button>
+      </div>
+      <OperationNote status={noteOperationStatus} retryAction={noteRetryAction} />
 
       <dl className="detail-list">
         <div><dt>设备 ID</dt><dd>{device.id}</dd></div>

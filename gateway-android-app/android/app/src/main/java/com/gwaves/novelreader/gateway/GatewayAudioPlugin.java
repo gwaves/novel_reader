@@ -104,6 +104,94 @@ public class GatewayAudioPlugin extends Plugin {
   }
 
   @PluginMethod
+  public void downloadAudioManifest(PluginCall call) {
+    String url = call.getString("url");
+    String token = call.getString("token");
+    String deviceId = call.getString("deviceId", "");
+    String deviceName = call.getString("deviceName", "Android Phone");
+    String deviceModel = call.getString("deviceModel", "");
+    String devicePlatform = call.getString("devicePlatform", "");
+    String appVersion = call.getString("appVersion", "");
+    String bookId = call.getString("bookId");
+    String chapterId = call.getString("chapterId");
+
+    if (url == null || token == null || bookId == null || chapterId == null) {
+      call.reject("Missing downloadAudioManifest parameters.");
+      return;
+    }
+
+    getBridge().execute(
+      () -> {
+        HttpURLConnection connection = null;
+        File tempFile = null;
+        try {
+          File bookDir = new File(getContext().getFilesDir(), "audio/" + safeSegment(bookId));
+          if (!bookDir.exists() && !bookDir.mkdirs()) {
+            throw new IllegalStateException("Unable to create audio cache directory.");
+          }
+
+          File targetFile = new File(bookDir, safeSegment(chapterId) + ".manifest.json");
+          if (targetFile.exists() && targetFile.isFile() && targetFile.length() > 0) {
+            JSObject result = new JSObject();
+            result.put("filePath", targetFile.getAbsolutePath());
+            result.put("sizeBytes", targetFile.length());
+            result.put("cached", true);
+            call.resolve(result);
+            return;
+          }
+
+          tempFile = File.createTempFile(safeSegment(chapterId) + "-manifest-", ".tmp", bookDir);
+
+          connection = (HttpURLConnection) new URL(url).openConnection();
+          connection.setConnectTimeout(15000);
+          connection.setReadTimeout(60000);
+          connection.setRequestProperty("Authorization", "Bearer " + token);
+          setDeviceHeaders(connection, deviceId, deviceName, deviceModel, devicePlatform, appVersion);
+
+          int status = connection.getResponseCode();
+          if (status < 200 || status >= 300) {
+            throw new IllegalStateException("Gateway HTTP " + status);
+          }
+
+          long sizeBytes = 0;
+          byte[] buffer = new byte[1024 * 64];
+          try (InputStream input = connection.getInputStream(); FileOutputStream output = new FileOutputStream(tempFile, false)) {
+            int read;
+            while ((read = input.read(buffer)) != -1) {
+              output.write(buffer, 0, read);
+              sizeBytes += read;
+            }
+          }
+
+          if (sizeBytes <= 0) {
+            throw new IllegalStateException("Gateway audio manifest was empty.");
+          }
+          if (targetFile.exists() && !targetFile.delete()) {
+            throw new IllegalStateException("Unable to replace cached audio manifest.");
+          }
+          if (!tempFile.renameTo(targetFile)) {
+            throw new IllegalStateException("Unable to finish cached audio manifest.");
+          }
+
+          JSObject result = new JSObject();
+          result.put("filePath", targetFile.getAbsolutePath());
+          result.put("sizeBytes", sizeBytes);
+          call.resolve(result);
+        } catch (Exception error) {
+          if (tempFile != null && tempFile.exists()) {
+            tempFile.delete();
+          }
+          call.reject(error.getMessage() == null ? "Audio manifest download failed." : error.getMessage(), error);
+        } finally {
+          if (connection != null) {
+            connection.disconnect();
+          }
+        }
+      }
+    );
+  }
+
+  @PluginMethod
   public void downloadPackage(PluginCall call) {
     String url = call.getString("url");
     String token = call.getString("token");

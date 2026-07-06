@@ -38,6 +38,7 @@ type GatewayBook = {
 type GatewayDevice = {
   id?: string
   name?: string
+  note?: string
   model?: string
   platform?: string
   appVersion?: string
@@ -281,6 +282,13 @@ export async function patchDeviceRole(deviceId: string, role: DeviceRole, fetche
   })
 }
 
+export async function patchDeviceNote(deviceId: string, note: string, fetcher: typeof fetch = fetch) {
+  await adminFetch(`/admin/devices/${encodeURIComponent(deviceId)}`, fetcher, {
+    method: 'PATCH',
+    body: JSON.stringify({ note }),
+  })
+}
+
 export async function downloadPackage(bookId: string, fetcher: typeof fetch = fetch) {
   return adminFetch<Blob>(`/admin/books/${encodeURIComponent(bookId)}/package/download`, fetcher, {}, 'blob')
 }
@@ -424,6 +432,7 @@ function mapDevice(device: GatewayDevice): AdminDevice {
   return {
     id: readString(device.id, 'unknown-device'),
     name: readString(device.name, '未命名设备'),
+    note: readString(device.note, ''),
     model: readString(device.model, 'Unknown'),
     platform: readString(device.platform, 'unknown'),
     appVersion: readString(device.appVersion, 'unknown'),
@@ -524,7 +533,12 @@ function mapBookLike(book: GatewayBook | AdminBook): AdminBook {
 }
 
 function mapDeviceLike(device: GatewayDevice | AdminDevice): AdminDevice {
-  if ('pairingCode' in device && 'recentRequests' in device) return device
+  if ('pairingCode' in device && 'recentRequests' in device) {
+    return {
+      ...device,
+      note: typeof device.note === 'string' ? device.note : '',
+    }
+  }
   return mapDevice(device)
 }
 
