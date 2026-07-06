@@ -97,6 +97,7 @@ type AudioManifest = {
 type CachedAudio = {
   blob?: Blob
   filePath?: string
+  manifestFilePath?: string
   manifest: AudioManifest | null
   sizeBytes?: number
 }
@@ -130,6 +131,8 @@ type CachedAudioRecord = {
   chapterId: string
   audioChapter: AudioChapter
   filePath: string
+  manifest?: AudioManifest | null
+  manifestFilePath?: string
   sizeBytes?: number
   cachedAt: string
   updatedAt?: string
@@ -139,10 +142,13 @@ type AudioCachePayload =
   | {
       kind: 'blob'
       blob: Blob
+      manifest?: AudioManifest | null
     }
   | {
       kind: 'file'
       filePath: string
+      manifest?: AudioManifest | null
+      manifestFilePath?: string
       sizeBytes?: number
     }
 
@@ -158,6 +164,17 @@ type NativeAudioPlugin = {
     bookId: string
     chapterId: string
   }): Promise<{ filePath: string; sizeBytes: number }>
+  downloadAudioManifest(options: {
+    url: string
+    token: string
+    deviceId: string
+    deviceName: string
+    deviceModel: string
+    devicePlatform: string
+    appVersion: string
+    bookId: string
+    chapterId: string
+  }): Promise<{ filePath: string; sizeBytes: number; cached?: boolean }>
   downloadPackage(options: {
     url: string
     token: string
@@ -488,6 +505,7 @@ function App() {
   const displaySummaryCoverage = hasImportedPackage(visibleFullPackageCache) ? 1 : inferredSummaryCoverage(selectedBook, bookPackage, visibleFullPackageCache)
   const displayKgCoverage = inferredKgCoverage(selectedBook, bookPackage, visibleFullPackageCache)
   const displayRagAvailability = ragAvailability(selectedBook, bookPackage)
+  const displayPackageLabel = packageLabel(bookPackage, selectedBook, visibleFullPackageCache)
   const displayCloudAudioChapterCount = visibleAudioChapters.length || selectedBook?.audioChapterCount || 0
   const displayCachedAudioChapterCount = visibleCachedAudioIds.size || bookCachedAudioCount(selectedLocalBook ?? selectedBook)
   const cacheSummaries = useMemo(() => buildBookCacheSummaries([...displayLocalBooks, ...books], cacheVersion), [books, displayLocalBooks, cacheVersion])
@@ -541,6 +559,7 @@ function App() {
   const pendingAudioStartTimeRef = useRef<number | null>(null)
   const pendingAudioShouldPlayRef = useRef(false)
   const audioStreamRetryRef = useRef<AudioStreamRetryState | null>(null)
+  const hydratingAudioManifestBooksRef = useRef<Set<string>>(new Set())
   const pendingAutoPlayChapterIdRef = useRef<string | null>(null)
   const autoConnectAttemptedRef = useRef(false)
   const autoRestoreAttemptedRef = useRef(false)
@@ -592,7 +611,7 @@ function App() {
       reportUserError(new Error('请先配置 Gateway 地址和 Token。'), { action: 'submitLocalLogs' }, '提交日志失败')
       return
     }
-    const entries = loadAppLogEntriesFromStorage(localStorage)
+    const entries = buildSubmittedAppLogs(loadAppLogEntriesFromStorage(localStorage), latestIssue)
     if (entries.length === 0) {
       setLogSubmitState({ status: 'idle', message: '暂无可提交日志。' })
       setMessage('暂无可提交日志')
@@ -630,7 +649,7 @@ function App() {
           cachedAudioCount: visibleCachedAudioIds.size,
           speechEngine: ttsSettings.engine,
         },
-        logs: entries.slice(-maxSubmittedLogEntries),
+        logs: entries,
       })
       const receiptId = readString(response.receiptId) || ''
       const submittedCount = typeof response.storedEntries === 'number' ? response.storedEntries : entries.length
@@ -1176,6 +1195,15 @@ function App() {
     setAudioSyncBookId(null)
     clearAudioUrl()
     void refreshCachedAudioIds(bookId)
+    void loadCachedBookPackageSelection(bookId)
+  }
+
+  async function loadCachedBookPackageSelection(bookId: string) {
+    const cachedPackage = await loadCachedBookPackage(bookId)
+    if (!cachedPackage) return
+    const cachedChapters = packageChapters(cachedPackage)
+    setBookPackage((current) => (current?.book?.id === bookId ? current : cachedPackage))
+    setCurrentChapterId((current) => (current && cachedChapters.some((chapter) => chapter.id === current) ? current : cachedChapters[0]?.id ?? null))
   }
 
   async function syncFullPackage(bookId: string) {
@@ -1316,6 +1344,7 @@ function App() {
         currentChapterId,
       })
       await refreshCachedAudioIds(bookId)
+      void hydrateCachedAudioManifests(bookId, nextAudioChapters)
       if (showMessage) setMessage(`音频 ${nextAudioChapters.length} 章`)
     } catch (error) {
       if (isDeviceDisabledError(error)) {
@@ -1357,13 +1386,24 @@ function App() {
     setAudioPlaybackLoading(true)
     try {
       const cachedAudio = readCachedAudio(selectedBookId, currentChapter.id)
-      const manifest =
-        cachedAudio?.manifest ??
-        (currentAudio?.manifestFileName
-          ? await gatewayFetch(settings, `/mobile/books/${encodeURIComponent(selectedBookId)}/audio/${encodeURIComponent(currentAudio.chapterId)}/manifest`)
-              .then(normalizeAudioManifest)
-              .catch(() => null)
-          : null)
+      let manifest = await loadCachedAudioManifest(cachedAudio)
+      if (!manifest && cachedAudio && currentAudio.manifestFileName) {
+        manifest = await ensureCachedAudioManifest(selectedBookId, currentChapter.id, currentAudio).catch(() => null)
+      }
+      if (!manifest && currentAudio.manifestFileName) {
+        manifest = await fetchAudioManifest(selectedBookId, currentAudio).catch(() => null)
+      }
+      const missingCachedTimeline = Boolean(cachedAudio && options.sourcePosition != null && !manifest)
+      if (missingCachedTimeline) {
+        recordDiagnostic('warn', '本地 MP3 缺少时间轴，无法定位到当前位置', {
+          action: 'playCurrentAudio',
+          bookId: selectedBookId,
+          currentChapterId: currentChapter.id,
+          audioChapterId: currentAudio.chapterId,
+          hasCachedAudio: Boolean(cachedAudio),
+          hasManifestFilePath: Boolean(cachedAudio?.manifestFilePath),
+        })
+      }
       let playbackUrl = cachedAudio?.filePath ? Capacitor.convertFileSrc(cachedAudio.filePath) : ''
       const blob: Blob | undefined = cachedAudio?.blob
       let usesRemoteStream = false
@@ -1396,7 +1436,7 @@ function App() {
       setAudioManifest(manifest)
       setAudioTime(startTime)
       setAudioUrl(playbackUrl)
-      setMessage('音频已加载')
+      setMessage(missingCachedTimeline ? '本地 MP3 缺少时间轴，已从头播放；联网后会自动补齐' : '音频已加载')
     } catch (error) {
       pendingAudioStartTimeRef.current = null
       pendingAudioShouldPlayRef.current = false
@@ -1428,7 +1468,43 @@ function App() {
     setAudioChapters(nextAudioChapters)
     setAudioCatalogBookId(bookId)
     await refreshCachedAudioIds(bookId)
+    void hydrateCachedAudioManifests(bookId, nextAudioChapters)
     return nextAudioChapters
+  }
+
+  async function hydrateCachedAudioManifests(bookId: string, catalog: AudioChapter[]) {
+    if (!Capacitor.isNativePlatform() || hydratingAudioManifestBooksRef.current.has(bookId)) return
+    const records = Object.values(loadAudioCacheIndex()).filter(
+      (record) => record.bookId === bookId && !record.manifestFilePath,
+    )
+    if (!records.length) return
+
+    hydratingAudioManifestBooksRef.current.add(bookId)
+    let updated = 0
+    try {
+      for (const record of records) {
+        const audioChapter = findAudioChapterForReference(record.chapterId, catalog, bookId) ?? record.audioChapter
+        if (!audioChapter.manifestFileName) continue
+        const manifest = await ensureCachedAudioManifest(bookId, record.chapterId, audioChapter).catch(() => null)
+        if (manifest) updated += 1
+      }
+      if (updated > 0) {
+        recordDiagnostic('info', '已补齐本地 MP3 时间轴缓存', {
+          action: 'hydrateCachedAudioManifests',
+          bookId,
+          updated,
+          cachedCount: records.length,
+        })
+      }
+    } catch (error) {
+      recordDiagnostic('warn', '补齐本地 MP3 时间轴失败', {
+        action: 'hydrateCachedAudioManifests',
+        bookId,
+        error: serializeErrorForLog(error),
+      })
+    } finally {
+      hydratingAudioManifestBooksRef.current.delete(bookId)
+    }
   }
 
   async function syncCurrentBookAudioRange(limit: number | 'current' | 'all') {
@@ -1584,8 +1660,37 @@ function App() {
 
   function openMp3Manager() {
     setMp3ManagerOpen(true)
-    if (selectedBookId && audioCatalogBookId !== selectedBookId && !cloudSyncBlocked) {
+    if (!selectedBookId) return
+    if (audioCatalogBookId !== selectedBookId && !cloudSyncBlocked) {
       void refreshAudio(selectedBookId, false)
+    }
+    if (!bookPackage || bookPackage.book?.id !== selectedBookId) {
+      void loadBookPackageForMp3Manager(selectedBookId)
+    }
+  }
+
+  async function loadBookPackageForMp3Manager(bookId: string) {
+    try {
+      const cachedPackage = await loadCachedBookPackage(bookId)
+      if (cachedPackage) {
+        const cachedChapters = packageChapters(cachedPackage)
+        setBookPackage(cachedPackage)
+        setCurrentChapterId((current) => (current && cachedChapters.some((chapter) => chapter.id === current) ? current : cachedChapters[0]?.id ?? null))
+        return
+      }
+      if (cloudSyncBlocked) return
+      const response = await gatewayFetch(settings, `/mobile/books/${encodeURIComponent(bookId)}/package`)
+      const nextPackage = normalizeBookPackage(response.package)
+      const nextChapters = packageChapters(nextPackage)
+      setBookPackage(nextPackage)
+      setCurrentChapterId(nextChapters[0]?.id ?? null)
+      void cacheBookPackage(bookId, nextPackage)
+    } catch (error) {
+      recordDiagnostic('warn', 'MP3 管理加载章节失败', {
+        action: 'loadBookPackageForMp3Manager',
+        bookId,
+        error: serializeErrorForLog(error),
+      })
     }
   }
 
@@ -1707,12 +1812,78 @@ function App() {
     return Array.isArray(response.chapters) ? response.chapters.filter(isAudioChapter) : []
   }
 
+  async function fetchAudioManifest(bookId: string, audioChapter: AudioChapter) {
+    if (!audioChapter.manifestFileName) return null
+    return gatewayFetch(
+      settings,
+      `/mobile/books/${encodeURIComponent(bookId)}/audio/${encodeURIComponent(audioChapter.chapterId)}/manifest`,
+    ).then(normalizeAudioManifest)
+  }
+
+  async function readAudioManifestFile(filePath: string) {
+    const response = await fetch(Capacitor.convertFileSrc(filePath))
+    if (!response.ok) throw new Error(`Cached audio manifest HTTP ${response.status}`)
+    const parsed = (await response.json()) as unknown
+    return isRecord(parsed) ? normalizeAudioManifest(parsed) : null
+  }
+
+  async function loadCachedAudioManifest(cachedAudio: CachedAudio | null) {
+    if (!cachedAudio) return null
+    if (cachedAudio.manifest) return cachedAudio.manifest
+    if (!cachedAudio.manifestFilePath) return null
+    try {
+      return await readAudioManifestFile(cachedAudio.manifestFilePath)
+    } catch (error) {
+      recordDiagnostic('warn', '读取本地 MP3 时间轴失败', {
+        action: 'loadCachedAudioManifest',
+        manifestFilePath: cachedAudio.manifestFilePath,
+        error: serializeErrorForLog(error),
+      })
+      return null
+    }
+  }
+
+  async function cacheAudioManifestForChapter(bookId: string, audioChapter: AudioChapter) {
+    if (!audioChapter.manifestFileName) return { manifest: null, manifestFilePath: undefined }
+    if (Capacitor.isNativePlatform()) {
+      const downloaded = await downloadAudioManifestToNativeFile(settings, bookId, audioChapter.chapterId)
+      return {
+        manifest: await readAudioManifestFile(downloaded.filePath),
+        manifestFilePath: downloaded.filePath,
+      }
+    }
+    return {
+      manifest: await fetchAudioManifest(bookId, audioChapter),
+      manifestFilePath: undefined,
+    }
+  }
+
+  async function ensureCachedAudioManifest(bookId: string, cacheChapterId: string, audioChapter: AudioChapter) {
+    const cachedAudio = readCachedAudio(bookId, cacheChapterId)
+    const cachedManifest = await loadCachedAudioManifest(cachedAudio)
+    if (cachedManifest) return cachedManifest
+    const manifestPayload = await cacheAudioManifestForChapter(bookId, audioChapter)
+    updateCachedAudioManifest(bookId, cacheChapterId, manifestPayload)
+    return manifestPayload.manifest
+  }
+
   async function cacheAudioChapter(bookId: string, audioChapter: AudioChapter): Promise<AudioCachePayload> {
     if (Capacitor.isNativePlatform()) {
       const downloaded = await downloadAudioToNativeFile(settings, bookId, audioChapter.chapterId)
+      const manifestPayload = await cacheAudioManifestForChapter(bookId, audioChapter).catch((error) => {
+        recordDiagnostic('warn', '缓存 MP3 时间轴失败', {
+          action: 'cacheAudioManifestForChapter',
+          bookId,
+          audioChapterId: audioChapter.chapterId,
+          error: serializeErrorForLog(error),
+        })
+        return { manifest: null, manifestFilePath: undefined }
+      })
       const payload: AudioCachePayload = {
         kind: 'file',
         filePath: downloaded.filePath,
+        manifest: manifestPayload.manifest,
+        manifestFilePath: manifestPayload.manifestFilePath,
         sizeBytes: downloaded.sizeBytes,
       }
       writeCachedAudio(bookId, audioChapter, payload)
@@ -2678,7 +2849,9 @@ function App() {
             <p>{latestIssue.message}</p>
           </div>
           <div className="issue-actions">
-            <button type="button" onClick={() => openSettingsTab('diagnostics')}>提交日志</button>
+            <button type="button" onClick={() => void submitLocalLogs()} disabled={logSubmitState.status === 'submitting'}>
+              {logSubmitState.status === 'submitting' ? '提交中' : '提交日志'}
+            </button>
             <button type="button" onClick={() => setLatestIssue(null)}>忽略</button>
           </div>
         </section>
@@ -2749,7 +2922,7 @@ function App() {
                 </div>
                 <div className="package-line">
                   <span>Package</span>
-                  <strong>{bookPackage ? packageSummary(bookPackage) : '未加载'}</strong>
+                  <strong>{displayPackageLabel}</strong>
                 </div>
                 <div className="package-line">
                   <span>完整数据包</span>
@@ -3367,7 +3540,7 @@ function App() {
               </div>
               <div>
                 <dt>Package</dt>
-                <dd>{bookPackage ? packageSummary(bookPackage) : '未加载'}</dd>
+                <dd>{displayPackageLabel}</dd>
               </div>
               <div>
                 <dt>本机音频</dt>
@@ -4611,6 +4784,29 @@ async function downloadAudioToNativeFile(settings: GatewaySettings, bookId: stri
   })
 }
 
+async function downloadAudioManifestToNativeFile(settings: GatewaySettings, bookId: string, chapterId: string) {
+  const baseUrl = settings.baseUrl.trim().replace(/\/+$/, '')
+  if (!baseUrl || baseUrl === 'https:') {
+    throw new Error('请填写 Gateway 地址')
+  }
+  if (!settings.token.trim()) {
+    throw new Error('请填写 Token')
+  }
+
+  const metadata = getDeviceMetadata(appVersion)
+  return NativeAudio.downloadAudioManifest({
+    bookId,
+    chapterId,
+    appVersion: metadata.appVersion,
+    deviceId: settings.deviceId,
+    deviceModel: metadata.model,
+    deviceName: settings.deviceName.trim() || 'Android Phone',
+    devicePlatform: metadata.platform,
+    token: settings.token.trim(),
+    url: `${baseUrl}/mobile/books/${encodeURIComponent(bookId)}/audio/${encodeURIComponent(chapterId)}/manifest`,
+  })
+}
+
 async function downloadPackageToNativeFile(settings: GatewaySettings, bookId: string) {
   const baseUrl = settings.baseUrl.trim().replace(/\/+$/, '')
   if (!baseUrl || baseUrl === 'https:') {
@@ -4734,8 +4930,39 @@ function normalizeFullPackageCache(value: unknown): FullPackageCache | null {
 function saveFullPackageCache(cache: FullPackageCache) {
   const index = loadFullPackageCacheIndex()
   index[cache.bookId] = cache
-  localStorage.setItem(fullPackageCacheIndexKey, JSON.stringify(index))
-  localStorage.setItem(fullPackageCacheKey, JSON.stringify(cache))
+  try {
+    localStorage.removeItem(fullPackageCacheKey)
+  } catch {
+    // Best effort: the legacy single-book cache is optional.
+  }
+  try {
+    localStorage.setItem(fullPackageCacheIndexKey, JSON.stringify(index))
+  } catch {
+    removeLegacyBookPackageCachesFromLocalStorage()
+    try {
+      localStorage.setItem(fullPackageCacheIndexKey, JSON.stringify(index))
+    } catch {
+      // The native file/import already succeeded; a localStorage quota issue must not abort sync.
+    }
+  }
+  try {
+    localStorage.setItem(fullPackageCacheKey, JSON.stringify(cache))
+  } catch {
+    // Keep this compatibility key best-effort only. The indexed cache above is authoritative.
+  }
+}
+
+function removeLegacyBookPackageCachesFromLocalStorage() {
+  try {
+    const keys: string[] = []
+    for (let index = 0; index < localStorage.length; index += 1) {
+      const key = localStorage.key(index)
+      if (key?.startsWith(packageCachePrefix)) keys.push(key)
+    }
+    for (const key of keys) localStorage.removeItem(key)
+  } catch {
+    // Ignore storage enumeration failures in constrained WebViews.
+  }
 }
 
 function removeFullPackageCache(bookId: string) {
@@ -4792,6 +5019,11 @@ function clearAppLogsFromStorage(storage: Pick<Storage, 'removeItem'>) {
 
 function loadLatestIssueFromStorage(storage: Pick<Storage, 'getItem'>) {
   return [...loadAppLogEntriesFromStorage(storage)].reverse().find((entry) => entry.level === 'error' || entry.level === 'warn') ?? null
+}
+
+export function buildSubmittedAppLogs(entries: AppLogEntry[], latestIssue: AppLogEntry | null) {
+  const nextEntries = latestIssue && !entries.some((entry) => entry.id === latestIssue.id) ? [...entries, latestIssue] : entries
+  return nextEntries.slice(-maxSubmittedLogEntries)
 }
 
 function saveAppLogEntries(storage: Pick<Storage, 'setItem'>, entries: AppLogEntry[]) {
@@ -5102,6 +5334,14 @@ function packageSummary(bookPackage: BookPackage) {
   return chapterCount > 0 ? `${chapterCount} 章` : '已加载'
 }
 
+function packageLabel(bookPackage: BookPackage | null, book: BookSummary | null, fullPackage: FullPackageCache | null) {
+  if (bookPackage) return packageSummary(bookPackage)
+  const importedChapterCount = fullPackage?.importStats?.chapterCount ?? 0
+  if (hasImportedPackage(fullPackage)) return importedChapterCount > 0 ? `${importedChapterCount} 章` : '已导入'
+  if (book?.chapterCount) return `${book.chapterCount} 章`
+  return '未加载'
+}
+
 function packageChapters(bookPackage: BookPackage | null): Chapter[] {
   if (!bookPackage || !Array.isArray(bookPackage.chapters)) return []
   return bookPackage.chapters.filter(isChapter).sort((left, right) => {
@@ -5259,9 +5499,37 @@ export function writeCachedAudioToStorage(
     chapterId: audioChapter.chapterId,
     audioChapter,
     filePath: payload.filePath,
+    manifest: payload.manifest ?? null,
+    manifestFilePath: payload.manifestFilePath,
     sizeBytes: payload.sizeBytes || audioChapter.sizeBytes,
     cachedAt: new Date().toISOString(),
     updatedAt: audioChapter.updatedAt,
+  }
+  saveAudioCacheIndexToStorage(storage, index)
+}
+
+function updateCachedAudioManifest(
+  bookId: string,
+  chapterId: string,
+  payload: Pick<CachedAudioRecord, 'manifest' | 'manifestFilePath'>,
+) {
+  updateCachedAudioManifestInStorage(localStorage, bookId, chapterId, payload)
+}
+
+export function updateCachedAudioManifestInStorage(
+  storage: AudioCacheStorage,
+  bookId: string,
+  chapterId: string,
+  payload: Pick<CachedAudioRecord, 'manifest' | 'manifestFilePath'>,
+) {
+  const index = loadAudioCacheIndexFromStorage(storage)
+  const key = audioCacheKey(bookId, chapterId)
+  const record = index[key]
+  if (!record) return
+  index[key] = {
+    ...record,
+    manifest: payload.manifest ?? record.manifest ?? null,
+    manifestFilePath: payload.manifestFilePath || record.manifestFilePath,
   }
   saveAudioCacheIndexToStorage(storage, index)
 }
@@ -5273,9 +5541,11 @@ function readCachedAudio(bookId: string, chapterId: string): CachedAudio | null 
 export function readCachedAudioFromStorage(storage: Pick<AudioCacheStorage, 'getItem'>, bookId: string, chapterId: string): CachedAudio | null {
   const record = loadAudioCacheIndexFromStorage(storage)[audioCacheKey(bookId, chapterId)]
   if (!record?.filePath) return null
+  const manifest = isRecord(record.manifest) ? normalizeAudioManifest(record.manifest) : null
   return {
     filePath: record.filePath,
-    manifest: null,
+    manifest,
+    manifestFilePath: typeof record.manifestFilePath === 'string' && record.manifestFilePath ? record.manifestFilePath : undefined,
     sizeBytes: record.sizeBytes,
   }
 }
