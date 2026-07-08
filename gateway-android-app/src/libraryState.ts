@@ -28,7 +28,7 @@ export type GatewayLibrarySyncState =
 
 export function mergeLocalBooksWithCloudMetadata(localBooks: BookSummary[], cloudBooks: BookSummary[]) {
   return localBooks.map((localBook) => {
-    const cloudBook = cloudBooks.find((book) => book.id === localBook.id)
+    const cloudBook = findMatchingCloudBook(localBook, cloudBooks)
     const localAudioChapterCount = bookCachedAudioCount(localBook)
     if (!cloudBook) {
       return {
@@ -54,6 +54,24 @@ export function mergeLocalBooksWithCloudMetadata(localBooks: BookSummary[], clou
 
 export function bookCachedAudioCount(book: Pick<BookSummary, 'audioChapterCount' | 'localAudioChapterCount'> | null | undefined) {
   return book?.localAudioChapterCount ?? book?.audioChapterCount ?? 0
+}
+
+function findMatchingCloudBook(localBook: BookSummary, cloudBooks: BookSummary[]) {
+  const exactMatch = cloudBooks.find((book) => book.id === localBook.id)
+  if (exactMatch) return exactMatch
+
+  const localTitle = normalizeBookTitle(localBook.title)
+  return (
+    cloudBooks.find((book) => {
+      if (normalizeBookTitle(book.title) !== localTitle) return false
+      if (book.chapterCount && localBook.chapterCount && book.chapterCount !== localBook.chapterCount) return false
+      return true
+    }) ?? null
+  )
+}
+
+function normalizeBookTitle(title: string) {
+  return title.trim().replace(/\s+/g, '').toLocaleLowerCase()
 }
 
 export function libraryVisibilityNotice(session: GatewaySession | null, bookCount: number) {

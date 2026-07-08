@@ -2877,7 +2877,7 @@ function App() {
                       onClick={() => selectBook(book.id)}
                     >
                       <span className="book-title">{book.title}</span>
-                      <span className="book-meta">{formatBookMeta(book, audioCount)}</span>
+                      <span className="book-meta">{formatLocalBookMeta(book, audioCount)}</span>
                     </button>
                   )
                 })}
@@ -5300,6 +5300,17 @@ function formatBookMeta(book: BookSummary, audioChapterCount = book.audioChapter
   const parts = [`${book.chapterCount} 章`]
   if (book.author) parts.push(book.author)
   if (audioChapterCount) parts.push(`${audioChapterCount} 可缓存音频`)
+  return parts.join(' · ')
+}
+
+export function formatLocalBookMeta(book: BookSummary, cachedAudioChapterCount = bookCachedAudioCount(book)) {
+  const parts = [`${book.chapterCount} 章`]
+  if (book.author) parts.push(book.author)
+  if (cachedAudioChapterCount) {
+    parts.push(`${cachedAudioChapterCount} 已缓存音频`)
+  } else if (book.audioChapterCount) {
+    parts.push(`${book.audioChapterCount} 可缓存音频`)
+  }
   return parts.join(' · ')
 }
 
