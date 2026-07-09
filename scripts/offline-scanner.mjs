@@ -89,7 +89,7 @@ function printHelp() {
 
 示例:
   # 1. 导入书籍
-  node scripts/offline-scanner.mjs import 604826e8-4fa3-4ffd-b48f-bb1112975613
+  node scripts/offline-scanner.mjs import file-365a976c422e99bb943cea65
 
   # 2. 同步主项目配置（如更换了前端模型）
   node scripts/offline-scanner.mjs sync

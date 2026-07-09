@@ -231,7 +231,7 @@ describe('Gateway 管理后台 UI', () => {
     expect(screen.getByText('S 80% · KG 70% · E 60%')).toBeInTheDocument()
 
     await user.click(screen.getByRole('button', { name: '设备' }))
-    expect(screen.getByRole('row', { name: /接口平板 112233 受信 192\.168\.88\.66/ })).toBeInTheDocument()
+    expect(screen.getByRole('row', { name: /接口平板 .*112233 受信 192\.168\.88\.66/ })).toBeInTheDocument()
 
     await user.click(screen.getByRole('button', { name: '数据包' }))
     expect(screen.getByRole('row', { name: /接口书籍 2026-06-29 20:10 可发布 12\.5 MB/ })).toBeInTheDocument()
@@ -271,6 +271,72 @@ describe('Gateway 管理后台 UI', () => {
     await user.click(screen.getByRole('button', { name: '请求日志' }))
     expect(screen.getByRole('heading', { name: '请求日志' })).toBeInTheDocument()
     expect(screen.getByRole('row', { name: /GET .*\/mobile\/books\/jinlin\/audio\/088\.mp3 404 42ms 客厅小米平板/ })).toBeInTheDocument()
+  })
+
+  it('行为分析页从 Gateway analytics API 展示用户行为和日志文件统计', async () => {
+    vi.spyOn(window, 'fetch').mockImplementation(async (input) => {
+      const url = String(input)
+      if (url === '/admin/analytics') {
+        return jsonResponse({
+          behavior: {
+            eventsLast24Hours: 5,
+            diagnosticsLast24Hours: 2,
+            errorEventsLast24Hours: 1,
+            activeDevicesLast24Hours: 1,
+            topActions: [
+              { value: 'openBook', count: 3 },
+              { value: 'playCurrentAudio', count: 2 },
+            ],
+            topBooks: [
+              { bookId: 'book-a', title: '行为书', count: 5 },
+            ],
+            recentEvents: [
+              {
+                receivedAt: '2026-07-09T10:30:00.000Z',
+                level: 'info',
+                source: 'behavior',
+                eventName: 'openBook',
+                deviceName: '接口手机',
+                deviceId: 'device-a',
+                bookId: 'book-a',
+                chapterId: 'chapter-1',
+              },
+            ],
+          },
+          requests: {
+            persistedLast24Hours: 42,
+            persistedDownloadsLast24Hours: 7,
+          },
+          logFiles: {
+            totalFiles: 2,
+            totalBytes: 2048,
+            recentFiles: [
+              {
+                kind: 'mobile',
+                date: '2026-07-09',
+                fileName: 'mobile-2026-07-09-000.jsonl',
+                relativePath: 'mobile/2026-07-09/mobile-2026-07-09-000.jsonl',
+                sizeBytes: 1024,
+              },
+            ],
+          },
+        })
+      }
+      throw new TypeError('api offline')
+    })
+
+    const user = userEvent.setup()
+    render(<App />)
+    await screen.findByText(/API 不可用，正在显示 mock 数据/)
+
+    await user.click(screen.getByRole('button', { name: '行为分析' }))
+
+    expect(await screen.findByRole('heading', { name: 'Top 行为' })).toBeInTheDocument()
+    expect(screen.getByText('行为事件').closest('div')).toHaveTextContent('5 条')
+    expect(screen.getByRole('row', { name: /openBook 3/ })).toBeInTheDocument()
+    expect(screen.getByRole('row', { name: /行为书 book-a 5/ })).toBeInTheDocument()
+    expect(screen.getByRole('row', { name: /18:30 info behavior openBook 接口手机 book-a chapter-1/ })).toBeInTheDocument()
+    expect(screen.getByRole('row', { name: /mobile 2026-07-09 mobile-2026-07-09-000\.jsonl 1\.0 KB/ })).toBeInTheDocument()
   })
 
   it('管理员未授权时显示安全失败状态，不伪装成 mock 数据', async () => {

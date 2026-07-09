@@ -611,6 +611,7 @@ function mergeRunningChildStage(stageValue, child) {
 async function executeChildStage(stage, args, runInfo, { onStart } = {}) {
   const logFile = join(runInfo.rootDir, 'logs', `${stage}-${Date.now()}.log`)
   await mkdir(dirname(logFile), { recursive: true })
+  await writeFile(logFile, '', { flag: 'a' })
   const initialChildRunJson = readArgValue(args, '--run')
   await onStart?.({
     stage,
@@ -3558,7 +3559,25 @@ async function inspectJobPreflight({ checks, job, rawJob, jobPath, mainDbPath })
   addDoctorCheck(checks, 'mainDb.path', Boolean(mainDbPath), mainDbPath)
   if (job.stages.includes('import')) {
     addDoctorCheck(checks, 'import.sourceFile', Boolean(sourceFile), sourceFile || 'missing job.source.file')
-    if (sourceFile) addDoctorCheck(checks, 'import.sourceFile.exists', existsSync(expandPath(sourceFile)), expandPath(sourceFile))
+    if (sourceFile) {
+      const expandedSourceFile = expandPath(sourceFile)
+      const sourceFileExists = existsSync(expandedSourceFile)
+      addDoctorCheck(checks, 'import.sourceFile.exists', sourceFileExists, expandedSourceFile)
+      if (sourceFileExists) {
+        try {
+          const derivedBookId = await deriveFileBookId(job)
+          const configuredBookId = String(rawJob?.bookId || '').trim()
+          addDoctorCheck(
+            checks,
+            'job.bookId.sourceHash',
+            !configuredBookId || configuredBookId === derivedBookId,
+            configuredBookId ? `${configuredBookId} -> ${derivedBookId}` : derivedBookId,
+          )
+        } catch (error) {
+          addDoctorCheck(checks, 'job.bookId.sourceHash', false, error instanceof Error ? error.message : String(error))
+        }
+      }
+    }
   } else {
     addDoctorCheck(checks, 'mainDb.exists', existsSync(mainDbPath), mainDbPath)
   }
@@ -3668,7 +3687,7 @@ async function hydrateJobConfig(rawJob) {
   if (job.stages.includes('import')) {
     return {
       ...job,
-      bookId: job.bookId || await deriveFileBookId(job),
+      bookId: await resolveImportJobBookId(job),
     }
   }
   if (job.bookId) return job
@@ -3692,6 +3711,14 @@ async function deriveFileBookId(job) {
   if (!file) throw new Error('job requires bookId unless import stage has job.source.file.')
   const sourceBuffer = await readFile(expandPath(file))
   return `file-${hashBuffer(sourceBuffer).slice(0, 24)}`
+}
+
+async function resolveImportJobBookId(job) {
+  const derivedBookId = await deriveFileBookId(job)
+  if (job.bookId && job.bookId !== derivedBookId) {
+    throw new Error(`import job.bookId (${job.bookId}) must match source file id (${derivedBookId}). Remove bookId or set it to ${derivedBookId}.`)
+  }
+  return derivedBookId
 }
 
 function normalizeStageList(stages) {

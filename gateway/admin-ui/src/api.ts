@@ -1,12 +1,17 @@
 import {
   type AdminBook,
-  type AdminDevice,
   type AdminAudio,
+  type AdminAnalyticsSummary,
+  type AdminBehaviorEvent,
+  type AdminDevice,
+  type AdminLogFile,
   type AdminPackage,
   type AdminDownloadTrendBucket,
   type AdminRequestTrendBucket,
   type AdminRequestLog,
   type AdminSystemSummary,
+  type AdminTopAction,
+  type AdminTopBook,
   type ContentLabel,
   type DeviceRole,
   type Visibility,
@@ -15,6 +20,7 @@ import {
   initialDevices,
   initialPackages,
   initialRequestLogs,
+  analyticsSummary,
   overviewMetrics,
   recentEvents,
 } from './mockData'
@@ -149,6 +155,58 @@ type GatewayRequestLog = {
   ip?: string
 }
 
+type GatewayAnalytics = {
+  behavior?: {
+    eventsLast24Hours?: number
+    diagnosticsLast24Hours?: number
+    errorEventsLast24Hours?: number
+    activeDevicesLast24Hours?: number
+    topActions?: GatewayTopAction[]
+    topBooks?: GatewayTopBook[]
+    recentEvents?: GatewayBehaviorEvent[]
+  }
+  requests?: {
+    persistedLast24Hours?: number
+    persistedDownloadsLast24Hours?: number
+  }
+  logFiles?: {
+    totalFiles?: number
+    totalBytes?: number
+    recentFiles?: GatewayLogFile[]
+  }
+}
+
+type GatewayTopAction = {
+  value?: string
+  count?: number
+}
+
+type GatewayTopBook = {
+  bookId?: string
+  title?: string
+  count?: number
+}
+
+type GatewayBehaviorEvent = {
+  receivedAt?: string
+  level?: 'info' | 'warn' | 'error'
+  source?: string
+  eventName?: string
+  message?: string
+  deviceId?: string
+  deviceName?: string
+  bookId?: string
+  chapterId?: string
+}
+
+type GatewayLogFile = {
+  kind?: string
+  date?: string
+  fileName?: string
+  relativePath?: string
+  sizeBytes?: number
+}
+
 export type AdminDashboardData = {
   books: AdminBook[]
   devices: AdminDevice[]
@@ -258,6 +316,15 @@ export async function loadAdminOverviewData(fetcher: typeof fetch = fetch): Prom
     source: 'api',
     status: failedSections.length > 0 ? 'partial' : 'ok',
     failedSections,
+  }
+}
+
+export async function loadAdminAnalyticsData(fetcher: typeof fetch = fetch): Promise<AdminAnalyticsSummary> {
+  try {
+    return mapAnalytics(await adminFetch<GatewayAnalytics>('/admin/analytics', fetcher))
+  } catch (error) {
+    if (isAdminApiError(error, 'unauthorized')) return emptyAnalyticsSummary()
+    return analyticsSummary
   }
 }
 
@@ -524,6 +591,87 @@ function mapRequestLog(log: GatewayRequestLog): AdminRequestLog {
     deviceName: readString(log.deviceName, '未知设备'),
     deviceId: readString(log.deviceId, '-'),
     ip,
+  }
+}
+
+function mapAnalytics(payload: GatewayAnalytics): AdminAnalyticsSummary {
+  return {
+    eventsLast24Hours: readNumber(payload.behavior?.eventsLast24Hours),
+    diagnosticsLast24Hours: readNumber(payload.behavior?.diagnosticsLast24Hours),
+    errorEventsLast24Hours: readNumber(payload.behavior?.errorEventsLast24Hours),
+    activeDevicesLast24Hours: readNumber(payload.behavior?.activeDevicesLast24Hours),
+    persistedRequestsLast24Hours: readNumber(payload.requests?.persistedLast24Hours),
+    persistedDownloadsLast24Hours: readNumber(payload.requests?.persistedDownloadsLast24Hours),
+    logFileCount: readNumber(payload.logFiles?.totalFiles),
+    logFileBytes: readNumber(payload.logFiles?.totalBytes),
+    topActions: Array.isArray(payload.behavior?.topActions) ? payload.behavior.topActions.map(mapTopAction).filter(hasTopActionValue) : [],
+    topBooks: Array.isArray(payload.behavior?.topBooks) ? payload.behavior.topBooks.map(mapTopBook).filter(hasTopBookId) : [],
+    recentEvents: Array.isArray(payload.behavior?.recentEvents) ? payload.behavior.recentEvents.map(mapBehaviorEvent) : [],
+    recentFiles: Array.isArray(payload.logFiles?.recentFiles) ? payload.logFiles.recentFiles.map(mapLogFile) : [],
+  }
+}
+
+function emptyAnalyticsSummary(): AdminAnalyticsSummary {
+  return {
+    eventsLast24Hours: 0,
+    diagnosticsLast24Hours: 0,
+    errorEventsLast24Hours: 0,
+    activeDevicesLast24Hours: 0,
+    persistedRequestsLast24Hours: 0,
+    persistedDownloadsLast24Hours: 0,
+    logFileCount: 0,
+    logFileBytes: 0,
+    topActions: [],
+    topBooks: [],
+    recentEvents: [],
+    recentFiles: [],
+  }
+}
+
+function mapTopAction(item: GatewayTopAction): AdminTopAction {
+  return {
+    value: readString(item.value, ''),
+    count: readNumber(item.count),
+  }
+}
+
+function mapTopBook(item: GatewayTopBook): AdminTopBook {
+  return {
+    bookId: readString(item.bookId, ''),
+    title: readString(item.title, readString(item.bookId, '')),
+    count: readNumber(item.count),
+  }
+}
+
+function hasTopActionValue(item: AdminTopAction) {
+  return Boolean(item.value)
+}
+
+function hasTopBookId(item: AdminTopBook) {
+  return Boolean(item.bookId)
+}
+
+function mapBehaviorEvent(event: GatewayBehaviorEvent): AdminBehaviorEvent {
+  return {
+    receivedAt: formatTime(event.receivedAt),
+    level: event.level ?? 'info',
+    source: readString(event.source, 'app'),
+    eventName: readString(event.eventName, 'event'),
+    message: readString(event.message, 'mobile event'),
+    deviceId: readString(event.deviceId, '-'),
+    deviceName: readString(event.deviceName, '未知设备'),
+    bookId: readString(event.bookId, '-'),
+    chapterId: readString(event.chapterId, '-'),
+  }
+}
+
+function mapLogFile(file: GatewayLogFile): AdminLogFile {
+  return {
+    kind: file.kind === 'requests' ? 'requests' : 'mobile',
+    date: readString(file.date, '-'),
+    fileName: readString(file.fileName, '-'),
+    relativePath: readString(file.relativePath, '-'),
+    sizeBytes: readNumber(file.sizeBytes),
   }
 }
 

@@ -1,6 +1,7 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { execFile, spawn } from 'node:child_process'
+import { createHash } from 'node:crypto'
 import { createServer } from 'node:http'
 import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { basename, dirname, join } from 'node:path'
@@ -706,7 +707,7 @@ describe('production-pipeline import', () => {
     }
   })
 
-  it('preserves configured bookId for import jobs instead of replacing it with a file-derived id', async () => {
+  it('rejects configured import bookId that does not match the source file hash', async () => {
     const tempDir = await mkdtemp(join(tmpdir(), 'production-pipeline-derived-book-test-'))
     try {
       const txtPath = join(tempDir, 'sample.txt')
@@ -715,11 +716,10 @@ describe('production-pipeline import', () => {
       const jobPath = join(tempDir, 'job.json')
       const sourceText = '第一章 开始\n这是第一章内容。\n\n第二章 继续\n这是第二章内容。'
       await writeFile(txtPath, sourceText, 'utf8')
-      const expectedBookId = 'stable-config-book-id'
       await writeFile(
         jobPath,
         JSON.stringify({
-          bookId: expectedBookId,
+          bookId: 'stable-config-book-id',
           title: '样书',
           mainDbPath: dbPath,
           source: { type: 'txt', file: txtPath },
@@ -729,36 +729,18 @@ describe('production-pipeline import', () => {
         'utf8',
       )
 
-      const { stdout } = await execFileAsync(process.execPath, [
-        cliPath,
-        'run',
-        '--job',
-        jobPath,
-        '--run-root',
-        runRoot,
-      ])
-
-      assert.match(stdout, /completed: import/)
-      assert.match(stdout, /completed: package/)
-      const parentRunDir = stdout.match(/runDir: (.+)/)?.[1]?.trim()
-      assert.ok(parentRunDir)
-      assert.equal(parentRunDir, join(runRoot, expectedBookId, basename(parentRunDir)))
-      const runJson = JSON.parse(await readFile(join(parentRunDir, 'run.json'), 'utf8'))
-      assert.equal(runJson.job.bookId, expectedBookId)
-      assert.equal(runJson.stages.import.status, 'completed')
-      assert.equal(runJson.stages.package.status, 'completed')
-      const persistedJob = JSON.parse(await readFile(jobPath, 'utf8'))
-      assert.equal(persistedJob.bookId, expectedBookId)
-
-      const db = new DatabaseSync(dbPath, { readOnly: true })
-      try {
-        const book = db.prepare('SELECT id, title, chapter_count FROM books WHERE id = ?').get(expectedBookId)
-        assert.equal(book.id, expectedBookId)
-        assert.equal(book.title, '样书')
-        assert.equal(book.chapter_count, 2)
-      } finally {
-        db.close()
-      }
+      const expectedBookId = fileBookIdForText(sourceText)
+      await assert.rejects(
+        () => execFileAsync(process.execPath, [
+          cliPath,
+          'run',
+          '--job',
+          jobPath,
+          '--run-root',
+          runRoot,
+        ]),
+        new RegExp(`import job\\.bookId \\(stable-config-book-id\\) must match source file id \\(${expectedBookId}\\)`),
+      )
     } finally {
       await rm(tempDir, { recursive: true, force: true })
     }
@@ -773,13 +755,12 @@ describe('production-pipeline import', () => {
       const runRoot = join(tempDir, 'runs')
       const jobPath = join(tempDir, 'job.json')
       const sourceText = `第一章 开始\n这是第一章内容。`
-      const expectedBookId = 'sample-book'
+      const expectedBookId = fileBookIdForText(sourceText)
       await writeFile(txtPath, sourceText, 'utf8')
       embeddingServer = await startFakeEmbeddingServer()
       await writeFile(
         jobPath,
         JSON.stringify({
-          bookId: 'sample-book',
           title: '样书',
           mainDbPath: dbPath,
           source: { file: txtPath },
@@ -838,7 +819,6 @@ describe('production-pipeline import', () => {
       await writeFile(
         jobPath,
         JSON.stringify({
-          bookId: 'sample-book',
           title: '样书',
           mainDbPath: dbPath,
           source: { file: txtPath },
@@ -890,7 +870,6 @@ describe('production-pipeline import', () => {
       await writeFile(
         jobPath,
         JSON.stringify({
-          bookId: 'sample-book',
           title: '样书',
           mainDbPath: dbPath,
           source: { file: txtPath },
@@ -948,7 +927,6 @@ describe('production-pipeline import', () => {
       await writeFile(
         jobPath,
         JSON.stringify({
-          bookId: 'sample-book',
           title: '样书',
           mainDbPath: dbPath,
           source: { file: txtPath },
@@ -1006,7 +984,6 @@ describe('production-pipeline import', () => {
       await writeFile(
         jobPath,
         JSON.stringify({
-          bookId: 'sample-book',
           title: '样书',
           mainDbPath: dbPath,
           source: { file: txtPath },
@@ -1069,7 +1046,6 @@ describe('production-pipeline import', () => {
       await writeFile(
         jobPath,
         JSON.stringify({
-          bookId: 'sample-book',
           title: '样书',
           mainDbPath: dbPath,
           source: { file: txtPath },
@@ -1167,7 +1143,6 @@ describe('production-pipeline import', () => {
       await writeFile(
         jobPath,
         JSON.stringify({
-          bookId: 'sample-book',
           title: '样书',
           mainDbPath: dbPath,
           source: { file: txtPath },
@@ -1895,7 +1870,6 @@ describe('production-pipeline import', () => {
       await writeFile(
         jobPath,
         JSON.stringify({
-          bookId: 'sample-book',
           title: '样书',
           mainDbPath: join(tempDir, 'main.sqlite'),
           source: { type: 'txt', file: txtPath },
@@ -3368,4 +3342,8 @@ async function captureRejectedExec(command, args) {
     return error
   }
   assert.fail(`Expected command to fail: ${command} ${args.join(' ')}`)
+}
+
+function fileBookIdForText(text) {
+  return `file-${createHash('sha256').update(text).digest('hex').slice(0, 24)}`
 }

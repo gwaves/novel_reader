@@ -6,6 +6,7 @@ import {
   deleteBookAudio,
   downloadPackage,
   importBookPackage,
+  loadAdminAnalyticsData,
   loadAdminDashboardData,
   loadAdminOverviewData,
   patchBookLabels,
@@ -17,6 +18,7 @@ import {
 } from './api'
 import {
   AdminAudio,
+  AdminAnalyticsSummary,
   AdminBook,
   AdminDevice,
   AdminDownloadTrendBucket,
@@ -30,12 +32,13 @@ import {
   labelNames,
   labelOptions,
   overviewMetrics as mockOverviewMetrics,
+  analyticsSummary as mockAnalyticsSummary,
   recentEvents as mockRecentEvents,
   roleNames,
   visibilityOptions,
 } from './mockData'
 
-type ViewKey = 'overview' | 'books' | 'packages' | 'audio' | 'devices' | 'logs' | 'settings'
+type ViewKey = 'overview' | 'books' | 'packages' | 'audio' | 'devices' | 'logs' | 'analytics' | 'settings'
 type ConnectionStatus = AdminDashboardData['status'] | 'loading'
 type OperationState = 'idle' | 'saving' | 'success' | 'failed'
 type OperationStatus = {
@@ -54,6 +57,7 @@ const navItems: Array<{ key: ViewKey; label: string }> = [
   { key: 'audio', label: '音频' },
   { key: 'devices', label: '设备' },
   { key: 'logs', label: '请求日志' },
+  { key: 'analytics', label: '行为分析' },
   { key: 'settings', label: '设置' },
 ]
 
@@ -69,6 +73,8 @@ function App() {
   const [requestTrend, setRequestTrend] = useState<AdminRequestTrendBucket[]>([])
   const [downloadTrend, setDownloadTrend] = useState<AdminDownloadTrendBucket[]>([])
   const [systemSummary, setSystemSummary] = useState<AdminSystemSummary>(emptySystemSummary())
+  const [analytics, setAnalytics] = useState<AdminAnalyticsSummary>(mockAnalyticsSummary)
+  const [analyticsLoaded, setAnalyticsLoaded] = useState(false)
   const [dataSource, setDataSource] = useState<AdminDashboardData['source']>('api')
   const [connectionStatus, setConnectionStatus] = useState<ConnectionStatus>('loading')
   const [loadMessage, setLoadMessage] = useState('正在连接 Gateway 管理 API')
@@ -320,6 +326,12 @@ function App() {
     setActiveView(view)
     setSelectedBookId(null)
     setSelectedDeviceId(null)
+    if (view === 'analytics' && !analyticsLoaded) {
+      void loadAdminAnalyticsData().then((data) => {
+        setAnalytics(data)
+        setAnalyticsLoaded(true)
+      })
+    }
   }
 
   const saveAdminToken = (nextToken: string) => {
@@ -444,6 +456,7 @@ function App() {
             />
           )}
           {!isInitialLoading && activeView === 'logs' && <RequestLogsPage requestLogs={requestLogs} />}
+          {!isInitialLoading && activeView === 'analytics' && <AnalyticsPage analytics={analytics} />}
           {activeView === 'settings' && (
             <SettingsPage
               key={adminToken}
@@ -1169,6 +1182,131 @@ function RequestLogsPage({ requestLogs }: { requestLogs: AdminRequestLog[] }) {
                 <td>{log.deviceName}</td>
                 <td><code>{log.deviceId}</code></td>
                 <td>{log.ip}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </section>
+    </section>
+  )
+}
+
+function AnalyticsPage({ analytics }: { analytics: AdminAnalyticsSummary }) {
+  return (
+    <section className="view-stack" aria-label="行为分析">
+      <div className="operation-summary">
+        <SummaryTile label="行为事件" value={`${formatCount(analytics.eventsLast24Hours)} 条`} note="最近 24 小时" />
+        <SummaryTile label="活跃设备" value={`${analytics.activeDevicesLast24Hours} 台`} note="行为日志去重" />
+        <SummaryTile label="诊断 / 错误" value={`${analytics.diagnosticsLast24Hours} / ${analytics.errorEventsLast24Hours}`} note="最近 24 小时" />
+        <SummaryTile label="日志文件" value={`${analytics.logFileCount} 个`} note={formatBytes(analytics.logFileBytes)} />
+      </div>
+
+      <div className="chart-grid">
+        <section className="panel table-panel">
+          <div className="panel-header">
+            <h2>Top 行为</h2>
+            <span>按 action 聚合</span>
+          </div>
+          <table className="data-table">
+            <thead>
+              <tr>
+                <th>Action</th>
+                <th>次数</th>
+              </tr>
+            </thead>
+            <tbody>
+              {analytics.topActions.map((item) => (
+                <tr key={item.value}>
+                  <td><code>{item.value}</code></td>
+                  <td>{formatCount(item.count)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </section>
+
+        <section className="panel table-panel">
+          <div className="panel-header">
+            <h2>Top 书籍</h2>
+            <span>行为事件关联书籍</span>
+          </div>
+          <table className="data-table">
+            <thead>
+              <tr>
+                <th>书籍</th>
+                <th>Book ID</th>
+                <th>次数</th>
+              </tr>
+            </thead>
+            <tbody>
+              {analytics.topBooks.map((item) => (
+                <tr key={item.bookId}>
+                  <td><strong>{item.title}</strong></td>
+                  <td><code>{item.bookId}</code></td>
+                  <td>{formatCount(item.count)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </section>
+      </div>
+
+      <section className="panel table-panel">
+        <div className="panel-header">
+          <h2>最近行为事件</h2>
+          <span>手机端 JSONL 上报</span>
+        </div>
+        <table className="data-table">
+          <thead>
+            <tr>
+              <th>时间</th>
+              <th>级别</th>
+              <th>来源</th>
+              <th>Action</th>
+              <th>设备</th>
+              <th>书籍</th>
+              <th>章节</th>
+            </tr>
+          </thead>
+          <tbody>
+            {analytics.recentEvents.map((event) => (
+              <tr key={`${event.receivedAt}-${event.deviceId}-${event.eventName}-${event.chapterId}`}>
+                <td>{event.receivedAt}</td>
+                <td><Badge>{event.level}</Badge></td>
+                <td>{event.source}</td>
+                <td><code>{event.eventName}</code></td>
+                <td>{event.deviceName}</td>
+                <td><code>{event.bookId}</code></td>
+                <td><code>{event.chapterId}</code></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </section>
+
+      <section className="panel table-panel">
+        <div className="panel-header">
+          <h2>日志文件</h2>
+          <span>请求 / 手机端 JSONL 轮转文件</span>
+        </div>
+        <table className="data-table">
+          <thead>
+            <tr>
+              <th>类型</th>
+              <th>日期</th>
+              <th>文件</th>
+              <th>大小</th>
+              <th>相对路径</th>
+            </tr>
+          </thead>
+          <tbody>
+            {analytics.recentFiles.map((file) => (
+              <tr key={file.relativePath}>
+                <td><Badge>{file.kind}</Badge></td>
+                <td>{file.date}</td>
+                <td><code>{file.fileName}</code></td>
+                <td>{formatBytes(file.sizeBytes)}</td>
+                <td><code>{file.relativePath}</code></td>
               </tr>
             ))}
           </tbody>

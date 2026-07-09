@@ -462,7 +462,7 @@ function runCommand(store, job, commandSpec) {
 function createProductionV2Spec(body, config) {
   const jobPath = resolve(requiredString(body.jobPath || body.productionJobPath || body.manifestPath || body.manifest, 'jobPath is required.'))
   const jobConfig = readProductionJobConfig(jobPath)
-  const bookId = readString(body.bookId || jobConfig.bookId || (productionJobImports(jobConfig) ? deriveFileBookId(jobConfig) : ''))
+  const bookId = resolveProductionJobBookId(body, jobConfig)
   const title = readString(body.title || jobConfig.title || bookId)
   const runRoot = resolve(readString(body.productionRunRoot || body.runRoot) || config.productionRunRoot)
   return {
@@ -1106,6 +1106,22 @@ function deriveFileBookId(jobConfig) {
   if (!file) throw httpError(400, 'missing_required_field', 'bookId is required unless the v2 job imports job.source.file.')
   const hash = createHash('sha256').update(readFileSync(expandPath(file))).digest('hex')
   return `file-${hash.slice(0, 24)}`
+}
+
+function resolveProductionJobBookId(body, jobConfig) {
+  const bodyBookId = readString(body.bookId)
+  const jobBookId = readString(jobConfig.bookId)
+  if (!productionJobImports(jobConfig)) return readString(bodyBookId || jobBookId)
+  const derivedBookId = deriveFileBookId(jobConfig)
+  const configuredBookId = bodyBookId || jobBookId
+  if (configuredBookId && configuredBookId !== derivedBookId) {
+    throw httpError(
+      400,
+      'invalid_book_id',
+      `import job bookId (${configuredBookId}) must match source file id (${derivedBookId}). Remove bookId or set it to ${derivedBookId}.`,
+    )
+  }
+  return derivedBookId
 }
 
 async function readJsonIfExists(path) {

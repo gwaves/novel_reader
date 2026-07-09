@@ -366,6 +366,7 @@ const settingsKey = 'novel-reader-gateway-settings'
 const readerSettingsKey = 'novel-reader-gateway-reader-settings'
 const ttsSettingsKey = 'novel-reader-gateway-tts-settings'
 const appLogKey = 'novel-reader-gateway-app-logs'
+const submittedBehaviorLogIdsKey = 'novel-reader-gateway-submitted-behavior-log-ids'
 const readingProgressKey = 'novel-reader-gateway-reading-progress'
 const fullPackageCacheKey = 'novel-reader-gateway-full-package-cache'
 const fullPackageCacheIndexKey = 'novel-reader-gateway-full-package-cache-index'
@@ -374,9 +375,20 @@ const packageCachePrefix = 'novel-reader-gateway-package:'
 const packageCacheDbName = 'novel-reader-gateway'
 const packageCacheStoreName = 'book-packages'
 const legacyAudioCacheStoreName = 'chapter-audio'
+const legacyBookIdReplacements = new Map<string, string>([
+  ['9679077f-2288-4bc7-9080-854784fc7f94', 'file-409ef19a053f38adb8d9cc3e'],
+  ['b9c4ff5b-b702-4a59-9120-fc63e51b07b4', 'file-fbf3267ee73644f94035b821'],
+  ['daf59e90-2ca0-461b-85c3-95acb1ecf700', 'file-9aba79321cff0e51d7bffe5e'],
+  ['dbf8857c-9a61-41b4-9256-e5597dc2aaa5', 'file-297ff8d0202629340204d025'],
+  ['sanguo', 'file-297ff8d0202629340204d025'],
+  ['shuanglongzhuan', 'file-bfe273a306f299a9d1ce3b19'],
+  ['mqxe7ya6-yiulrd3l', 'file-bfe273a306f299a9d1ce3b19'],
+  ['zhujue-chenyan', 'file-27c5f225b8fd15dce9924e7b'],
+])
 const defaultGatewayBaseUrl = import.meta.env.VITE_GATEWAY_DEFAULT_BASE_URL ?? 'https://novel.gwaves.net:8888'
 const maxAppLogEntries = 200
 const maxSubmittedLogEntries = 200
+const maxBehaviorSubmitEntries = 50
 const maxLogMessageLength = 800
 const defaultGatewayToken = import.meta.env.VITE_GATEWAY_DEFAULT_TOKEN ?? '123456'
 const appVersion = buildInfo.versionName
@@ -582,6 +594,9 @@ function App() {
   const audioDownloadProcessingRef = useRef(false)
   const gatewaySessionRef = useRef<GatewaySession | null>(gatewaySession)
   const cloudBookCountRef = useRef(books.length)
+  const behaviorFlushTimerRef = useRef<number | null>(null)
+  const behaviorFlushInFlightRef = useRef(false)
+  const errorLogUploadInFlightRef = useRef(false)
 
   function recordDiagnostic(level: AppLogLevel, message: string, context: Record<string, unknown> = {}) {
     const entry = appendAppLogToStorage(localStorage, level, message, {
@@ -598,12 +613,120 @@ function App() {
 
   function reportUserError(error: unknown, context: Record<string, unknown> = {}, prefix?: string) {
     const message = prefix ? `${prefix}：${errorMessage(error)}` : errorMessage(error)
-    recordDiagnostic('error', message, {
+    const entry = recordDiagnostic('error', message, {
       ...context,
       error: serializeErrorForLog(error),
     })
+    if (shouldAutoUploadErrorLog(error, context) && isGatewayConfigured(settings)) {
+      void submitErrorLogs(entry)
+    }
     setMessage(message)
     return message
+  }
+
+  async function submitErrorLogs(triggerEntry: AppLogEntry) {
+    if (errorLogUploadInFlightRef.current) return
+    const entries = buildSubmittedAppLogs(loadAppLogEntriesFromStorage(localStorage), triggerEntry)
+    if (entries.length === 0) return
+
+    errorLogUploadInFlightRef.current = true
+    try {
+      const response = await gatewayPost(settings, '/mobile/logs', buildLogSubmissionPayload('diagnostics', entries))
+      const receiptId = readString(response.receiptId) || ''
+      setLogSubmitState({
+        status: 'submitted',
+        message: receiptId ? `错误日志已自动提交：${receiptId}` : `错误日志已自动提交：${entries.length} 条`,
+        receiptId,
+      })
+    } catch (uploadError) {
+      if (!isGatewayConnectivityError(uploadError)) {
+        recordDiagnostic('warn', '错误日志自动提交失败', {
+          action: 'submitErrorLogs',
+          triggerLogId: triggerEntry.id,
+          error: serializeErrorForLog(uploadError),
+        })
+      }
+    } finally {
+      errorLogUploadInFlightRef.current = false
+    }
+  }
+
+  function recordBehavior(action: string, context: Record<string, unknown> = {}) {
+    const entry = appendAppLogToStorage(localStorage, 'info', `用户行为: ${action}`, {
+      ...context,
+      action,
+      tab,
+      selectedBookId,
+      currentChapterId: currentChapter?.id,
+      currentChapterIndex: currentChapter?.index ?? currentChapter?.chapterIndex,
+    }, 'behavior')
+    setAppLogCount(loadAppLogEntriesFromStorage(localStorage).length)
+    scheduleBehaviorLogFlush()
+    return entry
+  }
+
+  function scheduleBehaviorLogFlush(delayMs = 5000) {
+    if (behaviorFlushTimerRef.current != null || !isGatewayConfigured(settings)) return
+    behaviorFlushTimerRef.current = window.setTimeout(() => {
+      behaviorFlushTimerRef.current = null
+      void submitBehaviorLogs()
+    }, delayMs)
+  }
+
+  async function submitBehaviorLogs() {
+    if (!isGatewayConfigured(settings) || behaviorFlushInFlightRef.current) return
+    const entries = buildPendingBehaviorLogs(localStorage, maxBehaviorSubmitEntries)
+    if (entries.length === 0) return
+
+    behaviorFlushInFlightRef.current = true
+    try {
+      await gatewayPost(settings, '/mobile/logs', buildLogSubmissionPayload('behavior', entries))
+      markBehaviorLogsSubmitted(localStorage, entries)
+    } catch (error) {
+      appendAppLogToStorage(localStorage, 'info', '用户行为日志上报失败', {
+        action: 'submitBehaviorLogs',
+        pendingCount: entries.length,
+        error: serializeErrorForLog(error),
+      })
+      setAppLogCount(loadAppLogEntriesFromStorage(localStorage).length)
+    } finally {
+      behaviorFlushInFlightRef.current = false
+    }
+  }
+
+  function buildLogSubmissionPayload(submissionKind: 'diagnostics' | 'behavior', entries: AppLogEntry[]) {
+    return {
+      schemaVersion: 1,
+      submissionKind,
+      submittedAt: new Date().toISOString(),
+      app: {
+        versionName: buildInfo.versionName,
+        versionCode: buildInfo.versionCode,
+        buildNumber: buildInfo.buildNumber,
+        gitCommit: buildInfo.gitCommit,
+        dirty: buildInfo.dirty,
+      },
+      device: {
+        id: settings.deviceId,
+        name: settings.deviceName,
+        model: deviceMetadata.model,
+        platform: deviceMetadata.platform,
+      },
+      state: {
+        tab,
+        connectionState,
+        selectedBookId,
+        selectedBookTitle: selectedBook?.title,
+        currentChapterId: currentChapter?.id,
+        currentChapterTitle: currentChapter?.title,
+        currentChapterIndex: currentChapter?.index ?? currentChapter?.chapterIndex,
+        audioCatalogBookId,
+        audioChapterCount: visibleAudioChapters.length,
+        cachedAudioCount: visibleCachedAudioIds.size,
+        speechEngine: ttsSettings.engine,
+      },
+      logs: entries,
+    }
   }
 
   async function submitLocalLogs() {
@@ -620,37 +743,7 @@ function App() {
 
     setLogSubmitState({ status: 'submitting', message: '正在提交日志...' })
     try {
-      const response = await gatewayPost(settings, '/mobile/logs', {
-        schemaVersion: 1,
-        submittedAt: new Date().toISOString(),
-        app: {
-          versionName: buildInfo.versionName,
-          versionCode: buildInfo.versionCode,
-          buildNumber: buildInfo.buildNumber,
-          gitCommit: buildInfo.gitCommit,
-          dirty: buildInfo.dirty,
-        },
-        device: {
-          id: settings.deviceId,
-          name: settings.deviceName,
-          model: deviceMetadata.model,
-          platform: deviceMetadata.platform,
-        },
-        state: {
-          tab,
-          connectionState,
-          selectedBookId,
-          selectedBookTitle: selectedBook?.title,
-          currentChapterId: currentChapter?.id,
-          currentChapterTitle: currentChapter?.title,
-          currentChapterIndex: currentChapter?.index ?? currentChapter?.chapterIndex,
-          audioCatalogBookId,
-          audioChapterCount: visibleAudioChapters.length,
-          cachedAudioCount: visibleCachedAudioIds.size,
-          speechEngine: ttsSettings.engine,
-        },
-        logs: entries,
-      })
+      const response = await gatewayPost(settings, '/mobile/logs', buildLogSubmissionPayload('diagnostics', entries))
       const receiptId = readString(response.receiptId) || ''
       const submittedCount = typeof response.storedEntries === 'number' ? response.storedEntries : entries.length
       const nextMessage = receiptId ? `日志已提交：${receiptId}` : `日志已提交：${submittedCount} 条`
@@ -672,6 +765,17 @@ function App() {
 
   useEffect(() => {
     localStorage.setItem(settingsKey, JSON.stringify(settings))
+  }, [settings])
+
+  useEffect(() => {
+    if (!isGatewayConfigured(settings)) return
+    scheduleBehaviorLogFlush(8000)
+    const interval = window.setInterval(() => {
+      void submitBehaviorLogs()
+    }, 60_000)
+    return () => {
+      window.clearInterval(interval)
+    }
   }, [settings])
 
   useEffect(() => {
@@ -890,6 +994,7 @@ function App() {
   useEffect(() => {
     return () => {
       if (speechFollowTimerRef.current != null) window.clearTimeout(speechFollowTimerRef.current)
+      if (behaviorFlushTimerRef.current != null) window.clearTimeout(behaviorFlushTimerRef.current)
       currentUtteranceIdRef.current = null
       speechUtteranceIndexRef.current.clear()
       void NovelReaderTts.stop().catch(() => undefined)
@@ -1094,6 +1199,11 @@ function App() {
 
   async function openBook(bookId: string, options: { restoreProgress?: ReadingProgress | null } = {}) {
     const restoreProgress = options.restoreProgress ?? loadReadingProgress(bookId)
+    recordBehavior('openBook', {
+      bookId,
+      restoreChapterId: restoreProgress?.chapterId,
+      hasRestoreProgress: Boolean(restoreProgress),
+    })
     setSelectedBookId(bookId)
     const cachedFullPackage = loadFullPackageCache(bookId)
     setFullPackageCache(cachedFullPackage)
@@ -1179,6 +1289,7 @@ function App() {
   }
 
   function selectBook(bookId: string) {
+    recordBehavior('selectBook', { bookId })
     setSelectedBookId(bookId)
     const cachedFullPackage = loadFullPackageCache(bookId)
     setFullPackageCache(cachedFullPackage)
@@ -1251,6 +1362,11 @@ function App() {
       setFullPackageCache(importedCache)
       setFullPackageStatus('imported')
       setFullPackageProgress({ bookId, phase: 'import', status: 'imported', done: 4, total: 4 })
+      recordBehavior('syncFullPackage', {
+        bookId,
+        sizeBytes: downloaded.sizeBytes,
+        chapterCount: importedCache.importStats?.chapterCount,
+      })
       await refreshLocalLibrary()
       if (bookId === selectedBookId) {
         const refreshedPackage = await gatewayFetch(settings, `/mobile/books/${encodeURIComponent(bookId)}/package`)
@@ -1414,6 +1530,14 @@ function App() {
       if (!playbackUrl && blob) {
         playbackUrl = URL.createObjectURL(blob)
       }
+      recordBehavior('playCurrentAudio', {
+        bookId: selectedBookId,
+        currentChapterId: currentChapter.id,
+        audioChapterId: currentAudio.chapterId,
+        cached: Boolean(cachedAudio),
+        remoteStream: usesRemoteStream,
+        sourcePosition: options.sourcePosition,
+      })
       const startTime =
         typeof options.startTime === 'number'
           ? options.startTime
@@ -1578,6 +1702,13 @@ function App() {
           ? `${label} 已停止，已缓存 ${done}/${chaptersToSync.length} 章`
           : `${label} 已缓存 ${chaptersToSync.length}/${chaptersToSync.length} 章`,
       )
+      recordBehavior('syncAudioChapters', {
+        bookId,
+        label,
+        requestedCount: chaptersToSync.length,
+        completedCount: done,
+        cancelled: audioSyncCancelRequestedRef.current,
+      })
     } catch (error) {
       if (isDeviceDisabledError(error)) {
         setConnectionState('error')
@@ -1635,6 +1766,10 @@ function App() {
           await refreshCachedAudioIds(item.bookId)
           await refreshLocalLibrary()
           setMessage(`已缓存：${item.audioChapter.title ?? item.audioChapter.chapterId}`)
+          recordBehavior('downloadAudioChapter', {
+            bookId: item.bookId,
+            audioChapterId: item.audioChapter.chapterId,
+          })
         } catch (error) {
           if (isDeviceDisabledError(error)) {
             setConnectionState('error')
@@ -2066,6 +2201,10 @@ function App() {
 
   function selectChapter(chapterId: string) {
     void stopSpeechReading()
+    recordBehavior('selectChapter', {
+      bookId: selectedBookId,
+      chapterId,
+    })
     setCurrentChapterId(chapterId)
     clearAudioUrl()
     lastReaderScrollYRef.current = 0
@@ -2115,6 +2254,12 @@ function App() {
   function submitSearch() {
     const query = searchInput.trim()
     if (!bookPackage || !query) return
+    recordBehavior('submitSearch', {
+      bookId: selectedBookId ?? bookPackage.book.id,
+      searchMode,
+      queryLength: query.length,
+      semantic: ragUseSemantic,
+    })
     setSubmittedSearchQuery(query)
     if (searchMode === 'rag') {
       setRagAnswer('')
@@ -2218,6 +2363,9 @@ function App() {
   }
 
   function switchTab(nextTab: GatewayTab) {
+    if (nextTab !== tab) {
+      recordBehavior('switchTab', { from: tab, to: nextTab })
+    }
     if (tab === 'reader' && selectedBookId && currentChapterId) {
       const scrollY = Math.max(0, window.scrollY)
       lastReaderScrollYRef.current = scrollY
@@ -2614,6 +2762,12 @@ function App() {
     clearAudioUrl()
     setSpeechPlayback({ status: 'checking' })
     setTtsStatusMessage('')
+    recordBehavior('startSpeechReading', {
+      bookId: selectedBookId,
+      currentChapterId: currentChapter?.id,
+      startIndex: startIndexOverride ?? findCurrentVisibleSpeechSegmentIndex() ?? 0,
+      segmentCount: speechChapter.segments.length,
+    })
     try {
       const available = await refreshTtsAvailability()
       if (!available) {
@@ -2800,6 +2954,13 @@ function App() {
     )
   }
 
+  function openReaderMenu() {
+    setChapterPickerOpen(true)
+    if (selectedBookId && audioCatalogBookId !== selectedBookId && !cloudSyncBlocked) {
+      void refreshAudio(selectedBookId, false)
+    }
+  }
+
   function handleReaderTap(event: MouseEvent<HTMLElement>) {
     const target = event.target as HTMLElement
     if (target.closest('button, input, select, textarea, a, label, audio')) return
@@ -2810,7 +2971,7 @@ function App() {
       const now = event.timeStamp
       if (now - lastReaderCenterTapAtRef.current < 360) {
         lastReaderCenterTapAtRef.current = 0
-        setChapterPickerOpen(true)
+        openReaderMenu()
         return
       }
       lastReaderCenterTapAtRef.current = now
@@ -3008,7 +3169,7 @@ function App() {
                     </option>
                   ))}
                 </select>
-                <button type="button" onClick={() => setChapterPickerOpen(true)}>菜单</button>
+                <button type="button" onClick={openReaderMenu}>菜单</button>
               </div>
               <div className="chapter-nav-row">
                 <button type="button" onClick={() => selectChapter(previousChapter?.id ?? currentChapter.id)} disabled={!previousChapter}>
@@ -4841,7 +5002,7 @@ async function listLocalBookSummaries(): Promise<BookSummary[]> {
     Array.from(bookIds).map(async (bookId) => {
       const cache = fullPackageIndex[bookId] ?? null
       const indexedPackage = cachedPackages.find((entry) => entry.bookId === bookId)?.package ?? null
-      const cachedPackage = indexedPackage ?? (await loadCachedBookPackage(bookId))
+      const cachedPackage = indexedPackage ?? (await loadCachedBookPackage(bookId, { nativeFileFallback: false }))
       const packageBook = cachedPackage?.book
       const localAudioChapterCount = Object.values(audioIndex).filter((record) => record.bookId === bookId).length
       return {
@@ -4906,6 +5067,7 @@ function normalizeFullPackageCache(value: unknown): FullPackageCache | null {
   if (!isRecord(value)) return null
   if (typeof value.bookId !== 'string' || typeof value.filePath !== 'string') return null
   if (typeof value.sizeBytes !== 'number' || typeof value.cachedAt !== 'string') return null
+  if (isLegacyBookId(value.bookId) || containsLegacyBookId(value.filePath)) return null
   return {
     bookId: value.bookId,
     title: typeof value.title === 'string' ? value.title : undefined,
@@ -5010,15 +5172,48 @@ export function appendAppLogToStorage(
 
 function clearAppLogsFromStorage(storage: Pick<Storage, 'removeItem'>) {
   storage.removeItem(appLogKey)
+  storage.removeItem(submittedBehaviorLogIdsKey)
 }
 
-function loadLatestIssueFromStorage(storage: Pick<Storage, 'getItem'>) {
-  return [...loadAppLogEntriesFromStorage(storage)].reverse().find((entry) => entry.level === 'error' || entry.level === 'warn') ?? null
+export function loadLatestIssueFromStorage(storage: Pick<Storage, 'getItem'>) {
+  return [...loadAppLogEntriesFromStorage(storage)].reverse().find(isVisibleDiagnosticIssue) ?? null
+}
+
+function isVisibleDiagnosticIssue(entry: AppLogEntry) {
+  if (entry.level !== 'error' && entry.level !== 'warn') return false
+  if (isRecord(entry.context) && entry.context.action === 'submitBehaviorLogs') return false
+  return true
 }
 
 export function buildSubmittedAppLogs(entries: AppLogEntry[], latestIssue: AppLogEntry | null) {
   const nextEntries = latestIssue && !entries.some((entry) => entry.id === latestIssue.id) ? [...entries, latestIssue] : entries
   return nextEntries.slice(-maxSubmittedLogEntries)
+}
+
+export function buildPendingBehaviorLogs(storage: Pick<Storage, 'getItem'>, limit = maxBehaviorSubmitEntries) {
+  const submittedIds = loadSubmittedBehaviorLogIds(storage)
+  return loadAppLogEntriesFromStorage(storage)
+    .filter((entry) => entry.source === 'behavior' && !submittedIds.has(entry.id))
+    .slice(-limit)
+}
+
+export function markBehaviorLogsSubmitted(storage: Pick<Storage, 'getItem' | 'setItem'>, entries: AppLogEntry[]) {
+  const submittedIds = loadSubmittedBehaviorLogIds(storage)
+  for (const entry of entries) {
+    if (entry.source === 'behavior') submittedIds.add(entry.id)
+  }
+  const compactIds = Array.from(submittedIds).slice(-1000)
+  storage.setItem(submittedBehaviorLogIdsKey, JSON.stringify(compactIds))
+}
+
+function loadSubmittedBehaviorLogIds(storage: Pick<Storage, 'getItem'>) {
+  try {
+    const parsed = JSON.parse(storage.getItem(submittedBehaviorLogIdsKey) || '[]') as unknown
+    if (!Array.isArray(parsed)) return new Set<string>()
+    return new Set(parsed.filter((value): value is string => typeof value === 'string' && Boolean(value)))
+  } catch {
+    return new Set<string>()
+  }
 }
 
 function saveAppLogEntries(storage: Pick<Storage, 'setItem'>, entries: AppLogEntry[]) {
@@ -5064,6 +5259,44 @@ function serializeErrorForLog(error: unknown) {
     }
   }
   return sanitizeLogValue(error)
+}
+
+export function shouldAutoUploadErrorLog(error: unknown, context: Record<string, unknown> = {}) {
+  if (isGatewayConnectivityError(error)) return false
+  const action = typeof context.action === 'string' ? context.action : ''
+  if (action === 'submitLocalLogs' || action === 'submitBehaviorLogs' || action === 'submitErrorLogs') return false
+  return true
+}
+
+export function isGatewayConnectivityError(error: unknown) {
+  if (error instanceof GatewayError) return false
+  const name = error instanceof Error ? error.name : ''
+  const message = error instanceof Error ? error.message : typeof error === 'string' ? error : ''
+  const normalized = `${name} ${message}`.toLowerCase()
+  return [
+    'failed to fetch',
+    'networkerror',
+    'network error',
+    'network request failed',
+    'load failed',
+    'aborterror',
+    'timeout',
+    'timed out',
+    'sockettimeoutexception',
+    'unable to resolve host',
+    'could not resolve host',
+    'no address associated with hostname',
+    'network is unreachable',
+    'host unreachable',
+    'connection refused',
+    'connection reset',
+    'connection timed out',
+    'offline',
+    'internet_disconnected',
+    'err_internet_disconnected',
+    'err_network_changed',
+    'err_connection',
+  ].some((pattern) => normalized.includes(pattern))
 }
 
 function sanitizeLogValue(value: unknown, depth = 0): unknown {
@@ -5168,9 +5401,10 @@ function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string)
 
 export function normalizeReadingProgress(value: unknown): ReadingProgress | null {
   if (!isRecord(value) || typeof value.bookId !== 'string' || typeof value.chapterId !== 'string') return null
+  const bookId = canonicalBookId(value.bookId)
   return {
-    bookId: value.bookId,
-    chapterId: value.chapterId,
+    bookId,
+    chapterId: canonicalChapterId(value.chapterId),
     scrollY: typeof value.scrollY === 'number' && Number.isFinite(value.scrollY) ? Math.max(0, value.scrollY) : 0,
     updatedAt: typeof value.updatedAt === 'string' ? value.updatedAt : new Date().toISOString(),
   }
@@ -5180,7 +5414,7 @@ export function normalizeReadingProgressStore(value: unknown): ReadingProgressSt
   const store: ReadingProgressStore = { schemaVersion: 2, books: {} }
   const legacyProgress = normalizeReadingProgress(value)
   if (legacyProgress) {
-    store.books[legacyProgress.bookId] = legacyProgress
+    upsertReadingProgress(store, legacyProgress)
     return store
   }
 
@@ -5188,9 +5422,16 @@ export function normalizeReadingProgressStore(value: unknown): ReadingProgressSt
 
   for (const progressValue of Object.values(value.books)) {
     const progress = normalizeReadingProgress(progressValue)
-    if (progress) store.books[progress.bookId] = progress
+    if (progress) upsertReadingProgress(store, progress)
   }
   return store
+}
+
+function upsertReadingProgress(store: ReadingProgressStore, progress: ReadingProgress) {
+  const existing = store.books[progress.bookId]
+  if (!existing || Date.parse(progress.updatedAt) >= Date.parse(existing.updatedAt)) {
+    store.books[progress.bookId] = progress
+  }
 }
 
 export function loadReadingProgressFromStorage(storage: Pick<ReadingProgressStorage, 'getItem'>, bookId: string): ReadingProgress | null {
@@ -5296,6 +5537,29 @@ function normalizeBookTitle(title: string) {
   return title.trim().replace(/\s+/g, '').toLocaleLowerCase()
 }
 
+function canonicalBookId(bookId: string) {
+  return legacyBookIdReplacements.get(bookId) ?? bookId
+}
+
+function isLegacyBookId(bookId: string) {
+  return legacyBookIdReplacements.has(bookId)
+}
+
+function canonicalChapterId(chapterId: string) {
+  for (const [legacyBookId, canonicalId] of legacyBookIdReplacements) {
+    if (chapterId === legacyBookId) return canonicalId
+    if (chapterId.startsWith(`${legacyBookId}:`)) return `${canonicalId}${chapterId.slice(legacyBookId.length)}`
+  }
+  return chapterId
+}
+
+function containsLegacyBookId(value: string) {
+  for (const legacyBookId of legacyBookIdReplacements.keys()) {
+    if (value.includes(legacyBookId)) return true
+  }
+  return false
+}
+
 function formatBookMeta(book: BookSummary, audioChapterCount = book.audioChapterCount) {
   const parts = [`${book.chapterCount} 章`]
   if (book.author) parts.push(book.author)
@@ -5396,16 +5660,50 @@ async function cacheBookPackage(bookId: string, bookPackage: BookPackage) {
   }
 }
 
-async function loadCachedBookPackage(bookId: string): Promise<BookPackage | null> {
+async function loadCachedBookPackage(bookId: string, options: { nativeFileFallback?: boolean } = {}): Promise<BookPackage | null> {
   const indexedDbPackage = await readBookPackageFromIndexedDb(bookId)
   if (indexedDbPackage) return indexedDbPackage
 
   try {
     const cached = localStorage.getItem(`${packageCachePrefix}${bookId}`)
-    return cached ? normalizeBookPackage(JSON.parse(cached) as unknown) : null
+    if (cached) return normalizeBookPackage(JSON.parse(cached) as unknown)
+  } catch {
+    // Fall through to the native full-package file below.
+  }
+
+  if (options.nativeFileFallback === false) return null
+  const nativePackage = await readCachedBookPackageFromNativeFile(bookId)
+  if (!nativePackage) return null
+  await cacheBookPackage(bookId, nativePackage)
+  return nativePackage
+}
+
+async function readCachedBookPackageFromNativeFile(bookId: string) {
+  if (!Capacitor.isNativePlatform()) return null
+  const cache = loadFullPackageCache(bookId)
+  if (!cache?.filePath) return null
+  try {
+    const bookPackage = await readBookPackageFromNativeFilePath(cache.filePath)
+    return bookPackage.book.id === bookId ? bookPackage : null
   } catch {
     return null
   }
+}
+
+export async function readBookPackageFromNativeFilePath(
+  filePath: string,
+  options: {
+    fetchImpl?: typeof fetch
+    convertFileSrc?: (filePath: string) => string
+  } = {},
+): Promise<BookPackage> {
+  const fetchImpl = options.fetchImpl ?? fetch
+  const convertFileSrc = options.convertFileSrc ?? ((path) => Capacitor.convertFileSrc(path))
+  const response = await fetchImpl(convertFileSrc(filePath))
+  if (!response.ok) {
+    throw new Error(`Cached package file returned ${response.status}.`)
+  }
+  return normalizeBookPackage(await response.json() as unknown)
 }
 
 async function writeBookPackageToIndexedDb(bookId: string, bookPackage: BookPackage) {
@@ -5446,6 +5744,8 @@ async function listCachedBookPackages() {
     for (const value of values) {
       if (!isRecord(value) || typeof value.bookId !== 'string') continue
       try {
+        if (isLegacyBookId(value.bookId)) continue
+        if (isRecord(value.package) && isRecord(value.package.book) && typeof value.package.book.id === 'string' && isLegacyBookId(value.package.book.id)) continue
         records.push({
           bookId: value.bookId,
           package: normalizeBookPackage(value.package),
@@ -5463,6 +5763,7 @@ async function listCachedBookPackages() {
       const key = localStorage.key(index)
       if (!key?.startsWith(packageCachePrefix)) continue
       const bookId = key.slice(packageCachePrefix.length)
+      if (isLegacyBookId(bookId)) continue
       if (!bookId || records.some((record) => record.bookId === bookId)) continue
       const raw = localStorage.getItem(key)
       if (!raw) continue
@@ -5593,6 +5894,11 @@ export function loadAudioCacheIndexFromStorage(storage: Pick<AudioCacheStorage, 
           typeof record.chapterId === 'string' &&
           typeof record.filePath === 'string' &&
           record.filePath.length > 0 &&
+          !isLegacyBookId(record.bookId) &&
+          !containsLegacyBookId(record.chapterId) &&
+          !containsLegacyBookId(record.filePath) &&
+          (typeof record.manifestFilePath !== 'string' || !containsLegacyBookId(record.manifestFilePath)) &&
+          !containsLegacyBookId(JSON.stringify(record.audioChapter)) &&
           isAudioChapter(record.audioChapter)
         )
       }),
@@ -5638,6 +5944,7 @@ type ChapterAudioReference =
   | {
       id?: string
       chapterId?: string
+      title?: string
       index?: number
       chapterIndex?: number
     }
@@ -5679,6 +5986,12 @@ function chapterAudioReferenceId(reference: ChapterAudioReference) {
   return (reference.id ?? reference.chapterId ?? '').trim()
 }
 
+function chapterAudioReferenceIndex(reference: ChapterAudioReference) {
+  if (!reference || typeof reference === 'string') return null
+  const index = Number.isSafeInteger(reference.index) && reference.index! > 0 ? reference.index : reference.chapterIndex
+  return Number.isSafeInteger(index) && index! > 0 ? index! : null
+}
+
 function chapterAudioReferenceKeys(bookId: string | undefined, reference: ChapterAudioReference) {
   const keys = new Set<string>()
   const id = chapterAudioReferenceId(reference)
@@ -5690,8 +6003,8 @@ function chapterAudioReferenceKeys(bookId: string | undefined, reference: Chapte
     }
   }
   if (reference && typeof reference !== 'string') {
-    const index = Number.isSafeInteger(reference.index) && reference.index! > 0 ? reference.index : reference.chapterIndex
-    if (Number.isSafeInteger(index) && index! > 0) keys.add(`chapter:${index}`)
+    const index = chapterAudioReferenceIndex(reference)
+    if (index != null) keys.add(`chapter:${index}`)
   }
   return keys
 }

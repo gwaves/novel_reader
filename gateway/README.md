@@ -77,6 +77,7 @@ localStorage.setItem('novel-reader-gateway-admin-token', '<GATEWAY_ADMIN_ACCESS_
 - `GET /admin/metrics`（受保护，返回请求量、错误率、P95 和下载统计）
 - `GET /admin/events`（受保护，返回最近下载、错误和告警事件）
 - `GET /admin/requests`（受保护，返回最近请求日志）
+- `GET /admin/analytics`（受保护，返回持久化请求日志、手机行为日志、Top action、Top 书籍和日志文件统计）
 - `GET /admin/ui`（内网管理后台静态入口）
 - `POST /ai/chat`（受保护，转发 OpenAI-compatible chat completions）
 - `POST /ai/embeddings`（受保护，转发 OpenAI-compatible embeddings）
@@ -110,6 +111,40 @@ X-Device-Model: <model>
 X-Device-Platform: android
 X-App-Version: <version>
 ```
+
+## 运维指标与日志
+
+Gateway 会在内存中保留最近请求指标供 `/admin/metrics`、`/admin/events`、`/admin/requests` 快速展示，同时把请求和手机端日志持久化为 JSON Lines 文件，便于 `jq`、ClickHouse、DuckDB、Spark 等工具离线统计。
+
+默认日志目录为 `GATEWAY_DATA_DIR/logs`，可用以下环境变量调整：
+
+- `GATEWAY_LOG_DIR`：持久化 JSONL 日志根目录，默认 `GATEWAY_DATA_DIR/logs`。
+- `GATEWAY_LOG_ROTATE_BYTES`：单个 JSONL 文件最大字节数，默认 `10485760`。
+- `GATEWAY_LOG_RETENTION_DAYS`：按日期目录保留天数，默认 `30`。
+
+目录格式：
+
+```text
+logs/
+├── requests/
+│   └── 2026-07-09/
+│       ├── requests-2026-07-09-000.jsonl
+│       └── requests-2026-07-09-001.jsonl
+└── mobile/
+    └── 2026-07-09/
+        ├── mobile-2026-07-09-000.jsonl
+        └── mobile-2026-07-09-001.jsonl
+```
+
+每行是一条独立 JSON 事件，顶层包含 `schemaVersion`、`kind`、`receivedAt`。请求日志使用 `kind: "gateway.request"`，手机端日志使用 `kind: "mobile.event"`。手机端行为日志的低基数字段是 `eventName`，书籍和章节分别在 `bookId`、`chapterId`，敏感字段会在客户端和服务端两侧按 `token`、`authorization`、`password`、`secret` 等键名脱敏。
+
+手机端诊断与行为日志统一提交到：
+
+- `POST /mobile/logs`（受保护，写入 JSONL，返回 `receiptId`）
+
+后台统计入口：
+
+- `GET /admin/analytics`：读取最近 7 天 JSONL，返回最近 24 小时行为事件数、诊断/错误数、活跃设备、Top action、Top 书籍、最近事件和日志文件统计。
 
 第一版书库索引从 `GATEWAY_DATA_DIR/books.json` 读取。文件缺失时返回空书库；文件存在时应使用：
 

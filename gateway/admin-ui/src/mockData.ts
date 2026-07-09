@@ -105,6 +105,52 @@ export type AdminSystemSummary = {
   dataDirBytes: number
 }
 
+export type AdminTopAction = {
+  value: string
+  count: number
+}
+
+export type AdminTopBook = {
+  bookId: string
+  title: string
+  count: number
+}
+
+export type AdminBehaviorEvent = {
+  receivedAt: string
+  level: 'info' | 'warn' | 'error'
+  source: string
+  eventName: string
+  message: string
+  deviceId: string
+  deviceName: string
+  bookId: string
+  chapterId: string
+}
+
+export type AdminLogFile = {
+  kind: 'requests' | 'mobile'
+  date: string
+  fileName: string
+  relativePath: string
+  sizeBytes: number
+}
+
+export type AdminAnalyticsSummary = {
+  eventsLast24Hours: number
+  diagnosticsLast24Hours: number
+  errorEventsLast24Hours: number
+  activeDevicesLast24Hours: number
+  persistedRequestsLast24Hours: number
+  persistedDownloadsLast24Hours: number
+  logFileCount: number
+  logFileBytes: number
+  topActions: AdminTopAction[]
+  topBooks: AdminTopBook[]
+  recentEvents: AdminBehaviorEvent[]
+  recentFiles: AdminLogFile[]
+}
+
 export const visibilityOptions: Visibility[] = ['default', 'trusted', 'admin', 'hidden']
 
 export const labelNames: Record<ContentLabel, string> = {
@@ -136,6 +182,48 @@ export const recentEvents = [
   { time: '10:10', level: 'info', text: '设备“客厅小米平板”连接，验证码 428193' },
   { time: '09:56', level: 'error', text: '《夜航档案》embedding 覆盖率低于 70%' },
 ]
+
+export const analyticsSummary: AdminAnalyticsSummary = {
+  eventsLast24Hours: 128,
+  diagnosticsLast24Hours: 6,
+  errorEventsLast24Hours: 2,
+  activeDevicesLast24Hours: 3,
+  persistedRequestsLast24Hours: 12430,
+  persistedDownloadsLast24Hours: 842,
+  logFileCount: 8,
+  logFileBytes: 18 * 1024 * 1024,
+  topActions: [
+    { value: 'openBook', count: 42 },
+    { value: 'selectChapter', count: 36 },
+    { value: 'playCurrentAudio', count: 28 },
+  ],
+  topBooks: [
+    { bookId: 'jinlin', title: '烬鳞纪', count: 76 },
+    { bookId: 'yaodao', title: '妖刀记', count: 41 },
+  ],
+  recentEvents: [
+    {
+      receivedAt: '2026-07-09T10:22:18.000Z',
+      level: 'info',
+      source: 'behavior',
+      eventName: 'playCurrentAudio',
+      message: '用户行为: playCurrentAudio',
+      deviceId: 'device-living-room-pad',
+      deviceName: '客厅小米平板',
+      bookId: 'jinlin',
+      chapterId: 'chapter-88',
+    },
+  ],
+  recentFiles: [
+    {
+      kind: 'mobile',
+      date: '2026-07-09',
+      fileName: 'mobile-2026-07-09-000.jsonl',
+      relativePath: 'mobile/2026-07-09/mobile-2026-07-09-000.jsonl',
+      sizeBytes: 6 * 1024 * 1024,
+    },
+  ],
+}
 
 export const initialPackages: AdminPackage[] = [
   {

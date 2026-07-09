@@ -4,9 +4,10 @@ import rateLimit from '@fastify/rate-limit'
 import Fastify, { type FastifyError, type FastifyReply, type FastifyRequest } from 'fastify'
 import { createHmac, randomUUID, timingSafeEqual } from 'node:crypto'
 import { createReadStream } from 'node:fs'
-import { mkdir, readdir, stat, writeFile } from 'node:fs/promises'
+import { readdir, stat } from 'node:fs/promises'
 import { extname, join, normalize, relative, basename } from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { buildGatewayAnalytics } from './analytics.js'
 import { requireAdminAuth, requireMobileAuth } from './auth.js'
 import { deleteBookAudio, openAudioFile, readAudioCatalog, readAudioManifest, summarizeBookAudio } from './audio-store.js'
 import { buildCapabilities } from './capabilities.js'
@@ -33,11 +34,13 @@ import {
   updateGatewayDevice,
 } from './device-store.js'
 import { GatewayHttpError, isGatewayHttpError } from './errors.js'
-import { createGatewayMetrics } from './metrics.js'
+import { appendStructuredLogRecords, type StructuredLogRecord } from './log-store.js'
+import { createGatewayMetrics, formatRequestSample, type RequestSample } from './metrics.js'
 import { createEmbedding, forwardChatCompletion, forwardEmbeddings } from './openai-client.js'
 
 export function buildGatewayApp(config: GatewayConfig = loadConfig()) {
   const metrics = createGatewayMetrics()
+  const pendingLogWrites = new Set<Promise<void>>()
   const app = Fastify({
     logger:
       config.environment === 'test'
@@ -81,7 +84,17 @@ export function buildGatewayApp(config: GatewayConfig = loadConfig()) {
   })
 
   app.addHook('onResponse', async (request, reply) => {
-    metrics.record(request, reply.statusCode)
+    const sample = metrics.record(request, reply.statusCode)
+    await trackLogWrite(
+      pendingLogWrites,
+      appendStructuredLogRecords(config, 'requests', [buildRequestLogRecord(sample)]).catch((error: unknown) => {
+        request.log.warn({ err: error }, 'failed to persist gateway request log')
+      }),
+    )
+  })
+
+  app.addHook('onClose', async () => {
+    await Promise.allSettled(pendingLogWrites)
   })
 
   app.setErrorHandler((error, request, reply) => {
@@ -165,28 +178,18 @@ export function buildGatewayApp(config: GatewayConfig = loadConfig()) {
     const payload = normalizeMobileLogSubmission(request.body)
     const receiptId = randomUUID()
     const receivedAt = new Date().toISOString()
-    const logDir = join(config.dataDir, 'mobile-logs', receivedAt.slice(0, 10))
-    const fileName = `${safeFileSegment(mobileAuth.deviceId)}-${receiptId}.json`
-    await mkdir(logDir, { recursive: true })
-    await writeFile(
-      join(logDir, fileName),
-      `${JSON.stringify(
-        {
-          schemaVersion: 1,
-          receiptId,
-          receivedAt,
-          remoteAddress: request.ip,
-          deviceId: mobileAuth.deviceId,
-          app: payload.app,
-          device: payload.device,
-          state: payload.state,
-          logs: payload.logs,
-        },
-        null,
-        2,
-      )}\n`,
-      'utf8',
+    const records = payload.logs.map((entry) =>
+      buildMobileLogRecord({
+        receiptId,
+        receivedAt,
+        remoteAddress: request.ip,
+        mobileAuth,
+        payload,
+        entry,
+        request,
+      }),
     )
+    await appendStructuredLogRecords(config, 'mobile', records)
     request.log.warn({ receiptId, deviceId: mobileAuth.deviceId, entries: payload.logs.length }, 'mobile diagnostics submitted')
     return {
       schemaVersion: 1,
@@ -393,6 +396,11 @@ export function buildGatewayApp(config: GatewayConfig = loadConfig()) {
   app.get('/admin/requests', async (request) => {
     requireAdminAuth(config, request)
     return metrics.recentRequests()
+  })
+
+  app.get('/admin/analytics', async (request) => {
+    requireAdminAuth(config, request)
+    return buildGatewayAnalytics(config, await readBookCatalog(config))
   })
 
   app.patch<{ Body: unknown; Params: { deviceId: string } }>('/admin/devices/:deviceId', async (request) => {
@@ -663,6 +671,91 @@ async function requireMobileDevice(config: GatewayConfig, request: FastifyReques
   }
 }
 
+function buildRequestLogRecord(sample: RequestSample): StructuredLogRecord {
+  const formatted = formatRequestSample(sample)
+  return {
+    schemaVersion: 1,
+    kind: 'gateway.request',
+    receivedAt: formatted.time,
+    ...formatted,
+    path: formatted.url.split('?')[0] || formatted.url,
+  }
+}
+
+async function trackLogWrite(pendingLogWrites: Set<Promise<void>>, write: Promise<void>) {
+  pendingLogWrites.add(write)
+  try {
+    await write
+  } finally {
+    pendingLogWrites.delete(write)
+  }
+}
+
+function buildMobileLogRecord({
+  receiptId,
+  receivedAt,
+  remoteAddress,
+  mobileAuth,
+  payload,
+  entry,
+  request,
+}: {
+  receiptId: string
+  receivedAt: string
+  remoteAddress: string
+  mobileAuth: MobileDeviceContext
+  payload: ReturnType<typeof normalizeMobileLogSubmission>
+  entry: Record<string, unknown>
+  request: FastifyRequest
+}): StructuredLogRecord {
+  const context = isRecord(entry.context) ? entry.context : {}
+  const app = isRecord(payload.app) ? payload.app : {}
+  const device = isRecord(payload.device) ? payload.device : {}
+  const state = isRecord(payload.state) ? payload.state : {}
+  const source = readNonEmptyString(entry.source) || (payload.submissionKind === 'behavior' ? 'behavior' : 'diagnostic')
+  const eventName = readNonEmptyString(context.action) || behaviorEventName(source, entry.message)
+  return {
+    schemaVersion: 1,
+    kind: 'mobile.event',
+    receiptId,
+    receivedAt,
+    submittedAt: payload.submittedAt,
+    clientTimestamp: readNonEmptyString(entry.timestamp),
+    eventId: readNonEmptyString(entry.id) || randomUUID(),
+    remoteAddress,
+    deviceId: mobileAuth.deviceId,
+    deviceName: readRequestHeader(request, 'x-device-name') || readNonEmptyString(device.name),
+    deviceModel: readRequestHeader(request, 'x-device-model') || readNonEmptyString(device.model),
+    devicePlatform: readRequestHeader(request, 'x-device-platform') || readNonEmptyString(device.platform),
+    appVersion: readRequestHeader(request, 'x-app-version') || readNonEmptyString(app.versionName) || readNonEmptyString(app.version),
+    submissionKind: payload.submissionKind,
+    level: entry.level,
+    source,
+    eventName,
+    message: entry.message,
+    bookId: readNonEmptyString(context.bookId) || readNonEmptyString(state.selectedBookId),
+    chapterId:
+      readNonEmptyString(context.chapterId) ||
+      readNonEmptyString(context.currentChapterId) ||
+      readNonEmptyString(state.currentChapterId),
+    app,
+    device,
+    state,
+    context,
+  }
+}
+
+function behaviorEventName(source: string, message: unknown) {
+  if (source !== 'behavior') return ''
+  return readNonEmptyString(message).replace(/^用户行为[:：]\s*/, '').slice(0, 120)
+}
+
+function readRequestHeader(request: FastifyRequest, key: string) {
+  const value = request.headers[key]
+  const rawValue = Array.isArray(value) ? value[0] : value
+  return rawValue?.trim() || ''
+}
+
 function normalizeMobileLogSubmission(body: unknown) {
   if (!isRecord(body)) {
     throw new GatewayHttpError(400, 'invalid_mobile_logs', 'Mobile logs body must be an object.')
@@ -676,6 +769,8 @@ function normalizeMobileLogSubmission(body: unknown) {
     throw new GatewayHttpError(400, 'invalid_mobile_logs', 'Mobile logs body must include at least one valid log entry.')
   }
   return {
+    submittedAt: readNonEmptyString(body.submittedAt),
+    submissionKind: body.submissionKind === 'behavior' ? 'behavior' as const : 'diagnostics' as const,
     app: sanitizeLogObject(body.app),
     device: sanitizeLogObject(body.device),
     state: sanitizeLogObject(body.state),
@@ -711,10 +806,6 @@ function sanitizeLogObject(value: unknown, depth = 0): unknown {
       /token|authorization|password|secret/i.test(key) ? '[redacted]' : sanitizeLogObject(entry, depth + 1),
     ]),
   )
-}
-
-function safeFileSegment(value: string) {
-  return value.replace(/[^0-9A-Za-z._-]+/g, '_').slice(0, 120) || 'unknown-device'
 }
 
 const audioStreamTokenTtlMs = 2 * 60 * 60 * 1000
