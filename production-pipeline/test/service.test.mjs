@@ -141,7 +141,6 @@ describe('production pipeline console service', () => {
     await writeFile(
       jobPath,
       JSON.stringify({
-        bookId: 'v2-book',
         title: 'V2 测试书',
         mainDbPath: dbPath,
         source: { type: 'txt', file: txtPath },

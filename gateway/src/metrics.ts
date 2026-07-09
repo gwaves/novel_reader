@@ -5,7 +5,7 @@ type GatewayRequest = FastifyRequest & {
   metricsStartedAt?: number
 }
 
-type RequestSample = {
+export type RequestSample = {
   requestId: string
   method: string
   url: string
@@ -52,7 +52,7 @@ export function createGatewayMetrics() {
     const sample: RequestSample = {
       requestId: request.id,
       method: request.method,
-      url: request.url,
+      url: redactUrl(request.url),
       statusCode,
       durationMs,
       time: now,
@@ -69,6 +69,7 @@ export function createGatewayMetrics() {
       events.unshift(event)
       events.splice(100)
     }
+    return sample
   }
 
   function snapshot(catalog: GatewayBookCatalog, system: { dataDirBytes?: number } = {}) {
@@ -132,7 +133,7 @@ export function createGatewayMetrics() {
   }
 }
 
-function formatRequestSample(sample: RequestSample) {
+export function formatRequestSample(sample: RequestSample) {
   return {
     requestId: sample.requestId,
     time: new Date(sample.time).toISOString(),
@@ -146,6 +147,10 @@ function formatRequestSample(sample: RequestSample) {
     bookId: sample.bookId,
     downloadKind: sample.downloadKind,
   }
+}
+
+function redactUrl(url: string) {
+  return url.replace(/([?&](?:token|access_token|authorization|password|secret)=)[^&]+/gi, '$1[redacted]')
 }
 
 function readHeaderValue(value: string | string[] | undefined) {

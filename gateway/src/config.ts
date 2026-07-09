@@ -20,6 +20,9 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     GATEWAY_AUDIO_DIR: readOptionalString(env, 'GATEWAY_AUDIO_DIR'),
     GATEWAY_DOWNLOADS_DIR: readOptionalString(env, 'GATEWAY_DOWNLOADS_DIR'),
     GATEWAY_ADMIN_UI_DIR: readOptionalString(env, 'GATEWAY_ADMIN_UI_DIR'),
+    GATEWAY_LOG_DIR: readOptionalString(env, 'GATEWAY_LOG_DIR'),
+    GATEWAY_LOG_ROTATE_BYTES: readInteger(env, 'GATEWAY_LOG_ROTATE_BYTES', 10 * 1024 * 1024, { min: 512 }),
+    GATEWAY_LOG_RETENTION_DAYS: readInteger(env, 'GATEWAY_LOG_RETENTION_DAYS', 30, { min: 1 }),
     GATEWAY_MAX_BODY_BYTES: readInteger(env, 'GATEWAY_MAX_BODY_BYTES', 50 * 1024 * 1024, { min: 1024 }),
     GATEWAY_DEV_ACCESS_TOKEN: readOptionalString(env, 'GATEWAY_DEV_ACCESS_TOKEN'),
     GATEWAY_ADMIN_ACCESS_TOKEN: readOptionalString(env, 'GATEWAY_ADMIN_ACCESS_TOKEN'),
@@ -72,6 +75,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env) {
     audioDir: parsed.GATEWAY_AUDIO_DIR ?? join(parsed.GATEWAY_DATA_DIR, 'audio'),
     downloadsDir: parsed.GATEWAY_DOWNLOADS_DIR ?? join(parsed.GATEWAY_DATA_DIR, 'downloads'),
     adminUiDir: parsed.GATEWAY_ADMIN_UI_DIR,
+    logs: {
+      dir: parsed.GATEWAY_LOG_DIR ?? join(parsed.GATEWAY_DATA_DIR, 'logs'),
+      rotateBytes: parsed.GATEWAY_LOG_ROTATE_BYTES,
+      retentionDays: parsed.GATEWAY_LOG_RETENTION_DAYS,
+    },
     maxBodyBytes: parsed.GATEWAY_MAX_BODY_BYTES,
     auth: {
       devAccessToken: parsed.GATEWAY_DEV_ACCESS_TOKEN,

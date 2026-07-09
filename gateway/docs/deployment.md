@@ -29,6 +29,9 @@ GATEWAY_MOBILE_ACCESS_TOKEN=replace-with-a-long-random-mobile-token
 # 浏览器跨域白名单，移动 App 原生请求通常不需要。生产如果不需要浏览器跨域，保持空；不要配置 *。
 GATEWAY_CORS_ORIGINS=
 GATEWAY_DOWNLOADS_DIR=
+GATEWAY_LOG_DIR=
+GATEWAY_LOG_ROTATE_BYTES=10485760
+GATEWAY_LOG_RETENTION_DAYS=30
 GATEWAY_AI_BASE_URL=https://api.openai.com/v1
 GATEWAY_AI_API_KEY=
 GATEWAY_AI_MODEL=gpt-4.1-mini
@@ -49,6 +52,7 @@ docker compose up -d --build
 - `gateway/data` -> 容器 `/data`，保存 `books.json` 和单书 `package.json`。
 - `gateway/audio` -> 容器 `/audio`，只读提供本地 MP3 清单和音频文件。
 - Android APK 下载目录默认使用 `gateway/data/downloads`，由 Gateway 公开为 `/downloads/*`。如果需要把下载文件放在独立磁盘或目录，可以设置 `GATEWAY_DOWNLOADS_DIR`，并在 Compose 中额外挂载该目录。
+- 请求日志和手机端行为/诊断日志默认写入 `gateway/data/logs`。如果要把日志放到独立磁盘或采集目录，可以设置 `GATEWAY_LOG_DIR`，并在 Compose 中额外挂载该目录。
 
 独立下载目录示例：
 
@@ -57,11 +61,22 @@ services:
   gateway:
     environment:
       GATEWAY_DOWNLOADS_DIR: /downloads
+      GATEWAY_LOG_DIR: /logs
     volumes:
       - ./data:/data
       - ./audio:/audio
       - ./downloads:/downloads
+      - ./logs:/logs
 ```
+
+日志文件按类型、日期和序号轮转：
+
+```text
+logs/requests/2026-07-09/requests-2026-07-09-000.jsonl
+logs/mobile/2026-07-09/mobile-2026-07-09-000.jsonl
+```
+
+每行是独立 JSON 事件，适合直接用 `jq` 或批处理系统读取。后台 `/admin/analytics` 会基于这些文件统计最近 24 小时行为事件、诊断错误、活跃设备、Top action、Top 书籍和最近日志文件。
 
 如果生产流水线运行在 Mac 等内网机器上，需要让 Gateway 应用端口对局域网开放：
 

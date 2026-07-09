@@ -213,17 +213,121 @@ describe('gateway app', () => {
       storedEntries: 1,
     })
     expect(body.receiptId).toEqual(expect.any(String))
-    const logDateDir = join(dataDir, 'mobile-logs', body.receivedAt.slice(0, 10))
+    const logDateDir = join(dataDir, 'logs', 'mobile', body.receivedAt.slice(0, 10))
     const files = await readdir(logDateDir)
-    expect(files[0]).toMatch(/^device_with_slash-/)
-    const saved = JSON.parse(await readFile(join(logDateDir, files[0]), 'utf8'))
+    expect(files[0]).toMatch(/^mobile-\d{4}-\d{2}-\d{2}-000\.jsonl$/)
+    const saved = JSON.parse((await readFile(join(logDateDir, files[0]), 'utf8')).trim())
     expect(saved).toMatchObject({
       receiptId: body.receiptId,
       deviceId: 'device/with/slash',
-      logs: [expect.objectContaining({ message: 'MP3 播放失败' })],
+      kind: 'mobile.event',
+      message: 'MP3 播放失败',
+      eventName: 'chapterAudioError',
     })
     expect(saved.device.token).toBe('[redacted]')
-    expect(saved.logs[0].context.token).toBe('[redacted]')
+    expect(saved.context.token).toBe('[redacted]')
+  })
+
+  it('rotates structured mobile event logs and reports behavior analytics', async () => {
+    const dataDir = await makeDataDir()
+    await writeFile(
+      join(dataDir, 'books.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        books: [
+          {
+            id: 'book-a',
+            title: '行为书',
+            chapterCount: 1,
+            updatedAt: '2026-07-09T00:00:00.000Z',
+          },
+        ],
+      }),
+      'utf8',
+    )
+    const app = buildTestApp({
+      GATEWAY_DEV_ACCESS_TOKEN: 'dev-token',
+      GATEWAY_DATA_DIR: dataDir,
+      GATEWAY_LOG_ROTATE_BYTES: '900',
+    })
+    const authHeaders = {
+      authorization: 'Bearer dev-token',
+      'x-device-id': 'device-a',
+      'x-device-name': 'QA Phone',
+    }
+    const actions = ['openBook', 'selectChapter', 'playCurrentAudio', 'openBook']
+
+    for (const [index, action] of actions.entries()) {
+      const response = await app.inject({
+        method: 'POST',
+        url: '/mobile/logs',
+        headers: authHeaders,
+        payload: {
+          schemaVersion: 1,
+          submissionKind: 'behavior',
+          submittedAt: '2026-07-09T10:00:00.000Z',
+          app: { versionName: '0.8.0' },
+          device: { model: 'Pixel' },
+          state: { selectedBookId: 'book-a', currentChapterId: 'chapter-1' },
+          logs: [
+            {
+              id: `behavior-${index}`,
+              timestamp: new Date(Date.now() + index).toISOString(),
+              level: 'info',
+              source: 'behavior',
+              message: `用户行为: ${action}`,
+              context: {
+                action,
+                bookId: 'book-a',
+                currentChapterId: 'chapter-1',
+                padding: 'x'.repeat(500),
+              },
+            },
+          ],
+        },
+      })
+      expect(response.statusCode).toBe(200)
+    }
+
+    const logDateDir = join(dataDir, 'logs', 'mobile', new Date().toISOString().slice(0, 10))
+    const files = await readdir(logDateDir)
+    expect(files.length).toBeGreaterThan(1)
+
+    const analyticsResponse = await app.inject({
+      method: 'GET',
+      url: '/admin/analytics',
+      headers: authHeaders,
+    })
+
+    expect(analyticsResponse.statusCode).toBe(200)
+    expect(analyticsResponse.json()).toMatchObject({
+      schemaVersion: 1,
+      behavior: {
+        eventsLast24Hours: actions.length,
+        activeDevicesLast24Hours: 1,
+        topActions: [
+          { value: 'openBook', count: 2 },
+          { value: 'playCurrentAudio', count: 1 },
+          { value: 'selectChapter', count: 1 },
+        ],
+        topBooks: [
+          { bookId: 'book-a', title: '行为书', count: actions.length },
+        ],
+      },
+      logFiles: {
+        byKind: {
+          mobile: {
+            files: files.length,
+          },
+        },
+      },
+    })
+    expect(analyticsResponse.json().behavior.recentEvents[0]).toMatchObject({
+      source: 'behavior',
+      deviceId: 'device-a',
+      bookId: 'book-a',
+      chapterId: 'chapter-1',
+    })
   })
 
   it('rejects empty mobile diagnostic submissions', async () => {

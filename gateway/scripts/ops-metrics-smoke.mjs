@@ -34,6 +34,7 @@ if (errorPath) await request(errorPath, { headers: mobileHeaders })
 const metrics = await jsonRequest('/admin/metrics', { headers: adminHeaders })
 const events = await jsonRequest('/admin/events', { headers: adminHeaders })
 const requests = await jsonRequest('/admin/requests', { headers: adminHeaders })
+const analytics = await jsonRequest('/admin/analytics', { headers: adminHeaders })
 
 check(metrics?.requests?.last24Hours >= 3, 'metrics.requests.last24Hours includes smoke requests')
 check(metrics?.requests?.errorRate > 0, 'metrics.requests.errorRate is above 0 after 401/404')
@@ -52,6 +53,14 @@ check(
   Array.isArray(metrics?.trends?.downloads) &&
     metrics.trends.downloads.at(-1)?.packageDownloads >= 1,
   'metrics.trends.downloads latest bucket includes package download',
+)
+check(
+  analytics?.requests?.persistedLast24Hours >= 3,
+  'analytics.requests.persistedLast24Hours includes smoke requests',
+)
+check(
+  analytics?.logFiles?.byKind?.requests?.files >= 1,
+  'analytics.logFiles identifies persisted request JSONL files',
 )
 
 const eventItems = Array.isArray(events?.events) ? events.events : []

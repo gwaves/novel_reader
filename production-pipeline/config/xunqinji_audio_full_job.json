@@ -1,0 +1,56 @@
+{
+  "bookId": "file-9aba79321cff0e51d7bffe5e",
+  "title": "寻秦记",
+  "mainDbPath": "~/.novel_reader/novel_reader.sqlite",
+  "source": {
+    "type": "main-db"
+  },
+  "stages": [
+    "audio",
+    "publish",
+    "verify"
+  ],
+  "llm": {
+    "provider": "openai-compatible",
+    "baseUrl": "https://ark.cn-beijing.volces.com/api/v3",
+    "apiKeyEnv": "PRODUCTION_LLM_API_KEY",
+    "model": "doubao-seed-2-0-mini-260428",
+    "concurrency": 4,
+    "retries": 3,
+    "timeoutMs": 300000,
+    "maxTokens": 8192,
+    "responseFormatJson": true,
+    "scheduler": {
+      "borrowIdle": true,
+      "weights": {
+        "audio": 4
+      }
+    }
+  },
+  "audio": {
+    "ttsConfig": "tmp/production-pipeline/xunqinji-tts-director.config.json",
+    "ttsOutRoot": "tmp/production-audio/xunqinji-full-20260706",
+    "batchSize": 1,
+    "directorConcurrency": 4,
+    "llmChapters": 1,
+    "minBatchSize": 1,
+    "ttsConcurrency": 30,
+    "ttsChapters": 1,
+    "controlFile": "production-pipeline/config/xunqinji_audio_control.json",
+    "resume": true,
+    "strict": true,
+    "noAdaptiveTts": true
+  },
+  "publish": {
+    "dryRun": false
+  },
+  "verify": {
+    "audioSamples": 3
+  },
+  "gateway": {
+    "host": "192.168.88.100",
+    "user": "gwaves",
+    "root": "/home/gwaves/novel-reader-gateway",
+    "url": "http://192.168.88.100:6180"
+  }
+}

@@ -1,19 +1,24 @@
 import { describe, expect, it, vi } from 'vitest'
 import {
   buildAudioChapterStatusRows,
+  buildPendingBehaviorLogs,
   buildSubmittedAppLogs,
   appendAppLogToStorage,
   gatewayGenerateRagAnswer,
   gatewayUserFacingError,
+  isGatewayConnectivityError,
   isAudioPlaybackDisabled,
   loadAppLogEntriesFromStorage,
   listCachedAudioChapterIdsFromStorage,
   loadAudioCacheIndexFromStorage,
+  loadLatestIssueFromStorage,
   loadLatestReadingProgressFromStorage,
   loadReadingProgressFromStorage,
+  markBehaviorLogsSubmitted,
   ragFallbackStatus,
   readCachedAudioChapterFromStorage,
   readCachedAudioFromStorage,
+  readBookPackageFromNativeFilePath,
   removeReadingProgressFromStorage,
   resolveCurrentAudio,
   scrollElementStartToViewportCenter,
@@ -21,6 +26,7 @@ import {
   writeCachedAudioToStorage,
   updateCachedAudioManifestInStorage,
   saveReadingProgressToStorage,
+  shouldAutoUploadErrorLog,
   type AudioChapter,
 } from './App'
 import { createGatewayError } from './deviceIdentity'
@@ -187,6 +193,61 @@ describe('local diagnostics log', () => {
 
     expect(buildSubmittedAppLogs(loadAppLogEntriesFromStorage(storage), latestIssue)).toEqual([stored, latestIssue])
   })
+
+  it('returns only unsent behavior logs for automatic upload', () => {
+    const storage = createMemoryStorage()
+    const openBook = appendAppLogToStorage(storage, 'info', '用户行为: openBook', { action: 'openBook' }, 'behavior')
+    appendAppLogToStorage(storage, 'error', 'MP3 播放失败', { action: 'chapterAudioError' })
+    const selectChapter = appendAppLogToStorage(storage, 'info', '用户行为: selectChapter', { action: 'selectChapter' }, 'behavior')
+
+    expect(buildPendingBehaviorLogs(storage)).toEqual([openBook, selectChapter])
+
+    markBehaviorLogsSubmitted(storage, [openBook])
+
+    expect(buildPendingBehaviorLogs(storage)).toEqual([selectChapter])
+  })
+
+  it('does not show behavior log upload failures as the latest visible issue', () => {
+    const storage = createMemoryStorage()
+    appendAppLogToStorage(storage, 'warn', '用户行为日志上报失败', { action: 'submitBehaviorLogs' })
+
+    expect(loadLatestIssueFromStorage(storage)).toBeNull()
+
+    const playbackError = appendAppLogToStorage(storage, 'error', 'MP3 播放失败', { action: 'chapterAudioError' })
+
+    expect(loadLatestIssueFromStorage(storage)).toEqual(playbackError)
+  })
+
+  it('does not auto-upload Gateway connectivity failures', () => {
+    expect(isGatewayConnectivityError(new TypeError('Failed to fetch'))).toBe(true)
+    expect(isGatewayConnectivityError(new Error('java.net.UnknownHostException: Unable to resolve host'))).toBe(true)
+    expect(isGatewayConnectivityError(new Error('Read timed out'))).toBe(true)
+    expect(shouldAutoUploadErrorLog(new TypeError('Failed to fetch'), { action: 'refreshBooks' })).toBe(false)
+  })
+
+  it('auto-uploads non-network app errors but excludes log upload failures', () => {
+    expect(shouldAutoUploadErrorLog(new Error('MP3 播放失败'), { action: 'chapterAudioError' })).toBe(true)
+    expect(shouldAutoUploadErrorLog(new Error('提交日志失败'), { action: 'submitLocalLogs' })).toBe(false)
+  })
+})
+
+describe('native full package cache', () => {
+  it('loads a cached native package file through a converted file URL', async () => {
+    const bookPackage = await readBookPackageFromNativeFilePath('/data/user/0/app/files/packages/book-a/package-full.json', {
+      convertFileSrc: (filePath) => `https://localhost/_capacitor_file_${filePath}`,
+      fetchImpl: vi.fn(async (url) => {
+        expect(url).toBe('https://localhost/_capacitor_file_/data/user/0/app/files/packages/book-a/package-full.json')
+        return new Response(JSON.stringify({
+          schemaVersion: 1,
+          book: { id: 'book-a', title: 'Book A', chapterCount: 1 },
+          chapters: [{ id: 'book-a:ch00001', title: '第一章', index: 1 }],
+        }))
+      }) as typeof fetch,
+    })
+
+    expect(bookPackage.book.id).toBe('book-a')
+    expect(bookPackage.chapters).toEqual([expect.objectContaining({ id: 'book-a:ch00001', title: '第一章' })])
+  })
 })
 
 describe('audio cache storage', () => {
@@ -312,6 +373,34 @@ describe('audio cache storage', () => {
     expect(Object.keys(loadAudioCacheIndexFromStorage(storage))).toEqual(['book-a:chapter-1'])
     expect(listCachedAudioChapterIdsFromStorage(storage, 'book-a')).toEqual(['chapter-1'])
     expect(listCachedAudioChapterIdsFromStorage(storage, 'book-b')).toEqual([])
+  })
+
+  it('ignores cached MP3 records that still point at legacy book ids', () => {
+    const storage = createMemoryStorage({
+      'novel-reader-gateway-audio-cache-index': JSON.stringify({
+        'shuanglongzhuan:shuanglongzhuan:ch00002': {
+          bookId: 'shuanglongzhuan',
+          chapterId: 'shuanglongzhuan:ch00002',
+          audioChapter: { chapterId: 'shuanglongzhuan:ch00002', fileName: 'chapter.mp3' },
+          filePath: '/audio/shuanglongzhuan/shuanglongzhuan_ch00002.mp3',
+          cachedAt: '2026-07-09T14:29:48.963Z',
+        },
+        'file-bfe273a306f299a9d1ce3b19:file-bfe273a306f299a9d1ce3b19:ch00002': {
+          bookId: 'file-bfe273a306f299a9d1ce3b19',
+          chapterId: 'file-bfe273a306f299a9d1ce3b19:ch00002',
+          audioChapter: { chapterId: 'file-bfe273a306f299a9d1ce3b19:ch00002', fileName: 'chapter.mp3' },
+          filePath: '/audio/file-bfe273a306f299a9d1ce3b19/file-bfe273a306f299a9d1ce3b19_ch00002.mp3',
+          cachedAt: '2026-07-09T15:45:00.000Z',
+        },
+      }),
+    })
+
+    expect(Object.keys(loadAudioCacheIndexFromStorage(storage))).toEqual([
+      'file-bfe273a306f299a9d1ce3b19:file-bfe273a306f299a9d1ce3b19:ch00002',
+    ])
+    expect(listCachedAudioChapterIdsFromStorage(storage, 'file-bfe273a306f299a9d1ce3b19')).toEqual([
+      'file-bfe273a306f299a9d1ce3b19:ch00002',
+    ])
   })
 })
 
@@ -515,6 +604,33 @@ describe('reading progress storage', () => {
       expect.objectContaining({ bookId: 'book-b', chapterId: 'chapter-3', scrollY: 12 }),
     )
     expect(loadLatestReadingProgressFromStorage(storage)).toEqual(expect.objectContaining({ bookId: 'book-b' }))
+  })
+
+  it('maps legacy book-scoped progress to canonical file-hash ids', () => {
+    const storage = createMemoryStorage({
+      'novel-reader-gateway-reading-progress': JSON.stringify({
+        schemaVersion: 2,
+        books: {
+          shuanglongzhuan: {
+            bookId: 'shuanglongzhuan',
+            chapterId: 'shuanglongzhuan:ch00002',
+            scrollY: 1221,
+            updatedAt: '2026-07-09T14:29:48.963Z',
+          },
+        },
+      }),
+    })
+
+    expect(loadReadingProgressFromStorage(storage, 'file-bfe273a306f299a9d1ce3b19')).toEqual(
+      expect.objectContaining({
+        bookId: 'file-bfe273a306f299a9d1ce3b19',
+        chapterId: 'file-bfe273a306f299a9d1ce3b19:ch00002',
+        scrollY: 1221,
+      }),
+    )
+    expect(loadLatestReadingProgressFromStorage(storage)).toEqual(
+      expect.objectContaining({ bookId: 'file-bfe273a306f299a9d1ce3b19' }),
+    )
   })
 
   it('removes only the deleted book progress', () => {
