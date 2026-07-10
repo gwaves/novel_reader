@@ -1,7 +1,12 @@
 package com.gwaves.novelreader.gateway;
 
 import android.content.Intent;
+import android.media.AudioDeviceCallback;
+import android.media.AudioDeviceInfo;
+import android.media.AudioManager;
 import android.net.Uri;
+import android.os.Handler;
+import android.os.Looper;
 import androidx.core.content.FileProvider;
 import com.getcapacitor.JSObject;
 import com.getcapacitor.Plugin;
@@ -18,6 +23,39 @@ import java.nio.charset.StandardCharsets;
 
 @CapacitorPlugin(name = "GatewayAudio")
 public class GatewayAudioPlugin extends Plugin {
+  private AudioManager audioManager;
+  private AudioDeviceCallback audioDeviceCallback;
+
+  @Override
+  public void load() {
+    audioManager = (AudioManager) getContext().getSystemService(android.content.Context.AUDIO_SERVICE);
+    if (audioManager == null) return;
+
+    audioDeviceCallback =
+      new AudioDeviceCallback() {
+        @Override
+        public void onAudioDevicesAdded(AudioDeviceInfo[] addedDevices) {
+          notifyAudioRouteChanged("added", addedDevices);
+        }
+
+        @Override
+        public void onAudioDevicesRemoved(AudioDeviceInfo[] removedDevices) {
+          notifyAudioRouteChanged("removed", removedDevices);
+        }
+      };
+    audioManager.registerAudioDeviceCallback(audioDeviceCallback, new Handler(Looper.getMainLooper()));
+  }
+
+  @Override
+  protected void handleOnDestroy() {
+    if (audioManager != null && audioDeviceCallback != null) {
+      audioManager.unregisterAudioDeviceCallback(audioDeviceCallback);
+    }
+    audioDeviceCallback = null;
+    audioManager = null;
+    super.handleOnDestroy();
+  }
+
   @PluginMethod
   public void downloadAudio(PluginCall call) {
     String url = call.getString("url");
@@ -502,6 +540,63 @@ public class GatewayAudioPlugin extends Plugin {
     payload.put("total", total);
     notifyListeners("packageSyncProgress", payload);
   }
+
+  private void notifyAudioRouteChanged(String reason, AudioDeviceInfo[] changedDevices) {
+    JSObject payload = new JSObject();
+    payload.put("reason", reason);
+    payload.put("changedDevices", describeAudioDevices(changedDevices));
+    AudioDeviceInfo[] outputs = audioManager == null ? new AudioDeviceInfo[0] : audioManager.getDevices(AudioManager.GET_DEVICES_OUTPUTS);
+    payload.put("outputs", describeAudioDevices(outputs));
+    payload.put("hasBluetoothOutput", hasBluetoothOutput(outputs));
+    notifyListeners("audioRouteChanged", payload);
+  }
+
+  private String describeAudioDevices(AudioDeviceInfo[] devices) {
+    if (devices == null || devices.length == 0) return "";
+    StringBuilder description = new StringBuilder();
+    for (AudioDeviceInfo device : devices) {
+      if (description.length() > 0) description.append(",");
+      description.append(audioDeviceTypeName(device.getType()));
+    }
+    return description.toString();
+  }
+
+  private boolean hasBluetoothOutput(AudioDeviceInfo[] devices) {
+    if (devices == null) return false;
+    for (AudioDeviceInfo device : devices) {
+      int type = device.getType();
+      if (type == AudioDeviceInfo.TYPE_BLUETOOTH_A2DP || type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO || type == AudioDeviceInfo.TYPE_BLE_HEADSET || type == AudioDeviceInfo.TYPE_BLE_SPEAKER) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private String audioDeviceTypeName(int type) {
+    switch (type) {
+      case AudioDeviceInfo.TYPE_BUILTIN_SPEAKER:
+        return "builtin_speaker";
+      case AudioDeviceInfo.TYPE_BLUETOOTH_A2DP:
+        return "bluetooth_a2dp";
+      case AudioDeviceInfo.TYPE_BLUETOOTH_SCO:
+        return "bluetooth_sco";
+      case AudioDeviceInfo.TYPE_BLE_HEADSET:
+        return "ble_headset";
+      case AudioDeviceInfo.TYPE_BLE_SPEAKER:
+        return "ble_speaker";
+      case AudioDeviceInfo.TYPE_WIRED_HEADPHONES:
+        return "wired_headphones";
+      case AudioDeviceInfo.TYPE_WIRED_HEADSET:
+        return "wired_headset";
+      case AudioDeviceInfo.TYPE_USB_HEADSET:
+        return "usb_headset";
+      case AudioDeviceInfo.TYPE_HDMI:
+        return "hdmi";
+      default:
+        return "type_" + type;
+    }
+  }
+
   private int estimateCount(String text, String needle) {
     int count = 0;
     int index = 0;

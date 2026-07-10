@@ -4,6 +4,8 @@ import {
   buildPendingBehaviorLogs,
   buildSubmittedAppLogs,
   appendAppLogToStorage,
+  audioButtonLabel,
+  audioRetryCacheLookupIds,
   gatewayGenerateRagAnswer,
   gatewayUserFacingError,
   isGatewayConnectivityError,
@@ -23,6 +25,8 @@ import {
   resolveCurrentAudio,
   scrollElementStartToViewportCenter,
   searchGatewayRag,
+  searchPackageStatusLabel,
+  shouldRecoverChapterAudioAfterRouteChange,
   writeCachedAudioToStorage,
   updateCachedAudioManifestInStorage,
   saveReadingProgressToStorage,
@@ -53,6 +57,39 @@ describe('reader audio playback availability', () => {
   it('disables MP3 playback only when the current chapter is missing or actively loading', () => {
     expect(isAudioPlaybackDisabled(null, false)).toBe(true)
     expect(isAudioPlaybackDisabled(cachedChapter, true)).toBe(true)
+  })
+
+  it('shows MP3 catalog loading separately from a missing chapter audio entry', () => {
+    expect(audioButtonLabel(null, true)).toBe('加载中')
+    expect(audioButtonLabel(null, false)).toBe('无音频')
+    expect(audioButtonLabel(cachedChapter, false)).toBe('播放')
+  })
+
+  it('recovers MP3 playback after audio route changes only while actively playing', () => {
+    expect(shouldRecoverChapterAudioAfterRouteChange('file:///chapter.mp3', true)).toBe(true)
+    expect(shouldRecoverChapterAudioAfterRouteChange('file:///chapter.mp3', false)).toBe(false)
+    expect(shouldRecoverChapterAudioAfterRouteChange(null, true)).toBe(false)
+  })
+
+  it('looks up retry fallback cache by package chapter id and audio chapter id', () => {
+    expect(audioRetryCacheLookupIds('chapter-3', 'book-a:ch00003')).toEqual(['chapter-3', 'book-a:ch00003'])
+    expect(audioRetryCacheLookupIds('book-a:ch00003', 'book-a:ch00003')).toEqual(['book-a:ch00003'])
+  })
+
+  it('shows user-facing search package status instead of raw chunk and graph counters', () => {
+    const bookPackage = {
+      schemaVersion: 1 as const,
+      book: { id: 'book-a', title: '书 A', chapterCount: 2, updatedAt: '2026-07-10T00:00:00.000Z' },
+      chapters: [
+        { id: 'book-a:ch00001', title: '第一章', index: 1 },
+        { id: 'book-a:ch00002', title: '第二章', index: 2 },
+      ],
+      knowledgeGraph: { entities: [{ id: 'e-1', name: '人物' }], relations: [{ id: 'r-1' }] },
+      embeddings: { chunks: [] },
+    }
+
+    expect(searchPackageStatusLabel(bookPackage, 'rag', true)).toBe('2 章 · RAG 云端 · 图谱已加载')
+    expect(searchPackageStatusLabel(bookPackage, 'graph', true)).toBe('2 章 · 图谱已加载')
   })
 
   it('uses cached MP3 metadata when the remote audio catalog is not loaded', () => {
@@ -187,7 +224,7 @@ describe('local diagnostics log', () => {
       id: 'visible-quota-error',
       timestamp: '2026-07-06T09:46:00.000Z',
       level: 'error' as const,
-      message: "完整包同步失败：Failed to execute 'setItem' on 'Storage': quota exceeded",
+      message: "离线备份保存失败：Failed to execute 'setItem' on 'Storage': quota exceeded",
       source: 'app',
     }
 
