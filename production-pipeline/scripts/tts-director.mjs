@@ -657,12 +657,14 @@ function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms))
 }
 
-async function callOpenAICompatibleWithRetry(config, messages, label, maxAttempts = 3, stats = null) {
+async function callOpenAICompatibleWithRetry(config, messages, label, maxAttempts = 3, stats = null, validate = null) {
   let lastError = null
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     if (stats) stats.attempts += 1
     try {
-      return await callOpenAICompatible(config, messages)
+      const result = await callOpenAICompatible(config, messages)
+      if (validate) validate(result)
+      return result
     } catch (error) {
       lastError = error
       if (stats) {
@@ -684,7 +686,9 @@ async function callOpenAICompatibleWithRetry(config, messages, label, maxAttempt
     const fallbackConfig = { ...config, llm: { ...config.llm, ...config.llm.fallback, fallback: null } }
     console.warn(`🛟 ${label} 主模型重试耗尽，切换兜底模型 ${fallbackConfig.llm.model}。`)
     try {
-      return await callOpenAICompatible(fallbackConfig, messages)
+      const result = await callOpenAICompatible(fallbackConfig, messages)
+      if (validate) validate(result)
+      return result
     } catch (error) {
       lastError = error
     }
@@ -946,10 +950,9 @@ async function runDraftScript(config, args) {
       const batchDecisions = await callOpenAICompatibleWithRetry(config, [
         { role: 'system', content: '你只输出严格 JSON，不输出 Markdown，不输出思考过程。' },
         { role: 'user', content: prompt },
-      ], `第 ${currentBatch} 批导演判定`, 3, llmBatchStats)
-      if (!Array.isArray(batchDecisions?.decisions)) {
-        throw new Error(`第 ${currentBatch} 批模型输出缺少 decisions 数组。`)
-      }
+      ], `第 ${currentBatch} 批导演判定`, 3, llmBatchStats, result => {
+        if (!Array.isArray(result?.decisions)) throw new Error(`第 ${currentBatch} 批模型输出缺少 decisions 数组。`)
+      })
       batchResults[batchInfo.index] = batchDecisions.decisions
       console.log(`✅ 导演判定完成 ${currentBatch}/${batches.length}`)
     })
