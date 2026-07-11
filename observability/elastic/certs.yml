@@ -1,0 +1,9 @@
+instances:
+  - name: elasticsearch
+    dns:
+      - elasticsearch
+      - localhost
+    ip:
+      - 127.0.0.1
+      - 192.168.88.100
+

@@ -1,0 +1,47 @@
+name: novel-reader-production
+
+services:
+  production-service:
+    build:
+      context: ../..
+      dockerfile: production-pipeline/deploy/Dockerfile
+    container_name: novel-reader-production-service
+    restart: unless-stopped
+    init: true
+    environment:
+      PRODUCTION_PIPELINE_CONSOLE_HOST: 0.0.0.0
+      PRODUCTION_PIPELINE_CONSOLE_PORT: 6290
+      PRODUCTION_PIPELINE_CONSOLE_TOKEN: ${PRODUCTION_PIPELINE_CONSOLE_TOKEN}
+      PRODUCTION_PIPELINE_CONSOLE_VIEWER_TOKEN: ${PRODUCTION_PIPELINE_CONSOLE_VIEWER_TOKEN:-}
+      PRODUCTION_PIPELINE_CONSOLE_DATA_DIR: /app/service-data
+      PRODUCTION_PIPELINE_RUN_ROOT: /app/runs
+      PRODUCTION_PIPELINE_MAIN_DB: /home/node/.novel_reader/novel_reader.sqlite
+      PRODUCTION_PIPELINE_JOBS_DIR: /app/jobs
+      PRODUCTION_PIPELINE_SOURCES_DIR: /app/sources
+      PRODUCTION_PIPELINE_BACKUPS_DIR: /app/backups
+      PRODUCTION_PIPELINE_MAX_CONCURRENT_JOBS: ${PRODUCTION_PIPELINE_MAX_CONCURRENT_JOBS:-1}
+      PRODUCTION_PIPELINE_AUTO_RESUME_INTERRUPTED: ${PRODUCTION_PIPELINE_AUTO_RESUME_INTERRUPTED:-true}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      EMBEDDING_API_KEY: ${EMBEDDING_API_KEY:-}
+      GATEWAY_TOKEN: ${GATEWAY_TOKEN:-}
+      GATEWAY_ADMIN_TOKEN: ${GATEWAY_ADMIN_TOKEN:-}
+      PRODUCTION_PIPELINE_CONSOLE_DISCOVER_RUNS: "true"
+      NO_PROXY: 127.0.0.1,localhost,192.168.88.100
+      no_proxy: 127.0.0.1,localhost,192.168.88.100
+    ports:
+      - "${PRODUCTION_PIPELINE_BIND_ADDRESS:-192.168.88.100}:6290:6290"
+    volumes:
+      - ${PRODUCTION_PIPELINE_HOST_ROOT:-/home/gwaves/production-pipeline-service}/data:/app/service-data
+      - ${PRODUCTION_PIPELINE_HOST_ROOT:-/home/gwaves/production-pipeline-service}/runs:/app/runs
+      - ${PRODUCTION_PIPELINE_HOST_ROOT:-/home/gwaves/production-pipeline-service}/jobs:/app/jobs
+      - ${PRODUCTION_PIPELINE_HOST_ROOT:-/home/gwaves/production-pipeline-service}/sources:/app/sources
+      - ${PRODUCTION_PIPELINE_HOST_ROOT:-/home/gwaves/production-pipeline-service}/backups:/app/backups
+      - /home/gwaves/.novel_reader:/home/node/.novel_reader
+      - /home/gwaves/novel-reader-gateway:/home/gwaves/novel-reader-gateway
+    mem_limit: 24g
+    cpus: 24
+    healthcheck:
+      test: ["CMD-SHELL", "node -e \"fetch('http://127.0.0.1:6290/health').then(r=>{if(!r.ok)process.exit(1)})\""]
+      interval: 15s
+      timeout: 5s
+      retries: 20

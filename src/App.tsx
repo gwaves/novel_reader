@@ -3995,14 +3995,14 @@ function App() {
           <label className="upload-box">
             <input
               type="file"
-              accept=".txt,.epub,text/plain,application/epub+zip"
+              accept=".txt,.epub,.pdf,text/plain,application/epub+zip,application/pdf"
               onChange={(event) => {
                 const file = event.target.files?.[0]
                 if (file) void handleImport(file)
               }}
             />
-            <span>{hasBooks ? '导入新书到书架' : '导入第一本 txt / epub 小说'}</span>
-            <small>{hasBooks ? 'txt 支持常见章节标题；epub 会按目录 spine 导入章节' : '先用一本熟悉的书验证导入、阅读和章节切分，再继续配置 AI'}</small>
+            <span>{hasBooks ? '导入新书到书架' : '导入第一本 txt / epub / pdf 小说'}</span>
+            <small>{hasBooks ? 'pdf 需包含可复制的文本层；扫描件请先 OCR' : '先用一本熟悉的书验证导入、阅读和章节切分，再继续配置 AI'}</small>
           </label>
 
           <div className="database-backup-card">

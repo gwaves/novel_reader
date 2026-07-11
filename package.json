@@ -40,6 +40,9 @@
     "production-pipeline:console": "node production-pipeline/src/service.mjs",
     "production-pipeline:console:dev": "node --watch production-pipeline/src/service.mjs",
     "production-pipeline:console:test": "node --test production-pipeline/test/service.test.mjs",
+    "production-pipeline:service": "node production-pipeline/src/service.mjs",
+    "production-pipeline:service:dev": "node --watch production-pipeline/src/service.mjs",
+    "production-pipeline:service:test": "node --test production-pipeline/test/service.test.mjs",
     "production-pipeline:test": "node --test production-pipeline/test/*.test.mjs",
     "gateway-android:dev": "npm --prefix gateway-android-app run dev",
     "gateway-android:build": "npm --prefix gateway-android-app run build",
@@ -59,8 +62,10 @@
     "test:smoke": "npm run test:unit && npm run test:e2e"
   },
   "dependencies": {
+    "@fastify/multipart": "^10.1.0",
     "@xyflow/react": "^12.11.0",
     "fastify": "^5.9.0",
+    "pdfjs-dist": "^5.7.284",
     "react": "^19.2.6",
     "react-dom": "^19.2.6"
   },

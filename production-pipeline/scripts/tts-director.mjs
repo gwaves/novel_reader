@@ -28,23 +28,30 @@ Novel Reader 生产流水线 TTS 导演脚本工具
   list-books                   列出主数据库中的书籍
   inspect-chapter              查看章节元信息与正文预览
   draft-script                 调用模型生成导演脚本 JSON
+  draft-batch                  批量生成导演脚本，不执行质检或 TTS
   audit-script                 生成导演脚本质量报告
+  audit-batch                  批量校验和质检导演脚本，不执行 TTS
   validate-script              校验已有导演脚本 JSON
   synth                        按导演脚本调用 MIMO TTS，输出 MP3
+  synth-batch                  批量合成已通过质检的导演脚本
+  synth-segments-batch         仅批量合成 TTS 片段 WAV
+  audio-qc-batch               批量质检 TTS 片段音频
+  assemble-batch               批量拼接并编码章节音频
   batch-pipeline               按流水线批量生成多章音频：LLM 可配并发，TTS 并行
 
 参数:
   --config <path>              配置文件路径，默认 ~/.novel_reader/tts-director.config.json
   --book-id <id>               书籍 ID
   --chapter <number>           章节序号，从 1 开始
-  --chapters <list>            batch-pipeline 章节列表，如 19,21-24
+  --chapters <list>            批量工序章节列表，如 19,21-24
   --limit <number>             只处理章节前 N 个字符；仅用于调试，必须同时传 --allow-partial
   --allow-partial              允许 draft-script/synth/batch-pipeline 处理非全章脚本
   --out <path>                 draft-script 输出路径
-  --out-root <path>            batch-pipeline 输出根目录
+  --out-root <path>            批量工序输出根目录
   --script <path>              validate-script 输入路径
   --out-dir <path>             synth 输出目录，默认与脚本同目录下的 audio/
-  --resume                     batch-pipeline 断点续跑，跳过已完成脚本或 MP3
+  --resume                     批量工序断点续跑，跳过已完成且有效的产物
+  --strict                     audit-batch 发现质检警告时也判定失败
   --concurrency <number>       draft-script 的 LLM 并发数，或 synth 的 TTS 并发数，覆盖配置文件
   --batch-size <number>        draft-script 每批提交给模型的预切分片段数
   --director-concurrency <n>   batch-pipeline 单章 LLM 批次并发，默认取 director.concurrency
@@ -1571,6 +1578,39 @@ function summarizeBatchTtsMetrics(results) {
   }
 }
 
+function runAudioQc(config, args) {
+  const outDir = args['out-dir'] ? resolve(args['out-dir']) : null
+  if (!outDir) throw new Error('audio-qc 需要 --out-dir。')
+  const segmentManifestPath = join(outDir, 'segments-manifest.json')
+  if (!existsSync(segmentManifestPath)) throw new Error(`缺少 TTS 片段清单：${segmentManifestPath}`)
+  const manifest = JSON.parse(readFileSync(segmentManifestPath, 'utf8'))
+  const results = (manifest.segments || []).map(item => {
+    try {
+      const durationSeconds = validateSynthesizedAudio(config, item)
+      return { id: item.id, status: 'passed', durationSeconds, wav: item.wav }
+    } catch (error) {
+      return { id: item.id, status: 'failed', error: error.message, wav: item.wav }
+    }
+  })
+  const failed = results.filter(result => result.status === 'failed')
+  const report = {
+    kind: 'novel-reader-tts-audio-qc',
+    version: 1,
+    generatedAt: new Date().toISOString(),
+    sourceManifest: segmentManifestPath,
+    totalSegments: results.length,
+    passedSegments: results.length - failed.length,
+    failedSegments: failed.length,
+    passed: failed.length === 0 && results.length > 0,
+    results,
+  }
+  const reportPath = join(outDir, 'audio-qc.json')
+  writeFileSync(reportPath, `${JSON.stringify(report, null, 2)}\n`, 'utf8')
+  console.log(`🩺 音频片段质检：通过 ${report.passedSegments}/${report.totalSegments}，失败 ${report.failedSegments}`)
+  console.log(`   质检文件：${reportPath}`)
+  return { report, reportPath, manifest }
+}
+
 async function runSynth(config, args) {
   if (config.tts.provider !== 'mimo') {
     throw new Error(`暂不支持 TTS provider：${config.tts.provider}`)
@@ -1681,6 +1721,20 @@ async function runSynth(config, args) {
   metrics.summary = summarizeTtsMetrics(metrics.segments)
   manifest.segments = manifest.segments.map(({ segment, metric, ...item }) => item)
 
+  const segmentManifestPath = join(outDir, 'segments-manifest.json')
+  const metricsPath = join(outDir, 'tts-metrics.json')
+  writeFileSync(segmentManifestPath, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8')
+  writeFileSync(metricsPath, `${JSON.stringify(metrics, null, 2)}\n`, 'utf8')
+  if (args['segments-only'] === true) {
+    console.log(`✅ TTS 片段合成完成：${manifest.segments.length} 个`)
+    console.log(`   片段清单：${segmentManifestPath}`)
+    console.log(`   Metrics：${metricsPath}`)
+    return { segmentManifestPath, metricsPath, summary: metrics.summary }
+  }
+
+  const qcResult = runAudioQc(config, { 'out-dir': outDir })
+  if (!qcResult.report.passed) throw new Error(`音频片段质检失败：${qcResult.report.failedSegments} 个片段不合格`)
+
   const concatEntries = []
   const timeline = []
   let timelineCursor = 0
@@ -1732,9 +1786,7 @@ async function runSynth(config, args) {
   manifest.duration = probeAudioDurationSeconds(finalPath)
   manifest.timeline = timeline
   const manifestPath = join(outDir, 'manifest.json')
-  const metricsPath = join(outDir, 'tts-metrics.json')
   writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8')
-  writeFileSync(metricsPath, `${JSON.stringify(metrics, null, 2)}\n`, 'utf8')
 
   console.log(`✅ 音频已生成：${finalPath}`)
   console.log(`   Manifest：${manifestPath}`)
@@ -1750,6 +1802,58 @@ async function runSynth(config, args) {
     metricsPath,
     summary: metrics.summary,
   }
+}
+
+function runAssemble(config, args) {
+  const outDir = args['out-dir'] ? resolve(args['out-dir']) : null
+  if (!outDir) throw new Error('assemble 需要 --out-dir。')
+  const segmentManifestPath = join(outDir, 'segments-manifest.json')
+  const qcPath = join(outDir, 'audio-qc.json')
+  if (!existsSync(segmentManifestPath)) throw new Error(`缺少 TTS 片段清单：${segmentManifestPath}`)
+  if (!existsSync(qcPath)) throw new Error(`缺少音频质检报告：${qcPath}`)
+  const manifest = JSON.parse(readFileSync(segmentManifestPath, 'utf8'))
+  const qc = JSON.parse(readFileSync(qcPath, 'utf8'))
+  if (!qc.passed) throw new Error(`音频质检未通过，不能拼接：失败 ${qc.failedSegments || 0} 个片段`)
+  const workDir = join(outDir, 'work')
+  mkdirSync(workDir, { recursive: true })
+  const concatEntries = []
+  const timeline = []
+  let timelineCursor = 0
+  for (let index = 0; index < manifest.segments.length; index += 1) {
+    const item = manifest.segments[index]
+    const normalized = join(workDir, `${String(index + 1).padStart(4, '0')}-${item.id}.wav`)
+    runFfmpeg(['-i', item.wav, '-ar', '24000', '-ac', '1', '-sample_fmt', 's16', normalized], `标准化 ${item.id}`)
+    const speechDuration = probeAudioDurationSeconds(normalized)
+    const startTime = timelineCursor
+    const endTime = startTime + speechDuration
+    concatEntries.push(normalized)
+    timelineCursor = endTime
+    let trailingSilence = 0
+    if (index < manifest.segments.length - 1 && config.tts.silenceSeconds > 0) {
+      const silence = join(workDir, `${String(index + 1).padStart(4, '0')}-silence.wav`)
+      runFfmpeg(['-f', 'lavfi', '-i', 'anullsrc=r=24000:cl=mono', '-t', String(config.tts.silenceSeconds), '-sample_fmt', 's16', silence], '生成静音')
+      trailingSilence = probeAudioDurationSeconds(silence)
+      concatEntries.push(silence)
+      timelineCursor += trailingSilence
+    }
+    timeline.push({ ...item, startTime, endTime, speechDuration, trailingSilence, nextStartTime: timelineCursor })
+  }
+  const concatFile = join(workDir, 'concat.txt')
+  writeFileSync(concatFile, concatEntries.map(file => `file '${file.replace(/'/g, "'\\''")}'`).join('\n'), 'utf8')
+  const chapterWav = join(workDir, 'chapter.wav')
+  runFfmpeg(['-f', 'concat', '-safe', '0', '-i', concatFile, '-c', 'copy', chapterWav], '拼接 WAV')
+  const finalPath = join(outDir, `chapter.${config.tts.finalFormat}`)
+  if (config.tts.finalFormat === 'mp3') runFfmpeg(['-i', chapterWav, '-codec:a', 'libmp3lame', '-b:a', config.tts.mp3Bitrate, finalPath], '编码 MP3')
+  else runFfmpeg(['-i', chapterWav, finalPath], `编码 ${config.tts.finalFormat}`)
+  manifest.output = finalPath
+  manifest.duration = probeAudioDurationSeconds(finalPath)
+  manifest.timeline = timeline
+  const manifestPath = join(outDir, 'manifest.json')
+  writeFileSync(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8')
+  console.log(`✅ 章节音频拼接完成：${finalPath}`)
+  console.log(`   Manifest：${manifestPath}`)
+  if (!config.tts.keepIntermediateWav) cleanupIntermediateWavs([join(outDir, 'segments'), workDir])
+  return { manifestPath, finalPath }
 }
 
 function expandLongSegmentsForTts(segments, maxChars) {
@@ -1791,6 +1895,211 @@ function loadValidScript(scriptPath) {
   } catch {
     return null
   }
+}
+
+function requireBatchChapterArgs(args, command) {
+  const bookId = args['book-id']
+  const chapters = parseChapterList(args.chapters)
+  if (!bookId || chapters.length === 0) {
+    throw new Error(`${command} 需要 --book-id 和 --chapters。`)
+  }
+  return { bookId, chapters }
+}
+
+function resolveBatchOutRoot(config, args, bookId, firstChapterIndex) {
+  if (args['out-root']) return resolve(args['out-root'])
+  const firstChapter = getChapter(config, bookId, firstChapterIndex)
+  return resolve(`tmp/tts/${safeFilePart(firstChapter.book.title)}`)
+}
+
+async function runDraftBatch(config, args) {
+  const { bookId, chapters } = requireBatchChapterArgs(args, 'draft-batch')
+  const outRoot = resolveBatchOutRoot(config, args, bookId, chapters[0])
+  const chapterConcurrency = Math.max(1, Math.floor(Number(args['llm-chapters'] || 1)))
+  const directorConcurrency = Math.max(1, Math.floor(Number(args['director-concurrency'] || config.director.concurrency)))
+  const startedAt = Date.now()
+  const results = []
+
+  await runConcurrent(chapters, chapterConcurrency, async (chapterIndex) => {
+    const { scriptPath } = getChapterOutputPaths(outRoot, chapterIndex, config.tts.finalFormat)
+    const existing = args.resume === true ? loadValidScript(scriptPath) : null
+    if (existing) {
+      results.push({ chapterIndex, status: 'skipped-valid-script', scriptPath })
+      console.log(`⏭️  第 ${chapterIndex} 章导演脚本已存在且有效，跳过`)
+      return
+    }
+    const result = await runDraftScript(config, makeChapterArgs({
+      'book-id': bookId,
+      ...(args.limit == null ? {} : { limit: args.limit }),
+      ...(args['allow-partial'] === true ? { 'allow-partial': true } : {}),
+      ...(args['batch-size'] ? { 'batch-size': args['batch-size'] } : {}),
+      concurrency: String(directorConcurrency),
+    }, chapterIndex, scriptPath))
+    if (result.validation.errors.length) {
+      throw new Error(`第 ${chapterIndex} 章导演脚本结构校验失败：${result.validation.errors[0]}`)
+    }
+    results.push({ chapterIndex, status: 'completed', scriptPath, diagnosticsPath: result.diagnosticsPath })
+  })
+
+  results.sort((left, right) => left.chapterIndex - right.chapterIndex)
+  const summary = {
+    kind: 'novel-reader-tts-director-draft-batch',
+    generatedAt: new Date().toISOString(),
+    elapsedSeconds: Math.round((Date.now() - startedAt) / 1000),
+    bookId,
+    chapters,
+    outRoot,
+    chapterConcurrency,
+    directorConcurrency,
+    results,
+  }
+  const summaryPath = join(outRoot, `director-draft-${chapters[0]}-${chapters.at(-1)}.summary.json`)
+  mkdirSync(outRoot, { recursive: true })
+  writeFileSync(summaryPath, `${JSON.stringify(summary, null, 2)}\n`, 'utf8')
+  console.log(`✅ 导演脚本批量工序完成：${results.length}/${chapters.length}`)
+  console.log(`   汇总文件：${summaryPath}`)
+  return { summary, summaryPath }
+}
+
+async function runAuditBatch(config, args) {
+  const { bookId, chapters } = requireBatchChapterArgs(args, 'audit-batch')
+  const outRoot = resolveBatchOutRoot(config, args, bookId, chapters[0])
+  const concurrency = Math.max(1, Math.floor(Number(args.concurrency || 8)))
+  const results = []
+
+  await runConcurrent(chapters, concurrency, async (chapterIndex) => {
+    const { scriptPath } = getChapterOutputPaths(outRoot, chapterIndex, config.tts.finalFormat)
+    if (!existsSync(scriptPath)) throw new Error(`第 ${chapterIndex} 章缺少导演脚本：${scriptPath}`)
+    const script = JSON.parse(readFileSync(scriptPath, 'utf8'))
+    const validation = validateDirectorScript(script)
+    const { audit, auditPath } = writeAuditReport(config, scriptPath, script)
+    const passed = validation.errors.length === 0 && (args.strict !== true || audit.warnings.length === 0)
+    results.push({
+      chapterIndex,
+      status: passed ? 'completed' : 'failed',
+      scriptPath,
+      auditPath,
+      validationErrors: validation.errors,
+      validationWarnings: validation.warnings,
+      auditWarnings: audit.warnings,
+    })
+  })
+
+  results.sort((left, right) => left.chapterIndex - right.chapterIndex)
+  const failed = results.filter(result => result.status === 'failed')
+  const summary = {
+    kind: 'novel-reader-tts-director-audit-batch',
+    generatedAt: new Date().toISOString(),
+    bookId,
+    chapters,
+    outRoot,
+    strict: args.strict === true,
+    completed: results.length - failed.length,
+    failed: failed.length,
+    results,
+  }
+  const summaryPath = join(outRoot, `director-audit-${chapters[0]}-${chapters.at(-1)}.summary.json`)
+  writeFileSync(summaryPath, `${JSON.stringify(summary, null, 2)}\n`, 'utf8')
+  console.log(`✅ 导演脚本质检完成：通过 ${summary.completed}/${results.length}，失败 ${summary.failed}`)
+  console.log(`   汇总文件：${summaryPath}`)
+  if (failed.length) throw new Error(`导演脚本质检失败 ${failed.length} 章：${failed.map(result => result.chapterIndex).join(', ')}`)
+  return { summary, summaryPath }
+}
+
+async function runSynthBatch(config, args) {
+  const { bookId, chapters } = requireBatchChapterArgs(args, 'synth-batch')
+  const outRoot = resolveBatchOutRoot(config, args, bookId, chapters[0])
+  const chapterConcurrency = Math.max(1, Math.floor(Number(args['tts-chapters'] || 2)))
+  const segmentConcurrency = Math.max(1, Math.floor(Number(args['tts-concurrency'] || config.tts.concurrency)))
+  const results = []
+
+  await runConcurrent(chapters, chapterConcurrency, async (chapterIndex) => {
+    const { scriptPath, audioDir, finalAudioPath } = getChapterOutputPaths(outRoot, chapterIndex, config.tts.finalFormat)
+    if (!existsSync(scriptPath)) throw new Error(`第 ${chapterIndex} 章缺少导演脚本：${scriptPath}`)
+    const auditPath = scriptPath.replace(/\.json$/i, '.audit.json')
+    if (!existsSync(auditPath)) throw new Error(`第 ${chapterIndex} 章缺少脚本质检结果：${auditPath}`)
+    if (args.resume === true && existsSync(finalAudioPath)) {
+      results.push({ chapterIndex, status: 'skipped-audio-exists', scriptPath, audioDir, finalAudioPath })
+      console.log(`⏭️  第 ${chapterIndex} 章音频已存在，跳过`)
+      return
+    }
+    const synthResult = await runSynth(config, {
+      script: scriptPath,
+      'out-dir': audioDir,
+      concurrency: String(segmentConcurrency),
+      ...(args['segments-only'] === true ? { 'segments-only': true } : {}),
+      ...(args['allow-partial'] === true ? { 'allow-partial': true } : {}),
+    })
+    results.push({
+      chapterIndex,
+      status: 'completed',
+      scriptPath,
+      audioDir,
+      finalAudioPath,
+      metricsPath: synthResult.metricsPath,
+      metricsSummary: synthResult.summary,
+    })
+  })
+
+  results.sort((left, right) => left.chapterIndex - right.chapterIndex)
+  const summary = {
+    kind: 'novel-reader-tts-synth-batch',
+    generatedAt: new Date().toISOString(),
+    bookId,
+    chapters,
+    outRoot,
+    chapterConcurrency,
+    segmentConcurrency,
+    results,
+    metricsSummary: summarizeBatchTtsMetrics(results),
+  }
+  const summaryPath = join(outRoot, `tts-synth-${chapters[0]}-${chapters.at(-1)}.summary.json`)
+  writeFileSync(summaryPath, `${JSON.stringify(summary, null, 2)}\n`, 'utf8')
+  console.log(`✅ TTS 批量合成完成：${results.length}/${chapters.length}`)
+  console.log(`   汇总文件：${summaryPath}`)
+  return { summary, summaryPath }
+}
+
+async function runAudioQcBatch(config, args) {
+  const { bookId, chapters } = requireBatchChapterArgs(args, 'audio-qc-batch')
+  const outRoot = resolveBatchOutRoot(config, args, bookId, chapters[0])
+  const concurrency = Math.max(1, Math.floor(Number(args.concurrency || 8)))
+  const results = []
+  await runConcurrent(chapters, concurrency, async chapterIndex => {
+    const { audioDir } = getChapterOutputPaths(outRoot, chapterIndex, config.tts.finalFormat)
+    const { report, reportPath } = runAudioQc(config, { 'out-dir': audioDir })
+    results.push({ chapterIndex, status: report.passed ? 'completed' : 'failed', reportPath, ...report })
+  })
+  results.sort((left, right) => left.chapterIndex - right.chapterIndex)
+  const failed = results.filter(result => result.status === 'failed')
+  const summaryPath = join(outRoot, `audio-qc-${chapters[0]}-${chapters.at(-1)}.summary.json`)
+  writeFileSync(summaryPath, `${JSON.stringify({ kind: 'novel-reader-tts-audio-qc-batch', generatedAt: new Date().toISOString(), bookId, chapters, results }, null, 2)}\n`, 'utf8')
+  if (failed.length) throw new Error(`音频质检失败 ${failed.length} 章：${failed.map(result => result.chapterIndex).join(', ')}`)
+  console.log(`✅ 音频质检批量工序完成：${results.length}/${chapters.length}`)
+  console.log(`   汇总文件：${summaryPath}`)
+  return { results, summaryPath }
+}
+
+async function runAssembleBatch(config, args) {
+  const { bookId, chapters } = requireBatchChapterArgs(args, 'assemble-batch')
+  const outRoot = resolveBatchOutRoot(config, args, bookId, chapters[0])
+  const concurrency = Math.max(1, Math.floor(Number(args.concurrency || 2)))
+  const results = []
+  await runConcurrent(chapters, concurrency, async chapterIndex => {
+    const { audioDir, finalAudioPath } = getChapterOutputPaths(outRoot, chapterIndex, config.tts.finalFormat)
+    if (args.resume === true && existsSync(finalAudioPath)) {
+      results.push({ chapterIndex, status: 'skipped-audio-exists', finalAudioPath })
+      return
+    }
+    const result = runAssemble(config, { 'out-dir': audioDir })
+    results.push({ chapterIndex, status: 'completed', ...result })
+  })
+  results.sort((left, right) => left.chapterIndex - right.chapterIndex)
+  const summaryPath = join(outRoot, `audio-assemble-${chapters[0]}-${chapters.at(-1)}.summary.json`)
+  writeFileSync(summaryPath, `${JSON.stringify({ kind: 'novel-reader-tts-assemble-batch', generatedAt: new Date().toISOString(), bookId, chapters, results }, null, 2)}\n`, 'utf8')
+  console.log(`✅ 章节拼接批量工序完成：${results.length}/${chapters.length}`)
+  console.log(`   汇总文件：${summaryPath}`)
+  return { results, summaryPath }
 }
 
 async function runBatchPipeline(config, args) {
@@ -2098,6 +2407,11 @@ async function main() {
     return
   }
 
+  if (command === 'draft-batch') {
+    await runDraftBatch(config, args)
+    return
+  }
+
   if (command === 'validate-script') {
     await runValidateScript(args)
     return
@@ -2108,8 +2422,33 @@ async function main() {
     return
   }
 
+  if (command === 'audit-batch') {
+    await runAuditBatch(config, args)
+    return
+  }
+
   if (command === 'synth') {
     await runSynth(config, args)
+    return
+  }
+
+  if (command === 'synth-batch') {
+    await runSynthBatch(config, args)
+    return
+  }
+
+  if (command === 'synth-segments-batch') {
+    await runSynthBatch(config, { ...args, 'segments-only': true })
+    return
+  }
+
+  if (command === 'audio-qc-batch') {
+    await runAudioQcBatch(config, args)
+    return
+  }
+
+  if (command === 'assemble-batch') {
+    await runAssembleBatch(config, args)
     return
   }
 

@@ -1,0 +1,7 @@
+server.name: novel-reader-kibana
+server.host: 0.0.0.0
+telemetry.enabled: false
+elasticsearch.hosts: ["https://elasticsearch:9200"]
+elasticsearch.ssl.certificateAuthorities: ["/usr/share/kibana/config/certs/ca/ca.crt"]
+elasticsearch.ssl.verificationMode: certificate
+

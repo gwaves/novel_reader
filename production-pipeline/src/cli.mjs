@@ -300,7 +300,7 @@ async function runResume(options) {
 }
 
 async function executeJobStages({ runInfo, job, mainDbPath, resume }) {
-  const stages = expandEmbeddingStages(normalizeStageList(job.stages))
+  const stages = expandAudioWorkflowStages(expandEmbeddingStages(normalizeStageList(job.stages)), job)
   const stageGroups = buildStageExecutionGroups(stages)
   const stageResults = { ...(runInfo.runJson.stages || {}) }
   const context = {
@@ -372,14 +372,29 @@ async function executeJobStages({ runInfo, job, mainDbPath, resume }) {
 }
 
 function stageDependencies(stage) {
-  if (stage === 'summaryEmbedding') return ['summary']
-  return []
+  const dependencies = {
+    summary: ['import'],
+    'summary-locate': ['import', 'summary'],
+    kg: ['import'],
+    chunkEmbedding: ['import'],
+    summaryEmbedding: ['import', 'summary'],
+    directorDraft: ['import'],
+    directorQc: ['directorDraft'],
+    ttsSegments: ['directorQc'],
+    audioQc: ['ttsSegments'],
+    audioAssemble: ['audioQc'],
+    audio: ['import', 'audioAssemble'],
+    package: ['import', 'summary', 'summary-locate', 'kg', 'chunkEmbedding', 'summaryEmbedding', 'audio'],
+    publish: ['package'],
+    verify: ['publish'],
+  }
+  return dependencies[stage] || []
 }
 
 function activeLlmSchedulerSlots(runningStages, stageResults) {
   let total = 0
   for (const stage of runningStages.keys()) {
-    if (stage === 'summary' || stage === 'kg' || stage === 'audio') {
+    if (stage === 'summary' || stage === 'kg' || stage === 'audio' || stage === 'directorDraft') {
       total += Math.max(1, Number(stageResults[stage]?.schedulerConcurrency || 1))
     }
   }
@@ -555,7 +570,10 @@ function computeKgRuntimeConcurrency({ scheduler, stageResults, stageOptions = {
   const fixedAudioSlots = stageResults.audio?.status === 'running'
     ? Math.max(1, Number(stageResults.audio?.schedulerConcurrency || stageOptions.audio?.directorConcurrency || 1))
     : 0
-  const available = Math.max(1, scheduler.concurrency - fixedAudioSlots)
+  const fixedSummarySlots = stageResults.summary?.status === 'running'
+    ? Math.max(1, Number(stageResults.summary?.schedulerConcurrency || stageOptions.summary?.concurrency || 1))
+    : 0
+  const available = Math.max(1, scheduler.concurrency - fixedAudioSlots - fixedSummarySlots)
   return Math.min(scheduler.concurrency, available)
 }
 
@@ -564,6 +582,9 @@ async function writeKgControlFile(controlFile, control) {
 }
 
 async function executePipelineStage({ stage, runInfo, job, mainDbPath, context, stageOptions = {}, onChildStart }) {
+  if (['directorDraft', 'directorQc', 'ttsSegments', 'audioQc', 'audioAssemble'].includes(stage)) {
+    return executeAudioWorkflowStage({ stage, runInfo, job, mainDbPath, stageOptions, onChildStart })
+  }
   if (stage === 'publish') {
     const childRuns = []
     if (context.packageRunJson) childRuns.push(await executeChildStage(stage, buildPublishArgs(job, context.packageRunJson), runInfo, { onStart: onChildStart }))
@@ -585,13 +606,93 @@ async function executePipelineStage({ stage, runInfo, job, mainDbPath, context, 
     }
   }
 
-  const args = buildStageArgs(stage, job, mainDbPath, runInfo, stageOptions)
+  const effectiveJob = stage === 'audio'
+    && (job.audio?.ttsConfig || job.audio?.tts_config)
+    && isFlagEnabled(job.audio?.workflowDag ?? job.audio?.workflow_dag)
+    ? {
+        ...job,
+        audio: {
+          ...job.audio,
+          sourceRoot: audioWorkflowOutRoot(job, runInfo),
+          ttsConfig: undefined,
+          tts_config: undefined,
+          ttsOutRoot: undefined,
+          tts_out_root: undefined,
+        },
+      }
+    : job
+  const args = buildStageArgs(stage, effectiveJob, mainDbPath, runInfo, stageOptions)
   const childRun = await executeChildStage(stage, args, runInfo, { onStart: onChildStart })
   return {
     message: `completed ${stage}.`,
     childRunJson: childRun.childRunJson,
     childRunDir: childRun.childRunDir,
     logFile: childRun.logFile,
+  }
+}
+
+function audioWorkflowOutRoot(job, runInfo) {
+  const audio = job.audio || {}
+  return resolve(audio.ttsOutRoot || audio.tts_out_root || join(runInfo.rootDir, 'artifacts', 'tts-source'))
+}
+
+async function executeAudioWorkflowStage({ stage, runInfo, job, mainDbPath, stageOptions, onChildStart }) {
+  const audio = job.audio || {}
+  const directorScript = resolve(audio.ttsDirectorScript || audio.tts_director_script || defaultTtsDirectorScript)
+  const baseConfigPath = expandPath(required(audio.ttsConfig || audio.tts_config, `${stage} requires job.audio.ttsConfig`))
+  const ttsLlmConfig = buildTtsLlmConfigFromJob(job)
+  const configPath = await prepareTtsDirectorConfigForAudio({
+    ttsConfig: baseConfigPath,
+    ...(ttsLlmConfig ? { ttsLlmConfig: JSON.stringify(ttsLlmConfig) } : {}),
+  }, { artifactsDir: join(runInfo.rootDir, 'artifacts') })
+  const chapters = await resolveAudioWorkflowChapters(job, mainDbPath)
+  const outRoot = audioWorkflowOutRoot(job, runInfo)
+  const command = {
+    directorDraft: 'draft-batch',
+    directorQc: 'audit-batch',
+    ttsSegments: 'synth-segments-batch',
+    audioQc: 'audio-qc-batch',
+    audioAssemble: 'assemble-batch',
+  }[stage]
+  const args = [directorScript, command, '--config', configPath, '--book-id', job.bookId, '--chapters', chapters, '--out-root', outRoot]
+  if (isFlagEnabled(audio.resume)) args.push('--resume')
+  if (isFlagEnabled(audio.allowPartial || audio.allow_partial)) args.push('--allow-partial')
+  if (stage === 'directorDraft') {
+    if (audio.batchSize || audio.batch_size) args.push('--batch-size', String(audio.batchSize || audio.batch_size))
+    args.push('--director-concurrency', String(stageOptions.directorConcurrency || audio.directorConcurrency || audio.director_concurrency || 1))
+    args.push('--llm-chapters', String(stageOptions.llmChapters || audio.llmChapters || audio.llm_chapters || 1))
+  } else if (stage === 'directorQc') {
+    args.push('--concurrency', String(audio.qcConcurrency || audio.qc_concurrency || 8))
+    if (isFlagEnabled(audio.strict)) args.push('--strict')
+  } else if (stage === 'ttsSegments') {
+    args.push('--tts-concurrency', String(audio.ttsConcurrency || audio.tts_concurrency || 16))
+    args.push('--tts-chapters', String(audio.ttsChapters || audio.tts_chapters || 2))
+  } else {
+    args.push('--concurrency', String(stage === 'audioQc' ? (audio.audioQcConcurrency || audio.audio_qc_concurrency || 8) : (audio.assembleConcurrency || audio.assemble_concurrency || 2)))
+  }
+
+  const logFile = join(runInfo.rootDir, 'logs', `${stage}-${Date.now()}.log`)
+  await mkdir(dirname(logFile), { recursive: true })
+  await writeFile(logFile, '', { flag: 'a' })
+  const child = { stage, logFile: relativeRunPath(runInfo.rootDir, logFile), outRoot, chapters }
+  await onChildStart?.(child)
+  await execFileStreaming(process.execPath, args, logFile)
+  return { message: `completed ${stage}.`, logFile: child.logFile, outRoot, chapters }
+}
+
+async function resolveAudioWorkflowChapters(job, mainDbPath) {
+  const audio = job.audio || {}
+  if (audio.chapters) return String(audio.chapters)
+  if (audio.chapter) return String(audio.chapter)
+  const DatabaseSync = await loadDatabaseSync()
+  const db = new DatabaseSync(expandPath(mainDbPath), { readOnly: true })
+  try {
+    const count = Number(db.prepare('SELECT COUNT(*) AS count FROM chapters WHERE book_id = ?').get(job.bookId)?.count) || 0
+    if (!count) throw new Error(`Book has no chapters for audio workflow: ${job.bookId}`)
+    const limit = Math.min(count, clampInteger(audio.limit, count, 1, count))
+    return `1-${limit}`
+  } finally {
+    db.close()
   }
 }
 
@@ -3634,7 +3735,8 @@ async function inspectJobPreflight({ checks, job, rawJob, jobPath, mainDbPath })
   if (job.stages.includes('verify')) {
     const verify = { ...(job.gateway || {}), ...(job.verify || {}) }
     addDoctorCheck(checks, 'verify.gatewayUrl', Boolean(verify.gatewayUrl || verify.url), verify.gatewayUrl || verify.url || 'missing')
-    addDoctorCheck(checks, 'verify.gatewayToken', Boolean(verify.gatewayToken || verify.token), (verify.gatewayToken || verify.token) ? '[present]' : 'missing')
+    const token = verify.gatewayToken || verify.token || readConfiguredEnvironmentValue(verify.gatewayTokenEnv || verify.tokenEnv)
+    addDoctorCheck(checks, 'verify.gatewayToken', Boolean(token), token ? '[present]' : 'missing')
   }
 }
 
@@ -3739,36 +3841,19 @@ function expandEmbeddingStages(stages) {
   return [...new Set(expanded)]
 }
 
-function buildStageExecutionGroups(stages) {
-  const groups = []
-  const remaining = [...stages]
-  const parallelAfterImport = new Set(['summary', 'kg', 'chunkEmbedding', 'summaryEmbedding', 'audio'])
-  const barriers = new Set(['summary-locate', 'package', 'publish', 'verify'])
-  let index = 0
-  while (index < remaining.length) {
-    const stage = remaining[index]
-    if (!stage) {
-      index += 1
-      continue
-    }
-    if (parallelAfterImport.has(stage)) {
-      const group = []
-      for (let groupIndex = index; groupIndex < remaining.length; groupIndex += 1) {
-        const candidate = remaining[groupIndex]
-        if (barriers.has(candidate)) break
-        if (parallelAfterImport.has(candidate)) {
-          group.push(candidate)
-          remaining[groupIndex] = ''
-        }
-      }
-      groups.push(group)
-      index += 1
-      continue
-    }
-    groups.push([stage])
-    index += 1
+function expandAudioWorkflowStages(stages, job) {
+  const audio = job.audio || {}
+  if (!stages.includes('audio') || !(audio.ttsConfig || audio.tts_config) || !isFlagEnabled(audio.workflowDag ?? audio.workflow_dag)) return stages
+  const expanded = []
+  for (const stage of stages) {
+    if (stage === 'audio') expanded.push('directorDraft', 'directorQc', 'ttsSegments', 'audioQc', 'audioAssemble', 'audio')
+    else expanded.push(stage)
   }
-  return groups
+  return [...new Set(expanded)]
+}
+
+function buildStageExecutionGroups(stages) {
+  return [stages]
 }
 
 function buildStageExecutionPlan(job, stages, { usedLlmSlots = 0 } = {}) {
@@ -3798,7 +3883,7 @@ function buildStageExecutionPlan(job, stages, { usedLlmSlots = 0 } = {}) {
   const stageOptions = {}
   for (const stage of scheduledLlmStages) {
     const concurrency = allocations[stage]
-    stageOptions[stage] = stage === 'audio'
+    stageOptions[stage] = stage === 'audio' || stage === 'directorDraft'
       ? buildScheduledAudioOptions(job, concurrency)
       : { concurrency }
   }
@@ -3829,6 +3914,7 @@ function normalizeLlmScheduler(job) {
     audio: 1,
     ...(scheduler.weights || scheduler.stageWeights || scheduler.stage_weights || {}),
   }
+  if (job.audio?.workflowDag || job.audio?.workflow_dag) weights.directorDraft = weights.audio
   return {
     concurrency,
     borrowIdle: !('borrowIdle' in scheduler || 'borrow_idle' in scheduler) || isFlagEnabled(scheduler.borrowIdle ?? scheduler.borrow_idle),
@@ -3839,8 +3925,10 @@ function normalizeLlmScheduler(job) {
 
 function isSchedulableLlmStage(stage, job) {
   if (stage === 'summary' || stage === 'kg') return true
+  if (stage === 'directorDraft') return true
   if (stage !== 'audio') return false
   const audio = job.audio || {}
+  if (isFlagEnabled(audio.workflowDag ?? audio.workflow_dag)) return false
   return Boolean(audio.ttsConfig || audio.tts_config)
 }
 
@@ -4069,10 +4157,17 @@ function buildVerifyArgs(job, childRunJson) {
   const verify = { ...(job.gateway || {}), ...(job.verify || {}) }
   const args = ['verify', '--run', childRunJson]
   if (verify.gatewayUrl || verify.url) args.push('--gateway-url', verify.gatewayUrl || verify.url)
-  if (verify.gatewayToken || verify.token) args.push('--gateway-token', verify.gatewayToken || verify.token)
-  if (verify.gatewayAdminToken || verify.adminToken) args.push('--gateway-admin-token', verify.gatewayAdminToken || verify.adminToken)
+  const gatewayToken = verify.gatewayToken || verify.token || readConfiguredEnvironmentValue(verify.gatewayTokenEnv || verify.tokenEnv)
+  const gatewayAdminToken = verify.gatewayAdminToken || verify.adminToken || readConfiguredEnvironmentValue(verify.gatewayAdminTokenEnv || verify.adminTokenEnv)
+  if (gatewayToken) args.push('--gateway-token', gatewayToken)
+  if (gatewayAdminToken) args.push('--gateway-admin-token', gatewayAdminToken)
   if (verify.audioSamples) args.push('--audio-samples', String(verify.audioSamples))
   return args
+}
+
+function readConfiguredEnvironmentValue(name) {
+  if (!name) return ''
+  return process.env[String(name).trim()] || ''
 }
 
 function findLatestChildRun(stageResult) {

@@ -1,0 +1,150 @@
+filebeat.inputs:
+  - type: filestream
+    id: gateway-container-stdout
+    enabled: true
+    paths:
+      - /var/lib/docker/containers/*/*-json.log
+    parsers:
+      - container:
+          stream: all
+          format: docker
+    prospector.scanner.symlinks: false
+    fields_under_root: true
+    fields:
+      service.name: novel-gateway
+      event.dataset: container.stdout
+    processors:
+      - add_docker_metadata:
+          host: unix:///var/run/docker.sock
+      - drop_event:
+          when:
+            not:
+              regexp:
+                container.name: '^novel-reader-gateway(-https)?$'
+      - decode_json_fields:
+          when:
+            equals:
+              container.name: novel-reader-gateway
+          fields: [message]
+          target: pino
+          overwrite_keys: false
+          add_error_key: true
+
+  - type: filestream
+    id: gateway-request-jsonl
+    enabled: true
+    paths:
+      - /gateway-logs/requests/*/*.jsonl
+    parsers:
+      - ndjson:
+          target: novel
+          add_error_key: true
+          expand_keys: true
+    fields_under_root: true
+    fields:
+      service.name: novel-gateway
+      event.dataset: gateway.request
+    processors:
+      - timestamp:
+          field: novel.receivedAt
+          layouts: [ISO8601]
+          ignore_missing: true
+
+  - type: filestream
+    id: gateway-mobile-jsonl
+    enabled: true
+    paths:
+      - /gateway-logs/mobile/*/*.jsonl
+    parsers:
+      - ndjson:
+          target: novel
+          add_error_key: true
+          expand_keys: true
+    fields_under_root: true
+    fields:
+      service.name: novel-mobile
+      event.dataset: mobile.diagnostic
+    processors:
+      - timestamp:
+          field: novel.receivedAt
+          layouts: [ISO8601]
+          ignore_missing: true
+
+  - type: filestream
+    id: production-service-stdout
+    enabled: true
+    paths:
+      - /var/lib/docker/containers/*/*-json.log
+    parsers:
+      - container:
+          stream: all
+          format: docker
+    fields_under_root: true
+    fields:
+      service.name: production-pipeline-service
+      event.dataset: production.pipeline.stdout
+    processors:
+      - add_docker_metadata:
+          host: unix:///var/run/docker.sock
+      - drop_event:
+          when:
+            not:
+              equals:
+                container.name: novel-reader-production-service
+      - decode_json_fields:
+          fields: [message]
+          target: pino
+          overwrite_keys: false
+          add_error_key: true
+
+  - type: filestream
+    id: production-service-events
+    enabled: true
+    paths:
+      - /production-service-data/events.jsonl
+    parsers:
+      - ndjson:
+          target: ''
+          add_error_key: true
+          expand_keys: true
+
+processors:
+  - add_host_metadata: ~
+  - drop_fields:
+      ignore_missing: true
+      fields:
+        - authorization
+        - cookie
+        - apiKey
+        - api_key
+        - token
+        - accessToken
+        - refreshToken
+
+setup.ilm.enabled: true
+setup.ilm.policy_name: novel-reader-logs-30d
+setup.ilm.policy_file: /usr/share/filebeat/ilm-policy.json
+setup.ilm.rollover_alias: novel-reader-logs
+setup.ilm.pattern: '{now/d}-000001'
+setup.template.enabled: true
+setup.template.overwrite: true
+setup.template.name: novel-reader-logs
+setup.template.pattern: novel-reader-logs*
+setup.template.settings:
+  index.number_of_replicas: 0
+
+output.elasticsearch:
+  hosts: ["https://elasticsearch:9200"]
+  index: novel-reader-logs
+  username: filebeat_internal
+  password: "${FILEBEAT_INTERNAL_PASSWORD}"
+  ssl.certificate_authorities: ["/usr/share/filebeat/certs/ca/ca.crt"]
+
+logging.level: info
+logging.to_files: false
+logging.event_data.to_files: true
+logging.event_data.files:
+  path: /usr/share/filebeat/event-data
+  name: non-indexable-events
+  keepfiles: 3
+  permissions: 0600
