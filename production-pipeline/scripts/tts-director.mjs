@@ -160,6 +160,7 @@ function loadConfig(configPath) {
   const database = config.database || {}
   const apiKeyEnv = optionalString(llm.apiKeyEnv)
   const inlineApiKey = optionalString(llm.apiKey)
+  const fallback = llm.fallback && typeof llm.fallback === 'object' ? llm.fallback : null
   return {
     ...config,
     configPath: path,
@@ -172,6 +173,14 @@ function loadConfig(configPath) {
       timeoutMs: finiteNumber(llm.timeoutMs, 180_000),
       maxTokens: finiteNumber(llm.maxTokens, 8192),
       responseFormatJson: llm.responseFormatJson === true,
+      fallback: fallback && optionalString(fallback.baseUrl) && optionalString(fallback.model)
+        ? {
+            baseUrl: optionalString(fallback.baseUrl).replace(/\/+$/, ''),
+            model: optionalString(fallback.model),
+            apiKey: optionalString(fallback.apiKey),
+            apiKeyEnv: optionalString(fallback.apiKeyEnv),
+          }
+        : null,
     },
     database: {
       mainDbPath: resolve(expandHome(database.mainDbPath || process.env.NOVEL_READER_DB_PATH || DEFAULT_MAIN_DB_PATH)),
@@ -666,6 +675,15 @@ async function callOpenAICompatibleWithRetry(config, messages, label, maxAttempt
       const delayMs = 1000 * attempt
       console.warn(`⚠️  ${label} 第 ${attempt} 次失败：${error.message.split('\n')[0]}，${delayMs}ms 后重试。`)
       await sleep(delayMs)
+    }
+  }
+  if (config.llm.fallback) {
+    const fallbackConfig = { ...config, llm: { ...config.llm, ...config.llm.fallback, fallback: null } }
+    console.warn(`🛟 ${label} 主模型重试耗尽，切换兜底模型 ${fallbackConfig.llm.model}。`)
+    try {
+      return await callOpenAICompatible(fallbackConfig, messages)
+    } catch (error) {
+      lastError = error
     }
   }
   throw lastError
@@ -2301,7 +2319,7 @@ async function runBatchPipeline(config, args) {
     synthPromises.push(synthPromise)
   }
 
-  const draftWithFallback = async (chapterIndex, scriptPath) => {
+  const draftWithFallback = async (chapterIndex, scriptPath, modelConfig = config) => {
     let lastError = null
     for (let attempt = 1; attempt <= config.batchPipeline.maxDraftAttempts; attempt += 1) {
       try {
@@ -2310,7 +2328,7 @@ async function runBatchPipeline(config, args) {
           adaptiveDirectorConcurrency = control.directorConcurrency
           lastConfiguredDirectorConcurrency = control.directorConcurrency
         }
-        const result = await runDraftScript(config, makeChapterArgs({
+        const result = await runDraftScript(modelConfig, makeChapterArgs({
           'book-id': bookId,
           ...(requestedLimit == null ? {} : { limit: String(requestedLimit) }),
           ...(args['allow-partial'] === true ? { 'allow-partial': true } : {}),
@@ -2367,7 +2385,11 @@ async function runBatchPipeline(config, args) {
       for (let attempt = 1; strictFailures.length && attempt <= maxAuditRepairAttempts; attempt += 1) {
         console.warn(`⚠️  第 ${chapterIndex} 章导演脚本质检失败：${strictFailures[0]}`)
         console.warn(`   自动重新生成并复检 ${attempt}/${maxAuditRepairAttempts}；其他章节不会因此停止。`)
-        const draftResult = await draftWithFallback(chapterIndex, scriptPath)
+        const repairConfig = config.llm.fallback
+          ? { ...config, llm: { ...config.llm, ...config.llm.fallback, fallback: null } }
+          : config
+        if (config.llm.fallback) console.warn(`🛟 第 ${chapterIndex} 章质检修复切换兜底模型 ${repairConfig.llm.model}。`)
+        const draftResult = await draftWithFallback(chapterIndex, scriptPath, repairConfig)
         script = draftResult.script
         auditResult = writeAuditReport(config, scriptPath, script)
         strictFailures = strictAuditFailures(config, auditResult.audit)

@@ -54,6 +54,7 @@ export function loadServiceConfig(env = process.env) {
     autoResumeInterrupted: env.PRODUCTION_PIPELINE_AUTO_RESUME_INTERRUPTED !== 'false',
     eventLogFile: resolve(dataDir, 'events.jsonl'),
     credentialsFile: resolve(env.PRODUCTION_PIPELINE_CREDENTIALS_FILE || resolve(dataDir, 'credentials.env')),
+    modelProfilesFile: resolve(env.PRODUCTION_PIPELINE_MODEL_PROFILES_FILE || resolve(dataDir, 'model-profiles.json')),
     jobsDir: resolve(env.PRODUCTION_PIPELINE_JOBS_DIR || joinPath('production-pipeline', 'config')),
     sourcesDir: resolve(env.PRODUCTION_PIPELINE_SOURCES_DIR || joinPath('tmp', 'production-pipeline-service', 'sources')),
     backupsDir: resolve(env.PRODUCTION_PIPELINE_BACKUPS_DIR || joinPath('tmp', 'production-pipeline-service', 'backups')),
@@ -190,6 +191,7 @@ export async function buildProductionPipelineService(config = loadServiceConfig(
       audio: { ttsConfig: '/home/node/.novel_reader/tts-director.config.json', llmChapters: 1, ttsConcurrency: 16, ttsChapters: 1 },
       gateway: { host: '192.168.88.100', user: 'gwaves', root: '/home/gwaves/novel-reader-gateway', url: 'http://192.168.88.100:6180', tokenEnv: 'GATEWAY_TOKEN' },
     },
+    modelProfiles: readModelProfiles(config.modelProfilesFile),
     environmentStatus: {
       llmCredential: Boolean(process.env.LLM_API_KEY || readRuntimeCredentials(config.credentialsFile).LLM_API_KEY),
       embeddingCredential: Boolean(process.env.EMBEDDING_API_KEY || readRuntimeCredentials(config.credentialsFile).EMBEDDING_API_KEY),
@@ -199,6 +201,21 @@ export async function buildProductionPipelineService(config = loadServiceConfig(
       mainDatabase: existsSync(config.mainDbPath),
     },
   }))
+
+  app.put('/api/model-profiles', async (request) => {
+    const body = readObjectBody(request.body)
+    const profiles = normalizeModelProfiles(body.profiles)
+    if (!profiles.length) throw httpError(400, 'model_profile_required', '至少需要保留一组 LLM 配置。')
+    const credentials = readRuntimeCredentials(config.credentialsFile)
+    for (const profile of profiles) {
+      if (readString(profile.apiKey)) credentials[profile.apiKeyEnv] = readString(profile.apiKey)
+      delete profile.apiKey
+    }
+    await writeFile(config.modelProfilesFile, `${JSON.stringify({ profiles }, null, 2)}\n`, { mode: 0o600 })
+    await chmod(config.modelProfilesFile, 0o600)
+    await writeRuntimeCredentials(config.credentialsFile, credentials)
+    return { profiles: readModelProfiles(config.modelProfilesFile) }
+  })
 
   app.put('/api/runtime-credentials', async (request) => {
     const body = readObjectBody(request.body)
@@ -1016,6 +1033,9 @@ function renderConsoleHtml() {
       <h2>生产环境</h2>
       <div id="settingsStatus" class="book-progress">加载中...</div>
       <h2>模型 API 凭据</h2>
+      <div id="modelProfiles" class="jobs"></div>
+      <div class="actions"><button class="secondary" id="addModelProfile" type="button">创建新 LLM</button><button id="saveModelProfiles" type="button">保存模型配置</button></div>
+      <div id="modelProfileFeedback" class="meta" aria-live="polite">可配置多组模型；最多一组可标记为兜底。</div>
       <label>LLM API Key <input id="settingsLlmApiKey" type="password" autocomplete="new-password" placeholder="留空则保留现有 LLM_API_KEY" /></label>
       <label>向量 API Key <input id="settingsEmbeddingApiKey" type="password" autocomplete="new-password" placeholder="留空则保留现有 EMBEDDING_API_KEY" /></label>
       <div class="actions"><button class="secondary save-runtime-credentials" data-source="settings" type="button">保存到生产环境</button></div>
@@ -1073,6 +1093,7 @@ function renderConsoleHtml() {
       <div class="wizard-step" data-wizard-panel="3" hidden>
       <h2>资源配置</h2>
       <div class="actions"><button class="secondary resource-preset" data-preset="stable" type="button">稳定</button><button class="resource-preset" data-preset="balanced" type="button">均衡（推荐）</button><button class="secondary resource-preset" data-preset="fast" type="button">极速</button></div>
+      <label>LLM 配置 <select id="llmProfile"><option value="">手动配置</option></select></label>
       <label>LLM 地址 <input id="llmBaseUrl" /></label>
       <label>LLM 模型 <input id="llmModel" /></label>
       <label>LLM 总并发数 <input id="llmConcurrency" type="number" min="1" max="64" /></label>
@@ -1120,7 +1141,7 @@ function renderConsoleHtml() {
     </div>
   </div>
   <script>
-    const state = { selectedJobId: '', eventSource: null, builderBooks: [], jobs: [], jobStatuses: {}, dagProgress: {}, currentView: localStorage.getItem('productionPipeline.currentView') || 'overview', wizardStep: 1, logFilter: 'key' };
+    const state = { selectedJobId: '', eventSource: null, builderBooks: [], modelProfiles: [], jobs: [], jobStatuses: {}, dagProgress: {}, currentView: localStorage.getItem('productionPipeline.currentView') || 'overview', wizardStep: 1, logFilter: 'key' };
     function showWizardStep(step) {
       state.wizardStep = Math.max(1, Math.min(4, Number(step) || 1));
       document.querySelectorAll('[data-wizard-panel]').forEach(panel => { panel.hidden = Number(panel.dataset.wizardPanel) !== state.wizardStep; });
@@ -1309,6 +1330,7 @@ function renderConsoleHtml() {
       document.getElementById('builderBookRow').hidden = !mainDb;
       if (template.source?.file) document.getElementById('builderSource').value = template.source.file.split('/').pop();
       if (template.bookId) document.getElementById('builderBook').value = template.bookId;
+      if (template.llm?.profileId) document.getElementById('llmProfile').value = template.llm.profileId;
       document.querySelectorAll('#builderStages input').forEach(input => { input.checked = (template.stages || []).includes(input.value); });
       for (const [id, value] of [['llmBaseUrl', template.llm?.baseUrl], ['llmModel', template.llm?.model], ['llmConcurrency', template.llm?.concurrency], ['embeddingBaseUrl', template.embedding?.baseUrl], ['embeddingModel', template.embedding?.model], ['embeddingConcurrency', template.embedding?.concurrency], ['ttsConfig', template.audio?.ttsConfig], ['llmChapters', template.audio?.llmChapters], ['ttsConcurrency', template.audio?.ttsConcurrency], ['ttsChapters', template.audio?.ttsChapters], ['gatewayHost', template.gateway?.host], ['gatewayUser', template.gateway?.user], ['gatewayRoot', template.gateway?.root], ['gatewayUrl', template.gateway?.url], ['gatewayTokenEnv', template.gateway?.tokenEnv], ['audioSamples', template.verify?.audioSamples], ['costSummary', template.costEstimation?.summaryPerChapter], ['costKg', template.costEstimation?.kgPerChapter], ['costAudio', template.costEstimation?.audioPerChapter]]) {
         if (value !== undefined) document.getElementById(id).value = value;
@@ -1326,6 +1348,8 @@ function renderConsoleHtml() {
     }
     function populateBuilder(body) {
       const environmentStatus = body.environmentStatus || {};
+      state.modelProfiles = body.modelProfiles || [];
+      renderModelProfiles();
       const statusLabels = { mainDatabase: '生产主库', ttsConfig: 'TTS配置', llmCredential: 'LLM凭据', embeddingCredential: '向量凭据', gatewayToken: 'Gateway访问凭据', gatewayAdminToken: 'Gateway管理凭据' };
       document.getElementById('settingsStatus').innerHTML = Object.entries(statusLabels).map(([key, label]) => '<div class="topline"><span>' + label + '</span><span class="status ' + (environmentStatus[key] ? 'completed' : 'failed') + '">' + (environmentStatus[key] ? '已配置' : '未配置') + '</span></div>').join('');
       const source = document.getElementById('builderSource');
@@ -1345,12 +1369,41 @@ function renderConsoleHtml() {
         stages.querySelectorAll('input').forEach(input => input.addEventListener('change', enforceStageDependencies));
       }
       enforceStageDependencies();
+      const profileSelect = document.getElementById('llmProfile');
+      const selectedProfile = profileSelect.value;
+      profileSelect.innerHTML = '<option value="">手动配置</option>' + state.modelProfiles.map(profile => '<option value="' + escapeHtml(profile.id) + '">' + escapeHtml(profile.label) + (profile.fallback ? '（兜底）' : '') + '</option>').join('');
+      if (selectedProfile) profileSelect.value = selectedProfile;
       for (const [id, value] of [['llmBaseUrl', body.defaults.llm.baseUrl], ['llmModel', body.defaults.llm.model], ['llmConcurrency', body.defaults.llm.concurrency], ['embeddingBaseUrl', body.defaults.embedding.baseUrl], ['embeddingModel', body.defaults.embedding.model], ['embeddingConcurrency', body.defaults.embedding.concurrency]]) {
         if (!document.getElementById(id).value) document.getElementById(id).value = value;
       }
       for (const [id, value] of [['ttsConfig', body.defaults.audio.ttsConfig], ['llmChapters', body.defaults.audio.llmChapters], ['ttsConcurrency', body.defaults.audio.ttsConcurrency], ['ttsChapters', body.defaults.audio.ttsChapters], ['gatewayHost', body.defaults.gateway.host], ['gatewayUser', body.defaults.gateway.user], ['gatewayRoot', body.defaults.gateway.root], ['gatewayUrl', body.defaults.gateway.url], ['gatewayTokenEnv', body.defaults.gateway.tokenEnv]]) {
         if (!document.getElementById(id).value) document.getElementById(id).value = value;
       }
+    }
+    function renderModelProfiles() {
+      const root = document.getElementById('modelProfiles');
+      root.innerHTML = state.modelProfiles.map((profile, index) => '<div class="panel model-profile" data-profile-index="' + index + '"><label>名称 <input data-profile-field="label" value="' + escapeHtml(profile.label) + '"></label><label>标识 <input data-profile-field="id" value="' + escapeHtml(profile.id) + '" ' + (profile.persisted ? 'readonly' : '') + '></label><label>Base URL <input data-profile-field="baseUrl" value="' + escapeHtml(profile.baseUrl) + '"></label><label>模型名称 <input data-profile-field="model" value="' + escapeHtml(profile.model) + '"></label><label>API Key <input data-profile-field="apiKey" type="password" autocomplete="new-password" placeholder="留空保留现有凭据"></label><label><input data-profile-field="fallback" type="checkbox" ' + (profile.fallback ? 'checked' : '') + '> 作为兜底模型</label><button class="danger remove-model-profile" type="button">删除</button></div>').join('') || '<div class="meta">尚未创建命名模型配置。</div>';
+      root.querySelectorAll('.remove-model-profile').forEach(button => button.addEventListener('click', () => { state.modelProfiles.splice(Number(button.closest('.model-profile').dataset.profileIndex), 1); renderModelProfiles(); }));
+    }
+    function collectModelProfiles() {
+      return [...document.querySelectorAll('.model-profile')].map(card => ({
+        id: card.querySelector('[data-profile-field="id"]').value.trim(), label: card.querySelector('[data-profile-field="label"]').value.trim(),
+        baseUrl: card.querySelector('[data-profile-field="baseUrl"]').value.trim(), model: card.querySelector('[data-profile-field="model"]').value.trim(),
+        apiKey: card.querySelector('[data-profile-field="apiKey"]').value, fallback: card.querySelector('[data-profile-field="fallback"]').checked,
+      }));
+    }
+    async function saveModelProfiles() {
+      const body = await api('/api/model-profiles', { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ profiles: collectModelProfiles() }) });
+      state.modelProfiles = (body.profiles || []).map(profile => ({ ...profile, persisted: true }));
+      document.getElementById('modelProfileFeedback').textContent = '模型配置已保存，API Key 不会回传到页面。';
+      renderModelProfiles();
+      await loadManagedAssets();
+    }
+    function selectModelProfile() {
+      const profile = state.modelProfiles.find(item => item.id === document.getElementById('llmProfile').value);
+      if (!profile) return;
+      document.getElementById('llmBaseUrl').value = profile.baseUrl;
+      document.getElementById('llmModel').value = profile.model;
     }
     function enforceStageDependencies() {
       const checked = id => document.getElementById('stage-' + id)?.checked;
@@ -1388,7 +1441,11 @@ function renderConsoleHtml() {
         stages,
       };
       if (mode === 'main-db') template.bookId = document.getElementById('builderBook').value;
-      if (stages.some(stage => ['summary','summary-locate','kg','audio'].includes(stage))) template.llm = { provider: 'openai-compatible', baseUrl: document.getElementById('llmBaseUrl').value.trim(), model: document.getElementById('llmModel').value.trim(), concurrency: Number(document.getElementById('llmConcurrency').value) || 8, apiKeyEnv: 'LLM_API_KEY', scheduler: { borrowIdle: true, weights: { summary: 4, kg: 2, audio: 4 } } };
+      if (stages.some(stage => ['summary','summary-locate','kg','audio'].includes(stage))) {
+        const selected = state.modelProfiles.find(item => item.id === document.getElementById('llmProfile').value);
+        const fallback = state.modelProfiles.find(item => item.fallback && item.id !== selected?.id);
+        template.llm = { provider: 'openai-compatible', baseUrl: document.getElementById('llmBaseUrl').value.trim(), model: document.getElementById('llmModel').value.trim(), concurrency: Number(document.getElementById('llmConcurrency').value) || 8, apiKeyEnv: selected?.apiKeyEnv || 'LLM_API_KEY', ...(selected ? { profileId: selected.id } : {}), ...(fallback ? { fallback: { profileId: fallback.id, baseUrl: fallback.baseUrl, model: fallback.model, apiKeyEnv: fallback.apiKeyEnv } } : {}), scheduler: { borrowIdle: true, weights: { summary: 4, kg: 2, audio: 4 } } };
+      }
       if (stages.includes('embedding')) template.embedding = { provider: 'openai-compatible', baseUrl: document.getElementById('embeddingBaseUrl').value.trim(), model: document.getElementById('embeddingModel').value.trim(), concurrency: Number(document.getElementById('embeddingConcurrency').value) || 16, apiKeyEnv: 'EMBEDDING_API_KEY' };
       if (stages.includes('audio')) template.audio = { workflowDag: true, ttsConfig: document.getElementById('ttsConfig').value.trim(), llmChapters: Number(document.getElementById('llmChapters').value) || 1, ttsConcurrency: Number(document.getElementById('ttsConcurrency').value) || 16, ttsChapters: Number(document.getElementById('ttsChapters').value) || 1, resume: true, strict: true };
       if (stages.some(stage => ['publish','verify'].includes(stage))) template.gateway = { host: document.getElementById('gatewayHost').value.trim(), user: document.getElementById('gatewayUser').value.trim(), root: document.getElementById('gatewayRoot').value.trim(), url: document.getElementById('gatewayUrl').value.trim(), tokenEnv: document.getElementById('gatewayTokenEnv').value.trim() };
@@ -1749,6 +1806,13 @@ function renderConsoleHtml() {
       renderBookProduction();
     });
     document.getElementById('builderBook').addEventListener('change', renderBookProduction);
+    document.getElementById('llmProfile').addEventListener('change', selectModelProfile);
+    document.getElementById('addModelProfile').addEventListener('click', () => {
+      const next = state.modelProfiles.length + 1;
+      state.modelProfiles.push({ id: 'llm' + next, label: 'LLM ' + next, baseUrl: '', model: '', apiKeyEnv: '', fallback: false });
+      renderModelProfiles();
+    });
+    document.getElementById('saveModelProfiles').addEventListener('click', () => saveModelProfiles().catch(error => { document.getElementById('modelProfileFeedback').textContent = '保存失败：' + (error.message || String(error)); }));
     function updateDirectorConcurrency() {
       const total = Math.max(1, Number(document.getElementById('llmConcurrency').value) || 8);
       const chapters = Math.max(1, Number(document.getElementById('llmChapters').value) || 1);
@@ -2615,7 +2679,7 @@ function readRuntimeCredentials(path) {
   try {
     return Object.fromEntries(readFileSync(path, 'utf8').split(/\r?\n/).flatMap(line => {
       const match = /^([A-Z_][A-Z0-9_]*)=(.*)$/.exec(line.trim())
-      if (!match || !['LLM_API_KEY', 'EMBEDDING_API_KEY'].includes(match[1])) return []
+      if (!match || (!['LLM_API_KEY', 'EMBEDDING_API_KEY'].includes(match[1]) && !/^LLM_PROFILE_[A-Z0-9_]+_API_KEY$/.test(match[1]))) return []
       let value = match[2]
       try { value = JSON.parse(value) } catch {}
       return typeof value === 'string' && value ? [[match[1], value]] : []
@@ -2628,7 +2692,9 @@ function readRuntimeCredentials(path) {
 async function writeRuntimeCredentials(path, credentials) {
   await mkdir(dirname(path), { recursive: true })
   const tempPath = `${path}.${randomUUID()}.tmp`
-  const content = ['LLM_API_KEY', 'EMBEDDING_API_KEY']
+  const content = Object.keys(credentials)
+    .filter(key => ['LLM_API_KEY', 'EMBEDDING_API_KEY'].includes(key) || /^LLM_PROFILE_[A-Z0-9_]+_API_KEY$/.test(key))
+    .sort()
     .filter(key => readString(credentials[key]))
     .map(key => `${key}=${JSON.stringify(readString(credentials[key]))}`)
     .join('\n')
@@ -2642,6 +2708,42 @@ function runtimeCredentialStatus(config, credentials = readRuntimeCredentials(co
     llmCredential: Boolean(process.env.LLM_API_KEY || credentials.LLM_API_KEY),
     embeddingCredential: Boolean(process.env.EMBEDDING_API_KEY || credentials.EMBEDDING_API_KEY),
   }
+}
+
+function readModelProfiles(path) {
+  if (!existsSync(path)) return []
+  try {
+    return normalizeModelProfiles(JSON.parse(readFileSync(path, 'utf8')).profiles)
+  } catch {
+    return []
+  }
+}
+
+function normalizeModelProfiles(value) {
+  if (!Array.isArray(value)) return []
+  const seen = new Set()
+  return value.map((item, index) => {
+    const source = item && typeof item === 'object' ? item : {}
+    const id = readString(source.id).replace(/[^a-zA-Z0-9_-]/g, '').slice(0, 40) || `llm${index + 1}`
+    if (seen.has(id)) throw httpError(400, 'duplicate_model_profile', `模型配置名称重复：${id}`)
+    seen.add(id)
+    const baseUrl = readString(source.baseUrl)
+    const model = readString(source.model)
+    if (!baseUrl || !model) throw httpError(400, 'invalid_model_profile', `${id} 必须填写 Base URL 和模型名称。`)
+    return {
+      id,
+      label: readString(source.label) || id,
+      provider: 'openai-compatible',
+      baseUrl,
+      model,
+      apiKeyEnv: `LLM_PROFILE_${id.toUpperCase().replace(/[^A-Z0-9]/g, '_')}_API_KEY`,
+      fallback: source.fallback === true,
+      ...(readString(source.apiKey) ? { apiKey: readString(source.apiKey) } : {}),
+    }
+  }).map((profile, _index, profiles) => ({
+    ...profile,
+    fallback: profile.fallback && profiles.findIndex(item => item.fallback) === profiles.indexOf(profile),
+  }))
 }
 
 async function writeJsonAtomic(path, value) {

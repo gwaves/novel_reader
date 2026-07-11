@@ -1048,7 +1048,8 @@ async function runSummary(options) {
       provider,
       model,
       baseUrl,
-      apiKey: options.apiKey || process.env.LLM_API_KEY || process.env.OPENAI_API_KEY || '',
+      apiKey: options.apiKey || process.env[options.apiKeyEnv] || process.env.LLM_API_KEY || process.env.OPENAI_API_KEY || '',
+      fallback: parseLlmFallbackOption(options.fallbackConfig),
       temperature: Number.isFinite(Number(options.temperature)) ? Number(options.temperature) : 0,
       thinkingEnabled: !isFlagEnabled(options.disableThinking),
       timeoutMs,
@@ -1205,7 +1206,8 @@ async function runSummaryLocate(options) {
       provider,
       model,
       baseUrl,
-      apiKey: options.apiKey || process.env.LLM_API_KEY || process.env.OPENAI_API_KEY || '',
+      apiKey: options.apiKey || process.env[options.apiKeyEnv] || process.env.LLM_API_KEY || process.env.OPENAI_API_KEY || '',
+      fallback: parseLlmFallbackOption(options.fallbackConfig),
       temperature: Number.isFinite(Number(options.temperature)) ? Number(options.temperature) : 0,
       thinkingEnabled: !isFlagEnabled(options.disableThinking),
       timeoutMs,
@@ -1353,7 +1355,8 @@ async function runKg(options) {
       provider,
       model,
       baseUrl,
-      apiKey: options.apiKey || process.env.LLM_API_KEY || process.env.OPENAI_API_KEY || '',
+      apiKey: options.apiKey || process.env[options.apiKeyEnv] || process.env.LLM_API_KEY || process.env.OPENAI_API_KEY || '',
+      fallback: parseLlmFallbackOption(options.fallbackConfig),
       temperature: Number.isFinite(Number(options.temperature)) ? Number(options.temperature) : 0,
       thinkingEnabled: !isFlagEnabled(options.disableThinking),
       timeoutMs,
@@ -4076,6 +4079,8 @@ function buildStageArgs(stage, job, mainDbPath, runInfo, stageOptions = {}) {
       String(stageOptions.concurrency ?? summary.concurrency ?? 4),
     ]
     if (summary.apiKey) args.push('--api-key', summary.apiKey)
+    if (summary.apiKeyEnv) args.push('--api-key-env', summary.apiKeyEnv)
+    if (summary.fallback) args.push('--fallback-config', JSON.stringify(summary.fallback))
     if (summary.temperature !== undefined) args.push('--temperature', String(summary.temperature))
     if (summary.timeoutMs) args.push('--timeout-ms', String(summary.timeoutMs))
     if (summary.maxAttempts || summary.retries) args.push('--max-attempts', String(summary.maxAttempts || summary.retries))
@@ -4099,6 +4104,8 @@ function buildStageArgs(stage, job, mainDbPath, runInfo, stageOptions = {}) {
       String(stageOptions.concurrency ?? summaryLocate.concurrency ?? 4),
     ]
     if (summaryLocate.apiKey) args.push('--api-key', summaryLocate.apiKey)
+    if (summaryLocate.apiKeyEnv) args.push('--api-key-env', summaryLocate.apiKeyEnv)
+    if (summaryLocate.fallback) args.push('--fallback-config', JSON.stringify(summaryLocate.fallback))
     if (summaryLocate.temperature !== undefined) args.push('--temperature', String(summaryLocate.temperature))
     if (summaryLocate.timeoutMs) args.push('--timeout-ms', String(summaryLocate.timeoutMs))
     if (summaryLocate.maxAttempts || summaryLocate.retries) args.push('--max-attempts', String(summaryLocate.maxAttempts || summaryLocate.retries))
@@ -4122,6 +4129,8 @@ function buildStageArgs(stage, job, mainDbPath, runInfo, stageOptions = {}) {
       String(stageOptions.concurrency ?? kg.concurrency ?? 3),
     ]
     if (kg.apiKey) args.push('--api-key', kg.apiKey)
+    if (kg.apiKeyEnv) args.push('--api-key-env', kg.apiKeyEnv)
+    if (kg.fallback) args.push('--fallback-config', JSON.stringify(kg.fallback))
     if (kg.temperature !== undefined) args.push('--temperature', String(kg.temperature))
     if (kg.timeoutMs) args.push('--timeout-ms', String(kg.timeoutMs))
     if (kg.maxAttempts || kg.retries) args.push('--max-attempts', String(kg.maxAttempts || kg.retries))
@@ -4193,6 +4202,7 @@ function buildTtsLlmConfigFromJob(job) {
   if (llm.responseFormatJson !== undefined || llm.response_format_json !== undefined) {
     config.responseFormatJson = llm.responseFormatJson ?? llm.response_format_json
   }
+  if (isPlainRecord(llm.fallback)) config.fallback = llm.fallback
   return config
 }
 
@@ -4716,19 +4726,37 @@ async function callOpenAICompatibleChat(messages, config) {
     body.extra_body = { enable_thinking: false }
     body.chat_template_kwargs = { enable_thinking: false }
   }
-  const response = await fetch(`${baseUrl}/chat/completions`, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(config.timeoutMs),
-  })
+  let response
+  try {
+    response = await fetch(`${baseUrl}/chat/completions`, {
+      method: 'POST', headers, body: JSON.stringify(body), signal: AbortSignal.timeout(config.timeoutMs),
+    })
+  } catch (error) {
+    if (!config.fallback) throw error
+    console.warn(`LLM 主模型请求失败，切换兜底模型 ${config.fallback.model}: ${error.message}`)
+    return callOpenAICompatibleChat(messages, { ...config, ...config.fallback, fallback: null })
+  }
   if (!response.ok) {
+    if (config.fallback) {
+      console.warn(`LLM 主模型返回 ${response.status}，切换兜底模型 ${config.fallback.model}`)
+      return callOpenAICompatibleChat(messages, { ...config, ...config.fallback, fallback: null })
+    }
     const error = new Error(`OpenAI-compatible chat failed: ${response.status} ${response.statusText}`)
     error.status = response.status
     throw error
   }
   const data = await response.json()
   return data.choices?.[0]?.message?.content ?? ''
+}
+
+function parseLlmFallbackOption(value) {
+  const fallback = typeof value === 'string' ? safeJsonParse(value, null) : value
+  if (!isPlainRecord(fallback) || !fallback.baseUrl || !fallback.model) return null
+  return {
+    baseUrl: fallback.baseUrl,
+    model: fallback.model,
+    apiKey: fallback.apiKey || process.env[fallback.apiKeyEnv] || '',
+  }
 }
 
 async function callOllamaGenerate(prompt, config) {

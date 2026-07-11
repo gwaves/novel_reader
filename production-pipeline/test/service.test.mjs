@@ -127,6 +127,23 @@ describe('production pipeline console service', () => {
     assert.equal((await stat(credentialsPath)).mode & 0o777, 0o600)
   })
 
+  it('stores named LLM profiles and keeps profile API keys out of responses', async () => {
+    const app = await buildTestApp()
+    const response = await app.inject({
+      method: 'PUT', url: '/api/model-profiles',
+      payload: { profiles: [
+        { id: 'llm1', label: '主模型', baseUrl: 'http://llm1/v1', model: 'model-1', apiKey: 'profile-secret' },
+        { id: 'llm2', label: '兜底模型', baseUrl: 'http://llm2/v1', model: 'model-2', fallback: true },
+      ] },
+    })
+    assert.equal(response.statusCode, 200)
+    assert.equal(response.json().profiles[1].fallback, true)
+    assert.doesNotMatch(response.body, /profile-secret/)
+    const metadata = await app.inject({ method: 'GET', url: '/api/builder-metadata' })
+    assert.equal(metadata.json().modelProfiles[0].label, '主模型')
+    assert.match(await readFile(join(tempDirs.at(-1), 'credentials.env'), 'utf8'), /LLM_PROFILE_LLM1_API_KEY="profile-secret"/)
+  })
+
   it('requires bearer token when configured', async () => {
     const app = await buildTestApp({ PRODUCTION_PIPELINE_CONSOLE_TOKEN: 'secret' })
     const response = await app.inject({
