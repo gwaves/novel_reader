@@ -576,8 +576,8 @@ function buildDirectorPrompt({ config, book, chapter, preSegments, characterCand
 3. type 只能是 narration、dialogue、thought、stage。
 4. typeHint=dialogue 的片段通常是引号内对白，必须判断 speaker。
 5. narration 必须使用 speaker="旁白"，voice="${config.director.defaultNarrator.voice}"。
-6. speaker 只能来自候选角色、"旁白" 或 "未知角色"。
-7. 不确定说话人时用 speaker="未知角色"，confidence 不得超过 0.45。
+6. speaker 优先使用候选角色；若正文明确给出未进入候选表的姓名、身份或可区分的临时人物，可使用原文姓名或稳定标签（例如“于春儿”“看灯人甲”“圆社甲”），characterId=null，并从可用音色中选择 voice。禁止凭空编造人物。
+7. 只有上下文确实无法区分说话人时才用 speaker="未知角色"，confidence 不得超过 0.45；不要因为人物不在候选表中就直接标为未知角色。
 8. 角色内心独白可标为 thought；纯叙述不可误标为角色对白。
 9. evidence 必须说明依据，例如上下文中的“某某道”“被唤作某某”、候选角色别名或无法判断。
 
@@ -605,6 +605,9 @@ ${JSON.stringify(config.director.defaultNarrator, null, 2)}
 
 候选角色与音色：
 ${JSON.stringify(characterCandidates, null, 2)}
+
+可用音色：
+${JSON.stringify(config.tts.availableVoices, null, 2)}
 
 预切分片段：
 ${JSON.stringify(compactPreSegments(preSegments), null, 2)}
