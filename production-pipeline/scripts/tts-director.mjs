@@ -2126,8 +2126,12 @@ async function runAudioQcBatch(config, args) {
   const concurrency = Math.max(1, Math.floor(Number(args.concurrency || 8)))
   const results = []
   await runConcurrent(chapters, concurrency, async chapterIndex => {
-    const { audioDir } = getChapterOutputPaths(outRoot, chapterIndex, config.tts.finalFormat)
-    const { report, reportPath } = runAudioQc(config, { 'out-dir': audioDir })
+    const { audioDir, finalAudioPath } = getChapterOutputPaths(outRoot, chapterIndex, config.tts.finalFormat)
+    const assembledManifestPath = join(audioDir, 'manifest.json')
+    const completedAudio = args.resume === true && existsSync(finalAudioPath) && existsSync(assembledManifestPath)
+    const { report, reportPath } = completedAudio
+      ? verifyAssembledAudioQc(audioDir, finalAudioPath, assembledManifestPath)
+      : runAudioQc(config, { 'out-dir': audioDir })
     results.push({ chapterIndex, status: report.passed ? 'completed' : 'failed', reportPath, ...report })
   })
   results.sort((left, right) => left.chapterIndex - right.chapterIndex)
@@ -2138,6 +2142,43 @@ async function runAudioQcBatch(config, args) {
   console.log(`✅ 音频质检批量工序完成：${results.length}/${chapters.length}`)
   console.log(`   汇总文件：${summaryPath}`)
   return { results, summaryPath }
+}
+
+function verifyAssembledAudioQc(audioDir, finalAudioPath, assembledManifestPath) {
+  const segmentManifestPath = join(audioDir, 'segments-manifest.json')
+  if (!existsSync(segmentManifestPath)) throw new Error(`缺少 TTS 片段清单：${segmentManifestPath}`)
+  const segmentManifest = JSON.parse(readFileSync(segmentManifestPath, 'utf8'))
+  const assembledManifest = JSON.parse(readFileSync(assembledManifestPath, 'utf8'))
+  const segments = Array.isArray(segmentManifest.segments) ? segmentManifest.segments : []
+  const timeline = Array.isArray(assembledManifest.timeline) ? assembledManifest.timeline : []
+  const durationSeconds = probeAudioDurationSeconds(finalAudioPath)
+  const timelineValid = timeline.length === segments.length && timeline.every((item, index) => (
+    item.id === segments[index]?.id &&
+    Number.isFinite(Number(item.startTime)) &&
+    Number.isFinite(Number(item.endTime)) &&
+    Number(item.endTime) > Number(item.startTime)
+  ))
+  const passed = segments.length > 0 && durationSeconds > 0 && timelineValid
+  const report = {
+    kind: 'novel-reader-tts-audio-qc',
+    version: 2,
+    generatedAt: new Date().toISOString(),
+    verificationMode: 'assembled-final-audio',
+    sourceManifest: segmentManifestPath,
+    assembledManifest: assembledManifestPath,
+    finalAudio: finalAudioPath,
+    finalDurationSeconds: durationSeconds,
+    totalSegments: segments.length,
+    passedSegments: passed ? segments.length : 0,
+    failedSegments: passed ? 0 : segments.length,
+    passed,
+    results: timeline.map(item => ({ id: item.id, status: passed ? 'passed' : 'failed', durationSeconds: item.speechDuration })),
+  }
+  const reportPath = join(audioDir, 'audio-qc.json')
+  writeFileSync(reportPath, `${JSON.stringify(report, null, 2)}\n`, 'utf8')
+  console.log(`🩺 已拼接音频质检：通过 ${report.passedSegments}/${report.totalSegments}，最终时长 ${durationSeconds.toFixed(2)}s`)
+  console.log(`   质检文件：${reportPath}`)
+  return { report, reportPath }
 }
 
 async function runAssembleBatch(config, args) {
