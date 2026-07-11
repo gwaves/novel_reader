@@ -2210,6 +2210,7 @@ async function runBatchPipeline(config, args) {
   const results = []
   const audits = []
   const synthPromises = []
+  const pipelineFailures = []
   let activeSynthCount = 0
   let adaptiveBatchSize = initialBatchSize
   let adaptiveDirectorConcurrency = initialDirectorConcurrency
@@ -2290,11 +2291,11 @@ async function runBatchPipeline(config, args) {
         }
       }
       console.log(`✅ 第 ${chapterIndex} 章 TTS 完成，用时 ${elapsedSeconds}s`)
-      return { ok: true }
+      return { ok: true, chapterIndex }
     })()
       .catch(error => {
         error.message = `第 ${chapterIndex} 章 TTS 失败：${error.message}`
-        return { ok: false, error }
+        return { ok: false, chapterIndex, stage: 'tts', error }
       })
       .finally(releaseSynthSlot)
     synthPromises.push(synthPromise)
@@ -2333,45 +2334,65 @@ async function runBatchPipeline(config, args) {
   }
 
   await runDynamicConcurrent(chapters, () => runtimeControl.current().llmChapters, async (chapterIndex) => {
-    const { scriptPath, audioDir, finalAudioPath } = getChapterOutputPaths(outRoot, chapterIndex, config.tts.finalFormat)
-    if (resume && existsSync(finalAudioPath)) {
-      console.log(`⏭️  第 ${chapterIndex} 章已存在 MP3，跳过：${finalAudioPath}`)
-      results.push({ chapterIndex, scriptPath, audioDir, status: 'skipped-audio-exists', elapsedSeconds: 0 })
-      return
-    }
+    try {
+      const { scriptPath, audioDir, finalAudioPath } = getChapterOutputPaths(outRoot, chapterIndex, config.tts.finalFormat)
+      if (resume && existsSync(finalAudioPath)) {
+        console.log(`⏭️  第 ${chapterIndex} 章已存在 MP3，跳过：${finalAudioPath}`)
+        results.push({ chapterIndex, scriptPath, audioDir, status: 'skipped-audio-exists', elapsedSeconds: 0 })
+        return
+      }
 
-    if (kgLeadChapters > 0) {
-      const position = chapters.indexOf(chapterIndex)
-      const targetChapterIndex = chapters[Math.min(chapters.length - 1, position + kgLeadChapters - 1)]
-      await waitForOrderedKgLead(config, bookId, targetChapterIndex, chapterIndex)
-    }
+      if (kgLeadChapters > 0) {
+        const position = chapters.indexOf(chapterIndex)
+        const targetChapterIndex = chapters[Math.min(chapters.length - 1, position + kgLeadChapters - 1)]
+        await waitForOrderedKgLead(config, bookId, targetChapterIndex, chapterIndex)
+      }
 
-    let script = null
-    const existing = resume ? loadValidScript(scriptPath) : null
-    if (existing) {
-      script = existing.script
-      console.log(`♻️  第 ${chapterIndex} 章复用已有导演脚本：${scriptPath}`)
-    } else {
-      const draftStarted = Date.now()
-      console.log(`\n🎬 第 ${chapterIndex} 章进入 LLM 阶段`)
-      const draftResult = await draftWithFallback(chapterIndex, scriptPath)
-      script = draftResult.script
-      const draftElapsed = Math.round((Date.now() - draftStarted) / 1000)
-      console.log(`✅ 第 ${chapterIndex} 章 LLM 阶段完成，用时 ${draftElapsed}s，进入 TTS 阶段`)
+      let script = null
+      const existing = resume ? loadValidScript(scriptPath) : null
+      if (existing) {
+        script = existing.script
+        console.log(`♻️  第 ${chapterIndex} 章复用已有导演脚本：${scriptPath}`)
+      } else {
+        const draftStarted = Date.now()
+        console.log(`\n🎬 第 ${chapterIndex} 章进入 LLM 阶段`)
+        const draftResult = await draftWithFallback(chapterIndex, scriptPath)
+        script = draftResult.script
+        const draftElapsed = Math.round((Date.now() - draftStarted) / 1000)
+        console.log(`✅ 第 ${chapterIndex} 章 LLM 阶段完成，用时 ${draftElapsed}s，进入 TTS 阶段`)
+      }
+      let auditResult = writeAuditReport(config, scriptPath, script)
+      let strictFailures = args.strict === true ? strictAuditFailures(config, auditResult.audit) : []
+      const maxAuditRepairAttempts = Math.max(1, Math.floor(finiteNumber(config.director?.auditRepairAttempts, 2)))
+      for (let attempt = 1; strictFailures.length && attempt <= maxAuditRepairAttempts; attempt += 1) {
+        console.warn(`⚠️  第 ${chapterIndex} 章导演脚本质检失败：${strictFailures[0]}`)
+        console.warn(`   自动重新生成并复检 ${attempt}/${maxAuditRepairAttempts}；其他章节不会因此停止。`)
+        const draftResult = await draftWithFallback(chapterIndex, scriptPath)
+        script = draftResult.script
+        auditResult = writeAuditReport(config, scriptPath, script)
+        strictFailures = strictAuditFailures(config, auditResult.audit)
+      }
+      if (strictFailures.length) {
+        throw new Error(`第 ${chapterIndex} 章导演脚本质检失败：${strictFailures[0]}`)
+      }
+      audits.push({ chapterIndex, auditPath: auditResult.auditPath, warnings: auditResult.audit.warnings })
+      launchSynth(chapterIndex, scriptPath, audioDir)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      pipelineFailures.push({ chapterIndex, stage: 'directorDraft', message })
+      console.error(`❌ 第 ${chapterIndex} 章已加入失败队列，流水线继续处理其他章节：${message}`)
     }
-    const auditResult = writeAuditReport(config, scriptPath, script)
-    const strictFailures = args.strict === true ? strictAuditFailures(config, auditResult.audit) : []
-    if (strictFailures.length) {
-      throw new Error(`第 ${chapterIndex} 章导演脚本质检失败：${strictFailures[0]}`)
-    }
-    audits.push({ chapterIndex, auditPath: auditResult.auditPath, warnings: auditResult.audit.warnings })
-    launchSynth(chapterIndex, scriptPath, audioDir)
   })
 
   console.log('\n⏳ 所有章节已完成 LLM 阶段，等待剩余 TTS 收尾。')
   const outcomes = await Promise.all(synthPromises)
-  const failed = outcomes.find(outcome => !outcome.ok)
-  if (failed) throw failed.error
+  for (const outcome of outcomes) {
+    if (!outcome.ok) pipelineFailures.push({
+      chapterIndex: outcome.chapterIndex,
+      stage: outcome.stage,
+      message: outcome.error.message,
+    })
+  }
   results.sort((a, b) => a.chapterIndex - b.chapterIndex)
   const batchMetricsSummary = summarizeBatchTtsMetrics(results)
   const elapsedSeconds = Math.round((Date.now() - startedAt) / 1000)
@@ -2392,10 +2413,17 @@ async function runBatchPipeline(config, args) {
     control: runtimeControl.path ? { path: runtimeControl.path, final: runtimeControl.current() } : null,
     results,
     audits,
+    failures: pipelineFailures.sort((a, b) => a.chapterIndex - b.chapterIndex),
     metricsSummary: batchMetricsSummary,
   }
   const summaryPath = join(outRoot, `batch-pipeline-${chapters[0]}-${chapters.at(-1)}.summary.json`)
   writeFileSync(summaryPath, `${JSON.stringify(summary, null, 2)}\n`, 'utf8')
+  if (pipelineFailures.length) {
+    console.error(`❌ 批量流水线已处理完全部可运行章节，仍有 ${pipelineFailures.length} 个章节失败。`)
+    for (const failure of pipelineFailures) console.error(`   第 ${failure.chapterIndex} 章 [${failure.stage}] ${failure.message}`)
+    console.error(`   失败汇总：${summaryPath}`)
+    throw new Error(`批量流水线存在 ${pipelineFailures.length} 个未解决章节；其他章节已继续生产，详见 ${summaryPath}`)
+  }
   console.log(`✅ 批量流水线完成，总用时 ${elapsedSeconds}s`)
   console.log(`   汇总文件：${summaryPath}`)
 }
