@@ -66,6 +66,18 @@ export function locateSummaryKeyPointSources(chapterContent, keyPoints, hints = 
         locator: fallback.locator,
       }
     }
+    const fuzzyFallback = locateKeyPointByCharacterOverlap(content, text)
+    if (fuzzyFallback) {
+      return {
+        index,
+        text,
+        startOffset: fuzzyFallback.startOffset,
+        endOffset: fuzzyFallback.endOffset,
+        quote: content.slice(fuzzyFallback.startOffset, fuzzyFallback.endOffset),
+        confidence: fuzzyFallback.confidence,
+        locator: fuzzyFallback.locator,
+      }
+    }
     return null
   }).filter(Boolean)
 }
@@ -152,6 +164,71 @@ function locateKeyPointByTerms(content, keyPoint) {
     confidence: Math.max(0.45, Math.min(0.78, 0.42 + best.coverage * 0.4)),
     locator: 'terms',
   }
+}
+
+function locateKeyPointByCharacterOverlap(content, keyPoint) {
+  const keyChars = meaningfulHanCharacters(keyPoint)
+  if (keyChars.size < 4) return null
+  const keyBigrams = hanBigrams(keyPoint)
+  const ranges = splitSentenceWindowRanges(content)
+  let best = null
+  for (const range of ranges) {
+    const rangeChars = meaningfulHanCharacters(range.text)
+    const charMatches = intersectionSize(keyChars, rangeChars)
+    if (charMatches < 3) continue
+    const rangeBigrams = hanBigrams(range.text)
+    const bigramMatches = intersectionSize(keyBigrams, rangeBigrams)
+    const score = bigramMatches * 4 + charMatches - Math.max(0, range.text.length - 100) / 100
+    if (!best || score > best.score) best = { range, score, charMatches, bigramMatches }
+  }
+  if (!best || (best.bigramMatches < 1 && best.charMatches < 5)) return null
+  return {
+    startOffset: best.range.startOffset,
+    endOffset: best.range.endOffset,
+    confidence: Math.min(0.55, 0.3 + best.bigramMatches * 0.025 + best.charMatches * 0.01),
+    locator: 'fuzzy-character-overlap',
+  }
+}
+
+function splitSentenceWindowRanges(content) {
+  const value = String(content || '')
+  const sentences = []
+  const pattern = /[^。！？!?；;\n]+[。！？!?；;]?/gu
+  for (const match of value.matchAll(pattern)) {
+    const raw = match[0]
+    const trimmed = raw.trim()
+    if (!trimmed) continue
+    const trimStart = raw.indexOf(trimmed)
+    sentences.push({ text: trimmed, startOffset: match.index + trimStart, endOffset: match.index + trimStart + trimmed.length })
+  }
+  const ranges = []
+  for (let index = 0; index < sentences.length; index += 1) {
+    let text = ''
+    let endOffset = sentences[index].endOffset
+    for (let cursor = index; cursor < sentences.length && text.length < 140; cursor += 1) {
+      text += sentences[cursor].text
+      endOffset = sentences[cursor].endOffset
+      if (text.length >= 30) ranges.push({ text, startOffset: sentences[index].startOffset, endOffset })
+    }
+  }
+  return ranges
+}
+
+function meaningfulHanCharacters(value) {
+  return new Set(Array.from(String(value || '').replace(/[本章节人物事件主要关键显示暗示体现相关情况进行通过以及一个]/gu, '')).filter(char => /[\p{Script=Han}]/u.test(char)))
+}
+
+function hanBigrams(value) {
+  const chars = Array.from(String(value || '')).filter(char => /[\p{Script=Han}]/u.test(char))
+  const result = new Set()
+  for (let index = 0; index < chars.length - 1; index += 1) result.add(chars[index] + chars[index + 1])
+  return result
+}
+
+function intersectionSize(left, right) {
+  let count = 0
+  for (const item of left) if (right.has(item)) count += 1
+  return count
 }
 
 function extractKeyPointTerms(keyPoint) {
