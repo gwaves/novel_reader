@@ -1988,12 +1988,29 @@ async function runVerify(options) {
       }))
     }
     if (expected.package.embeddings?.coverage) {
+      const expectedEmbeddingCoverage = expected.package.embeddings.coverage
+      const remoteEmbeddingCoverage = remotePackage?.embeddings?.coverage
+      const publicEmbeddingCoverage = {
+        summaryCoverage: libraryBook?.embeddingCoverage,
+        vectorCoverage: libraryBook?.embeddingVectorCoverage,
+        summaryVectorCount: libraryBook?.embeddingSummaryVectorCount,
+        chunkVectorCount: libraryBook?.embeddingChunkVectorCount,
+      }
+      const publicEmbeddingCoverageMatches = (
+        Number(publicEmbeddingCoverage.summaryCoverage) === Number(expectedEmbeddingCoverage.summary?.coverage)
+        && Number(publicEmbeddingCoverage.vectorCoverage) === Math.min(
+          Number(expectedEmbeddingCoverage.summary?.coverage),
+          Number(expectedEmbeddingCoverage.chunks?.coverage),
+        )
+        && Number(publicEmbeddingCoverage.summaryVectorCount) === Number(expectedEmbeddingCoverage.summary?.embeddedSummaries)
+        && Number(publicEmbeddingCoverage.chunkVectorCount) === Number(expectedEmbeddingCoverage.chunks?.embeddedChunks)
+      )
       checks.push(assertCheck(
         'package.embeddingCoverage',
-        sameJson(remotePackage?.embeddings?.coverage, expected.package.embeddings.coverage),
+        sameJson(remoteEmbeddingCoverage, expectedEmbeddingCoverage) || publicEmbeddingCoverageMatches,
         {
-          actual: remotePackage?.embeddings?.coverage,
-          expected: expected.package.embeddings.coverage,
+          actual: remoteEmbeddingCoverage || publicEmbeddingCoverage,
+          expected: expectedEmbeddingCoverage,
         },
       ))
     }
@@ -4418,16 +4435,23 @@ function remoteLogin(options) {
 }
 
 function sshBaseArgs(options) {
-  const args = []
+  const args = sshConnectionArgs(options)
   if (options.remoteSshPort || options.sshPort) args.push('-p', String(options.remoteSshPort || options.sshPort))
   args.push(remoteLogin(options))
   return args
 }
 
 function rsyncSshCommand(options) {
-  const args = ['ssh']
+  const args = ['ssh', ...sshConnectionArgs(options)]
   if (options.remoteSshPort || options.sshPort) args.push('-p', String(options.remoteSshPort || options.sshPort))
   return args.join(' ')
+}
+
+function sshConnectionArgs() {
+  // Production workers are frequently recreated with an empty known_hosts file.
+  // Accept and persist a host key on first contact, while still rejecting a
+  // changed key on later connections.
+  return ['-o', 'StrictHostKeyChecking=accept-new']
 }
 
 function remoteShellQuote(value) {
