@@ -161,14 +161,17 @@ async function runImport(options) {
       metadata: { chapterCount: chapters.length, sourceSha256: sha256 },
     })
 
+    let importResult = { reused: false }
     if (!isFlagEnabled(options.dryRun)) {
-      await writeBookToMainDb(mainDbPath, {
+      importResult = await writeBookToMainDb(mainDbPath, {
         id: bookId,
         title,
         importedAt,
         chapters,
         replace: isFlagEnabled(options.replace),
       })
+      importReport.reused = importResult.reused
+      await writeJson(join(run.artifactsDir, 'import-report.json'), importReport)
     }
 
     const finishedAt = new Date().toISOString()
@@ -197,7 +200,9 @@ async function runImport(options) {
           finishedAt,
           message: isFlagEnabled(options.dryRun)
             ? `dry-run parsed ${chapters.length} chapters.`
-            : `imported ${chapters.length} chapters.`,
+            : importResult.reused
+              ? `reused existing identical import with ${chapters.length} chapters.`
+              : `imported ${chapters.length} chapters.`,
           artifacts: {
             importReport: relativeRunPath(run.rootDir, join(run.artifactsDir, 'import-report.json')),
             chapterPreview: relativeRunPath(run.rootDir, join(run.artifactsDir, 'chapter-preview.json')),
@@ -209,6 +214,7 @@ async function runImport(options) {
     console.log(`run: ${run.runId}`)
     console.log(`book: ${bookId} ${title}`)
     console.log(`chapters: ${chapters.length}`)
+    if (importResult.reused) console.log('import: identical book already exists; reused existing main DB records')
     console.log(`runDir: ${run.rootDir}`)
     if (isFlagEnabled(options.dryRun)) console.log('dry-run: main database was not modified')
   } catch (error) {
@@ -458,6 +464,7 @@ async function executeJobStageWithTracking({ stage, runInfo, job, mainDbPath, co
   } catch (error) {
     const finishedAt = new Date().toISOString()
     stageResults[stage] = {
+      ...(stageResults[stage] || {}),
       status: 'failed',
       startedAt,
       finishedAt,
@@ -482,7 +489,7 @@ async function initializeRuntimeControls({ job, runInfo, stages, stageOptions, s
 }
 
 async function initializeAudioRuntimeControl({ job, runInfo, stages, stageOptions, stageResults, scheduler }) {
-  if (!stages.includes('audio')) return
+  if (!stages.some(stage => ['audio', 'directorDraft', 'directorQc', 'ttsSegments', 'audioQc', 'audioAssemble'].includes(stage))) return
   const audio = job.audio || {}
   if (audio.controlFile || audio.control_file) return
   const controlFile = join(runInfo.rootDir, 'artifacts', 'runtime', 'audio-control.json')
@@ -511,7 +518,7 @@ async function updateRuntimeControls({ job, runInfo, stageResults }) {
 async function updateAudioRuntimeControl({ job, scheduler, stageResults }) {
   const audio = job.audio || {}
   const controlFile = audio.controlFile || audio.control_file
-  if (!controlFile || stageResults.audio?.status !== 'running') return
+  if (!controlFile || !isAudioPipelineRunning(stageResults)) return
   await writeAudioControlFile(controlFile, buildAudioRuntimeControl({ job, scheduler, stageResults }))
 }
 
@@ -524,7 +531,7 @@ async function updateKgRuntimeControl({ job, scheduler, stageResults }) {
 
 function buildAudioRuntimeControl({ job, scheduler, stageResults, stageOptions = {} }) {
   const audio = job.audio || {}
-  const audioOptions = stageOptions.audio || {}
+  const audioOptions = stageOptions.audio || stageOptions.directorDraft || {}
   const llmChapters = clampInteger(audioOptions.llmChapters ?? audio.llmChapters ?? audio.llm_chapters, 1, 1, 32)
   return {
     directorConcurrency: computeAudioRuntimeDirectorConcurrency({ scheduler, stageResults, stageOptions, audioOptions, llmChapters }),
@@ -536,7 +543,7 @@ function buildAudioRuntimeControl({ job, scheduler, stageResults, stageOptions =
 }
 
 function computeAudioRuntimeDirectorConcurrency({ scheduler, stageResults, stageOptions = {}, audioOptions = {}, llmChapters = 1 }) {
-  if (stageResults.audio?.status !== 'running') {
+  if (!isAudioPipelineRunning(stageResults)) {
     return clampInteger(audioOptions.directorConcurrency, 1, 1, scheduler.concurrency)
   }
   const fixedLlmSlots = ['summary', 'kg']
@@ -567,14 +574,20 @@ function computeKgRuntimeConcurrency({ scheduler, stageResults, stageOptions = {
   if (stageResults.kg?.status !== 'running') {
     return clampInteger(kgOptions.concurrency, 1, 1, scheduler.concurrency)
   }
-  const fixedAudioSlots = stageResults.audio?.status === 'running'
-    ? Math.max(1, Number(stageResults.audio?.schedulerConcurrency || stageOptions.audio?.directorConcurrency || 1))
+  const runningAudioStage = ['audio', 'directorDraft', 'directorQc', 'ttsSegments', 'audioQc', 'audioAssemble'].find(stage => stageResults[stage]?.status === 'running')
+  const fixedAudioSlots = runningAudioStage
+    ? Math.max(1, Number(stageResults[runningAudioStage]?.schedulerConcurrency || stageOptions.directorDraft?.directorConcurrency || stageOptions.audio?.directorConcurrency || 1))
     : 0
   const fixedSummarySlots = stageResults.summary?.status === 'running'
     ? Math.max(1, Number(stageResults.summary?.schedulerConcurrency || stageOptions.summary?.concurrency || 1))
     : 0
   const available = Math.max(1, scheduler.concurrency - fixedAudioSlots - fixedSummarySlots)
   return Math.min(scheduler.concurrency, available)
+}
+
+function isAudioPipelineRunning(stageResults) {
+  return ['audio', 'directorDraft', 'directorQc', 'ttsSegments', 'audioQc', 'audioAssemble']
+    .some(stage => stageResults[stage]?.status === 'running')
 }
 
 async function writeKgControlFile(controlFile, control) {
@@ -647,8 +660,15 @@ async function executeAudioWorkflowStage({ stage, runInfo, job, mainDbPath, stag
   }, { artifactsDir: join(runInfo.rootDir, 'artifacts') })
   const chapters = await resolveAudioWorkflowChapters(job, mainDbPath)
   const outRoot = audioWorkflowOutRoot(job, runInfo)
+  if (stage === 'directorDraft' && safeArray(job.stages).includes('kg')) {
+    const warmupChapters = clampInteger(audio.kgWarmupChapters ?? audio.kg_warmup_chapters, 2, 1, 1000)
+    await waitForKgWarmup({ mainDbPath, bookId: job.bookId, chapters, warmupChapters })
+  }
   const command = {
-    directorDraft: 'draft-batch',
+    // The first split-DAG stage owns the chapter pipeline. Each completed
+    // director script immediately flows through audit, TTS, audio QC and
+    // assembly; the later stages remain as idempotent reconciliation passes.
+    directorDraft: 'batch-pipeline',
     directorQc: 'audit-batch',
     ttsSegments: 'synth-segments-batch',
     audioQc: 'audio-qc-batch',
@@ -661,12 +681,18 @@ async function executeAudioWorkflowStage({ stage, runInfo, job, mainDbPath, stag
     if (audio.batchSize || audio.batch_size) args.push('--batch-size', String(audio.batchSize || audio.batch_size))
     args.push('--director-concurrency', String(stageOptions.directorConcurrency || audio.directorConcurrency || audio.director_concurrency || 1))
     args.push('--llm-chapters', String(stageOptions.llmChapters || audio.llmChapters || audio.llm_chapters || 1))
+    args.push('--tts-concurrency', String(audio.ttsConcurrency || audio.tts_concurrency || 16))
+    args.push('--tts-chapters', String(audio.ttsChapters || audio.tts_chapters || 2))
+    if (safeArray(job.stages).includes('kg')) args.push('--kg-lead-chapters', String(audio.kgWarmupChapters ?? audio.kg_warmup_chapters ?? 2))
+    if (isFlagEnabled(audio.strict)) args.push('--strict')
+    if (audio.controlFile || audio.control_file) args.push('--control-file', audio.controlFile || audio.control_file)
   } else if (stage === 'directorQc') {
     args.push('--concurrency', String(audio.qcConcurrency || audio.qc_concurrency || 8))
     if (isFlagEnabled(audio.strict)) args.push('--strict')
   } else if (stage === 'ttsSegments') {
     args.push('--tts-concurrency', String(audio.ttsConcurrency || audio.tts_concurrency || 16))
     args.push('--tts-chapters', String(audio.ttsChapters || audio.tts_chapters || 2))
+    if (audio.controlFile || audio.control_file) args.push('--control-file', audio.controlFile || audio.control_file)
   } else {
     args.push('--concurrency', String(stage === 'audioQc' ? (audio.audioQcConcurrency || audio.audio_qc_concurrency || 8) : (audio.assembleConcurrency || audio.assemble_concurrency || 2)))
   }
@@ -678,6 +704,41 @@ async function executeAudioWorkflowStage({ stage, runInfo, job, mainDbPath, stag
   await onChildStart?.(child)
   await execFileStreaming(process.execPath, args, logFile)
   return { message: `completed ${stage}.`, logFile: child.logFile, outRoot, chapters }
+}
+
+async function waitForKgWarmup({ mainDbPath, bookId, chapters, warmupChapters }) {
+  const requestedChapters = parseChapterRange(chapters)
+  const target = Math.min(Math.max(1, requestedChapters.length), warmupChapters)
+  console.log(`audio pipeline: waiting for KG warmup ${target} chapter(s)`)
+  while (true) {
+    let completed = 0
+    const DatabaseSync = await loadDatabaseSync()
+    const db = new DatabaseSync(expandPath(mainDbPath), { readOnly: true })
+    try {
+      const exists = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'kg_chapter_extractions'").get()
+      if (exists) completed = Number(db.prepare("SELECT COUNT(DISTINCT chapter_id) AS count FROM kg_chapter_extractions WHERE book_id = ? AND status = 'completed'").get(bookId)?.count) || 0
+    } catch (error) {
+      if (!/locked|busy/i.test(error.message)) throw error
+    } finally {
+      db.close()
+    }
+    if (completed >= target) {
+      console.log(`audio pipeline: KG warmup ready ${completed}/${target}`)
+      return
+    }
+    await new Promise(resolve => setTimeout(resolve, 1000))
+  }
+}
+
+function parseChapterRange(value) {
+  const chapters = []
+  for (const part of String(value || '').split(',')) {
+    const range = part.trim().match(/^(\d+)-(\d+)$/)
+    if (range) {
+      for (let chapter = Number(range[1]); chapter <= Number(range[2]); chapter += 1) chapters.push(chapter)
+    } else if (/^\d+$/.test(part.trim())) chapters.push(Number(part.trim()))
+  }
+  return [...new Set(chapters)]
 }
 
 async function resolveAudioWorkflowChapters(job, mainDbPath) {
@@ -2701,8 +2762,9 @@ async function writeBookToMainDb(dbPath, book) {
   try {
     configureSqliteConnection(db)
     ensureMainDbSchema(db)
-    const existing = db.prepare('SELECT id FROM books WHERE id = ?').get(book.id)
+    const existing = db.prepare('SELECT id, title, chapter_count FROM books WHERE id = ?').get(book.id)
     if (existing && !book.replace) {
+      if (isExistingBookIdentical(db, existing, book)) return { reused: true }
       throw new Error(`Book already exists: ${book.id}. Use --replace to overwrite.`)
     }
 
@@ -2723,6 +2785,7 @@ async function writeBookToMainDb(dbPath, book) {
       insertChapter.run(chapter.id, book.id, chapter.index, chapter.title, chapter.content, chapter.wordCount)
     }
     db.exec('COMMIT')
+    return { reused: false }
   } catch (error) {
     try {
       db.exec('ROLLBACK')
@@ -2733,6 +2796,25 @@ async function writeBookToMainDb(dbPath, book) {
   } finally {
     db.close()
   }
+}
+
+function isExistingBookIdentical(db, existing, book) {
+  if (String(existing.title || '') !== String(book.title || '') || Number(existing.chapter_count) !== book.chapters.length) return false
+  const rows = db.prepare(`
+    SELECT id, chapter_index, title, content, word_count
+    FROM chapters
+    WHERE book_id = ?
+    ORDER BY chapter_index ASC
+  `).all(book.id)
+  if (rows.length !== book.chapters.length) return false
+  return rows.every((row, index) => {
+    const chapter = book.chapters[index]
+    return row.id === chapter.id
+      && Number(row.chapter_index) === chapter.index
+      && String(row.title || '') === chapter.title
+      && String(row.content || '') === chapter.content
+      && Number(row.word_count) === chapter.wordCount
+  })
 }
 
 async function openMainDbForEmbedding(dbPath) {
@@ -3909,9 +3991,9 @@ function normalizeLlmScheduler(job) {
   const concurrency = clampInteger(scheduler.concurrency ?? llm.concurrency, 0, 1, 256)
   if (!concurrency) return null
   const weights = {
-    summary: 4,
-    kg: 2,
-    audio: 1,
+    summary: 2,
+    kg: 4,
+    audio: 4,
     ...(scheduler.weights || scheduler.stageWeights || scheduler.stage_weights || {}),
   }
   if (job.audio?.workflowDag || job.audio?.workflow_dag) weights.directorDraft = weights.audio

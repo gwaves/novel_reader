@@ -6,7 +6,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { execFile, spawn } from 'node:child_process'
 import { EventEmitter } from 'node:events'
 import { createReadStream, createWriteStream, existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
-import { mkdir, readFile, readdir, rename, stat, unlink, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, readFile, readdir, rename, stat, unlink, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { basename, dirname, extname, resolve } from 'node:path'
 import { backup, DatabaseSync } from 'node:sqlite'
@@ -53,6 +53,7 @@ export function loadServiceConfig(env = process.env) {
     maxConcurrentJobs: readPositiveInteger(env.PRODUCTION_PIPELINE_MAX_CONCURRENT_JOBS, 1),
     autoResumeInterrupted: env.PRODUCTION_PIPELINE_AUTO_RESUME_INTERRUPTED !== 'false',
     eventLogFile: resolve(dataDir, 'events.jsonl'),
+    credentialsFile: resolve(env.PRODUCTION_PIPELINE_CREDENTIALS_FILE || resolve(dataDir, 'credentials.env')),
     jobsDir: resolve(env.PRODUCTION_PIPELINE_JOBS_DIR || joinPath('production-pipeline', 'config')),
     sourcesDir: resolve(env.PRODUCTION_PIPELINE_SOURCES_DIR || joinPath('tmp', 'production-pipeline-service', 'sources')),
     backupsDir: resolve(env.PRODUCTION_PIPELINE_BACKUPS_DIR || joinPath('tmp', 'production-pipeline-service', 'backups')),
@@ -190,14 +191,29 @@ export async function buildProductionPipelineService(config = loadServiceConfig(
       gateway: { host: '192.168.88.100', user: 'gwaves', root: '/home/gwaves/novel-reader-gateway', url: 'http://192.168.88.100:6180', tokenEnv: 'GATEWAY_TOKEN' },
     },
     environmentStatus: {
-      llmCredential: Boolean(process.env.LLM_API_KEY),
-      embeddingCredential: Boolean(process.env.EMBEDDING_API_KEY),
+      llmCredential: Boolean(process.env.LLM_API_KEY || readRuntimeCredentials(config.credentialsFile).LLM_API_KEY),
+      embeddingCredential: Boolean(process.env.EMBEDDING_API_KEY || readRuntimeCredentials(config.credentialsFile).EMBEDDING_API_KEY),
       gatewayToken: Boolean(process.env.GATEWAY_TOKEN),
       gatewayAdminToken: Boolean(process.env.GATEWAY_ADMIN_TOKEN),
       ttsConfig: existsSync('/home/node/.novel_reader/tts-director.config.json'),
       mainDatabase: existsSync(config.mainDbPath),
     },
   }))
+
+  app.put('/api/runtime-credentials', async (request) => {
+    const body = readObjectBody(request.body)
+    const current = readRuntimeCredentials(config.credentialsFile)
+    const next = { ...current }
+    const updated = []
+    if (body.clearLlm === true) { delete next.LLM_API_KEY; updated.push('LLM_API_KEY cleared') }
+    else if (readString(body.llmApiKey)) { next.LLM_API_KEY = readString(body.llmApiKey); updated.push('LLM_API_KEY updated') }
+    if (body.clearEmbedding === true) { delete next.EMBEDDING_API_KEY; updated.push('EMBEDDING_API_KEY cleared') }
+    else if (readString(body.embeddingApiKey)) { next.EMBEDDING_API_KEY = readString(body.embeddingApiKey); updated.push('EMBEDDING_API_KEY updated') }
+    if (!updated.length) throw httpError(400, 'credential_update_required', '请输入要保存的 API Key，或选择清除现有凭据。')
+    await writeRuntimeCredentials(config.credentialsFile, next)
+    request.log.info({ updated }, 'production runtime credentials updated')
+    return { environmentStatus: runtimeCredentialStatus(config, next), updated }
+  })
 
   app.get('/api/templates/:name', async (request) => {
     const fileName = safeManagedFileName(request.params.name, new Set(['.json']))
@@ -379,6 +395,19 @@ export async function buildProductionPipelineService(config = loadServiceConfig(
     const job = await store.retryJob(request.params.jobId)
     store.schedule(app.log)
     reply.status(202).send(await store.readJobResponse(job.id))
+  })
+
+  app.patch('/api/jobs/:jobId/runtime-concurrency', async (request) => {
+    const job = store.getJob(request.params.jobId)
+    if (!job) throw httpError(404, 'job_not_found', `Job not found: ${request.params.jobId}`)
+    if (job.readOnly) throw httpError(409, 'job_read_only', '发现的历史任务不能修改运行并发。')
+    if (job.status !== 'running') throw httpError(409, 'job_not_running', '只有运行中的任务可以调整并发。')
+    const productionRun = await readProductionRunState(job)
+    if (!productionRun?.runDir || !productionRun.runJson) throw httpError(404, 'production_run_not_found', `Production run not found for job: ${job.id}`)
+    const updated = await updateRuntimeConcurrency(productionRun.runDir, productionRun.runJson, readObjectBody(request.body))
+    await store.appendEvent(job, 'job.concurrency.updated', 'info', `运行并发已更新：${formatRuntimeConcurrencyUpdate(updated)}`)
+    await store.persistAndEmit(job)
+    return { jobId: job.id, updatedAt: updated.updatedAt, concurrency: await readRuntimeConcurrency(productionRun.runDir, productionRun.runJson) }
   })
 
   app.delete('/api/jobs/:jobId', async (request, reply) => {
@@ -808,7 +837,7 @@ function runCommand(store, job, commandSpec) {
   return new Promise((resolvePromise, rejectPromise) => {
     const child = spawn(commandSpec.command, commandSpec.args, {
       cwd: commandSpec.cwd,
-      env: process.env,
+      env: { ...process.env, ...readRuntimeCredentials(store.config.credentialsFile) },
       stdio: ['ignore', 'pipe', 'pipe'],
       detached: process.platform !== 'win32',
     })
@@ -863,7 +892,7 @@ function renderConsoleHtml() {
     body { margin: 0; }
     button, input, textarea, select { font: inherit; }
     .shell { display: grid; grid-template-columns: 220px minmax(0, 1fr); min-height: 100vh; }
-    .app-nav { background: #101828; color: #fff; padding: 22px 14px; display: flex; flex-direction: column; gap: 6px; }
+    .app-nav { position: sticky; top: 0; align-self: start; height: 100vh; box-sizing: border-box; background: #101828; color: #fff; padding: 22px 14px; display: flex; flex-direction: column; gap: 6px; }
     .app-nav h1 { padding: 0 10px 18px; margin: 0; font-size: 18px; }
     .nav-button { width: 100%; border: 0; background: transparent; color: #cbd5e1; text-align: left; padding: 11px 12px; }
     .nav-button:hover, .nav-button.active { background: #243148; color: #fff; }
@@ -927,11 +956,25 @@ function renderConsoleHtml() {
     .progress-fill { height: 100%; background: #1f5eff; }
     .overall-progress { margin: 14px 0; padding: 14px; background: #f8fafc; border: 1px solid #d9dee8; border-radius: 8px; }
     .overall-progress .progress-track { height: 10px; margin: 8px 0; }
-    .dag-flow { display: flex; align-items: stretch; gap: 8px; overflow-x: auto; padding: 10px 0; }
+    .dag-flow { overflow-x: auto; padding: 10px 0; }
+    .dag-graph { display: flex; align-items: center; gap: 8px; min-width: max-content; }
+    .dag-branches { display: grid; gap: 7px; padding: 7px; border: 1px dashed #d7deea; border-radius: 9px; background: #fbfcfe; }
+    .dag-lane { display: flex; align-items: center; gap: 8px; min-height: 54px; }
+    .dag-lane-group { display: grid; gap: 6px; }
+    .dag-lane-label { width: 52px; color: #667085; font-size: 11px; text-align: right; }
+    .dag-stream-dependency { display: inline-flex; align-items: center; gap: 5px; padding: 5px 7px; border: 1px dashed #d59b18; border-radius: 7px; background: #fff9e8; color: #735b00; font-size: 11px; white-space: nowrap; }
+    .dag-stream-dependency strong { color: #8a5a00; }
     .dag-wave { min-width: 130px; display: grid; gap: 6px; align-content: center; }
     .dag-arrow { align-self: center; color: #98a2b3; font-size: 22px; }
     .dag-node { border: 1px solid #d0d8e5; border-radius: 7px; padding: 8px; background: #fff; font-size: 12px; }
     .dag-node.running { border-color: #e3b341; background: #fff8dc; }
+    .dag-node-progress { margin-top: 7px; }
+    .dag-node-progress-label { display: flex; justify-content: space-between; gap: 6px; color: #735b00; font-size: 11px; font-variant-numeric: tabular-nums; }
+    .dag-node-progress .progress-track { height: 5px; margin-top: 4px; background: #eadfb4; }
+    .dag-node-progress .progress-fill { background: #e3a008; transition: width .35s ease; }
+    .dag-node.progress-updated { animation: dag-progress-pulse 1.1s ease-out; }
+    @keyframes dag-progress-pulse { 0% { background: #fff8dc; box-shadow: 0 0 0 0 rgba(245, 158, 11, 0); } 25% { background: #ffe69a; box-shadow: 0 0 0 4px rgba(245, 158, 11, .28); } 100% { background: #fff8dc; box-shadow: 0 0 0 0 rgba(245, 158, 11, 0); } }
+    @media (prefers-reduced-motion: reduce) { .dag-node.progress-updated { animation: none; } }
     .dag-node.completed { border-color: #74c69d; background: #eaf8f0; }
     .dag-node.failed { border-color: #e58b82; background: #fff0ee; }
     details.technical { margin-top: 14px; }
@@ -947,7 +990,7 @@ function renderConsoleHtml() {
     .overview-jobs { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; }
     .overview-job { border: 1px solid #d9dee8; border-radius: 10px; padding: 14px; background: #fff; cursor: pointer; }
     @media (max-width: 1100px) { .shell { grid-template-columns: 180px minmax(0, 1fr); } .workspace { grid-template-columns: 380px minmax(0, 1fr); } }
-    @media (max-width: 760px) { .shell { display: block; } .app-nav { position: sticky; top: 0; z-index: 5; flex-direction: row; overflow-x: auto; padding: 8px; } .app-nav h1, .nav-spacer { display: none; } .nav-button { width: auto; white-space: nowrap; } .workspace { display: block; } .control-pane { max-height: none; border-right: 0; border-bottom: 1px solid #d9dee8; } .stages, .metrics, .concurrency { grid-template-columns: repeat(2, minmax(120px, 1fr)); } }
+    @media (max-width: 760px) { .shell { display: block; } .app-nav { position: sticky; top: 0; z-index: 5; height: auto; align-self: auto; flex-direction: row; overflow-x: auto; padding: 8px; } .app-nav h1, .nav-spacer { display: none; } .nav-button { width: auto; white-space: nowrap; } .workspace { display: block; } .control-pane { max-height: none; border-right: 0; border-bottom: 1px solid #d9dee8; } .stages, .metrics, .concurrency { grid-template-columns: repeat(2, minmax(120px, 1fr)); } }
   </style>
 </head>
 <body>
@@ -972,6 +1015,11 @@ function renderConsoleHtml() {
       <div id="tokenFeedback" class="meta" aria-live="polite"></div>
       <h2>生产环境</h2>
       <div id="settingsStatus" class="book-progress">加载中...</div>
+      <h2>模型 API 凭据</h2>
+      <label>LLM API Key <input id="settingsLlmApiKey" type="password" autocomplete="new-password" placeholder="留空则保留现有 LLM_API_KEY" /></label>
+      <label>向量 API Key <input id="settingsEmbeddingApiKey" type="password" autocomplete="new-password" placeholder="留空则保留现有 EMBEDDING_API_KEY" /></label>
+      <div class="actions"><button class="secondary save-runtime-credentials" data-source="settings" type="button">保存到生产环境</button></div>
+      <div id="settingsCredentialFeedback" class="meta" aria-live="polite">使用密码框输入，服务端不会回传明文。</div>
       <h2>费用估算（元/章）</h2>
       <label>摘要 <input id="costSummary" type="number" min="0" step="0.001" value="0" /></label>
       <label>知识图谱 <input id="costKg" type="number" min="0" step="0.001" value="0" /></label>
@@ -1028,9 +1076,13 @@ function renderConsoleHtml() {
       <label>LLM 地址 <input id="llmBaseUrl" /></label>
       <label>LLM 模型 <input id="llmModel" /></label>
       <label>LLM 总并发数 <input id="llmConcurrency" type="number" min="1" max="64" /></label>
+      <label>LLM API Key <input id="builderLlmApiKey" type="password" autocomplete="new-password" placeholder="留空则使用已保存的 LLM_API_KEY" /></label>
       <label>向量服务地址 <input id="embeddingBaseUrl" /></label>
       <label>向量模型 <input id="embeddingModel" /></label>
       <label>向量并发数 <input id="embeddingConcurrency" type="number" min="1" max="128" /></label>
+      <label>向量 API Key <input id="builderEmbeddingApiKey" type="password" autocomplete="new-password" placeholder="留空则使用已保存的 EMBEDDING_API_KEY" /></label>
+      <div class="actions"><button class="secondary save-runtime-credentials" data-source="builder" type="button">保存 API Key 到生产环境</button></div>
+      <div id="builderCredentialFeedback" class="meta" aria-live="polite"></div>
       <h2>有声书参数</h2>
       <label>TTS 配置文件 <input id="ttsConfig" /></label>
       <label>导演最大并发数（自动计算） <input id="directorConcurrency" type="number" readonly /></label>
@@ -1068,7 +1120,7 @@ function renderConsoleHtml() {
     </div>
   </div>
   <script>
-    const state = { selectedJobId: '', eventSource: null, builderBooks: [], jobs: [], jobStatuses: {}, currentView: localStorage.getItem('productionPipeline.currentView') || 'overview', wizardStep: 1, logFilter: 'key' };
+    const state = { selectedJobId: '', eventSource: null, builderBooks: [], jobs: [], jobStatuses: {}, dagProgress: {}, currentView: localStorage.getItem('productionPipeline.currentView') || 'overview', wizardStep: 1, logFilter: 'key' };
     function showWizardStep(step) {
       state.wizardStep = Math.max(1, Math.min(4, Number(step) || 1));
       document.querySelectorAll('[data-wizard-panel]').forEach(panel => { panel.hidden = Number(panel.dataset.wizardPanel) !== state.wizardStep; });
@@ -1100,7 +1152,7 @@ function renderConsoleHtml() {
       else if (view === 'new') { document.getElementById('detail').innerHTML = '<div class="panel"><h1>新建生产</h1><p>按照内容来源、生产目标、资源配置和启动确认完成任务创建。</p><div id="wizardPreview" class="meta">进入第4步后，这里将显示最终 DAG 和生产影响范围。</div></div>'; showWizardStep(state.wizardStep); }
       else if (view === 'templates') document.getElementById('detail').innerHTML = '<div class="panel"><h1>模板管理</h1><p>选择生产端模板直接启动，或导入本机 JSON。模板不会自动执行。</p></div>';
       else if (view === 'assets') document.getElementById('detail').innerHTML = '<div class="panel"><h1>素材与备份</h1><p>集中管理生产源文件和主库一致性备份。</p></div>';
-      else if (view === 'settings') document.getElementById('detail').innerHTML = '<div class="panel"><h1>设置</h1><p>凭据只保存在当前浏览器；生产密钥仍由服务器环境变量管理。</p></div>';
+      else if (view === 'settings') document.getElementById('detail').innerHTML = '<div class="panel"><h1>设置</h1><p>Console Token 保存在当前浏览器；模型 API Key 以权限 600 保存到服务端运行环境文件，并注入后续生产进程。</p></div>';
     }
     function renderOverview() {
       const jobs = state.jobs || [];
@@ -1150,6 +1202,25 @@ function renderConsoleHtml() {
       localStorage.removeItem('productionPipeline.token');
       document.getElementById('token').value = '';
       document.getElementById('tokenFeedback').textContent = '当前浏览器保存的 Token 已清除。';
+    }
+    async function saveRuntimeCredentials(source, button) {
+      const prefix = source === 'settings' ? 'settings' : 'builder';
+      const llmInput = document.getElementById(prefix + 'LlmApiKey');
+      const embeddingInput = document.getElementById(prefix + 'EmbeddingApiKey');
+      const feedback = document.getElementById(prefix + 'CredentialFeedback');
+      const body = { llmApiKey: llmInput.value.trim(), embeddingApiKey: embeddingInput.value.trim() };
+      if (!body.llmApiKey && !body.embeddingApiKey) throw new Error('请至少输入一个 API Key。');
+      button.disabled = true;
+      feedback.textContent = '正在保存到生产环境…';
+      try {
+        const result = await api('/api/runtime-credentials', { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) });
+        llmInput.value = '';
+        embeddingInput.value = '';
+        feedback.textContent = '已保存。LLM：' + (result.environmentStatus.llmCredential ? '已配置' : '未配置') + '；向量：' + (result.environmentStatus.embeddingCredential ? '已配置' : '未配置') + '。';
+        await loadManagedAssets();
+      } finally {
+        button.disabled = false;
+      }
     }
     function showError(title, error) {
       document.getElementById('detail').className = '';
@@ -1330,7 +1401,7 @@ function renderConsoleHtml() {
       const template = buildTemplateFromForm();
       document.getElementById('templateJson').value = JSON.stringify(template, null, 2);
       localStorage.setItem('productionPipeline.templateJson', document.getElementById('templateJson').value);
-      showBuilderFeedback('success', 'JSON 已生成，请检查后点击“校验并保存”。');
+      showBuilderFeedback('success', 'JSON 已生成。检查后可“保存为模板”，或点击“确认并启动”完成校验并启动。');
       return template;
     }
     async function uploadSource() {
@@ -1392,6 +1463,10 @@ function renderConsoleHtml() {
       const job = body.job;
       const previousLog = document.getElementById('jobLog');
       const shouldStickToBottom = !previousLog || previousLog.scrollHeight - previousLog.scrollTop - previousLog.clientHeight < 24;
+      const technicalDetailsOpen = document.querySelector('details.technical')?.open === true;
+      const runtimeInputIds = ['runtimeKgConcurrency', 'runtimeDirectorConcurrency', 'runtimeLlmChapters', 'runtimeTtsConcurrency', 'runtimeTtsChapters'];
+      const runtimeDraft = Object.fromEntries(runtimeInputIds.map(id => [id, document.getElementById(id)?.value]).filter(([, value]) => value !== undefined));
+      const focusedRuntimeInput = runtimeInputIds.includes(document.activeElement?.id) ? document.activeElement.id : '';
       const productionRun = renderProductionRun(job.id, body.productionRun);
       const logItems = (job.logs || []).filter(item => state.logFilter === 'all' || (state.logFilter === 'errors' ? item.stream === 'stderr' || /fail|error|失败/i.test(item.line) : item.stream === 'system' || /start|completed|failed|停止|完成|失败/i.test(item.line)));
       const logs = logItems.map(item => '[' + formatLocalTime(item.at) + '] ' + item.stream + ': ' + localizeLogTimestamps(item.line)).join('\\n');
@@ -1400,6 +1475,9 @@ function renderConsoleHtml() {
       const activeError = job.error && !isActiveJob(job) ? '<div class="error-panel">' + escapeHtml(job.error) + '</div>' : '';
       const recoveryInfo = job.recoveryNote && isActiveJob(job) ? '<div class="inline-feedback info">' + escapeHtml(job.recoveryNote) + '</div>' : '';
       document.getElementById('detail').innerHTML = '<div class="panel"><div class="topline"><div><h1>' + escapeHtml(job.title) + '</h1><div class="meta">' + job.id + '</div></div><span class="status ' + job.status + '">' + escapeHtml(statusLabel(job.status)) + '</span></div><div class="meta">' + escapeHtml(job.productionJobPath || '') + '</div>' + activeError + recoveryInfo + jobButton + '</div>' + productionRun + '<div class="panel"><div class="topline"><h2>任务事件</h2><select id="jobLogFilter" style="width:auto"><option value="key">关键事件</option><option value="errors">仅错误</option><option value="all">全部</option></select></div><pre id="jobLog">' + escapeHtml(logs || '当前筛选下暂无日志') + '</pre></div>';
+      if (technicalDetailsOpen && document.querySelector('details.technical')) document.querySelector('details.technical').open = true;
+      for (const [id, value] of Object.entries(runtimeDraft)) if (document.getElementById(id)) document.getElementById(id).value = value;
+      if (focusedRuntimeInput && document.getElementById(focusedRuntimeInput)) document.getElementById(focusedRuntimeInput).focus();
       document.getElementById('jobLogFilter').value = state.logFilter;
       document.getElementById('jobLogFilter').addEventListener('change', event => { state.logFilter = event.target.value; renderJob(body); });
       const stopSelectedJob = document.getElementById('stopSelectedJob');
@@ -1408,6 +1486,7 @@ function renderConsoleHtml() {
       if (retrySelectedJob) retrySelectedJob.addEventListener('click', () => retryJob(job.id).catch(error => showError('重新排队失败', error)));
       const deleteSelectedJob = document.getElementById('deleteSelectedJob');
       if (deleteSelectedJob) deleteSelectedJob.addEventListener('click', () => deleteJob(job.id, job.title).catch(error => showError('删除任务失败', error)));
+      document.querySelectorAll('.runtime-concurrency-save').forEach(button => button.addEventListener('click', () => updateRuntimeConcurrencyFromConsole(button).catch(error => showError('调整并发失败', error))));
       const nextLog = document.getElementById('jobLog');
       if (nextLog && shouldStickToBottom) nextLog.scrollTop = nextLog.scrollHeight;
       await loadJobs();
@@ -1443,6 +1522,30 @@ function renderConsoleHtml() {
       await api('/api/jobs/' + encodeURIComponent(jobId) + '/retry', { method: 'POST' });
       await selectJob(jobId);
     }
+    async function updateRuntimeConcurrencyFromConsole(button) {
+      const jobId = button.dataset.jobId;
+      const kind = button.dataset.kind;
+      const numberValue = id => Number(document.getElementById(id).value);
+      const body = kind === 'kg'
+        ? { kg: { concurrency: numberValue('runtimeKgConcurrency') } }
+        : { audio: {
+            directorConcurrency: numberValue('runtimeDirectorConcurrency'),
+            llmChapters: numberValue('runtimeLlmChapters'),
+            ttsConcurrency: numberValue('runtimeTtsConcurrency'),
+            ttsChapters: numberValue('runtimeTtsChapters'),
+          } };
+      button.disabled = true;
+      try {
+        await api('/api/jobs/' + encodeURIComponent(jobId) + '/runtime-concurrency', {
+          method: 'PATCH',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(body),
+        });
+        await selectJob(jobId);
+      } finally {
+        button.disabled = false;
+      }
+    }
     function renderProductionRun(jobId, productionRun) {
       if (!productionRun) return '';
       const run = productionRun.runJson || {};
@@ -1458,24 +1561,48 @@ function renderConsoleHtml() {
       const runJsonLink = productionRun.runJsonPath ? renderProductionFileLink(jobId, 'run.json', productionRun.runJsonPath) : '等待 run.json...';
       const metrics = renderProductionMetrics(productionRun.metrics);
       const overallProgress = renderOverallProgress(productionRun.metrics && productionRun.metrics.progress);
-      const concurrency = renderRuntimeConcurrency(productionRun.metrics && productionRun.metrics.concurrency);
-      const dag = renderProductionDag(run);
+      const concurrency = renderRuntimeConcurrency(jobId, productionRun.metrics && productionRun.metrics.concurrency);
+      const dag = renderProductionDag(jobId, run, productionRun.metrics);
       return '<div class="panel"><div class="topline"><div><h2>生产进度</h2></div><span class="status ' + escapeHtml(run.status || 'pending') + '">' + escapeHtml(statusLabel(run.status || 'pending')) + '</span></div>' + overallProgress + dag + concurrency + metrics + '<details class="technical"><summary>技术详情</summary><div class="meta mono">' + runJsonLink + '</div>' + (stageCards ? '<div class="stages">' + stageCards + '</div>' : '<div class="meta">等待任务启动。</div>') + '</details></div>';
     }
-    function renderProductionDag(run) {
+    function renderProductionDag(jobId, run, metrics) {
       const configured = run.job && Array.isArray(run.job.stages) ? run.job.stages : [];
-      const audioDag = Boolean(run.job?.audio?.workflowDag || run.job?.audio?.workflow_dag || run.stages?.directorDraft);
+      const audioDagStages = ['directorDraft', 'directorQc', 'ttsSegments', 'audioQc', 'audioAssemble'];
+      const audioDag = audioDagStages.some(stage => Boolean(run.stages?.[stage]));
       const includes = stage => configured.includes(stage) || (stage === 'chunkEmbedding' || stage === 'summaryEmbedding') && configured.includes('embedding') || audioDag && ['directorDraft','directorQc','ttsSegments','audioQc','audioAssemble'].includes(stage);
-      const waves = [
-        ['import'],
-        ['summary','kg','chunkEmbedding', ...(audioDag ? ['directorDraft'] : ['audio'])],
-        ...(audioDag ? [['directorQc'], ['ttsSegments'], ['audioQc'], ['audioAssemble'], ['audio']] : []),
-        ['summary-locate','summaryEmbedding'],
-        ['package'], ['publish'], ['verify'],
-      ].map(wave => wave.filter(includes)).filter(wave => wave.length);
       const labels = { import: '导入正文', summary: '章节摘要', 'summary-locate': '摘要定位', kg: '知识图谱', chunkEmbedding: '正文向量', summaryEmbedding: '摘要向量', directorDraft: '导演脚本生成', directorQc: '导演脚本质检', ttsSegments: 'TTS 片段合成', audioQc: '音频片段质检', audioAssemble: '章节拼接编码', audio: '音频目录聚合', package: '打包', publish: '发布', verify: '验证' };
-      if (!waves.length) return '';
-      return '<h2>执行 DAG</h2><div class="dag-flow">' + waves.map((wave, index) => (index ? '<div class="dag-arrow">→</div>' : '') + '<div class="dag-wave">' + wave.map(stage => { const status = run.stages?.[stage]?.status || 'pending'; return '<div class="dag-node ' + escapeHtml(status) + '"><strong>' + escapeHtml(labels[stage] || stage) + '</strong><div class="meta">' + escapeHtml(statusLabel(status)) + '</div></div>'; }).join('') + '</div>').join('') + '</div>';
+      const renderNode = stage => {
+        const recordedStatus = run.stages?.[stage]?.status || 'pending';
+        const latest = metrics?.stages?.[stage]?.latest;
+        const completed = Math.max(0, Number(latest?.completed ?? latest?.done) || 0);
+        const total = Math.max(0, Number(latest?.total) || 0);
+        const percent = total > 0 ? Math.min(100, Math.round(completed / total * 100)) : 0;
+        const pipelinedAudioStage = ['directorQc', 'ttsSegments', 'audioQc', 'audioAssemble'].includes(stage) && run.stages?.directorDraft?.status === 'running';
+        const status = recordedStatus === 'pending' && pipelinedAudioStage && completed > 0 ? (total > 0 && completed >= total ? 'completed' : 'running') : recordedStatus;
+        const progressKey = jobId + ':' + stage;
+        const previous = state.dagProgress[progressKey];
+        const changed = status === 'running' && previous !== undefined && completed > previous;
+        state.dagProgress[progressKey] = completed;
+        const progress = status === 'running' && total > 0 ? '<div class="dag-node-progress"><div class="dag-node-progress-label"><span>' + escapeHtml(String(completed)) + '/' + escapeHtml(String(total)) + '</span><span>' + escapeHtml(String(percent)) + '%</span></div><div class="progress-track"><div class="progress-fill" style="width:' + escapeHtml(String(percent)) + '%"></div></div></div>' : '';
+        return '<div class="dag-node ' + escapeHtml(status) + (changed ? ' progress-updated' : '') + '"><strong>' + escapeHtml(labels[stage] || stage) + '</strong><div class="meta">' + escapeHtml(statusLabel(status)) + '</div>' + progress + '</div>';
+      };
+      const arrow = '<div class="dag-arrow">→</div>';
+      const summaryTail = ['summary-locate', 'summaryEmbedding'].filter(includes);
+      const lanes = [];
+      if (includes('summary') || summaryTail.length) lanes.push('<div class="dag-lane"><span class="dag-lane-label">摘要分支</span>' + (includes('summary') ? renderNode('summary') : '') + (summaryTail.length ? arrow + '<div class="dag-lane-group">' + summaryTail.map(renderNode).join('') + '</div>' : '') + '</div>');
+      if (includes('kg')) lanes.push('<div class="dag-lane"><span class="dag-lane-label">KG 分支</span>' + renderNode('kg') + '</div>');
+      if (includes('chunkEmbedding')) lanes.push('<div class="dag-lane"><span class="dag-lane-label">向量分支</span>' + renderNode('chunkEmbedding') + '</div>');
+      const audioStages = (audioDag ? ['directorDraft','directorQc','ttsSegments','audioQc','audioAssemble','audio'] : ['audio']).filter(includes);
+      const kgLeadChapters = Math.max(1, Number(run.job?.audio?.kgWarmupChapters ?? run.job?.audio?.kg_warmup_chapters) || 2);
+      const audioDependency = audioDag && includes('kg') ? '<span class="dag-stream-dependency"><strong>KG</strong><span>有序领先 ' + escapeHtml(String(kgLeadChapters)) + ' 章</span><span>→</span></span>' : '';
+      if (audioStages.length) lanes.push('<div class="dag-lane"><span class="dag-lane-label">音频分支</span>' + audioDependency + audioStages.map((stage, index) => (index ? arrow : '') + renderNode(stage)).join('') + '</div>');
+      const tail = ['package', 'publish', 'verify'].filter(includes);
+      const graph = (includes('import') ? renderNode('import') + (lanes.length || tail.length ? arrow : '') : '')
+        + (lanes.length ? '<div class="dag-branches">' + lanes.join('') + '</div>' : '')
+        + (tail.length && lanes.length ? arrow : '')
+        + tail.map((stage, index) => (index ? arrow : '') + renderNode(stage)).join('');
+      if (!graph) return '';
+      return '<h2>执行 DAG</h2><div class="dag-flow"><div class="dag-graph">' + graph + '</div></div>';
     }
     function renderOverallProgress(progress) {
       if (!progress) return '';
@@ -1483,7 +1610,7 @@ function renderConsoleHtml() {
       const cost = Number(progress.estimatedTotalCost) > 0 ? ' · 估算费用 ¥' + Number(progress.estimatedSpentCost || 0).toFixed(2) + '/¥' + Number(progress.estimatedTotalCost).toFixed(2) : '';
       return '<div class="overall-progress"><div class="topline"><strong>整体完成 ' + escapeHtml(String(progress.percent || 0)) + '%</strong><span class="meta">预计剩余 ' + escapeHtml(eta) + '</span></div><div class="progress-track"><div class="progress-fill" style="width:' + escapeHtml(String(progress.percent || 0)) + '%"></div></div><div class="meta">关键路径：' + escapeHtml(progress.criticalStage || '等待阶段数据') + ' · 已完成阶段 ' + escapeHtml(String(progress.completedStages || 0)) + '/' + escapeHtml(String(progress.totalStages || 0)) + escapeHtml(cost) + '</div></div>';
     }
-    function renderRuntimeConcurrency(concurrency) {
+    function renderRuntimeConcurrency(jobId, concurrency) {
       if (!concurrency || (!concurrency.llmPool && !concurrency.embedding && !concurrency.kg && !concurrency.audio)) return '';
       const cards = [];
       if (concurrency.llmPool) {
@@ -1499,11 +1626,12 @@ function renderConsoleHtml() {
       }
       if (concurrency.kg) {
         const kg = concurrency.kg;
-        cards.push('<div class="concurrency-card"><strong>KG 当前并发</strong><div class="chips"><span class="chip">当前 ' + escapeHtml(formatConcurrencyValue(kg.concurrency)) + '</span><span class="chip">' + (kg.active ? '运行中' : '未运行') + '</span></div>' + renderControlTime(kg.updatedAt, kg.active) + '</div>');
+        cards.push('<div class="concurrency-card"><strong>KG 当前并发</strong><div class="chips"><span class="chip">当前 ' + escapeHtml(formatConcurrencyValue(kg.concurrency)) + '</span><span class="chip">' + (kg.active ? '运行中' : '未运行') + '</span></div>' + (kg.active ? '<label>请求并发 <input id="runtimeKgConcurrency" type="number" min="1" max="64" value="' + escapeHtml(formatConcurrencyValue(kg.concurrency)) + '" /></label><button class="secondary runtime-concurrency-save" data-kind="kg" data-job-id="' + escapeHtml(jobId) + '" type="button">应用 KG 并发</button>' : '') + renderControlTime(kg.updatedAt, kg.active) + '</div>');
       }
       if (concurrency.audio) {
         const audio = concurrency.audio;
-        cards.push('<div class="concurrency-card"><strong>Audio 当前并发</strong><div class="chips"><span class="chip">导演 LLM ' + escapeHtml(formatConcurrencyValue(audio.directorConcurrency)) + '</span><span class="chip">LLM 章节 ' + escapeHtml(formatConcurrencyValue(audio.llmChapters)) + '</span><span class="chip">TTS API ' + escapeHtml(formatConcurrencyValue(audio.ttsConcurrency)) + '</span><span class="chip">TTS 章节 ' + escapeHtml(formatConcurrencyValue(audio.ttsChapters)) + '</span><span class="chip">' + (audio.active ? '运行中' : '未运行') + '</span></div>' + renderControlTime(audio.updatedAt, audio.active) + '</div>');
+        const editor = audio.active ? '<div class="stage-options"><label>导演 LLM<input id="runtimeDirectorConcurrency" type="number" min="1" max="64" value="' + escapeHtml(formatConcurrencyValue(audio.directorConcurrency)) + '" /></label><label>LLM 章节<input id="runtimeLlmChapters" type="number" min="1" max="16" value="' + escapeHtml(formatConcurrencyValue(audio.llmChapters)) + '" /></label><label>TTS API<input id="runtimeTtsConcurrency" type="number" min="1" max="128" value="' + escapeHtml(formatConcurrencyValue(audio.ttsConcurrency)) + '" /></label><label>TTS 章节<input id="runtimeTtsChapters" type="number" min="1" max="16" value="' + escapeHtml(formatConcurrencyValue(audio.ttsChapters)) + '" /></label></div><button class="secondary runtime-concurrency-save" data-kind="audio" data-job-id="' + escapeHtml(jobId) + '" type="button">应用 Audio 并发</button><div class="meta">新数值会在运行器下一次轮询时生效，无需暂停任务。</div>' : '';
+        cards.push('<div class="concurrency-card"><strong>Audio 当前并发</strong><div class="chips"><span class="chip">导演 LLM ' + escapeHtml(formatConcurrencyValue(audio.directorConcurrency)) + '</span><span class="chip">LLM 章节 ' + escapeHtml(formatConcurrencyValue(audio.llmChapters)) + '</span><span class="chip">TTS API ' + escapeHtml(formatConcurrencyValue(audio.ttsConcurrency)) + '</span><span class="chip">TTS 章节 ' + escapeHtml(formatConcurrencyValue(audio.ttsChapters)) + '</span><span class="chip">' + (audio.active ? '运行中' : '未运行') + '</span></div>' + editor + renderControlTime(audio.updatedAt, audio.active) + '</div>');
       }
       return '<h2>当前并发</h2><div class="concurrency">' + cards.join('') + '</div>';
     }
@@ -1524,7 +1652,7 @@ function renderConsoleHtml() {
         { key: '15m', label: '近 15 分钟' },
         { key: 'overall', label: '全程平均' },
       ];
-      const stageLabels = { summary: '章节摘要', chunkEmbedding: '正文向量覆盖', kg: '知识图谱覆盖', 'summary-locate': '摘要定位覆盖', summaryEmbedding: '摘要向量覆盖', audio: '章节音频' };
+      const stageLabels = { summary: '章节摘要', chunkEmbedding: '正文向量覆盖', kg: '知识图谱覆盖', 'summary-locate': '摘要定位覆盖', summaryEmbedding: '摘要向量覆盖', directorDraft: '导演脚本', directorQc: '导演脚本质检', ttsSegments: 'TTS 片段合成', audioQc: '音频片段质检', audioAssemble: '章节拼接编码', audio: '章节音频' };
       const bookChapterTotal = Math.max(0, ...Object.values(metrics.stages).map(metric => Number(metric?.latest?.total) || 0));
       const cards = Object.entries(metrics.stages).map(([name, metric]) => {
         const latest = metric.latest || {};
@@ -1595,6 +1723,9 @@ function renderConsoleHtml() {
       try { await saveConsoleToken(); } catch (error) { document.getElementById('tokenFeedback').textContent = '保存失败：' + (error.message || String(error)); } finally { button.disabled = false; }
     });
     document.getElementById('clearToken').addEventListener('click', clearConsoleToken);
+    document.querySelectorAll('.save-runtime-credentials').forEach(button => button.addEventListener('click', () => saveRuntimeCredentials(button.dataset.source, button).catch(error => {
+      document.getElementById((button.dataset.source === 'settings' ? 'settings' : 'builder') + 'CredentialFeedback').textContent = '保存失败：' + (error.message || String(error));
+    })));
     document.getElementById('enableNotifications').addEventListener('click', async () => {
       const root = document.getElementById('notificationStatus');
       if (typeof Notification === 'undefined') { root.textContent = '当前浏览器不支持通知。'; return; }
@@ -1879,6 +2010,14 @@ async function buildProductionRunMetrics({ runDir, runJson }) {
     ...(stageMetrics.audio || {}),
     ...audioMetric,
   }
+  if (runJson.job?.audio?.workflowDag || runJson.job?.audio?.workflow_dag) {
+    Object.assign(stageMetrics, await readAudioWorkflowMetrics(runDir, audioTotal).catch(() => ({})))
+    if (!stageMetrics.audio) stageMetrics.audio = {
+      unit: '章',
+      latest: { at: generatedAt, completed: 0, done: 0, failed: 0, total: audioTotal },
+      rates: {},
+    }
+  }
   const coverage = readProductionChapterCoverage(runJson)
   for (const [stageName, value] of Object.entries(coverage)) {
     if (!stageMetrics[stageName]) stageMetrics[stageName] = { unit: '章', rates: {} }
@@ -1964,6 +2103,7 @@ async function readRuntimeConcurrency(runDir, runJson = {}) {
   const embeddingStages = Object.entries(stages)
     .filter(([name, stage]) => ['chunkEmbedding', 'summaryEmbedding'].includes(name) && stage?.status === 'running')
     .map(([name]) => name)
+  const audioActive = ['audio', 'directorDraft', 'directorQc', 'ttsSegments', 'audioQc', 'audioAssemble'].some(name => stages[name]?.status === 'running')
   return {
     llmPool: llmTotal ? { total: llmTotal, used: llmUsed, available: Math.max(0, llmTotal - llmUsed), allocations: llmAllocations } : null,
     embedding: embeddingStages.length ? { concurrency: readFiniteNumber(job.embedding?.concurrency), stages: embeddingStages } : null,
@@ -1973,14 +2113,59 @@ async function readRuntimeConcurrency(runDir, runJson = {}) {
       updatedAt: readString(kgControl.updatedAt),
     } : null,
     audio: audioControl ? {
-      active: stages.audio?.status === 'running' || stages.directorDraft?.status === 'running' || stages.ttsSegments?.status === 'running',
-      directorConcurrency: stages.audio?.status === 'running' || stages.directorDraft?.status === 'running' ? readFiniteNumber(audioControl.directorConcurrency ?? audioControl.director_concurrency) : 0,
-      llmChapters: stages.audio?.status === 'running' || stages.directorDraft?.status === 'running' ? readFiniteNumber(audioControl.llmChapters ?? audioControl.llm_chapters) : 0,
-      ttsConcurrency: stages.audio?.status === 'running' || stages.ttsSegments?.status === 'running' ? readFiniteNumber(audioControl.ttsConcurrency ?? audioControl.tts_concurrency) : 0,
-      ttsChapters: stages.audio?.status === 'running' || stages.ttsSegments?.status === 'running' ? readFiniteNumber(audioControl.ttsChapters ?? audioControl.tts_chapters) : 0,
+      active: audioActive,
+      directorConcurrency: audioActive ? readFiniteNumber(audioControl.directorConcurrency ?? audioControl.director_concurrency) : 0,
+      llmChapters: audioActive ? readFiniteNumber(audioControl.llmChapters ?? audioControl.llm_chapters) : 0,
+      ttsConcurrency: audioActive ? readFiniteNumber(audioControl.ttsConcurrency ?? audioControl.tts_concurrency) : 0,
+      ttsChapters: audioActive ? readFiniteNumber(audioControl.ttsChapters ?? audioControl.tts_chapters) : 0,
       updatedAt: readString(audioControl.updatedAt),
     } : null,
   }
+}
+
+async function updateRuntimeConcurrency(runDir, runJson, body) {
+  const runtimeDir = resolve(runDir, 'artifacts', 'runtime')
+  const updatedAt = new Date().toISOString()
+  const result = { updatedAt }
+  if (body.audio !== undefined) {
+    if (!['audio', 'directorDraft', 'directorQc', 'ttsSegments', 'audioQc', 'audioAssemble'].some(stage => runJson.stages?.[stage]?.status === 'running')) throw httpError(409, 'audio_not_running', 'Audio 阶段当前未运行。')
+    const path = resolve(runtimeDir, 'audio-control.json')
+    const current = await readJsonIfExists(path)
+    if (!current) throw httpError(404, 'audio_control_not_found', '未找到 Audio 运行时控制文件。')
+    const audio = readObjectBody(body.audio)
+    result.audio = {
+      directorConcurrency: requiredRuntimeInteger(audio.directorConcurrency, '导演 LLM 并发', 1, 64),
+      llmChapters: requiredRuntimeInteger(audio.llmChapters, 'LLM 章节并发', 1, 16),
+      ttsConcurrency: requiredRuntimeInteger(audio.ttsConcurrency, 'TTS API 并发', 1, 128),
+      ttsChapters: requiredRuntimeInteger(audio.ttsChapters, 'TTS 章节并发', 1, 16),
+      updatedAt,
+    }
+    await writeJsonAtomic(path, { ...current, ...result.audio })
+  }
+  if (body.kg !== undefined) {
+    if (!runJson.stages?.kg || runJson.stages.kg.status !== 'running') throw httpError(409, 'kg_not_running', 'KG 阶段当前未运行。')
+    const path = resolve(runtimeDir, 'kg-control.json')
+    const current = await readJsonIfExists(path)
+    if (!current) throw httpError(404, 'kg_control_not_found', '未找到 KG 运行时控制文件。')
+    const kg = readObjectBody(body.kg)
+    result.kg = { concurrency: requiredRuntimeInteger(kg.concurrency, 'KG 并发', 1, 64), updatedAt }
+    await writeJsonAtomic(path, { ...current, ...result.kg })
+  }
+  if (!result.audio && !result.kg) throw httpError(400, 'runtime_concurrency_required', '请提供 audio 或 kg 并发设置。')
+  return result
+}
+
+function requiredRuntimeInteger(value, label, min, max) {
+  const number = Number(value)
+  if (!Number.isInteger(number) || number < min || number > max) throw httpError(400, 'invalid_runtime_concurrency', `${label}必须是 ${min} 到 ${max} 的整数。`)
+  return number
+}
+
+function formatRuntimeConcurrencyUpdate(updated) {
+  const parts = []
+  if (updated.audio) parts.push(`Audio director=${updated.audio.directorConcurrency}, llmChapters=${updated.audio.llmChapters}, tts=${updated.audio.ttsConcurrency}, ttsChapters=${updated.audio.ttsChapters}`)
+  if (updated.kg) parts.push(`KG=${updated.kg.concurrency}`)
+  return parts.join('; ')
 }
 
 async function readStageMetricFromLog({ stageName, logPath }) {
@@ -2010,28 +2195,55 @@ async function readStageMetricFromLog({ stageName, logPath }) {
 }
 
 async function readAudioMetricFromArtifacts(runDir, total = 0) {
-  const root = resolve(runDir, 'stage-runs', 'audio')
-  const files = await findFiles(root, (filePath) => /\/tts-source\/ch\d+-full\/audio\/chapter\.mp3$/.test(filePath))
-  const samples = []
+  const files = await findFiles(runDir, (filePath) => /\/tts-source\/ch\d+-full\/audio\/chapter\.mp3$/.test(filePath))
+  return buildChapterArtifactMetric(files, /\/tts-source\/ch(\d+)-full\/audio\/chapter\.mp3$/, total)
+}
+
+async function readAudioWorkflowMetrics(runDir, total = 0) {
+  const root = resolve(runDir, 'artifacts', 'tts-source')
+  const definitions = [
+    ['directorDraft', /\/ch(\d+)-full\/director-script\.json$/],
+    ['directorQc', /\/ch(\d+)-full\/director-script\.audit\.json$/],
+    ['ttsSegments', /\/ch(\d+)-full\/audio\/tts-metrics\.json$/],
+    ['audioQc', /\/ch(\d+)-full\/audio\/audio-qc\.json$/],
+    ['audioAssemble', /\/ch(\d+)-full\/audio\/chapter\.mp3$/],
+  ]
+  const metrics = {}
+  for (const [stageName, pattern] of definitions) {
+    const files = await findFiles(root, (filePath) => pattern.test(filePath))
+    metrics[stageName] = await buildChapterArtifactMetric(files, pattern, total) || {
+      unit: '章',
+      latest: { at: new Date().toISOString(), completed: 0, done: 0, failed: 0, total },
+      rates: {},
+    }
+  }
+  return metrics
+}
+
+async function buildChapterArtifactMetric(files, chapterPattern, total) {
+  const chapters = new Map()
   for (const filePath of files) {
+    const chapterMatch = chapterPattern.exec(filePath)
+    if (!chapterMatch) continue
     const fileStat = await stat(filePath).catch(() => null)
     if (!fileStat) continue
-    const chapterMatch = /\/tts-source\/ch(\d+)-full\/audio\/chapter\.mp3$/.exec(filePath)
+    const chapter = Number(chapterMatch[1]) || 0
+    const previous = chapters.get(chapter)
+    if (!previous || fileStat.mtimeMs < previous.atMs) chapters.set(chapter, { chapter, atMs: fileStat.mtimeMs, at: fileStat.mtime.toISOString() })
+  }
+  const ordered = [...chapters.values()].sort((a, b) => a.atMs - b.atMs || a.chapter - b.chapter)
+  const samples = []
+  for (const item of ordered) {
     samples.push({
-      at: fileStat.mtime.toISOString(),
-      atMs: fileStat.mtimeMs,
+      at: item.at,
+      atMs: item.atMs,
       done: samples.length + 1,
       completed: samples.length + 1,
       failed: 0,
       total,
-      chapter: chapterMatch ? Number(chapterMatch[1]) : 0,
+      chapter: item.chapter,
     })
   }
-  samples.sort((a, b) => a.atMs - b.atMs || a.chapter - b.chapter)
-  samples.forEach((sample, index) => {
-    sample.done = index + 1
-    sample.completed = index + 1
-  })
   return buildRateMetric({ unit: '章', samples })
 }
 
@@ -2396,6 +2608,40 @@ function redactSecrets(value) {
     key,
     /(?:api.?key|token|password|secret)$/i.test(key) && typeof item === 'string' ? '[REDACTED]' : redactSecrets(item),
   ]))
+}
+
+function readRuntimeCredentials(path) {
+  if (!path || !existsSync(path)) return {}
+  try {
+    return Object.fromEntries(readFileSync(path, 'utf8').split(/\r?\n/).flatMap(line => {
+      const match = /^([A-Z_][A-Z0-9_]*)=(.*)$/.exec(line.trim())
+      if (!match || !['LLM_API_KEY', 'EMBEDDING_API_KEY'].includes(match[1])) return []
+      let value = match[2]
+      try { value = JSON.parse(value) } catch {}
+      return typeof value === 'string' && value ? [[match[1], value]] : []
+    }))
+  } catch {
+    return {}
+  }
+}
+
+async function writeRuntimeCredentials(path, credentials) {
+  await mkdir(dirname(path), { recursive: true })
+  const tempPath = `${path}.${randomUUID()}.tmp`
+  const content = ['LLM_API_KEY', 'EMBEDDING_API_KEY']
+    .filter(key => readString(credentials[key]))
+    .map(key => `${key}=${JSON.stringify(readString(credentials[key]))}`)
+    .join('\n')
+  await writeFile(tempPath, content ? `${content}\n` : '', { mode: 0o600 })
+  await rename(tempPath, path)
+  await chmod(path, 0o600)
+}
+
+function runtimeCredentialStatus(config, credentials = readRuntimeCredentials(config.credentialsFile)) {
+  return {
+    llmCredential: Boolean(process.env.LLM_API_KEY || credentials.LLM_API_KEY),
+    embeddingCredential: Boolean(process.env.EMBEDDING_API_KEY || credentials.EMBEDDING_API_KEY),
+  }
 }
 
 async function writeJsonAtomic(path, value) {

@@ -99,7 +99,7 @@ describe('production-pipeline import', () => {
     }
   })
 
-  it('requires --replace before overwriting an existing book', async () => {
+  it('reuses an identical import but requires --replace for different content', async () => {
     const tempDir = await mkdtemp(join(tmpdir(), 'production-pipeline-import-test-'))
     try {
       const txtPath = join(tempDir, 'sample.txt')
@@ -120,6 +120,11 @@ describe('production-pipeline import', () => {
         runRoot,
       ]
       await execFileAsync(process.execPath, args)
+
+      const identical = await execFileAsync(process.execPath, args)
+      assert.match(identical.stdout, /identical book already exists; reused existing main DB records/)
+
+      await writeFile(txtPath, `第一章 开始\n这是已经修改的第一章内容。`, 'utf8')
 
       await assert.rejects(
         () => execFileAsync(process.execPath, args),
@@ -1665,6 +1670,7 @@ describe('production-pipeline import', () => {
           title: '样书',
           mainDbPath: dbPath,
           stages: ['audio'],
+          llm: { baseUrl: 'http://127.0.0.1:1/v1', model: 'fake', concurrency: 4, scheduler: { borrowIdle: true } },
           audio: {
             workflowDag: true,
             ttsConfig: fakeConfigPath,
@@ -1699,6 +1705,9 @@ describe('production-pipeline import', () => {
       assert.equal(parentRunJson.stages.audioQc.status, 'completed')
       assert.equal(parentRunJson.stages.audioAssemble.status, 'completed')
       assert.equal(parentRunJson.stages.audio.status, 'completed')
+      const audioControl = JSON.parse(await readFile(join(parentRunDir, 'artifacts', 'runtime', 'audio-control.json'), 'utf8'))
+      assert.equal(audioControl.directorConcurrency, 4)
+      assert.equal(audioControl.llmChapters, 1)
       assert.ok(parentRunJson.stages.audio.childRunJson)
       assert.ok(parentRunJson.stages.audio.logFile)
 

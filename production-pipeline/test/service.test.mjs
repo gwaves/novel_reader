@@ -1,6 +1,6 @@
 import { afterEach, describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import { dirname, join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { DatabaseSync } from 'node:sqlite'
@@ -77,7 +77,17 @@ describe('production pipeline console service', () => {
     assert.match(html, /id="generateTemplate"/)
     assert.match(html, /id="ttsConfig"/)
     assert.match(html, /id="llmConcurrency"/)
+    assert.match(html, /id="builderLlmApiKey"/)
+    assert.match(html, /id="builderEmbeddingApiKey"/)
+    assert.match(html, /id="settingsLlmApiKey"/)
+    assert.match(html, /\/api\/runtime-credentials/)
     assert.match(html, /id="builderFeedback"/)
+    assert.doesNotMatch(html, /校验并保存/)
+    assert.match(html, /audioDagStages\.some\(stage => Boolean\(run\.stages\?\.\[stage\]\)\)/)
+    assert.match(html, /dag-node-progress/)
+    assert.match(html, /completed > previous/)
+    assert.match(html, /dag-progress-pulse/)
+    assert.match(html, /technicalDetailsOpen.*details\.technical.*\.open = true/s)
     assert.match(html, /job && !job\.readOnly/)
     assert.match(html, /LLM 共享并发池/)
     assert.match(html, /向量服务并发/)
@@ -96,6 +106,25 @@ describe('production pipeline console service', () => {
     assert.match(html, /\[hidden\] \{ display: none !important; \}/)
     assert.match(html, /production-log-viewer/)
     assert.doesNotMatch(html, /Legacy/)
+  })
+
+  it('stores model API keys in a protected runtime environment file without returning secrets', async () => {
+    const app = await buildTestApp()
+    const response = await app.inject({
+      method: 'PUT',
+      url: '/api/runtime-credentials',
+      payload: { llmApiKey: 'llm-test-secret', embeddingApiKey: 'embedding-test-secret' },
+    })
+
+    assert.equal(response.statusCode, 200)
+    assert.equal(response.json().environmentStatus.llmCredential, true)
+    assert.equal(response.json().environmentStatus.embeddingCredential, true)
+    assert.doesNotMatch(response.body, /test-secret/)
+    const credentialsPath = join(tempDirs.at(-1), 'credentials.env')
+    const credentials = await readFile(credentialsPath, 'utf8')
+    assert.match(credentials, /LLM_API_KEY="llm-test-secret"/)
+    assert.match(credentials, /EMBEDDING_API_KEY="embedding-test-secret"/)
+    assert.equal((await stat(credentialsPath)).mode & 0o777, 0o600)
   })
 
   it('requires bearer token when configured', async () => {
@@ -296,16 +325,22 @@ describe('production pipeline console service', () => {
     await mkdir(join(runDir, 'artifacts', 'runtime'), { recursive: true })
     await mkdir(join(runDir, 'stage-runs', 'audio', 'one', 'tts-source', 'ch001-full', 'audio'), { recursive: true })
     await mkdir(join(runDir, 'stage-runs', 'audio', 'one', 'tts-source', 'ch002-full', 'audio'), { recursive: true })
+    await mkdir(join(runDir, 'artifacts', 'tts-source', 'ch001-full', 'audio'), { recursive: true })
     await writeFile(join(runDir, 'stage-runs', 'audio', 'one', 'tts-source', 'ch001-full', 'audio', 'chapter.mp3'), 'one')
     await new Promise((resolvePromise) => setTimeout(resolvePromise, 5))
     await writeFile(join(runDir, 'stage-runs', 'audio', 'one', 'tts-source', 'ch002-full', 'audio', 'chapter.mp3'), 'two')
+    await writeFile(join(runDir, 'artifacts', 'tts-source', 'ch001-full', 'director-script.json'), '{}')
+    await writeFile(join(runDir, 'artifacts', 'tts-source', 'ch001-full', 'director-script.audit.json'), '{}')
+    await writeFile(join(runDir, 'artifacts', 'tts-source', 'ch001-full', 'audio', 'tts-metrics.json'), '{}')
+    await writeFile(join(runDir, 'artifacts', 'tts-source', 'ch001-full', 'audio', 'audio-qc.json'), '{}')
+    await writeFile(join(runDir, 'artifacts', 'tts-source', 'ch001-full', 'audio', 'chapter.mp3'), 'one')
     await writeFile(
       join(runDir, 'run.json'),
       JSON.stringify({
         runId,
         status: 'running',
         mainDbPath,
-        job: { bookId },
+        job: { bookId, audio: { workflowDag: true } },
         stages: {
           kg: {
             status: 'running',
@@ -377,8 +412,37 @@ describe('production pipeline console service', () => {
     assert.equal(body.productionRun.metrics.concurrency.kg.concurrency, 7)
     assert.equal(body.productionRun.metrics.concurrency.audio.directorConcurrency, 4)
     assert.equal(body.productionRun.metrics.concurrency.audio.ttsConcurrency, 16)
+    assert.equal(body.productionRun.metrics.stages.directorDraft.latest.completed, 1)
+    assert.equal(body.productionRun.metrics.stages.directorQc.latest.completed, 1)
+    assert.equal(body.productionRun.metrics.stages.ttsSegments.latest.completed, 1)
+    assert.equal(body.productionRun.metrics.stages.audioQc.latest.completed, 1)
+    assert.equal(body.productionRun.metrics.stages.audioAssemble.latest.completed, 1)
     assert.equal(body.productionRun.metrics.stages.audio.latest.completed, 2)
     assert.equal(body.productionRun.metrics.stages.audio.latest.total, 3)
+
+    const updateResponse = await app.inject({
+      method: 'PATCH',
+      url: '/api/jobs/metric-job/runtime-concurrency',
+      payload: { audio: { directorConcurrency: 8, llmChapters: 2, ttsConcurrency: 24, ttsChapters: 3 } },
+    })
+    assert.equal(updateResponse.statusCode, 200)
+    assert.deepEqual(
+      JSON.parse(await readFile(join(runDir, 'artifacts', 'runtime', 'audio-control.json'), 'utf8')),
+      {
+        directorConcurrency: 8,
+        llmChapters: 2,
+        ttsConcurrency: 24,
+        ttsChapters: 3,
+        updatedAt: updateResponse.json().updatedAt,
+      },
+    )
+
+    const invalidResponse = await app.inject({
+      method: 'PATCH',
+      url: '/api/jobs/metric-job/runtime-concurrency',
+      payload: { audio: { directorConcurrency: 8, llmChapters: 2, ttsConcurrency: 0, ttsChapters: 3 } },
+    })
+    assert.equal(invalidResponse.statusCode, 400)
   })
 
   it('persists queued jobs and enforces the global concurrency limit', async () => {
