@@ -947,13 +947,21 @@ async function runDraftScript(config, args) {
       const batch = batchInfo.segments
       console.log(`🧾 生成导演判定 ${currentBatch}/${batches.length}，片段 ${batchInfo.start + 1}-${batchInfo.start + batch.length}/${preSegments.length}`)
       const prompt = buildDirectorPrompt({ config, book, chapter, preSegments: batch, characterCandidates })
-      const batchDecisions = await callOpenAICompatibleWithRetry(config, [
-        { role: 'system', content: '你只输出严格 JSON，不输出 Markdown，不输出思考过程。' },
-        { role: 'user', content: prompt },
-      ], `第 ${currentBatch} 批导演判定`, 3, llmBatchStats, result => {
-        if (!Array.isArray(result?.decisions)) throw new Error(`第 ${currentBatch} 批模型输出缺少 decisions 数组。`)
-      })
-      batchResults[batchInfo.index] = batchDecisions.decisions
+      let decisions
+      try {
+        const batchDecisions = await callOpenAICompatibleWithRetry(config, [
+          { role: 'system', content: '你只输出严格 JSON，不输出 Markdown，不输出思考过程。' },
+          { role: 'user', content: prompt },
+        ], `第 ${currentBatch} 批导演判定`, 3, llmBatchStats, result => {
+          if (!Array.isArray(result?.decisions)) throw new Error(`第 ${currentBatch} 批模型输出缺少 decisions 数组。`)
+        })
+        decisions = batchDecisions.decisions
+      } catch (error) {
+        if (!/模型输出缺少 decisions 数组/.test(error.message)) throw error
+        decisions = []
+        console.warn(`⚠️  第 ${currentBatch} 批连续返回空壳结构，局部降级为规则判定；其余批次继续保留。`)
+      }
+      batchResults[batchInfo.index] = decisions
       console.log(`✅ 导演判定完成 ${currentBatch}/${batches.length}`)
     })
   } catch (error) {
