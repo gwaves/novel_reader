@@ -825,6 +825,7 @@ function BookDrawer({
       </div>
 
       <BookTitleEditor
+        key={`${book.id}:${book.title}`}
         book={book}
         disabled={operationStatus.title?.state === 'saving'}
         onSave={(title) => onUpdate(book.id, { title })}
@@ -904,10 +905,6 @@ function BookTitleEditor({
   const [draftTitle, setDraftTitle] = useState(book.title)
   const normalizedTitle = draftTitle.trim()
   const hasChanged = normalizedTitle !== book.title
-
-  useEffect(() => {
-    setDraftTitle(book.title)
-  }, [book.id, book.title])
 
   return (
     <div className="inline-editor">
