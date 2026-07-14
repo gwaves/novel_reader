@@ -53,6 +53,7 @@
 | PC-IMPORT-002 | TXT 导入 GB18030 自动识别 | 准备 GB18030 样例 | 不需要人工选择编码，章节正文无乱码 | Unit + E2E | P1 | Existing |
 | PC-IMPORT-003 | TXT 异常标题/正文第一回拆章 | 样例含 `正文 第一回` 等边界标题 | 保持历史拆章行为，不误拆正文 | Unit | P1 | Existing |
 | PC-IMPORT-004 | EPUB spine 顺序导入 | 准备多 XHTML spine EPUB | 章节顺序与 OPF spine 一致，正文可读 | Unit + E2E | P1 | Existing |
+| PC-IMPORT-005 | 文本型 PDF 导入 | 准备带文本层和章节标题的 PDF | 提取正文并按章节标题切分；扫描件提示先 OCR | Unit | P1 | Existing |
 | PC-IMPORT-005 | 超长章节导入与展示 | 单章超长文本 | 导入不阻塞，阅读器可展示和滚动 | E2E | P2 | Existing |
 | PC-READ-001 | 多书阅读进度隔离 | 两本书分别阅读到不同章节/位置 | 切书、重启后各自恢复，不互相覆盖 | Unit + E2E | P0 | Existing |
 | PC-READ-002 | 阅读偏好保存 | 修改主题、字号、行高、宽度等 | 刷新后偏好仍生效 | Unit + E2E | P2 | Existing |
@@ -113,7 +114,7 @@
 | ID | 用例 | 前置条件 | 期望结果 | 层级 | 风险 | 状态 |
 |----|------|----------|----------|------|------|------|
 | PIPE-JOB-001 | job JSON schema 校验 | 缺少 bookId/stages/model/publish 配置 | doctor 报告明确缺失项 | API | P1 | Existing |
-| PIPE-IMPORT-001 | TXT/EPUB/MOBI/AZW 导入 | 准备样例源文件 | 导入主 SQLite 或 run store，章节/字数正确 | API | P1 | Planned |
+| PIPE-IMPORT-001 | TXT/EPUB/PDF/MOBI/AZW 导入 | 准备样例源文件 | 导入主 SQLite 或 run store，章节/字数正确 | API | P1 | Existing |
 | PIPE-STAGE-001 | summary 独立阶段 | job 只运行 summary | 可独立完成、可续跑、写入 run.json | API | P1 | Existing |
 | PIPE-STAGE-002 | KG 独立阶段 | job 只运行 kg | 失败项可重试，进度可见 | API | P1 | Existing |
 | PIPE-STAGE-003 | embedding 独立阶段 | Ollama mocked/测试服务 | 生成覆盖率元数据和向量计数 | API | P1 | Existing |

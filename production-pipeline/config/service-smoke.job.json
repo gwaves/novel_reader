@@ -1,0 +1,6 @@
+{
+  "title": "Production Service Smoke Test",
+  "bookId": "production-service-smoke",
+  "mainDbPath": "/home/node/.novel_reader/novel_reader.sqlite",
+  "stages": []
+}

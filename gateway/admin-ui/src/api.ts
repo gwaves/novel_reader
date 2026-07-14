@@ -335,6 +335,13 @@ export async function patchBookVisibility(bookId: string, visibility: Visibility
   })
 }
 
+export async function patchBookTitle(bookId: string, title: string, fetcher: typeof fetch = fetch) {
+  await adminFetch(`/admin/books/${encodeURIComponent(bookId)}/title`, fetcher, {
+    method: 'PATCH',
+    body: JSON.stringify({ title }),
+  })
+}
+
 export async function patchBookLabels(bookId: string, labels: ContentLabel[], fetcher: typeof fetch = fetch) {
   await adminFetch(`/admin/books/${encodeURIComponent(bookId)}/labels`, fetcher, {
     method: 'PATCH',

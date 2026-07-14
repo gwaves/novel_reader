@@ -1,3 +1,35 @@
+2026-07-11 更新：内容生产常驻服务补齐上传、模板和主库备份闭环。
+- 新增受Token保护的源文件管理：支持TXT、EPUB、PDF、MOBI、AZW/AZW3单文件流式上传、类型/文件名/大小限制和服务端列表；上传写临时文件后原子rename，失败不会留下半文件。
+- 新增服务端job模板管理：模板统一写入 `/app/jobs`，源文件名映射到 `/app/sources`，`mainDbPath` 强制使用88.100生产主库；模板可通过API或管理界面直接提交到持久队列。
+- 新增生产主库在线一致性备份：使用Node 24 `node:sqlite` backup API，支持备份列表和下载；管理界面增加源文件、模板及备份操作区。
+- 真实88.100验收：上传 `服务上传验证.txt`（105 bytes），保存并启动 `服务模板验证.json`，任务一次完成并生成 `run.json`；对当前生产主库创建 `novel-reader-2026-07-11T05-12-06-846Z.sqlite`，大小1,807,962,112 bytes，耗时约1.7秒。
+- 服务测试由9项扩展为12项，新增multipart上传、模板路径治理、SQLite一致性备份列表/下载覆盖。
+- 全量 `npm run production-pipeline:test` 通过（63 tests）；ELK按真实模板任务 `job_id` 检索到 `job.started` 和 `job.completed` 各1条。
+
+2026-07-11 更新：内容生产流水线已完成常驻服务首版并部署到 192.168.88.100。
+- 将现有 Fastify console 升级为持久任务服务：`jobs.json` 保存队列，全局并发由 `PRODUCTION_PIPELINE_MAX_CONCURRENT_JOBS` 控制；排队任务按创建时间启动，不再提交后无上限地直接拉起进程。
+- 服务重启时原 `running/stopping` 任务自动回到队列；如果已经生成 `run.json`，下一次执行改用 `resume --run <run.json>`，复用现有幂等阶段和 `items.sqlite` 恢复能力。失败或停止任务可通过 `POST /api/jobs/:jobId/retry` 和管理界面的“重新排队”按钮重试。
+- 增加SIGTERM/SIGINT收口：容器升级或服务关闭时终止子进程树，把任务保留为可恢复队列状态；`/health` 新增并发上限、运行数、排队数和是否接收任务。
+- 新增 `events.jsonl` 结构化任务事件，包含 `job_id`、`book_id`、状态、尝试次数和 `event.action`；Filebeat 已增加常驻服务 stdout 与事件日志采集。
+- 新增 `production-pipeline/deploy/` Node 24 + FFmpeg/rsync/SSH Docker 部署材料和 `production-pipeline/docs/service-deployment.md`；服务部署目录为 `/home/gwaves/production-pipeline-service`，管理入口为内网 `http://192.168.88.100:6290`，Token 只保存在远端 `.env`。
+- 已使用SQLite一致性快照把当前约1.7 GiB主数据库同步到88.100；真实 `/api/books` 能读取书库。真实smoke任务首次暴露镜像缺少 `scripts/summary-source-locator.mjs`，补齐镜像后通过retry API原任务第二次执行完成并生成 `run.json`。
+- ELK真实验收已出现5条 `production.pipeline.job` 事件：`job.started=2`、`job.completed=1`、`job.failed=1`、`job.queued=1`。服务测试扩展为9项，覆盖持久排队、单并发、重启恢复和失败重试。
+- 全量 `npm run production-pipeline:test` 通过（60 tests）；真实重启 `novel-reader-production-service` 后，smoke任务仍保持 `completed`、`attempts=2`、`exitCode=0`，未认证 `/api/jobs` 返回401。
+- 88.100 的 `/home/gwaves/.novel_reader/novel_reader.sqlite` 现在作为生产主库；为避免双写分叉，不再同时用macOS本地主库执行正式生产。下一切片需要补服务端源文件上传、job模板管理和生产主库备份/回迁流程。
+
+2026-07-11 更新：ELK 日志平台已部署到 192.168.88.100 并完成真实验收。
+- 在 `/home/gwaves/elastic-observability` 部署 Elasticsearch 9.4.2、Kibana 9.4.2 和 Filebeat 9.4.2；集群为单节点 green，Kibana 和 Elasticsearch 分别只监听内网地址 `192.168.88.100:5601`、`192.168.88.100:9200`，9300 未发布。
+- 新增 `observability/elastic/`：包含固定版本 Compose、自动生成远端凭据和 CA/节点证书、最小权限 Filebeat 用户、代理绕过、30 天 ILM、每日快照、Kibana Data View、部署说明和自动验收脚本；真实 `.env`、证书、数据和快照均在 Git 忽略范围内。
+- Filebeat 已采集 Gateway/Nginx 容器 stdout、Gateway requests JSONL 和 mobile JSONL；为避免与 ECS 的 `source`、`url` 字段冲突，原始结构化业务字段统一保存到 `novel.*`，并使用 `novel.receivedAt` 作为 `@timestamp`。
+- 真实数据验收：`container.stdout=10465`、`gateway.request=1343`、`mobile.diagnostic=992`；Filebeat 当前无 400/403 索引错误，Gateway `/health` 仍为 `ok`。
+- 生命周期与恢复验收：`novel-reader-logs-30d` 已绑定当前 data stream；`novel-reader-daily` 每日快照策略已启用，首次手工快照状态为 `SUCCESS`，1/1 shard 成功。
+- 下一阶段不再把内容生产视为临时命令行任务：将 production-pipeline 改造成常驻服务，统一任务提交、队列、并发、恢复、进度 API、管理界面和 ELK 日志关联；服务化完成后再纳管 `run_id/book_id/stage` 日志。
+
+2026-07-11 更新：完成 192.168.88.100 ELK 日志平台部署规划。
+- 已只读核查真实主机：32 核、62 GiB 内存、约 614 GiB 可用 NVMe，Docker 28.3.3、Compose 2.39.1，`vm.max_map_count=1048576`，5601/9200/9300/5044 均未占用。
+- 确认 Gateway 结构化日志位于 `/home/gwaves/novel-reader-gateway/data/logs`，当前约 2.2 MiB；生产流水线运行日志不在 88.100，需要在实际任务执行机部署第二个采集器。
+- 新增 `docs/elk-deployment-plan.md`：首版采用 Elasticsearch + Kibana + Filebeat 单节点架构，暂不引入 Logstash；规划安全边界、30/90 天保留策略、跨主机采集、Kibana 交付物、快照恢复和分阶段验收。
+
 2026-07-04 更新：README 与文档体系刷新为 AI 原生小说阅读器口径。
 - 根 README 已重制为图文并茂的项目首页，核心卖点统一为 AI 原生小说阅读器：知识图谱、RAG 剧情问答、多角色有声小说合成、Gateway Android 离线读听和 production-pipeline 发布验证闭环。
 - 使用新连接的 Android 真机补充移动端主要功能截图，保留公开名著内容界面：书库覆盖率、阅读概要、RAG/图谱搜索、音频/TTS 菜单、同步与缓存。原始截图中可能包含设备信息的临时文件已清理。
@@ -1087,3 +1119,97 @@ SQLite 图谱表
 - `/admin/metrics` 新增 `process.dataDirBytes`，由 Gateway 实时扫描数据目录大小；Admin UI 不再显示硬编码 CPU/磁盘示例值。
 - 总览页“运行 / 内存 / 数据目录”改为显示 Gateway uptime、heap、RSS 和数据目录大小；“在线设备”改为根据 `/admin/devices` 统计总设备、受信设备和禁用设备。
 - 已部署到 192.168.88.100，并验证线上当前返回 `dataDirBytes=357949331`、设备 3 台、受信 2 台、禁用 0 台。
+# 2026-07-11 更新：文本型 PDF 导入开发启动
+
+- 本地 `main` 已快进同步至远端最新提交，并创建 `codex/pdf-import` 开发分支。
+- PC 阅读器文件选择器已加入 `.pdf` / `application/pdf`，使用 PDF.js 提取文本层后复用现有正文清理、章节切分、概要、知识图谱、RAG 与 TTS 链路。
+- `production-pipeline/src/book-ingest.mjs` 已接通相同的文本型 PDF 导入能力，保留稳定书籍 ID 与既有生产阶段。
+- 扫描型 PDF 本期不内置 OCR；当文件没有可提取文字时，会明确提示先 OCR 后再导入。
+- 已增加 PC 单元测试与 production-pipeline 解析测试，并更新 README、产品规格和测试矩阵。
+- 自动化验证通过：目标 PC 单元测试 22 项、production-pipeline 测试 57 项、TypeScript/Vite 生产构建与全仓 ESLint 均通过。
+- 使用 Downloads 中两本真实中文文本型 PDF 回归时，发现通用章节正则会把正文编号和脚注误判为章节；已改为优先读取 PDF 自带 outline/bookmark 目录，以目录目标页划分章节，无目录时才回退原有文本章节识别。
+- 真实导入验证完成：《圆圈正义（2026新版）》按 PDF 目录导入 53 个有效章节、约 12.86 万字；《光环效应：商业认知思维的九大陷阱》导入 19 个章节、约 12.94 万字。两本均已写入主数据库并核对 `books.chapter_count` 与实际 `chapters` 行数一致。
+- 已为上述两本书分别建立可续跑的完整生产任务，阶段为 `summary + kg + embedding + audio + package`，不包含远端 publish/verify；两份任务均通过 production doctor 14/14 检查。
+- 生产任务已于 2026-07-11 启动：《圆圈正义》run `2026-07-11T02-46-22-353Z-bc2d0df4`，《光环效应》run `2026-07-11T02-46-22-369Z-29b62466`。首轮检查确认 chunk embedding、summary、KG 与 audio 均已实际运行，TTS 导演脚本已开始逐章生成。
+- 两本书的完整生产任务均已完成，并已将 package 与 audio 发布到真实 Gateway。由于整本音频 rsync 的 SSH 长连接约 40 秒后中断，改为按章节目录逐个增量同步，最终远端文件核对为《圆圈正义》53/53 MP3 + 53/53 manifest、《光环效应》19/19 MP3 + 19/19 manifest。
+- 已调用 Gateway `admin/audio/refresh`：两本书均为 `missingChapterCount: 0`、`coverage: 1`。使用真实 mobile token/trusted device 上下文验证 `/mobile/books/:bookId/package?include=full` 与 `/mobile/books/:bookId/audio`：圆圈正义返回 53 章、53 概要、834 实体、803 关系和 53 音频；光环效应返回 19 章、19 概要、335 实体、355 关系和 19 音频。
+2026-07-11 更新：内容生产常驻服务新增可视化 Job 构建器。
+- 管理页可直接选择上传源文件或生产主库已有书籍，勾选 import、summary、summary-locate、kg、embedding、audio、package、publish、verify 阶段，并填写 LLM/向量服务的基础参数，不再要求手写整份 JSON。
+- 新增 `/api/builder-metadata`、`/api/templates/validate` 和模板详情 API；保存前检查阶段、来源、bookId、LLM/向量配置，模板详情中的 token、apiKey、password、secret 字段统一脱敏。
+- 密钥仍只通过远端环境变量注入，可视化构建器只生成 `apiKeyEnv` 字段，不向浏览器返回真实密钥。
+- 已部署到 192.168.88.100：线上构建元数据返回9个阶段、1个上传源文件和13本主库书籍；`visual-builder-smoke.json` 服务端校验通过，真实任务 `2340c48e-c385-47c7-848b-7e94ccc95270` 执行完成。部署命令已强制指定远端 env 文件，重建后确认管理 Token 长度为64且未输出其内容。
+2026-07-11 更新：可视化构建器已覆盖有声书、打包、发布和验证配置。
+- 新增 TTS 配置路径、导演/章节/TTS 并发、Gateway SSH 目标、验证 URL、Token 环境变量和音频抽样数表单；可直接生成 `audio`、`publish`、`verify`、`gateway` 配置。
+- CLI verify/doctor 支持 `tokenEnv`、`adminTokenEnv`，Compose 显式注入 LLM、Embedding、Gateway mobile/admin 凭据，模板无需保存明文密钥。
+- 已将现有 TTS 配置安全迁移到88.100并设为0600，数据库路径改为容器绝对路径；Gateway mobile/admin Token 从现有 Gateway 环境映射，验证时只输出长度。
+- 线上保存 `full-production-ready.json`，服务端校验无错误/警告；容器内 `doctor` 13/13 全部通过。该模板仅用于配置预检，未启动真实音频生产。
+2026-07-11 更新：修复可视化构建器内容来源切换显示。
+- “上传源文件”模式现在只显示源文件选择；“主库已有书籍”模式只显示主库书籍选择，避免新书导入时误以为还必须选择一本旧书。
+2026-07-11 更新：主库书籍选择器新增生产状态概览。
+- `/api/books` 和构建元数据现在按主库真实记录统计摘要、KG已完成章节、摘要/正文块向量双覆盖，并结合 Gateway 文件系统统计已发布音频章节和内容包。
+- 主库下拉项显示摘要/图谱/向量/音频百分比及发布状态；选中书籍后显示正文章数、字数、各阶段完成章数和进度条，便于判断下一步应该勾选哪些生产阶段。
+2026-07-11 更新：可视化构建器补充 LLM 总并发配置。
+- 新增“LLM 总并发数”字段，默认8，生成模板时写入 `llm.concurrency`；摘要、KG以及有声书导演阶段均会包含统一的LLM池配置。
+2026-07-11 更新：LLM 总并发与有声书导演并发改为联动配置。
+- 构建器生成 `llm.scheduler` 共享池，摘要/KG/音频按4:2:4权重分配并允许空闲借用；导演最大并发按 `ceil(LLM总并发 / 同时编排章节数)` 自动显示，不再独立写入模板。
+- 服务端拒绝“同时编排章节数大于LLM总并发”以及“导演并发 × 同时编排章节数超过总并发”的高级JSON配置，避免静默钳制或LLM过载。
+2026-07-11 更新：修复长表单底部操作反馈不可见。
+- “生成 JSON / 校验并保存”按钮下方新增就地状态区，实时显示生成、校验、保存成功或失败原因；保存期间按钮禁用防止重复提交，不再把反馈写到页面顶部的任务详情区。
+2026-07-11 更新：修复 `summary-locate` 截断生产并行组的问题。
+- 调度器从“列表分组+屏障”改为单一DAG依赖调度：import后并行启动summary、KG、正文向量和audio；summary完成后启动summary-locate与摘要向量；全部上游完成后再package、publish、verify。
+- 并行回归用例加入summary-locate，明确验证KG和audio必须早于summary-locate启动，防止该阶段再次把全流程退化成串行。
+2026-07-11 更新：修复同一生产 run 重复展示和幽灵 running 状态。
+- 自动发现的只读 run 会与常驻服务管理任务按 `bookId + jobPath` 去重；前端只对非只读且真实活动的任务显示停止按钮。
+- 用户停止任务时同步把父 `run.json` 及仍在running的阶段标记为stopped，避免无进程的残留run继续显示running并触发 `Job is not running`。
+2026-07-11 更新：运行详情补全并发资源池表达。
+- “当前并发”新增LLM共享池总量/已分配/空闲，以及摘要、摘要定位、KG、音频导演逐阶段分配；向量服务独立显示请求并发和正在运行的正文/摘要向量阶段。
+- KG和audio运行控制仍单独显示动态值，便于同时核对调度配额与阶段内部实际并发。
+- 上线核对时发现KG动态借用只扣除了audio、漏扣summary，出现总池10但动态合计14；已修正为同时扣除summary与audio固定槽位。共享池卡片以调度配额为准，动态控制值单独展示，避免把瞬时控制文件误算成池分配。
+- 后续修正已完成阶段仍显示最后控制文件并发的问题：KG/audio 控制值只有对应阶段处于 running 时才计为当前并发，否则显示0和“未运行”，控制文件时间明确标为“最后控制记录”。线上核对《娇娇》当前 KG=0，Audio 导演=10，LLM池10/10。
+2026-07-11 更新：任务列表新增安全删除。
+- failed/stopped/completed任务可在列表卡片或详情页删除；running/queued/stopping必须先停止。删除前浏览器确认，删除后仅从管理列表隐藏，保留日志、run.json及生产产物。
+- 删除记录以持久隐藏标记保存，既可避免误删数据，也可防止同一run被自动发现后重新出现在任务列表。
+2026-07-11 更新：管理Token改为显式验证和保存。
+- Token输入框新增“验证并保存/清除”：保存前调用受保护API确认有效，仅写入当前浏览器localStorage，不上传到其他存储或回写服务器；刷新页面会提示已读取本地Token。
+- 移除Token随每次键入自动持久化的隐式行为，避免错误或未输完的Token覆盖已保存值。
+2026-07-11 更新：V2 Job JSON选择器区分浏览器本机与生产端。
+- 顶部改为“生产端JSON”下拉框，列出 `/app/jobs` 已保存模板；“本机JSON”使用浏览器文件选择器读取当前电脑文件，执行服务端校验后上传到生产端并自动选中。
+- 移除页面对服务器/macOS文件选择器的依赖，解决服务运行在Linux容器时点击“选择JSON”无反应的问题；处理状态和错误就地显示。
+2026-07-11 更新：修复管理页整段脚本因删除确认文案换行而无法解析。
+- 症状为“验证并保存”无响应、生产端JSON和下方资源永久显示加载中；根因是服务端模板把 `\\n` 展开成了JavaScript字符串中的真实换行。
+- 新增渲染后内联脚本编译回归检查，不再只检查HTML元素是否存在，防止类似错误导致全页面交互静默失效。
+2026-07-11 更新：生产管理页时间统一显示北京时间。
+- 后端事件、run.json与ELK继续保存UTC；浏览器将任务创建时间、控制文件更新时间、产出统计时间、服务日志时间及日志正文中的ISO时间戳统一转换为 `Asia/Shanghai UTC+8`。
+- 页面时间明确附加 `UTC+8`，避免把带 `Z` 的UTC时间误认为本地时间，同时不改变日志存储和ELK检索口径。
+2026-07-11 更新：音频产出指标补充总章节数与完成比例。
+- audio完成数继续按已落盘 `chapter.mp3` 统计；总数从当前run的主库bookId读取章节数，并尊重audio单章或limit配置。
+- 所有有总量的产出卡片统一显示 `完成数/总数 · 百分比`，例如 `完成 26/509 · 5%`。
+2026-07-11 更新：修正产出卡片把日志事件和向量条目误标为章节的问题。
+- 页面顶部明确显示“本书共 N 章”，所有工序卡片统一使用主库 `chapters` 作为分母，并改称“覆盖章节”；日志仅用于计算最近处理速度，不再决定完成数。
+- 摘要、KG、正文向量和摘要向量完成数直接从主库覆盖记录统计；摘要定位完成阶段按全书覆盖；音频继续按实际落盘 `chapter.mp3` 统计。
+- 已部署并通过线上 API 核对《娇娇》：全书 509 章，摘要/KG/正文向量/摘要定位/摘要向量均为 509/509，章节音频当前 104/509。
+2026-07-11 更新：有声书生产开始按真实工序拆分 DAG。
+- 新模板默认启用 `audio.workflowDag`，原先单一 `audio` 大节点拆为“导演脚本生成 → 导演脚本质检 → TTS 合成与音频校验 → 音频目录聚合”；旧模板仍兼容原 `batch-pipeline`。
+- TTS 导演新增 `draft-batch`、`audit-batch`、`synth-batch` 三个可独立执行和恢复的批量工序。每个工序内部继续按章节并发，TTS 工序内部继续按音频片段并发。
+- 导演脚本、质检报告、章节 MP3/manifest 均作为明确的工序交接产物；恢复任务会跳过已完成工序和已有有效产物，脚本质检失败不会进入 TTS。
+- 控制台执行 DAG、整体阶段进度和 LLM 并发池已识别新工序节点。完整 production-pipeline 回归测试 67/67 通过。
+2026-07-11 更新：继续拆分 `ttsSynthesize` 大工序。
+- 音频工序 DAG 细化为“导演脚本生成 → 导演脚本质检 → TTS 片段合成 → 音频片段质检 → 章节拼接编码 → 音频目录聚合”。
+- `synth-segments-batch` 只负责生成片段 WAV 和 `segments-manifest.json`；`audio-qc-batch` 独立校验片段时长、静音和完整性并生成 `audio-qc.json`；`assemble-batch` 仅接受质检通过的章节，负责标准化、拼接、编码 MP3 和最终 manifest。
+- 三个工序分别具有章节级并发与独立失败状态；恢复时可只重跑失败工序，音频质检失败不会进入章节拼接。
+- 原 `synth`、`synth-batch` 和 `batch-pipeline` 保持兼容，完整 production-pipeline 回归测试继续为 67/67 通过。
+2026-07-11 更新：生产控制台开始产品化信息架构重构。
+- 新增总览、任务、新建生产、模板、素材与备份、设置六个独立工作区，左侧长表单改为固定主导航+工作区布局；移动端切换为横向导航。
+- 新建生产改为四步向导：内容、目标、资源、确认；自动补齐import/summary-locate/publish/verify依赖，提供稳定/均衡/极速资源预设，并新增带LLM/TTS费用与Gateway写入提示的“确认并启动”。
+- 任务页新增书名/模板搜索与状态筛选；任务详情新增整体完成比例、阶段完成数、基于近期速度的ETA与关键路径摘要。
+- 模板区改为管理卡片，支持启动、载入编辑器、复制为副本和删除；运行中/排队任务正在使用的模板禁止删除，历史任务与产物不随模板删除。
+- 素材与备份改为管理卡片并支持安全删除；仍被模板引用的源文件禁止删除。任务日志默认展示关键事件，可切换“仅错误/全部”，任务失败原因提升为显著错误区。
+- 任务详情新增按依赖波次展示的DAG，技术路径与子run默认折叠；设置页提供显式浏览器通知授权，授权后任务完成或失败会在状态变更时通知。
+- 新增admin/viewer双Token权限：viewer仅可读取任务、进度、日志和审计，所有写请求返回403；设置页显示当前权限与最近20条结构化任务审计事件。
+- 任务生命周期文案统一为“暂停生产/继续生产/已暂停”，明确继续时复用已完成成果；内部stopped/retry状态保持兼容，不再让运营用户误以为会从头重跑。
+- 任务列表无需进入详情即可看到已完成阶段数、总阶段数和当前运行阶段；失败任务操作命名为“重试失败项”，实际恢复仍跳过已完成阶段/章节。
+- 设置页支持按供应商账单配置摘要/KG/音频元每章单价；新建任务启动前显示预计费用，运行详情按真实完成章数显示估算已发生/总费用。默认单价为0并明确不估算，避免编造价格。
+2026-07-11 更新：区分生产总览与任务工作台，并消除恢复任务状态歧义。
+- 总览不再复用任务列表双栏：改为全宽经营视图，只显示运行数、等待数、需要处理数、累计完成数，以及正在生产和需要关注的任务；完整搜索、筛选和历史仍留在任务页。
+- 服务自动恢复任务时立即清除旧的中断错误，记录 `job.recovered` 事件，并以普通提示显示“已恢复、当前正常运行”；只有失败或暂停状态才显示错误面板。
+- 已部署到 192.168.88.100。真实核对《娇娇》父恢复进程、KG、audio 和 TTS 导演进程均在运行，任务记录为 running、error 为空，并带有恢复成功说明。

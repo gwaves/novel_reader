@@ -24,6 +24,7 @@ import {
   readBookPackageStatusesForBooks,
   readBookSummary,
   updateBookLabels,
+  updateBookTitle,
   updateBookVisibility,
   upsertBookPackage,
 } from './data-store.js'
@@ -356,6 +357,18 @@ export function buildGatewayApp(config: GatewayConfig = loadConfig()) {
       schemaVersion: 1,
       updatedAt: new Date().toISOString(),
       book: await updateBookVisibility(config, request.params.bookId, request.body.visibility),
+    }
+  })
+
+  app.patch<{ Body: unknown; Params: { bookId: string } }>('/admin/books/:bookId/title', async (request) => {
+    requireAdminAuth(config, request)
+    if (!isRecord(request.body)) {
+      throw new GatewayHttpError(400, 'invalid_book_title', 'Book title patch body must be an object.')
+    }
+    return {
+      schemaVersion: 1,
+      updatedAt: new Date().toISOString(),
+      book: await updateBookTitle(config, request.params.bookId, request.body.title),
     }
   })
 

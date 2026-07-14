@@ -1,0 +1,6 @@
+.env
+data/
+runs/
+jobs/
+sources/
+backups/

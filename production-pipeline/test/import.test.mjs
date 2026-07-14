@@ -99,7 +99,7 @@ describe('production-pipeline import', () => {
     }
   })
 
-  it('requires --replace before overwriting an existing book', async () => {
+  it('reuses an identical import but requires --replace for different content', async () => {
     const tempDir = await mkdtemp(join(tmpdir(), 'production-pipeline-import-test-'))
     try {
       const txtPath = join(tempDir, 'sample.txt')
@@ -120,6 +120,11 @@ describe('production-pipeline import', () => {
         runRoot,
       ]
       await execFileAsync(process.execPath, args)
+
+      const identical = await execFileAsync(process.execPath, args)
+      assert.match(identical.stdout, /identical book already exists; reused existing main DB records/)
+
+      await writeFile(txtPath, `第一章 开始\n这是已经修改的第一章内容。`, 'utf8')
 
       await assert.rejects(
         () => execFileAsync(process.execPath, args),
@@ -1049,7 +1054,7 @@ describe('production-pipeline import', () => {
           title: '样书',
           mainDbPath: dbPath,
           source: { file: txtPath },
-          stages: ['import', 'summary', 'kg', 'embedding', 'audio'],
+          stages: ['import', 'summary', 'summary-locate', 'kg', 'embedding', 'audio'],
           llm: {
             provider: 'openai-compatible',
             baseUrl: chatServer.url,
@@ -1096,10 +1101,19 @@ describe('production-pipeline import', () => {
       assert.ok(parentRunDir)
       const runJson = JSON.parse(await readFile(join(parentRunDir, 'run.json'), 'utf8'))
       assert.equal(runJson.stages.audio.status, 'completed')
+      assert.equal(runJson.stages['summary-locate'].status, 'completed')
       assert.equal(runJson.stages.summaryEmbedding.status, 'completed')
       assert.ok(
         new Date(runJson.stages.audio.startedAt).getTime() <= new Date(runJson.stages.summaryEmbedding.startedAt).getTime(),
         'audio should start before summaryEmbedding even when audio is listed after embedding',
+      )
+      assert.ok(
+        new Date(runJson.stages.kg.startedAt).getTime() < new Date(runJson.stages['summary-locate'].startedAt).getTime(),
+        'kg should start in the first DAG wave instead of waiting behind summary-locate',
+      )
+      assert.ok(
+        new Date(runJson.stages.audio.startedAt).getTime() < new Date(runJson.stages['summary-locate'].startedAt).getTime(),
+        'audio should start in the first DAG wave instead of waiting behind summary-locate',
       )
       const summaryReport = JSON.parse(await readFile(join(dirname(runJson.stages.summary.childRunJson), 'artifacts', 'summary-report.json'), 'utf8'))
       const kgReport = JSON.parse(await readFile(join(dirname(runJson.stages.kg.childRunJson), 'artifacts', 'kg-report.json'), 'utf8'))
@@ -1452,6 +1466,63 @@ describe('production-pipeline import', () => {
     }
   })
 
+  it('allows empty kg for reference-like index pages', async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), 'production-pipeline-kg-reference-page-test-'))
+    let chatServer
+    try {
+      chatServer = await startFakeChatServer({ emptyKgWhenPromptIncludes: 'EMPTY_KG_INDEX' })
+      const txtPath = join(tempDir, 'sample.txt')
+      const dbPath = join(tempDir, 'main.sqlite')
+      const runRoot = join(tempDir, 'runs')
+      await writeFile(txtPath, `第一章 后汉\nEMPTY_KG_INDEX\n${'1 163 25 1936 28-32 483 522 513 2 115 41 2 121-156 48-56 524 2 159-180\n'.repeat(20)}`, 'utf8')
+      await execFileAsync(process.execPath, [
+        cliPath,
+        'import',
+        '--file',
+        txtPath,
+        '--book-id',
+        'sample-book',
+        '--title',
+        '样书',
+        '--main-db',
+        dbPath,
+        '--run-root',
+        runRoot,
+      ])
+
+      const { stdout } = await execFileAsync(process.execPath, [
+        cliPath,
+        'kg',
+        '--book-id',
+        'sample-book',
+        '--main-db',
+        dbPath,
+        '--run-root',
+        runRoot,
+        '--provider',
+        'openai-compatible',
+        '--base-url',
+        chatServer.url,
+        '--model',
+        'fake-chat',
+        '--empty-min-chars',
+        '100',
+        '--disable-thinking',
+      ])
+
+      assert.match(stdout, /completed: 1/)
+      assert.match(stdout, /failed: 0/)
+      const runIds = await readdir(join(runRoot, 'sample-book'))
+      const kgReport = JSON.parse(await readFile(join(runRoot, 'sample-book', runIds[0], 'artifacts', 'kg-report.json'), 'utf8'))
+      assert.equal(kgReport.completed, 1)
+      assert.equal(kgReport.failed, 0)
+      assert.equal(kgReport.quality.issueCount, 0)
+    } finally {
+      await chatServer?.close()
+      await rm(tempDir, { recursive: true, force: true })
+    }
+  })
+
   it('retries kg quality failures before marking a chapter failed', async () => {
     const tempDir = await mkdtemp(join(tmpdir(), 'production-pipeline-kg-quality-retry-test-'))
     let chatServer
@@ -1656,7 +1727,9 @@ describe('production-pipeline import', () => {
           title: '样书',
           mainDbPath: dbPath,
           stages: ['audio'],
+          llm: { baseUrl: 'http://127.0.0.1:1/v1', model: 'fake', concurrency: 4, scheduler: { borrowIdle: true } },
           audio: {
+            workflowDag: true,
             ttsConfig: fakeConfigPath,
             ttsDirectorScript: fakeDirectorPath,
             ttsOutRoot,
@@ -1682,8 +1755,16 @@ describe('production-pipeline import', () => {
       assert.ok(parentRunDir)
       const parentRunJson = JSON.parse(await readFile(join(parentRunDir, 'run.json'), 'utf8'))
       assert.equal(parentRunJson.status, 'completed')
-      assert.deepEqual(Object.keys(parentRunJson.stages), ['audio'])
+      assert.deepEqual(Object.keys(parentRunJson.stages), ['directorDraft', 'directorQc', 'ttsSegments', 'audioQc', 'audioAssemble', 'audio'])
+      assert.equal(parentRunJson.stages.directorDraft.status, 'completed')
+      assert.equal(parentRunJson.stages.directorQc.status, 'completed')
+      assert.equal(parentRunJson.stages.ttsSegments.status, 'completed')
+      assert.equal(parentRunJson.stages.audioQc.status, 'completed')
+      assert.equal(parentRunJson.stages.audioAssemble.status, 'completed')
       assert.equal(parentRunJson.stages.audio.status, 'completed')
+      const audioControl = JSON.parse(await readFile(join(parentRunDir, 'artifacts', 'runtime', 'audio-control.json'), 'utf8'))
+      assert.equal(audioControl.directorConcurrency, 4)
+      assert.equal(audioControl.llmChapters, 1)
       assert.ok(parentRunJson.stages.audio.childRunJson)
       assert.ok(parentRunJson.stages.audio.logFile)
 
@@ -1703,7 +1784,7 @@ describe('production-pipeline import', () => {
       assert.equal(audioCatalog.chapters[1].durationMs, 2000)
       assert.equal(await fileExists(join(dirname(audioCatalogPath), audioCatalog.chapters[0].fileName)), true)
       assert.equal(await fileExists(join(ttsOutRoot, 'ch001-full', 'audio', 'chapter.mp3')), true)
-      assert.match(await readFile(join(childRunDir, 'artifacts', 'tts-director.log'), 'utf8'), /fake director start/)
+      assert.match(await readFile(join(parentRunDir, parentRunJson.stages.directorDraft.logFile), 'utf8'), /fake director start/)
     } finally {
       await rm(tempDir, { recursive: true, force: true })
     }
@@ -2046,7 +2127,8 @@ describe('production-pipeline import', () => {
       const txtPath = join(tempDir, 'sample.txt')
       const dbPath = join(tempDir, 'main.sqlite')
       const runRoot = join(tempDir, 'runs')
-      const gatewayDataDir = join(tempDir, 'gateway-data')
+      const gatewayRoot = join(tempDir, 'gateway')
+      const gatewayDataDir = join(gatewayRoot, 'data')
       const jobPath = join(tempDir, 'job.json')
       await writeFile(txtPath, `第一章 开始\n这是第一章内容。`, 'utf8')
       await mkdir(gatewayDataDir, { recursive: true })
@@ -2073,7 +2155,7 @@ describe('production-pipeline import', () => {
           mainDbPath: dbPath,
           stages: ['package', 'publish'],
           gateway: {
-            gatewayDataDir,
+            root: gatewayRoot,
             url: 'https://127.0.0.1:8888',
             token: 'dev-token',
           },
@@ -2105,6 +2187,7 @@ describe('production-pipeline import', () => {
       const runJson = JSON.parse(await readFile(join(parentRunDir, 'run.json'), 'utf8'))
       const publishLog = await readFile(join(parentRunDir, runJson.stages.publish.childRuns[0].logFile), 'utf8')
       assert.match(publishLog, new RegExp(escapeRegExp(gatewayDataDir)))
+      assert.doesNotMatch(publishLog, /remote-host/)
     } finally {
       await rm(tempDir, { recursive: true, force: true })
     }
@@ -2948,9 +3031,11 @@ function parseChapters(value) {
 }
 
 const args = parseArgs(process.argv.slice(2))
-if (args._[0] !== 'batch-pipeline') throw new Error('fake director only supports batch-pipeline')
+const command = args._[0]
+if (!['batch-pipeline', 'draft-batch', 'audit-batch', 'synth-batch', 'synth-segments-batch', 'audio-qc-batch', 'assemble-batch'].includes(command)) throw new Error('unsupported fake director command: ' + command)
 await mkdir(args['out-root'], { recursive: true })
-await writeFile(join(args['out-root'], 'args.json'), JSON.stringify(args))
+await writeFile(join(args['out-root'], command + '-args.json'), JSON.stringify(args))
+if (command === 'batch-pipeline') await writeFile(join(args['out-root'], 'args.json'), JSON.stringify(args))
 const config = args.config ? JSON.parse(await readFile(args.config, 'utf8')) : {}
 await writeFile(join(args['out-root'], 'config.json'), JSON.stringify(config))
 console.log('fake director start')
@@ -2963,12 +3048,26 @@ if (args['control-file']) {
 const chapters = parseChapters(args.chapters)
 for (const chapter of chapters) {
   console.log('fake director chapter ' + chapter)
-  const audioDir = join(args['out-root'], 'ch' + String(chapter).padStart(3, '0') + '-full', 'audio')
-  await mkdir(audioDir, { recursive: true })
-  await writeFile(join(audioDir, 'chapter.mp3'), 'fake mp3 ' + chapter)
-  await writeFile(join(audioDir, 'manifest.json'), JSON.stringify({ version: 2, durationMs: chapter * 1000 }))
+  const chapterDir = join(args['out-root'], 'ch' + String(chapter).padStart(3, '0') + '-full')
+  await mkdir(chapterDir, { recursive: true })
+  if (command === 'draft-batch') await writeFile(join(chapterDir, 'director-script.json'), JSON.stringify({ source: { bookId: args['book-id'], chapterIndex: chapter }, segments: [] }))
+  if (command === 'audit-batch') await writeFile(join(chapterDir, 'director-script.audit.json'), JSON.stringify({ warnings: [] }))
+  const audioDir = join(chapterDir, 'audio')
+  if (command === 'synth-segments-batch') {
+    await mkdir(audioDir, { recursive: true })
+    await writeFile(join(audioDir, 'segments-manifest.json'), JSON.stringify({ segments: [{ id: 's1', wav: 'fake.wav' }] }))
+  }
+  if (command === 'audio-qc-batch') {
+    await mkdir(audioDir, { recursive: true })
+    await writeFile(join(audioDir, 'audio-qc.json'), JSON.stringify({ passed: true, failedSegments: 0 }))
+  }
+  if (command === 'batch-pipeline' || command === 'synth-batch' || command === 'assemble-batch') {
+    await mkdir(audioDir, { recursive: true })
+    await writeFile(join(audioDir, 'chapter.mp3'), 'fake mp3 ' + chapter)
+    await writeFile(join(audioDir, 'manifest.json'), JSON.stringify({ version: 2, durationMs: chapter * 1000 }))
+  }
 }
-const summaryPath = join(args['out-root'], 'batch-pipeline-' + chapters[0] + '-' + chapters.at(-1) + '.summary.json')
+const summaryPath = join(args['out-root'], command + '-' + chapters[0] + '-' + chapters.at(-1) + '.summary.json')
 await writeFile(summaryPath, JSON.stringify({ chapters }))
 console.log('汇总文件：' + summaryPath)
 `

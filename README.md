@@ -24,7 +24,7 @@ PC 端负责导入、阅读、AI 概要、知识图谱和 RAG 检索；`producti
 
 | 模块 | 当前能力 | 入口 |
 |------|----------|------|
-| PC AI 阅读器 | TXT/EPUB 导入、阅读进度、概要、知识图谱、RAG、数据库备份恢复 | `npm run dev` |
+| PC AI 阅读器 | TXT/EPUB/文本型 PDF 导入、阅读进度、概要、知识图谱、RAG、数据库备份恢复 | `npm run dev` |
 | Production Pipeline | `import -> summary -> kg -> embedding -> multi-role audio -> package -> publish -> verify` 全流程生产 | `npm run production-pipeline -- run --job ...` |
 | Gateway 服务 | 移动书库、package/audio 分发、RAG/AI 转发、设备授权、管理后台、指标与事件 | `npm run gateway:dev` |
 | Gateway Android App | Gateway 登录、书库同步、离线 package、章节 MP3 缓存、AI 多角色音频播放、应用更新 | `npm run gateway-android:android:build` |
@@ -103,7 +103,7 @@ flowchart LR
 
 ## 核心能力
 
-- **AI 原生阅读**：导入 `.txt` / `.epub` 后，系统围绕章节生成概要、实体、关系、embedding 和音频，读书过程天然带剧情索引。
+- **AI 原生阅读**：导入 `.txt` / `.epub` / 带文本层的 `.pdf` 后，系统围绕章节生成概要、实体、关系、embedding 和音频，读书过程天然带剧情索引。
 - **知识图谱理解长篇小说**：自动抽取人物、门派、道具、功法、地点、事件和关系，保留证据章节，支持编辑、合并、拆分、复审和 GraphML/JSON 导出。
 - **RAG 跨章节问答**：融合章节概要、正文 chunk 和图谱实体召回，适合追踪人物首次出现、道具流转、伏笔回收和剧情前因后果。
 - **多角色有声小说合成**：`production-pipeline/` 可生成分角色/旁白的章节 MP3 和 timeline manifest，移动端播放时能按音频进度高亮正文片段。
@@ -127,7 +127,7 @@ npm run dev
 | 前端 | `http://127.0.0.1:5173/` |
 | 本地 SQLite API | `http://127.0.0.1:5174/` |
 
-打开前端后可以导入 `.txt` 或 `.epub`，进入阅读器，再按需配置模型、生成概要、构建知识图谱或使用 RAG 搜索。
+打开前端后可以导入 `.txt`、`.epub` 或带文本层的 `.pdf`，进入阅读器，再按需配置模型、生成概要、构建知识图谱或使用 RAG 搜索。扫描型 PDF 需先通过 OCR 生成可复制的文本层。
 
 ### 2. 启动 Gateway
 

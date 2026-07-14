@@ -2,7 +2,7 @@
 
 import { createHash, randomUUID } from 'node:crypto'
 import { execFile, spawn } from 'node:child_process'
-import { copyFile, mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises'
+import { copyFile, mkdir, readFile, readdir, rename, stat, writeFile } from 'node:fs/promises'
 import { createWriteStream, existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, dirname, join, relative, resolve } from 'node:path'
@@ -161,14 +161,17 @@ async function runImport(options) {
       metadata: { chapterCount: chapters.length, sourceSha256: sha256 },
     })
 
+    let importResult = { reused: false }
     if (!isFlagEnabled(options.dryRun)) {
-      await writeBookToMainDb(mainDbPath, {
+      importResult = await writeBookToMainDb(mainDbPath, {
         id: bookId,
         title,
         importedAt,
         chapters,
         replace: isFlagEnabled(options.replace),
       })
+      importReport.reused = importResult.reused
+      await writeJson(join(run.artifactsDir, 'import-report.json'), importReport)
     }
 
     const finishedAt = new Date().toISOString()
@@ -197,7 +200,9 @@ async function runImport(options) {
           finishedAt,
           message: isFlagEnabled(options.dryRun)
             ? `dry-run parsed ${chapters.length} chapters.`
-            : `imported ${chapters.length} chapters.`,
+            : importResult.reused
+              ? `reused existing identical import with ${chapters.length} chapters.`
+              : `imported ${chapters.length} chapters.`,
           artifacts: {
             importReport: relativeRunPath(run.rootDir, join(run.artifactsDir, 'import-report.json')),
             chapterPreview: relativeRunPath(run.rootDir, join(run.artifactsDir, 'chapter-preview.json')),
@@ -209,6 +214,7 @@ async function runImport(options) {
     console.log(`run: ${run.runId}`)
     console.log(`book: ${bookId} ${title}`)
     console.log(`chapters: ${chapters.length}`)
+    if (importResult.reused) console.log('import: identical book already exists; reused existing main DB records')
     console.log(`runDir: ${run.rootDir}`)
     if (isFlagEnabled(options.dryRun)) console.log('dry-run: main database was not modified')
   } catch (error) {
@@ -300,7 +306,7 @@ async function runResume(options) {
 }
 
 async function executeJobStages({ runInfo, job, mainDbPath, resume }) {
-  const stages = expandEmbeddingStages(normalizeStageList(job.stages))
+  const stages = expandAudioWorkflowStages(expandEmbeddingStages(normalizeStageList(job.stages)), job)
   const stageGroups = buildStageExecutionGroups(stages)
   const stageResults = { ...(runInfo.runJson.stages || {}) }
   const context = {
@@ -364,6 +370,7 @@ async function executeJobStages({ runInfo, job, mainDbPath, resume }) {
     ...runInfo.runJson,
     status: 'completed',
     updatedAt: finishedAt,
+    finishedAt,
     stages: stageResults,
   })
   console.log(`run: ${runInfo.runJson.runId}`)
@@ -372,14 +379,29 @@ async function executeJobStages({ runInfo, job, mainDbPath, resume }) {
 }
 
 function stageDependencies(stage) {
-  if (stage === 'summaryEmbedding') return ['summary']
-  return []
+  const dependencies = {
+    summary: ['import'],
+    'summary-locate': ['import', 'summary'],
+    kg: ['import'],
+    chunkEmbedding: ['import'],
+    summaryEmbedding: ['import', 'summary'],
+    directorDraft: ['import'],
+    directorQc: ['directorDraft'],
+    ttsSegments: ['directorQc'],
+    audioQc: ['ttsSegments'],
+    audioAssemble: ['audioQc'],
+    audio: ['import', 'audioAssemble'],
+    package: ['import', 'summary', 'summary-locate', 'kg', 'chunkEmbedding', 'summaryEmbedding', 'audio'],
+    publish: ['package'],
+    verify: ['publish'],
+  }
+  return dependencies[stage] || []
 }
 
 function activeLlmSchedulerSlots(runningStages, stageResults) {
   let total = 0
   for (const stage of runningStages.keys()) {
-    if (stage === 'summary' || stage === 'kg' || stage === 'audio') {
+    if (stage === 'summary' || stage === 'kg' || stage === 'audio' || stage === 'directorDraft') {
       total += Math.max(1, Number(stageResults[stage]?.schedulerConcurrency || 1))
     }
   }
@@ -398,6 +420,7 @@ async function executeJobStageWithTracking({ stage, runInfo, job, mainDbPath, co
     ...runInfo.runJson,
     status: 'running',
     updatedAt: startedAt,
+    finishedAt: '',
     stages: stageResults,
   })
 
@@ -416,6 +439,7 @@ async function executeJobStageWithTracking({ stage, runInfo, job, mainDbPath, co
           ...runInfo.runJson,
           status: 'running',
           updatedAt: new Date().toISOString(),
+          finishedAt: '',
           stages: stageResults,
         })
       },
@@ -433,6 +457,7 @@ async function executeJobStageWithTracking({ stage, runInfo, job, mainDbPath, co
       ...runInfo.runJson,
       status: 'running',
       updatedAt: finishedAt,
+      finishedAt: '',
       stages: stageResults,
     })
     if (stage === 'import') {
@@ -443,6 +468,7 @@ async function executeJobStageWithTracking({ stage, runInfo, job, mainDbPath, co
   } catch (error) {
     const finishedAt = new Date().toISOString()
     stageResults[stage] = {
+      ...(stageResults[stage] || {}),
       status: 'failed',
       startedAt,
       finishedAt,
@@ -453,6 +479,7 @@ async function executeJobStageWithTracking({ stage, runInfo, job, mainDbPath, co
       ...runInfo.runJson,
       status: 'failed',
       updatedAt: finishedAt,
+      finishedAt,
       stages: stageResults,
     })
     throw error
@@ -467,7 +494,7 @@ async function initializeRuntimeControls({ job, runInfo, stages, stageOptions, s
 }
 
 async function initializeAudioRuntimeControl({ job, runInfo, stages, stageOptions, stageResults, scheduler }) {
-  if (!stages.includes('audio')) return
+  if (!stages.some(stage => ['audio', 'directorDraft', 'directorQc', 'ttsSegments', 'audioQc', 'audioAssemble'].includes(stage))) return
   const audio = job.audio || {}
   if (audio.controlFile || audio.control_file) return
   const controlFile = join(runInfo.rootDir, 'artifacts', 'runtime', 'audio-control.json')
@@ -496,7 +523,7 @@ async function updateRuntimeControls({ job, runInfo, stageResults }) {
 async function updateAudioRuntimeControl({ job, scheduler, stageResults }) {
   const audio = job.audio || {}
   const controlFile = audio.controlFile || audio.control_file
-  if (!controlFile || stageResults.audio?.status !== 'running') return
+  if (!controlFile || !isAudioPipelineRunning(stageResults)) return
   await writeAudioControlFile(controlFile, buildAudioRuntimeControl({ job, scheduler, stageResults }))
 }
 
@@ -509,7 +536,7 @@ async function updateKgRuntimeControl({ job, scheduler, stageResults }) {
 
 function buildAudioRuntimeControl({ job, scheduler, stageResults, stageOptions = {} }) {
   const audio = job.audio || {}
-  const audioOptions = stageOptions.audio || {}
+  const audioOptions = stageOptions.audio || stageOptions.directorDraft || {}
   const llmChapters = clampInteger(audioOptions.llmChapters ?? audio.llmChapters ?? audio.llm_chapters, 1, 1, 32)
   return {
     directorConcurrency: computeAudioRuntimeDirectorConcurrency({ scheduler, stageResults, stageOptions, audioOptions, llmChapters }),
@@ -521,7 +548,7 @@ function buildAudioRuntimeControl({ job, scheduler, stageResults, stageOptions =
 }
 
 function computeAudioRuntimeDirectorConcurrency({ scheduler, stageResults, stageOptions = {}, audioOptions = {}, llmChapters = 1 }) {
-  if (stageResults.audio?.status !== 'running') {
+  if (!isAudioPipelineRunning(stageResults)) {
     return clampInteger(audioOptions.directorConcurrency, 1, 1, scheduler.concurrency)
   }
   const fixedLlmSlots = ['summary', 'kg']
@@ -552,11 +579,20 @@ function computeKgRuntimeConcurrency({ scheduler, stageResults, stageOptions = {
   if (stageResults.kg?.status !== 'running') {
     return clampInteger(kgOptions.concurrency, 1, 1, scheduler.concurrency)
   }
-  const fixedAudioSlots = stageResults.audio?.status === 'running'
-    ? Math.max(1, Number(stageResults.audio?.schedulerConcurrency || stageOptions.audio?.directorConcurrency || 1))
+  const runningAudioStage = ['audio', 'directorDraft', 'directorQc', 'ttsSegments', 'audioQc', 'audioAssemble'].find(stage => stageResults[stage]?.status === 'running')
+  const fixedAudioSlots = runningAudioStage
+    ? Math.max(1, Number(stageResults[runningAudioStage]?.schedulerConcurrency || stageOptions.directorDraft?.directorConcurrency || stageOptions.audio?.directorConcurrency || 1))
     : 0
-  const available = Math.max(1, scheduler.concurrency - fixedAudioSlots)
+  const fixedSummarySlots = stageResults.summary?.status === 'running'
+    ? Math.max(1, Number(stageResults.summary?.schedulerConcurrency || stageOptions.summary?.concurrency || 1))
+    : 0
+  const available = Math.max(1, scheduler.concurrency - fixedAudioSlots - fixedSummarySlots)
   return Math.min(scheduler.concurrency, available)
+}
+
+function isAudioPipelineRunning(stageResults) {
+  return ['audio', 'directorDraft', 'directorQc', 'ttsSegments', 'audioQc', 'audioAssemble']
+    .some(stage => stageResults[stage]?.status === 'running')
 }
 
 async function writeKgControlFile(controlFile, control) {
@@ -564,6 +600,9 @@ async function writeKgControlFile(controlFile, control) {
 }
 
 async function executePipelineStage({ stage, runInfo, job, mainDbPath, context, stageOptions = {}, onChildStart }) {
+  if (['directorDraft', 'directorQc', 'ttsSegments', 'audioQc', 'audioAssemble'].includes(stage)) {
+    return executeAudioWorkflowStage({ stage, runInfo, job, mainDbPath, stageOptions, onChildStart })
+  }
   if (stage === 'publish') {
     const childRuns = []
     if (context.packageRunJson) childRuns.push(await executeChildStage(stage, buildPublishArgs(job, context.packageRunJson), runInfo, { onStart: onChildStart }))
@@ -585,13 +624,141 @@ async function executePipelineStage({ stage, runInfo, job, mainDbPath, context, 
     }
   }
 
-  const args = buildStageArgs(stage, job, mainDbPath, runInfo, stageOptions)
+  const effectiveJob = stage === 'audio'
+    && (job.audio?.ttsConfig || job.audio?.tts_config)
+    && isFlagEnabled(job.audio?.workflowDag ?? job.audio?.workflow_dag)
+    ? {
+        ...job,
+        audio: {
+          ...job.audio,
+          sourceRoot: audioWorkflowOutRoot(job, runInfo),
+          ttsConfig: undefined,
+          tts_config: undefined,
+          ttsOutRoot: undefined,
+          tts_out_root: undefined,
+        },
+      }
+    : job
+  const args = buildStageArgs(stage, effectiveJob, mainDbPath, runInfo, stageOptions)
   const childRun = await executeChildStage(stage, args, runInfo, { onStart: onChildStart })
   return {
     message: `completed ${stage}.`,
     childRunJson: childRun.childRunJson,
     childRunDir: childRun.childRunDir,
     logFile: childRun.logFile,
+  }
+}
+
+function audioWorkflowOutRoot(job, runInfo) {
+  const audio = job.audio || {}
+  return resolve(audio.ttsOutRoot || audio.tts_out_root || join(runInfo.rootDir, 'artifacts', 'tts-source'))
+}
+
+async function executeAudioWorkflowStage({ stage, runInfo, job, mainDbPath, stageOptions, onChildStart }) {
+  const audio = job.audio || {}
+  const directorScript = resolve(audio.ttsDirectorScript || audio.tts_director_script || defaultTtsDirectorScript)
+  const baseConfigPath = expandPath(required(audio.ttsConfig || audio.tts_config, `${stage} requires job.audio.ttsConfig`))
+  const ttsLlmConfig = buildTtsLlmConfigFromJob(job)
+  const configPath = await prepareTtsDirectorConfigForAudio({
+    ttsConfig: baseConfigPath,
+    ...(ttsLlmConfig ? { ttsLlmConfig: JSON.stringify(ttsLlmConfig) } : {}),
+  }, { artifactsDir: join(runInfo.rootDir, 'artifacts') })
+  const chapters = await resolveAudioWorkflowChapters(job, mainDbPath)
+  const outRoot = audioWorkflowOutRoot(job, runInfo)
+  if (stage === 'directorDraft' && safeArray(job.stages).includes('kg')) {
+    const warmupChapters = clampInteger(audio.kgWarmupChapters ?? audio.kg_warmup_chapters, 2, 1, 1000)
+    await waitForKgWarmup({ mainDbPath, bookId: job.bookId, chapters, warmupChapters })
+  }
+  const command = {
+    // The first split-DAG stage owns the chapter pipeline. Each completed
+    // director script immediately flows through audit, TTS, audio QC and
+    // assembly; the later stages remain as idempotent reconciliation passes.
+    directorDraft: 'batch-pipeline',
+    directorQc: 'audit-batch',
+    ttsSegments: 'synth-segments-batch',
+    audioQc: 'audio-qc-batch',
+    audioAssemble: 'assemble-batch',
+  }[stage]
+  const args = [directorScript, command, '--config', configPath, '--book-id', job.bookId, '--chapters', chapters, '--out-root', outRoot]
+  if (isFlagEnabled(audio.resume)) args.push('--resume')
+  if (isFlagEnabled(audio.allowPartial || audio.allow_partial)) args.push('--allow-partial')
+  if (stage === 'directorDraft') {
+    if (audio.batchSize || audio.batch_size) args.push('--batch-size', String(audio.batchSize || audio.batch_size))
+    args.push('--director-concurrency', String(stageOptions.directorConcurrency || audio.directorConcurrency || audio.director_concurrency || 1))
+    args.push('--llm-chapters', String(stageOptions.llmChapters || audio.llmChapters || audio.llm_chapters || 1))
+    args.push('--tts-concurrency', String(audio.ttsConcurrency || audio.tts_concurrency || 16))
+    args.push('--tts-chapters', String(audio.ttsChapters || audio.tts_chapters || 2))
+    if (safeArray(job.stages).includes('kg')) args.push('--kg-lead-chapters', String(audio.kgWarmupChapters ?? audio.kg_warmup_chapters ?? 2))
+    if (isFlagEnabled(audio.strict)) args.push('--strict')
+    if (audio.controlFile || audio.control_file) args.push('--control-file', audio.controlFile || audio.control_file)
+  } else if (stage === 'directorQc') {
+    args.push('--concurrency', String(audio.qcConcurrency || audio.qc_concurrency || 8))
+    if (isFlagEnabled(audio.strict)) args.push('--strict')
+  } else if (stage === 'ttsSegments') {
+    args.push('--tts-concurrency', String(audio.ttsConcurrency || audio.tts_concurrency || 16))
+    args.push('--tts-chapters', String(audio.ttsChapters || audio.tts_chapters || 2))
+    if (audio.controlFile || audio.control_file) args.push('--control-file', audio.controlFile || audio.control_file)
+  } else {
+    args.push('--concurrency', String(stage === 'audioQc' ? (audio.audioQcConcurrency || audio.audio_qc_concurrency || 8) : (audio.assembleConcurrency || audio.assemble_concurrency || 2)))
+  }
+
+  const logFile = join(runInfo.rootDir, 'logs', `${stage}-${Date.now()}.log`)
+  await mkdir(dirname(logFile), { recursive: true })
+  await writeFile(logFile, '', { flag: 'a' })
+  const child = { stage, logFile: relativeRunPath(runInfo.rootDir, logFile), outRoot, chapters }
+  await onChildStart?.(child)
+  await execFileStreaming(process.execPath, args, logFile)
+  return { message: `completed ${stage}.`, logFile: child.logFile, outRoot, chapters }
+}
+
+async function waitForKgWarmup({ mainDbPath, bookId, chapters, warmupChapters }) {
+  const requestedChapters = parseChapterRange(chapters)
+  const target = Math.min(Math.max(1, requestedChapters.length), warmupChapters)
+  console.log(`audio pipeline: waiting for KG warmup ${target} chapter(s)`)
+  while (true) {
+    let completed = 0
+    const DatabaseSync = await loadDatabaseSync()
+    const db = new DatabaseSync(expandPath(mainDbPath), { readOnly: true })
+    try {
+      const exists = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'kg_chapter_extractions'").get()
+      if (exists) completed = Number(db.prepare("SELECT COUNT(DISTINCT chapter_id) AS count FROM kg_chapter_extractions WHERE book_id = ? AND status = 'completed'").get(bookId)?.count) || 0
+    } catch (error) {
+      if (!/locked|busy/i.test(error.message)) throw error
+    } finally {
+      db.close()
+    }
+    if (completed >= target) {
+      console.log(`audio pipeline: KG warmup ready ${completed}/${target}`)
+      return
+    }
+    await new Promise(resolve => setTimeout(resolve, 1000))
+  }
+}
+
+function parseChapterRange(value) {
+  const chapters = []
+  for (const part of String(value || '').split(',')) {
+    const range = part.trim().match(/^(\d+)-(\d+)$/)
+    if (range) {
+      for (let chapter = Number(range[1]); chapter <= Number(range[2]); chapter += 1) chapters.push(chapter)
+    } else if (/^\d+$/.test(part.trim())) chapters.push(Number(part.trim()))
+  }
+  return [...new Set(chapters)]
+}
+
+async function resolveAudioWorkflowChapters(job, mainDbPath) {
+  const audio = job.audio || {}
+  if (audio.chapters) return String(audio.chapters)
+  if (audio.chapter) return String(audio.chapter)
+  const DatabaseSync = await loadDatabaseSync()
+  const db = new DatabaseSync(expandPath(mainDbPath), { readOnly: true })
+  try {
+    const count = Number(db.prepare('SELECT COUNT(*) AS count FROM chapters WHERE book_id = ?').get(job.bookId)?.count) || 0
+    if (!count) throw new Error(`Book has no chapters for audio workflow: ${job.bookId}`)
+    const limit = Math.min(count, clampInteger(audio.limit, count, 1, count))
+    return `1-${limit}`
+  } finally {
+    db.close()
   }
 }
 
@@ -886,7 +1053,8 @@ async function runSummary(options) {
       provider,
       model,
       baseUrl,
-      apiKey: options.apiKey || process.env.LLM_API_KEY || process.env.OPENAI_API_KEY || '',
+      apiKey: options.apiKey || process.env[options.apiKeyEnv] || process.env.LLM_API_KEY || process.env.OPENAI_API_KEY || '',
+      fallback: parseLlmFallbackOption(options.fallbackConfig),
       temperature: Number.isFinite(Number(options.temperature)) ? Number(options.temperature) : 0,
       thinkingEnabled: !isFlagEnabled(options.disableThinking),
       timeoutMs,
@@ -1043,7 +1211,8 @@ async function runSummaryLocate(options) {
       provider,
       model,
       baseUrl,
-      apiKey: options.apiKey || process.env.LLM_API_KEY || process.env.OPENAI_API_KEY || '',
+      apiKey: options.apiKey || process.env[options.apiKeyEnv] || process.env.LLM_API_KEY || process.env.OPENAI_API_KEY || '',
+      fallback: parseLlmFallbackOption(options.fallbackConfig),
       temperature: Number.isFinite(Number(options.temperature)) ? Number(options.temperature) : 0,
       thinkingEnabled: !isFlagEnabled(options.disableThinking),
       timeoutMs,
@@ -1191,7 +1360,8 @@ async function runKg(options) {
       provider,
       model,
       baseUrl,
-      apiKey: options.apiKey || process.env.LLM_API_KEY || process.env.OPENAI_API_KEY || '',
+      apiKey: options.apiKey || process.env[options.apiKeyEnv] || process.env.LLM_API_KEY || process.env.OPENAI_API_KEY || '',
+      fallback: parseLlmFallbackOption(options.fallbackConfig),
       temperature: Number.isFinite(Number(options.temperature)) ? Number(options.temperature) : 0,
       thinkingEnabled: !isFlagEnabled(options.disableThinking),
       timeoutMs,
@@ -1823,12 +1993,29 @@ async function runVerify(options) {
       }))
     }
     if (expected.package.embeddings?.coverage) {
+      const expectedEmbeddingCoverage = expected.package.embeddings.coverage
+      const remoteEmbeddingCoverage = remotePackage?.embeddings?.coverage
+      const publicEmbeddingCoverage = {
+        summaryCoverage: libraryBook?.embeddingCoverage,
+        vectorCoverage: libraryBook?.embeddingVectorCoverage,
+        summaryVectorCount: libraryBook?.embeddingSummaryVectorCount,
+        chunkVectorCount: libraryBook?.embeddingChunkVectorCount,
+      }
+      const publicEmbeddingCoverageMatches = (
+        Number(publicEmbeddingCoverage.summaryCoverage) === Number(expectedEmbeddingCoverage.summary?.coverage)
+        && Number(publicEmbeddingCoverage.vectorCoverage) === Math.min(
+          Number(expectedEmbeddingCoverage.summary?.coverage),
+          Number(expectedEmbeddingCoverage.chunks?.coverage),
+        )
+        && Number(publicEmbeddingCoverage.summaryVectorCount) === Number(expectedEmbeddingCoverage.summary?.embeddedSummaries)
+        && Number(publicEmbeddingCoverage.chunkVectorCount) === Number(expectedEmbeddingCoverage.chunks?.embeddedChunks)
+      )
       checks.push(assertCheck(
         'package.embeddingCoverage',
-        sameJson(remotePackage?.embeddings?.coverage, expected.package.embeddings.coverage),
+        sameJson(remoteEmbeddingCoverage, expectedEmbeddingCoverage) || publicEmbeddingCoverageMatches,
         {
-          actual: remotePackage?.embeddings?.coverage,
-          expected: expected.package.embeddings.coverage,
+          actual: remoteEmbeddingCoverage || publicEmbeddingCoverage,
+          expected: expectedEmbeddingCoverage,
         },
       ))
     }
@@ -2148,19 +2335,23 @@ function buildGatewayBookPackage(book, generatedAt) {
     wordCount: numberOrDefault(chapter.wordCount, countWords(String(chapter.content || ''))),
     updatedAt: chapter.updatedAt || generatedAt,
   }))
-  const summaries = book.summaries.map((summary) => ({
-    chapterId: String(summary.chapterId),
-    short: String(summary.short || ''),
-    detail: String(summary.detail || ''),
-    keyPoints: safeJsonParse(summary.keyPointsJson, []),
-    keyPointSources: normalizeSummaryKeyPointSources(
-      safeJsonParse(summary.keyPointSourcesJson, []),
-      safeJsonParse(summary.keyPointsJson, []),
-    ),
-    skippable: summary.skippable,
-    generatedBy: summary.generatedBy,
-    updatedAt: summary.updatedAt || generatedAt,
-  }))
+  const chapterContentById = new Map(chapters.map((chapter) => [chapter.id, chapter.content]))
+  const summaries = book.summaries.map((summary) => {
+    const chapterId = String(summary.chapterId)
+    const keyPoints = safeJsonParse(summary.keyPointsJson, [])
+    const storedSources = normalizeSummaryKeyPointSources(safeJsonParse(summary.keyPointSourcesJson, []), keyPoints)
+    const derivedSources = locateSummaryKeyPointSources(chapterContentById.get(chapterId) || '', keyPoints, storedSources)
+    return {
+      chapterId,
+      short: String(summary.short || ''),
+      detail: String(summary.detail || ''),
+      keyPoints,
+      keyPointSources: derivedSources.length > storedSources.length ? derivedSources : storedSources,
+      skippable: summary.skippable,
+      generatedBy: summary.generatedBy,
+      updatedAt: summary.updatedAt || generatedAt,
+    }
+  })
   const summarySourceCoverage = summarizeKeyPointSourceCoverage(summaries)
   const knowledgeGraph = normalizeKnowledgeGraphForPackage(book.knowledgeGraph)
   const embeddingCoverage = normalizeEmbeddingCoverage(book.embeddingCoverage, chapters.length, summaries.length)
@@ -2449,6 +2640,7 @@ function buildPackageQualityReport(book, bookPackage, options = {}) {
   const emptyCompletedKgChapters = safeArray(kgExtraction.completed)
     .filter((row) => numberOrDefault(row.contentLength, 0) >= emptyKgMinChars)
     .filter((row) => numberOrDefault(row.entityCount, 0) === 0 && numberOrDefault(row.relationCount, 0) === 0)
+    .filter((row) => !isReferenceLikeChapterContent(chapterById.get(String(row.chapterId || ''))?.content))
     .map((row) => ({
       chapterId: row.chapterId,
       chapterIndex: row.chapterIndex,
@@ -2600,8 +2792,9 @@ async function writeBookToMainDb(dbPath, book) {
   try {
     configureSqliteConnection(db)
     ensureMainDbSchema(db)
-    const existing = db.prepare('SELECT id FROM books WHERE id = ?').get(book.id)
+    const existing = db.prepare('SELECT id, title, chapter_count FROM books WHERE id = ?').get(book.id)
     if (existing && !book.replace) {
+      if (isExistingBookIdentical(db, existing, book)) return { reused: true }
       throw new Error(`Book already exists: ${book.id}. Use --replace to overwrite.`)
     }
 
@@ -2622,6 +2815,7 @@ async function writeBookToMainDb(dbPath, book) {
       insertChapter.run(chapter.id, book.id, chapter.index, chapter.title, chapter.content, chapter.wordCount)
     }
     db.exec('COMMIT')
+    return { reused: false }
   } catch (error) {
     try {
       db.exec('ROLLBACK')
@@ -2632,6 +2826,25 @@ async function writeBookToMainDb(dbPath, book) {
   } finally {
     db.close()
   }
+}
+
+function isExistingBookIdentical(db, existing, book) {
+  if (String(existing.title || '') !== String(book.title || '') || Number(existing.chapter_count) !== book.chapters.length) return false
+  const rows = db.prepare(`
+    SELECT id, chapter_index, title, content, word_count
+    FROM chapters
+    WHERE book_id = ?
+    ORDER BY chapter_index ASC
+  `).all(book.id)
+  if (rows.length !== book.chapters.length) return false
+  return rows.every((row, index) => {
+    const chapter = book.chapters[index]
+    return row.id === chapter.id
+      && Number(row.chapter_index) === chapter.index
+      && String(row.title || '') === chapter.title
+      && String(row.content || '') === chapter.content
+      && Number(row.word_count) === chapter.wordCount
+  })
 }
 
 async function openMainDbForEmbedding(dbPath) {
@@ -3626,15 +3839,18 @@ async function inspectJobPreflight({ checks, job, rawJob, jobPath, mainDbPath })
 
   if (job.stages.includes('publish')) {
     const publish = { ...(job.gateway || {}), ...(job.publish || {}) }
-    const hasLocal = Boolean(publish.gatewayDataDir)
+    const localRoot = publish.root && existsSync(expandPath(publish.root)) ? expandPath(publish.root) : ''
+    const localTarget = publish.gatewayDataDir || (localRoot ? join(localRoot, 'data') : '')
+    const hasLocal = Boolean(localTarget)
     const hasRemote = Boolean(publish.remoteHost || publish.host)
-    addDoctorCheck(checks, 'publish.target', hasLocal || hasRemote, hasLocal ? publish.gatewayDataDir : (publish.remoteHost || publish.host || 'missing'))
+    addDoctorCheck(checks, 'publish.target', hasLocal || hasRemote, hasLocal ? localTarget : (publish.remoteHost || publish.host || 'missing'))
   }
 
   if (job.stages.includes('verify')) {
     const verify = { ...(job.gateway || {}), ...(job.verify || {}) }
     addDoctorCheck(checks, 'verify.gatewayUrl', Boolean(verify.gatewayUrl || verify.url), verify.gatewayUrl || verify.url || 'missing')
-    addDoctorCheck(checks, 'verify.gatewayToken', Boolean(verify.gatewayToken || verify.token), (verify.gatewayToken || verify.token) ? '[present]' : 'missing')
+    const token = verify.gatewayToken || verify.token || readConfiguredEnvironmentValue(verify.gatewayTokenEnv || verify.tokenEnv)
+    addDoctorCheck(checks, 'verify.gatewayToken', Boolean(token), token ? '[present]' : 'missing')
   }
 }
 
@@ -3739,36 +3955,19 @@ function expandEmbeddingStages(stages) {
   return [...new Set(expanded)]
 }
 
-function buildStageExecutionGroups(stages) {
-  const groups = []
-  const remaining = [...stages]
-  const parallelAfterImport = new Set(['summary', 'kg', 'chunkEmbedding', 'summaryEmbedding', 'audio'])
-  const barriers = new Set(['summary-locate', 'package', 'publish', 'verify'])
-  let index = 0
-  while (index < remaining.length) {
-    const stage = remaining[index]
-    if (!stage) {
-      index += 1
-      continue
-    }
-    if (parallelAfterImport.has(stage)) {
-      const group = []
-      for (let groupIndex = index; groupIndex < remaining.length; groupIndex += 1) {
-        const candidate = remaining[groupIndex]
-        if (barriers.has(candidate)) break
-        if (parallelAfterImport.has(candidate)) {
-          group.push(candidate)
-          remaining[groupIndex] = ''
-        }
-      }
-      groups.push(group)
-      index += 1
-      continue
-    }
-    groups.push([stage])
-    index += 1
+function expandAudioWorkflowStages(stages, job) {
+  const audio = job.audio || {}
+  if (!stages.includes('audio') || !(audio.ttsConfig || audio.tts_config) || !isFlagEnabled(audio.workflowDag ?? audio.workflow_dag)) return stages
+  const expanded = []
+  for (const stage of stages) {
+    if (stage === 'audio') expanded.push('directorDraft', 'directorQc', 'ttsSegments', 'audioQc', 'audioAssemble', 'audio')
+    else expanded.push(stage)
   }
-  return groups
+  return [...new Set(expanded)]
+}
+
+function buildStageExecutionGroups(stages) {
+  return [stages]
 }
 
 function buildStageExecutionPlan(job, stages, { usedLlmSlots = 0 } = {}) {
@@ -3798,7 +3997,7 @@ function buildStageExecutionPlan(job, stages, { usedLlmSlots = 0 } = {}) {
   const stageOptions = {}
   for (const stage of scheduledLlmStages) {
     const concurrency = allocations[stage]
-    stageOptions[stage] = stage === 'audio'
+    stageOptions[stage] = stage === 'audio' || stage === 'directorDraft'
       ? buildScheduledAudioOptions(job, concurrency)
       : { concurrency }
   }
@@ -3824,11 +4023,12 @@ function normalizeLlmScheduler(job) {
   const concurrency = clampInteger(scheduler.concurrency ?? llm.concurrency, 0, 1, 256)
   if (!concurrency) return null
   const weights = {
-    summary: 4,
-    kg: 2,
-    audio: 1,
+    summary: 2,
+    kg: 4,
+    audio: 4,
     ...(scheduler.weights || scheduler.stageWeights || scheduler.stage_weights || {}),
   }
+  if (job.audio?.workflowDag || job.audio?.workflow_dag) weights.directorDraft = weights.audio
   return {
     concurrency,
     borrowIdle: !('borrowIdle' in scheduler || 'borrow_idle' in scheduler) || isFlagEnabled(scheduler.borrowIdle ?? scheduler.borrow_idle),
@@ -3839,8 +4039,10 @@ function normalizeLlmScheduler(job) {
 
 function isSchedulableLlmStage(stage, job) {
   if (stage === 'summary' || stage === 'kg') return true
+  if (stage === 'directorDraft') return true
   if (stage !== 'audio') return false
   const audio = job.audio || {}
+  if (isFlagEnabled(audio.workflowDag ?? audio.workflow_dag)) return false
   return Boolean(audio.ttsConfig || audio.tts_config)
 }
 
@@ -3906,6 +4108,8 @@ function buildStageArgs(stage, job, mainDbPath, runInfo, stageOptions = {}) {
       String(stageOptions.concurrency ?? summary.concurrency ?? 4),
     ]
     if (summary.apiKey) args.push('--api-key', summary.apiKey)
+    if (summary.apiKeyEnv) args.push('--api-key-env', summary.apiKeyEnv)
+    if (summary.fallback) args.push('--fallback-config', JSON.stringify(summary.fallback))
     if (summary.temperature !== undefined) args.push('--temperature', String(summary.temperature))
     if (summary.timeoutMs) args.push('--timeout-ms', String(summary.timeoutMs))
     if (summary.maxAttempts || summary.retries) args.push('--max-attempts', String(summary.maxAttempts || summary.retries))
@@ -3929,6 +4133,8 @@ function buildStageArgs(stage, job, mainDbPath, runInfo, stageOptions = {}) {
       String(stageOptions.concurrency ?? summaryLocate.concurrency ?? 4),
     ]
     if (summaryLocate.apiKey) args.push('--api-key', summaryLocate.apiKey)
+    if (summaryLocate.apiKeyEnv) args.push('--api-key-env', summaryLocate.apiKeyEnv)
+    if (summaryLocate.fallback) args.push('--fallback-config', JSON.stringify(summaryLocate.fallback))
     if (summaryLocate.temperature !== undefined) args.push('--temperature', String(summaryLocate.temperature))
     if (summaryLocate.timeoutMs) args.push('--timeout-ms', String(summaryLocate.timeoutMs))
     if (summaryLocate.maxAttempts || summaryLocate.retries) args.push('--max-attempts', String(summaryLocate.maxAttempts || summaryLocate.retries))
@@ -3952,6 +4158,8 @@ function buildStageArgs(stage, job, mainDbPath, runInfo, stageOptions = {}) {
       String(stageOptions.concurrency ?? kg.concurrency ?? 3),
     ]
     if (kg.apiKey) args.push('--api-key', kg.apiKey)
+    if (kg.apiKeyEnv) args.push('--api-key-env', kg.apiKeyEnv)
+    if (kg.fallback) args.push('--fallback-config', JSON.stringify(kg.fallback))
     if (kg.temperature !== undefined) args.push('--temperature', String(kg.temperature))
     if (kg.timeoutMs) args.push('--timeout-ms', String(kg.timeoutMs))
     if (kg.maxAttempts || kg.retries) args.push('--max-attempts', String(kg.maxAttempts || kg.retries))
@@ -4023,6 +4231,7 @@ function buildTtsLlmConfigFromJob(job) {
   if (llm.responseFormatJson !== undefined || llm.response_format_json !== undefined) {
     config.responseFormatJson = llm.responseFormatJson ?? llm.response_format_json
   }
+  if (isPlainRecord(llm.fallback)) config.fallback = llm.fallback
   return config
 }
 
@@ -4053,14 +4262,20 @@ function buildEmbeddingStageArgs(job, common, mode) {
 function buildPublishArgs(job, childRunJson) {
   const publish = { ...(job.gateway || {}), ...(job.publish || {}) }
   const args = ['publish', '--run', childRunJson]
-  if (publish.gatewayDataDir) args.push('--gateway-data-dir', publish.gatewayDataDir)
-  if (publish.gatewayAudioDir) args.push('--gateway-audio-dir', publish.gatewayAudioDir)
-  if (publish.remoteHost || publish.host) args.push('--remote-host', publish.remoteHost || publish.host)
-  if (publish.remoteUser || publish.user) args.push('--remote-user', publish.remoteUser || publish.user)
-  if (publish.remoteRoot || publish.root) args.push('--remote-root', publish.remoteRoot || publish.root)
-  if (publish.remoteDataDir) args.push('--remote-data-dir', publish.remoteDataDir)
-  if (publish.remoteAudioDir) args.push('--remote-audio-dir', publish.remoteAudioDir)
-  if (publish.sshPort || publish.remoteSshPort) args.push('--ssh-port', String(publish.sshPort || publish.remoteSshPort))
+  const localRoot = publish.root && existsSync(expandPath(publish.root)) ? expandPath(publish.root) : ''
+  const localDataDir = publish.gatewayDataDir || (localRoot ? join(localRoot, 'data') : '')
+  const localAudioDir = publish.gatewayAudioDir || (localRoot ? join(localRoot, 'audio') : '')
+  if (localDataDir) {
+    args.push('--gateway-data-dir', localDataDir)
+    if (localAudioDir) args.push('--gateway-audio-dir', localAudioDir)
+  } else {
+    if (publish.remoteHost || publish.host) args.push('--remote-host', publish.remoteHost || publish.host)
+    if (publish.remoteUser || publish.user) args.push('--remote-user', publish.remoteUser || publish.user)
+    if (publish.remoteRoot || publish.root) args.push('--remote-root', publish.remoteRoot || publish.root)
+    if (publish.remoteDataDir) args.push('--remote-data-dir', publish.remoteDataDir)
+    if (publish.remoteAudioDir) args.push('--remote-audio-dir', publish.remoteAudioDir)
+    if (publish.sshPort || publish.remoteSshPort) args.push('--ssh-port', String(publish.sshPort || publish.remoteSshPort))
+  }
   if (isFlagEnabled(publish.dryRun ?? job.dryRun)) args.push('--dry-run')
   return args
 }
@@ -4069,10 +4284,17 @@ function buildVerifyArgs(job, childRunJson) {
   const verify = { ...(job.gateway || {}), ...(job.verify || {}) }
   const args = ['verify', '--run', childRunJson]
   if (verify.gatewayUrl || verify.url) args.push('--gateway-url', verify.gatewayUrl || verify.url)
-  if (verify.gatewayToken || verify.token) args.push('--gateway-token', verify.gatewayToken || verify.token)
-  if (verify.gatewayAdminToken || verify.adminToken) args.push('--gateway-admin-token', verify.gatewayAdminToken || verify.adminToken)
+  const gatewayToken = verify.gatewayToken || verify.token || readConfiguredEnvironmentValue(verify.gatewayTokenEnv || verify.tokenEnv)
+  const gatewayAdminToken = verify.gatewayAdminToken || verify.adminToken || readConfiguredEnvironmentValue(verify.gatewayAdminTokenEnv || verify.adminTokenEnv)
+  if (gatewayToken) args.push('--gateway-token', gatewayToken)
+  if (gatewayAdminToken) args.push('--gateway-admin-token', gatewayAdminToken)
   if (verify.audioSamples) args.push('--audio-samples', String(verify.audioSamples))
   return args
+}
+
+function readConfiguredEnvironmentValue(name) {
+  if (!name) return ''
+  return process.env[String(name).trim()] || ''
 }
 
 function findLatestChildRun(stageResult) {
@@ -4231,16 +4453,23 @@ function remoteLogin(options) {
 }
 
 function sshBaseArgs(options) {
-  const args = []
+  const args = sshConnectionArgs(options)
   if (options.remoteSshPort || options.sshPort) args.push('-p', String(options.remoteSshPort || options.sshPort))
   args.push(remoteLogin(options))
   return args
 }
 
 function rsyncSshCommand(options) {
-  const args = ['ssh']
+  const args = ['ssh', ...sshConnectionArgs(options)]
   if (options.remoteSshPort || options.sshPort) args.push('-p', String(options.remoteSshPort || options.sshPort))
   return args.join(' ')
+}
+
+function sshConnectionArgs() {
+  // Production workers are frequently recreated with an empty known_hosts file.
+  // Accept and persist a host key on first contact, while still rejecting a
+  // changed key on later connections.
+  return ['-o', 'StrictHostKeyChecking=accept-new']
 }
 
 function remoteShellQuote(value) {
@@ -4539,19 +4768,37 @@ async function callOpenAICompatibleChat(messages, config) {
     body.extra_body = { enable_thinking: false }
     body.chat_template_kwargs = { enable_thinking: false }
   }
-  const response = await fetch(`${baseUrl}/chat/completions`, {
-    method: 'POST',
-    headers,
-    body: JSON.stringify(body),
-    signal: AbortSignal.timeout(config.timeoutMs),
-  })
+  let response
+  try {
+    response = await fetch(`${baseUrl}/chat/completions`, {
+      method: 'POST', headers, body: JSON.stringify(body), signal: AbortSignal.timeout(config.timeoutMs),
+    })
+  } catch (error) {
+    if (!config.fallback) throw error
+    console.warn(`LLM 主模型请求失败，切换兜底模型 ${config.fallback.model}: ${error.message}`)
+    return callOpenAICompatibleChat(messages, { ...config, ...config.fallback, fallback: null })
+  }
   if (!response.ok) {
+    if (config.fallback) {
+      console.warn(`LLM 主模型返回 ${response.status}，切换兜底模型 ${config.fallback.model}`)
+      return callOpenAICompatibleChat(messages, { ...config, ...config.fallback, fallback: null })
+    }
     const error = new Error(`OpenAI-compatible chat failed: ${response.status} ${response.statusText}`)
     error.status = response.status
     throw error
   }
   const data = await response.json()
   return data.choices?.[0]?.message?.content ?? ''
+}
+
+function parseLlmFallbackOption(value) {
+  const fallback = typeof value === 'string' ? safeJsonParse(value, null) : value
+  if (!isPlainRecord(fallback) || !fallback.baseUrl || !fallback.model) return null
+  return {
+    baseUrl: fallback.baseUrl,
+    model: fallback.model,
+    apiKey: fallback.apiKey || process.env[fallback.apiKeyEnv] || '',
+  }
 }
 
 async function callOllamaGenerate(prompt, config) {
@@ -4696,7 +4943,7 @@ function assertKgExtractionQuality(chapter, extraction, options = {}) {
   const contentLength = String(chapter.content || '').trim().length
   const entityCount = safeArray(extraction?.entities).length
   const relationCount = safeArray(extraction?.relations).length
-  if (allowEmpty || contentLength < emptyMinChars || entityCount > 0 || relationCount > 0) return
+  if (allowEmpty || contentLength < emptyMinChars || entityCount > 0 || relationCount > 0 || isReferenceLikeChapterContent(chapter.content)) return
   const qualityIssue = {
     code: 'kg_empty_extraction',
     chapterId: String(chapter.id || ''),
@@ -4710,6 +4957,19 @@ function assertKgExtractionQuality(chapter, extraction, options = {}) {
   const error = new Error(`${qualityIssue.message} chapterId=${qualityIssue.chapterId} contentLength=${contentLength}`)
   error.qualityIssue = qualityIssue
   throw error
+}
+
+function isReferenceLikeChapterContent(content) {
+  const text = String(content || '').trim()
+  if (!text) return false
+  const cjkCount = text.match(/\p{Script=Han}/gu)?.length ?? 0
+  const latinCount = text.match(/[A-Za-z]/g)?.length ?? 0
+  const digitCount = text.match(/\d/g)?.length ?? 0
+  const proseCount = cjkCount + latinCount
+  const compact = text.replace(/\s/g, '')
+  const referenceChars = text.match(/[\d\s.,;:()\[\]{}\-—–_/\\|]+/g)?.join('').length ?? 0
+  const referenceRatio = compact.length ? referenceChars / compact.length : 0
+  return proseCount < 24 && digitCount >= 40 && referenceRatio >= 0.7
 }
 
 function normalizeKgEntity(entity) {
@@ -5204,7 +5464,10 @@ async function writeJson(path, value) {
 }
 
 async function writeRunJson(path, value) {
-  await writeJson(path, value)
+  await mkdir(dirname(path), { recursive: true })
+  const tempPath = `${path}.${process.pid}.${Date.now()}.${randomUUID()}.tmp`
+  await writeFile(tempPath, `${JSON.stringify(value, null, 2)}\n`, 'utf8')
+  await rename(tempPath, path)
 }
 
 function relativeRunPath(runDir, path) {

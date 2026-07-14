@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from 'react'
 import { getCachedChapters, saveCachedChapters } from '../lib/chapterCache'
+import { extractPdfDocument } from '../lib/pdfImport'
 
 export type Chapter = {
   id: string
@@ -1840,9 +1841,19 @@ export async function parseImportedBook(
     return parseEpubFile(file)
   }
 
-  const text = await decodeTextFile(file)
+  const isPdf = /\.pdf$/i.test(file.name) || file.type === 'application/pdf'
+  const pdf = isPdf ? await extractPdfDocument(await file.arrayBuffer()) : null
+  const text = pdf?.text ?? await decodeTextFile(file)
   const cleanedText = stripPublicDomainBoilerplate(cleanFormattingTags(text))
-  let chapters = splitChapters(cleanedText)
+  let chapters = pdf?.sections.length
+    ? pdf.sections.map((section, index) => ({
+        id: `${index + 1}-${section.title.slice(0, 32)}`,
+        index: index + 1,
+        title: section.title,
+        content: section.content,
+        wordCount: countWords(section.content),
+      }))
+    : splitChapters(cleanedText)
 
   if (isBadSplit(chapters, cleanedText) && modelConfig) {
     const analysis = await analyzeChapterFormats(cleanedText, modelConfig)
@@ -1857,7 +1868,7 @@ export async function parseImportedBook(
   }
 
   return {
-    title: inferTitle(file.name),
+    title: pdf?.title || inferTitle(file.name),
     chapters,
   }
 }
@@ -2653,7 +2664,7 @@ export function useReaderState(): UseReaderStateReturn {
       const { chapters } = imported
 
       if (!chapters.length) {
-        setError('没有识别到正文内容，请换一个 txt 或 epub 文件试试。')
+        setError('没有识别到正文内容，请换一个 txt、epub 或带文本层的 pdf 文件试试。')
         return
       }
 

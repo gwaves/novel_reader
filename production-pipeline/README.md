@@ -184,18 +184,23 @@ the raw `run.json`. `items.sqlite` stores item-level progress and retry state.
 This keeps production history removable and portable without polluting the main
 app database.
 
-## Local Console
+## Persistent Production Service
 
-The production pipeline includes a local console at `http://127.0.0.1:6290`
-for launching and monitoring v2 jobs. Start it with:
+The production pipeline includes a persistent queue service and console at
+`http://127.0.0.1:6290` for launching and monitoring v2 jobs. Start it with:
 
 ```bash
-npm run production-pipeline:console
+npm run production-pipeline:service
 ```
 
+The service persists queued jobs, enforces `PRODUCTION_PIPELINE_MAX_CONCURRENT_JOBS`,
+automatically resumes interrupted runs after restart, and exposes retry/stop APIs.
 Fill `V2 Job JSON` with a job file path. The console reads the v2 `run.json` from
 `tmp/production-pipeline/runs/<bookId>/<runId>/run.json` and shows the stage
 status, child run paths, and child log files while the job is still running.
+
+See [service deployment](docs/service-deployment.md) for the 88.100 Docker deployment,
+data paths, authentication, and recovery behavior.
 
 ## Stage Model
 

@@ -10,6 +10,7 @@ import {
   loadAdminDashboardData,
   loadAdminOverviewData,
   patchBookLabels,
+  patchBookTitle,
   patchBookVisibility,
   patchDeviceNote,
   patchDeviceRole,
@@ -179,6 +180,7 @@ function App() {
       return
     }
     try {
+      if (patch.title !== undefined) await patchBookTitle(bookId, patch.title)
       if (patch.visibility) await patchBookVisibility(bookId, patch.visibility)
       if (patch.labels) await patchBookLabels(bookId, patch.labels)
       setBookOperationStatus((current) => ({ ...current, [operationKey]: { state: 'success', message: '保存成功' } }))
@@ -193,6 +195,7 @@ function App() {
   }
 
   const updateBook = (bookId: string, patch: Partial<AdminBook>) => {
+    if (patch.title !== undefined) void saveBookPatch(bookId, patch, `${bookId}:title`, '书名')
     if (patch.visibility) void saveBookPatch(bookId, patch, `${bookId}:visibility`, '可见范围')
     if (patch.labels) void saveBookPatch(bookId, patch, `${bookId}:labels`, '标签')
   }
@@ -417,11 +420,13 @@ function App() {
               onUpdate={updateBook}
               onDelete={handleDeleteBook}
               operationStatus={selectedBook ? {
+                title: bookOperationStatus[`${selectedBook.id}:title`],
                 visibility: bookOperationStatus[`${selectedBook.id}:visibility`],
                 labels: bookOperationStatus[`${selectedBook.id}:labels`],
                 delete: bookOperationStatus[`${selectedBook.id}:delete`],
               } : {}}
               retryActions={selectedBook ? {
+                title: bookRetryActions[`${selectedBook.id}:title`],
                 visibility: bookRetryActions[`${selectedBook.id}:visibility`],
                 labels: bookRetryActions[`${selectedBook.id}:labels`],
               } : {}}
@@ -726,8 +731,8 @@ function BooksPage({
   onSelect: (bookId: string) => void
   onUpdate: (bookId: string, patch: Partial<AdminBook>) => void
   onDelete: (book: AdminBook) => void
-  operationStatus: Partial<Record<'visibility' | 'labels' | 'delete', OperationStatus>>
-  retryActions: Partial<Record<'visibility' | 'labels', RetryAction>>
+  operationStatus: Partial<Record<'title' | 'visibility' | 'labels' | 'delete', OperationStatus>>
+  retryActions: Partial<Record<'title' | 'visibility' | 'labels', RetryAction>>
 }) {
   return (
     <section className="split-view">
@@ -797,8 +802,8 @@ function BookDrawer({
   book: AdminBook | null
   onUpdate: (bookId: string, patch: Partial<AdminBook>) => void
   onDelete: (book: AdminBook) => void
-  operationStatus: Partial<Record<'visibility' | 'labels' | 'delete', OperationStatus>>
-  retryActions: Partial<Record<'visibility' | 'labels', RetryAction>>
+  operationStatus: Partial<Record<'title' | 'visibility' | 'labels' | 'delete', OperationStatus>>
+  retryActions: Partial<Record<'title' | 'visibility' | 'labels', RetryAction>>
 }) {
   if (!book) {
     return <aside className="drawer empty">选择一本书查看可见范围、标签和数据包状态。</aside>
@@ -818,6 +823,14 @@ function BookDrawer({
         <h2>{book.title}</h2>
         <p>{book.author} · {book.chapterCount} 章</p>
       </div>
+
+      <BookTitleEditor
+        key={`${book.id}:${book.title}`}
+        book={book}
+        disabled={operationStatus.title?.state === 'saving'}
+        onSave={(title) => onUpdate(book.id, { title })}
+      />
+      <OperationNote status={operationStatus.title} retryAction={retryActions.title} />
 
       <label className="field">
         <span>可见范围</span>
@@ -877,6 +890,41 @@ function BookDrawer({
         <OperationNote status={operationStatus.delete} />
       </div>
     </aside>
+  )
+}
+
+function BookTitleEditor({
+  book,
+  disabled,
+  onSave,
+}: {
+  book: AdminBook
+  disabled?: boolean
+  onSave: (title: string) => void
+}) {
+  const [draftTitle, setDraftTitle] = useState(book.title)
+  const normalizedTitle = draftTitle.trim()
+  const hasChanged = normalizedTitle !== book.title
+
+  return (
+    <div className="inline-editor">
+      <label className="field">
+        <span>书名</span>
+        <input
+          value={draftTitle}
+          maxLength={120}
+          disabled={disabled}
+          onChange={(event) => setDraftTitle(event.target.value)}
+        />
+      </label>
+      <button
+        type="button"
+        disabled={disabled || !hasChanged || !normalizedTitle}
+        onClick={() => onSave(normalizedTitle)}
+      >
+        保存书名
+      </button>
+    </div>
   )
 }
 

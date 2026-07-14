@@ -7,6 +7,7 @@ import { DatabaseSync } from 'node:sqlite'
 import { inflateRawSync } from 'node:zlib'
 import { homedir, tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { extractPdfDocument } from './pdf-text.mjs'
 
 const chapterPattern =
   /^\s*(?:(?:正文\s*)?第\s*[0-9零一二三四五六七八九十百千万亿〇○]+\s*[集卷部]\s+第\s*[0-9零一二三四五六七八九十百千万亿〇○]+\s*[章卷节回][^\n]*|(?:正文\s*)?第\s*[0-9零一二三四五六七八九十百千万亿〇○]+\s*[章卷节回][^\n]*|Chapter\s*\d+[^\n]*|\d+[.、]\s*[^\n]+)\s*$/gim
@@ -66,7 +67,12 @@ export async function parseBookFile(filePath, fileBuffer = null) {
     return parseMobi(filePath)
   }
   if (type === 'pdf') {
-    throw new Error('PDF 导入尚未接入；Phase 2 先支持 TXT/EPUB，文本型 PDF 后续补充。')
+    const pdf = await extractPdfDocument(buffer)
+    const text = stripPublicDomainBoilerplate(cleanFormattingTags(pdf.text))
+    return {
+      title: pdf.title || inferTitle(filePath),
+      chapters: pdf.sections.length ? pdf.sections : splitChapters(text),
+    }
   }
 
   const text = stripPublicDomainBoilerplate(cleanFormattingTags(decodeText(buffer)))

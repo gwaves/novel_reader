@@ -1,0 +1,174 @@
+name: novel-reader-observability
+
+services:
+  setup:
+    image: docker.elastic.co/elasticsearch/elasticsearch:${ELASTIC_VERSION}
+    user: "0"
+    volumes:
+      - ./certs:/usr/share/elasticsearch/config/certs
+      - ./certs.yml:/usr/share/elasticsearch/config/certs.yml:ro
+    environment:
+      ELASTIC_PASSWORD: ${ELASTIC_PASSWORD}
+      NO_PROXY: elasticsearch,localhost,127.0.0.1
+      no_proxy: elasticsearch,localhost,127.0.0.1
+    command: >-
+      bash -c '
+        set -eu;
+        test -n "$${ELASTIC_PASSWORD}";
+        if [ ! -f config/certs/ca/ca.crt ]; then
+          bin/elasticsearch-certutil ca --silent --pem -out config/certs/ca.zip;
+          unzip -q config/certs/ca.zip -d config/certs;
+        fi;
+        if [ ! -f config/certs/elasticsearch/elasticsearch.crt ]; then
+          bin/elasticsearch-certutil cert --silent --pem \
+            --in config/certs.yml \
+            --ca-cert config/certs/ca/ca.crt \
+            --ca-key config/certs/ca/ca.key \
+            -out config/certs/certs.zip;
+          unzip -q config/certs/certs.zip -d config/certs;
+        fi;
+        chown -R root:root config/certs;
+        find config/certs -type d -exec chmod 755 {} +;
+        find config/certs -type f -exec chmod 640 {} +;
+        find config/certs -type f -name "*.crt" -exec chmod 644 {} +;
+        touch config/certs/.certs-ready;
+      '
+    healthcheck:
+      test: ["CMD-SHELL", "test -f config/certs/.certs-ready"]
+      interval: 5s
+      timeout: 5s
+      retries: 120
+
+  security-init:
+    image: docker.elastic.co/elasticsearch/elasticsearch:${ELASTIC_VERSION}
+    user: "0"
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+    volumes:
+      - ./certs:/usr/share/elasticsearch/config/certs:ro
+    environment:
+      ELASTIC_PASSWORD: ${ELASTIC_PASSWORD}
+      KIBANA_SYSTEM_PASSWORD: ${KIBANA_SYSTEM_PASSWORD}
+      FILEBEAT_INTERNAL_PASSWORD: ${FILEBEAT_INTERNAL_PASSWORD}
+      NO_PROXY: elasticsearch,localhost,127.0.0.1
+      no_proxy: elasticsearch,localhost,127.0.0.1
+    command: >-
+      bash -c '
+        set -eu;
+        until curl -sS --fail --cacert config/certs/ca/ca.crt \
+          -u "elastic:$${ELASTIC_PASSWORD}" \
+          -H "Content-Type: application/json" \
+          -X POST https://elasticsearch:9200/_security/user/kibana_system/_password \
+          -d "{\"password\":\"$${KIBANA_SYSTEM_PASSWORD}\"}" >/dev/null; do sleep 5; done;
+        curl -sS --fail --cacert config/certs/ca/ca.crt \
+          -u "elastic:$${ELASTIC_PASSWORD}" \
+          -H "Content-Type: application/json" \
+          -X PUT https://elasticsearch:9200/_security/role/novel_filebeat_writer \
+          -d "{\"cluster\":[\"monitor\",\"manage_ilm\",\"manage_index_templates\"],\"indices\":[{\"names\":[\"novel-reader-logs-*\",\"novel-reader-logs\"],\"privileges\":[\"auto_configure\",\"create_doc\",\"create_index\",\"manage\",\"view_index_metadata\"]}]}" >/dev/null;
+        curl -sS --fail --cacert config/certs/ca/ca.crt \
+          -u "elastic:$${ELASTIC_PASSWORD}" \
+          -H "Content-Type: application/json" \
+          -X PUT https://elasticsearch:9200/_security/user/filebeat_internal \
+          -d "{\"password\":\"$${FILEBEAT_INTERNAL_PASSWORD}\",\"roles\":[\"novel_filebeat_writer\"],\"full_name\":\"Novel Reader Filebeat\"}" >/dev/null;
+      '
+
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:${ELASTIC_VERSION}
+    restart: unless-stopped
+    depends_on:
+      setup:
+        condition: service_completed_successfully
+    environment:
+      node.name: elasticsearch
+      cluster.name: novel-reader-logs
+      discovery.type: single-node
+      bootstrap.memory_lock: "true"
+      xpack.security.enabled: "true"
+      xpack.security.http.ssl.enabled: "true"
+      xpack.security.http.ssl.key: certs/elasticsearch/elasticsearch.key
+      xpack.security.http.ssl.certificate: certs/elasticsearch/elasticsearch.crt
+      xpack.security.http.ssl.certificate_authorities: certs/ca/ca.crt
+      xpack.security.transport.ssl.enabled: "true"
+      xpack.security.transport.ssl.key: certs/elasticsearch/elasticsearch.key
+      xpack.security.transport.ssl.certificate: certs/elasticsearch/elasticsearch.crt
+      xpack.security.transport.ssl.certificate_authorities: certs/ca/ca.crt
+      xpack.security.transport.ssl.verification_mode: certificate
+      path.repo: /usr/share/elasticsearch/snapshots
+      ELASTIC_PASSWORD: ${ELASTIC_PASSWORD}
+      NO_PROXY: elasticsearch,localhost,127.0.0.1
+      no_proxy: elasticsearch,localhost,127.0.0.1
+    ports:
+      - "${ELASTICSEARCH_BIND_ADDRESS:-192.168.88.100}:9200:9200"
+    mem_limit: 8g
+    ulimits:
+      memlock:
+        soft: -1
+        hard: -1
+      nofile:
+        soft: 65536
+        hard: 65536
+    volumes:
+      - ./certs:/usr/share/elasticsearch/config/certs:ro
+      - ./data/elasticsearch:/usr/share/elasticsearch/data
+      - ./snapshots:/usr/share/elasticsearch/snapshots
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "curl -s --cacert config/certs/ca/ca.crt https://localhost:9200 | grep -q 'missing authentication credentials'",
+        ]
+      interval: 10s
+      timeout: 10s
+      retries: 120
+
+  kibana:
+    image: docker.elastic.co/kibana/kibana:${ELASTIC_VERSION}
+    restart: unless-stopped
+    depends_on:
+      security-init:
+        condition: service_completed_successfully
+    environment:
+      ELASTICSEARCH_USERNAME: kibana_system
+      ELASTICSEARCH_PASSWORD: ${KIBANA_SYSTEM_PASSWORD}
+      XPACK_ENCRYPTEDSAVEDOBJECTS_ENCRYPTIONKEY: ${KIBANA_ENCRYPTION_KEY}
+      XPACK_REPORTING_ENCRYPTIONKEY: ${KIBANA_REPORTING_ENCRYPTION_KEY}
+      XPACK_SECURITY_ENCRYPTIONKEY: ${KIBANA_SECURITY_ENCRYPTION_KEY}
+      NO_PROXY: elasticsearch,localhost,127.0.0.1
+      no_proxy: elasticsearch,localhost,127.0.0.1
+    ports:
+      - "${KIBANA_BIND_ADDRESS:-192.168.88.100}:5601:5601"
+    mem_limit: 2g
+    volumes:
+      - ./kibana.yml:/usr/share/kibana/config/kibana.yml:ro
+      - ./certs:/usr/share/kibana/config/certs:ro
+      - ./data/kibana:/usr/share/kibana/data
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sS --fail http://localhost:5601/api/status >/dev/null"]
+      interval: 10s
+      timeout: 10s
+      retries: 120
+
+  filebeat:
+    image: docker.elastic.co/beats/filebeat:${ELASTIC_VERSION}
+    user: root
+    restart: unless-stopped
+    depends_on:
+      security-init:
+        condition: service_completed_successfully
+    environment:
+      FILEBEAT_INTERNAL_PASSWORD: ${FILEBEAT_INTERNAL_PASSWORD}
+      NO_PROXY: elasticsearch,localhost,127.0.0.1
+      no_proxy: elasticsearch,localhost,127.0.0.1
+    command: ["filebeat", "-e", "--strict.perms=false"]
+    mem_limit: 512m
+    volumes:
+      - ./filebeat.yml:/usr/share/filebeat/filebeat.yml:ro
+      - ./ilm-policy.json:/usr/share/filebeat/ilm-policy.json:ro
+      - ./certs:/usr/share/filebeat/certs:ro
+      - ./data/filebeat:/usr/share/filebeat/data
+      - ./data/filebeat-event-data:/usr/share/filebeat/event-data
+      - /var/lib/docker/containers:/var/lib/docker/containers:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - /home/gwaves/novel-reader-gateway/data/logs:/gateway-logs:ro
+      - /home/gwaves/production-pipeline-service/data:/production-service-data:ro

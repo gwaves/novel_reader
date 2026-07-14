@@ -112,7 +112,7 @@ export async function readBookSummary(config: GatewayConfig, bookId: string): Pr
 }
 
 export async function readBookPackage(config: GatewayConfig, bookId: string): Promise<GatewayBookPackage> {
-  await readBookSummary(config, bookId)
+  const book = await readBookSummary(config, bookId)
 
   let rawPackage: string
   try {
@@ -124,10 +124,20 @@ export async function readBookPackage(config: GatewayConfig, bookId: string): Pr
     throw error
   }
 
-  return normalizeBookPackage(parseBookPackage(rawPackage), bookId, {
+  const bookPackage = normalizeBookPackage(parseBookPackage(rawPackage), bookId, {
     code: 'book_package_invalid',
     statusCode: 500,
   })
+  return {
+    ...bookPackage,
+    book: {
+      ...bookPackage.book,
+      title: book.title,
+      visibility: book.visibility,
+      labels: book.labels,
+      updatedAt: book.updatedAt,
+    },
+  }
 }
 
 export async function openBookPackageFile(config: GatewayConfig, bookId: string): Promise<GatewayBookPackageFile> {
@@ -345,6 +355,28 @@ export async function updateBookVisibility(
   return book
 }
 
+export async function updateBookTitle(config: GatewayConfig, bookId: string, title: unknown): Promise<GatewayBookSummary> {
+  if (typeof title !== 'string' || !title.trim()) {
+    throw new GatewayHttpError(400, 'invalid_book_title', 'Book title must be a non-empty string.')
+  }
+  const normalizedTitle = title.trim()
+  if (normalizedTitle.length > 120) {
+    throw new GatewayHttpError(400, 'invalid_book_title', 'Book title must be at most 120 characters.')
+  }
+
+  const catalog = await readBookCatalog(config)
+  const book = catalog.books.find((candidate) => candidate.id === bookId)
+  if (!book) {
+    throw new GatewayHttpError(404, 'book_not_found', `Gateway book ${bookId} was not found.`)
+  }
+  const updatedAt = new Date().toISOString()
+  book.title = normalizedTitle
+  book.updatedAt = updatedAt
+  await writeBookCatalog(config, catalog.books)
+  await updateBookPackageTitle(config, bookId, normalizedTitle, updatedAt)
+  return book
+}
+
 export async function updateBookLabels(config: GatewayConfig, bookId: string, labels: unknown): Promise<GatewayBookSummary> {
   if (!Array.isArray(labels) || labels.some((label) => typeof label !== 'string')) {
     throw new GatewayHttpError(400, 'invalid_book_labels', 'Book labels must be an array of strings.')
@@ -358,6 +390,33 @@ export async function updateBookLabels(config: GatewayConfig, bookId: string, la
   book.labels = normalizeLabels(labels)
   await writeBookCatalog(config, catalog.books)
   return book
+}
+
+async function updateBookPackageTitle(config: GatewayConfig, bookId: string, title: string, updatedAt: string) {
+  const packagePath = join(config.dataDir, 'books', bookId, 'package.json')
+  let rawPackage: string
+  try {
+    rawPackage = await readFile(packagePath, 'utf8')
+  } catch (error) {
+    if (isNodeError(error) && error.code === 'ENOENT') return
+    throw error
+  }
+  let bookPackage: unknown
+  try {
+    bookPackage = parseBookPackage(rawPackage)
+  } catch {
+    return
+  }
+  if (!isRecord(bookPackage) || !isRecord(bookPackage.book)) return
+  bookPackage.book.title = title
+  bookPackage.book.updatedAt = updatedAt
+  try {
+    await writeJsonFile(packagePath, bookPackage)
+    packageMetadataCache.delete(packagePath)
+  } catch (error) {
+    if (isNodeError(error) && (error.code === 'EACCES' || error.code === 'EPERM')) return
+    throw error
+  }
 }
 
 async function upsertBookSummary(
