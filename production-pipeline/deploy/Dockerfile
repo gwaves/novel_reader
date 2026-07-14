@@ -11,6 +11,7 @@ RUN npm ci --omit=dev
 
 COPY production-pipeline ./production-pipeline
 COPY scripts/summary-source-locator.mjs ./scripts/summary-source-locator.mjs
+RUN chmod -R a+rX /app/production-pipeline /app/scripts
 
 ENV NODE_ENV=production
 EXPOSE 6290

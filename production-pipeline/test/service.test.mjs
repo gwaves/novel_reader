@@ -510,6 +510,48 @@ describe('production pipeline console service', () => {
     assert.match(events, /"event.action":"job.completed"/)
   })
 
+  it('automatically retries a failed persisted production run with bounded resume state', async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), 'production-pipeline-auto-retry-test-'))
+    tempDirs.push(dataDir)
+    const job = queuedTestJob('auto-retry-job', dataDir, join(dataDir, 'unused.done'), 10)
+    const runDir = join(job.productionRunRoot, job.productionBookId, '2026-07-13T00-00-00-000Z-test')
+    await mkdir(runDir, { recursive: true })
+    await writeFile(join(runDir, 'run.json'), JSON.stringify({
+      runId: '2026-07-13T00-00-00-000Z-test',
+      command: 'run',
+      status: 'failed',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      mainDbPath: join(dataDir, 'main.sqlite'),
+      job: { bookId: job.productionBookId, title: job.title, stages: [] },
+      stages: {},
+    }, null, 2))
+    job.productionRunDir = runDir
+    job.commands = [{
+      command: process.execPath,
+      args: ['-e', 'process.exit(1)'],
+      display: 'intentional first-attempt failure',
+      cwd: dataDir,
+    }]
+    await writeFile(join(dataDir, 'jobs.json'), JSON.stringify([job], null, 2))
+
+    const app = await buildTestApp({
+      PRODUCTION_PIPELINE_CONSOLE_DATA_DIR: dataDir,
+      PRODUCTION_PIPELINE_AUTOMATIC_RETRY_BASE_DELAY_MS: '1',
+      PRODUCTION_PIPELINE_AUTOMATIC_RETRY_MAX_DELAY_MS: '1',
+      PRODUCTION_PIPELINE_MAX_AUTOMATIC_RETRIES: '2',
+    })
+    const response = await waitForJobStatus(app, 'auto-retry-job', 'completed')
+
+    assert.equal(response.json().job.attempts, 2)
+    assert.equal(response.json().job.automaticRetryCount, 1)
+    assert.equal(response.json().job.nextAttemptAt, '')
+    const events = await readFile(join(dataDir, 'events.jsonl'), 'utf8')
+    assert.match(events, /"event.action":"job.retry_scheduled"/)
+    assert.match(events, /"event.action":"job.recovered"/)
+    assert.equal(JSON.parse(await readFile(join(runDir, 'run.json'), 'utf8')).status, 'completed')
+  })
+
   it('retries a failed job through the service API', async () => {
     const dataDir = await mkdtemp(join(tmpdir(), 'production-pipeline-retry-test-'))
     tempDirs.push(dataDir)

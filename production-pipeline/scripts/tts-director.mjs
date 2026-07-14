@@ -614,6 +614,60 @@ ${JSON.stringify(compactPreSegments(preSegments), null, 2)}
 `
 }
 
+function buildUnknownSpeakerFallbackPrompt({ script, audit, unknownSegments }) {
+  const compactSegments = unknownSegments.map(segment => {
+    const index = script.segments.findIndex(item => item.id === segment.id)
+    return {
+      id: segment.id,
+      type: segment.type,
+      text: segment.text,
+      currentSpeaker: segment.speaker,
+      currentVoice: segment.voice,
+      evidence: segment.evidence,
+      previousText: index > 0 ? script.segments[index - 1]?.text || '' : '',
+      nextText: index >= 0 && index < script.segments.length - 1 ? script.segments[index + 1]?.text || '' : '',
+    }
+  })
+
+  return `你是有声小说导演脚本的质检复核员。当前章节因为 speaker="未知角色" 比例超标而未通过质检。
+
+你的任务是只复核这些未知片段是否属于无名路人、围观人群、群众闲谈、背景对白、无法区分且不影响剧情理解的临时声音。
+
+只输出严格 JSON，不要输出 Markdown，不要解释，不要输出思考过程。
+
+决策规则：
+1. 如果片段只是无名路人/群体闲谈/背景对白/气氛对白，且不需要保留独立角色身份，action 必须是 "narrator"。
+2. 如果片段可能属于重要角色、可从上下文推断出具体角色、或不确定是否会影响剧情理解，action 必须是 "keep_unknown"。
+3. 不要新编角色名。这个兜底只允许确认无关片段交给旁白代读，不负责新增人物。
+4. 每个输入片段都必须返回一个 decision。
+
+输出 JSON 结构：
+{
+  "decisions": [
+    {
+      "segmentId": "ch001-s0001",
+      "action": "narrator|keep_unknown",
+      "confidence": 0.0,
+      "reason": "简短依据"
+    }
+  ]
+}
+
+书籍：${script.source?.bookTitle || ''}
+章节：第 ${script.source?.chapterIndex || ''} 章 ${script.source?.chapterTitle || ''}
+
+质检摘要：
+${JSON.stringify({
+  segmentCount: audit.segmentCount,
+  unknown: audit.unknown,
+  speakerCounts: audit.speakerCounts,
+}, null, 2)}
+
+未知片段及上下文：
+${JSON.stringify(compactSegments, null, 2)}
+`
+}
+
 async function callOpenAICompatible(config, messages) {
   const apiKey = getApiKey(config)
   const headers = { 'Content-Type': 'application/json' }
@@ -1156,6 +1210,92 @@ function strictAuditFailures(config, audit) {
   return failures
 }
 
+function hasUnknownRatioFailure(config, audit) {
+  return audit?.unknown?.count > 0 && audit.unknown.ratio > Math.max(0, Math.min(1, finiteNumber(config.director?.maxUnknownRatio, 0.10)))
+}
+
+async function repairUnknownSpeakersWithNarratorFallback(config, scriptPath, script, audit, failureMessage) {
+  if (!hasUnknownRatioFailure(config, audit)) return { repairedCount: 0, script }
+  const unknownSegments = (script.segments || []).filter(segment => segment.speaker === '未知角色')
+  if (!unknownSegments.length) return { repairedCount: 0, script }
+
+  const reviewConfig = config.llm.fallback
+    ? { ...config, llm: { ...config.llm, ...config.llm.fallback, fallback: null } }
+    : config
+  if (config.llm.fallback) {
+    console.warn(`🛟 导演脚本未知角色复核使用兜底模型 ${reviewConfig.llm.model}。`)
+  }
+  console.warn(`🧑‍⚖️  未知角色超标，调用大模型复核 ${unknownSegments.length} 个未知片段：${failureMessage}`)
+
+  let review
+  try {
+    review = await callOpenAICompatibleWithRetry(reviewConfig, [
+      { role: 'system', content: '你只输出严格 JSON，不输出 Markdown，不输出思考过程。' },
+      { role: 'user', content: buildUnknownSpeakerFallbackPrompt({ script, audit, unknownSegments }) },
+    ], `第 ${script.source?.chapterIndex || '?'} 章未知角色兜底复核`, 2, null, result => {
+      if (!Array.isArray(result?.decisions)) throw new Error('未知角色复核输出缺少 decisions 数组。')
+    })
+  } catch (error) {
+    console.warn(`⚠️  未知角色兜底复核失败：${error.message.split('\n')[0]}`)
+    return { repairedCount: 0, script }
+  }
+
+  const decisions = new Map()
+  for (const decision of review.decisions || []) {
+    const id = optionalString(decision?.segmentId)
+    if (id) decisions.set(id, decision)
+  }
+
+  let repairedCount = 0
+  const repairedSegmentIds = []
+  const narrator = config.director.defaultNarrator
+  for (const segment of script.segments || []) {
+    if (segment.speaker !== '未知角色') continue
+    const decision = decisions.get(segment.id)
+    const action = optionalString(decision?.action)
+    const confidence = normalizeConfidence(decision?.confidence, 0)
+    if (action !== 'narrator' || confidence < 0.65) continue
+    segment.speaker = '旁白'
+    segment.characterId = null
+    segment.voice = narrator.voice
+    segment.style = `旁白代读无名路人或群体闲谈；${segment.style || narrator.style || '自然清晰。'}`
+    segment.confidence = Math.max(confidence, 0.75)
+    segment.evidence = `大模型兜底复核：${optionalString(decision?.reason) || '判定为无关路人/群体对白，旁白代读。'}`
+    segment.auditFallbackRepair = {
+      kind: 'unknown-speaker-narrator-fallback',
+      repairedAt: new Date().toISOString(),
+      originalSpeaker: '未知角色',
+      model: reviewConfig.llm.model,
+      confidence,
+    }
+    repairedCount += 1
+    repairedSegmentIds.push(segment.id)
+  }
+
+  if (!repairedCount) {
+    console.warn('⚠️  未知角色兜底复核未确认任何片段可旁白代读，保留原质检失败。')
+    return { repairedCount: 0, script }
+  }
+
+  script.diagnostics = {
+    ...(script.diagnostics || {}),
+    auditFallbackRepair: {
+      kind: 'unknown-speaker-narrator-fallback',
+      repairedAt: new Date().toISOString(),
+      model: reviewConfig.llm.model,
+      failure: failureMessage,
+      reviewedCount: unknownSegments.length,
+      repairedCount,
+      repairedSegmentIds,
+    },
+  }
+  writeFileSync(scriptPath, `${JSON.stringify(script, null, 2)}\n`, 'utf8')
+  const diagnosticsPath = scriptPath.replace(/\.json$/i, '.diagnostics.json')
+  writeFileSync(diagnosticsPath, `${JSON.stringify(script.diagnostics, null, 2)}\n`, 'utf8')
+  console.warn(`✅ 未知角色兜底复核完成：${repairedCount}/${unknownSegments.length} 个片段改为旁白代读。`)
+  return { repairedCount, script }
+}
+
 async function runValidateScript(args) {
   const scriptPath = args.script ? resolve(args.script) : null
   if (!scriptPath) throw new Error('validate-script 需要 --script。')
@@ -1252,6 +1392,10 @@ async function synthSegmentWithMimo(config, segment, outputPath) {
 }
 
 function runFfmpeg(args, label) {
+  const outputPath = args.at(-1)
+  if (outputPath && outputPath !== '-' && existsSync(outputPath)) {
+    rmSync(outputPath, { force: true })
+  }
   const result = spawnSync('ffmpeg', ['-hide_banner', '-loglevel', 'error', '-y', ...args], { encoding: 'utf8' })
   if (result.status !== 0) {
     throw new Error(`${label} 失败：${result.stderr || result.stdout || 'ffmpeg exited with error'}`)
@@ -2448,6 +2592,14 @@ async function runBatchPipeline(config, args) {
         script = draftResult.script
         auditResult = writeAuditReport(config, scriptPath, script)
         strictFailures = strictAuditFailures(config, auditResult.audit)
+      }
+      if (strictFailures.length && hasUnknownRatioFailure(config, auditResult.audit)) {
+        const fallbackRepair = await repairUnknownSpeakersWithNarratorFallback(config, scriptPath, script, auditResult.audit, strictFailures[0])
+        if (fallbackRepair.repairedCount > 0) {
+          script = fallbackRepair.script
+          auditResult = writeAuditReport(config, scriptPath, script)
+          strictFailures = strictAuditFailures(config, auditResult.audit)
+        }
       }
       if (strictFailures.length) {
         throw new Error(`第 ${chapterIndex} 章导演脚本质检失败：${strictFailures[0]}`)

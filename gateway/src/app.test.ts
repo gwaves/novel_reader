@@ -1287,6 +1287,22 @@ describe('gateway app', () => {
       }),
       'utf8',
     )
+    await mkdir(join(dataDir, 'books', 'book-a'), { recursive: true })
+    await writeFile(
+      join(dataDir, 'books', 'book-a', 'package.json'),
+      JSON.stringify({
+        schemaVersion: 1,
+        generatedAt: '2026-06-25T00:00:00.000Z',
+        book: {
+          id: 'book-a',
+          title: '后台书',
+          chapterCount: 1,
+          updatedAt: '2026-06-25T00:00:00.000Z',
+        },
+        chapters: [],
+      }),
+      'utf8',
+    )
     await writeFile(
       join(dataDir, 'devices.json'),
       JSON.stringify({
@@ -1314,6 +1330,12 @@ describe('gateway app', () => {
       method: 'GET',
       url: '/admin/books',
       headers: authHeaders,
+    })
+    const titleResponse = await app.inject({
+      method: 'PATCH',
+      url: '/admin/books/book-a/title',
+      headers: authHeaders,
+      payload: { title: '新后台书名' },
     })
     const visibilityResponse = await app.inject({
       method: 'PATCH',
@@ -1349,13 +1371,22 @@ describe('gateway app', () => {
     expect(booksBefore.json().books).toEqual([
       expect.objectContaining({
         id: 'book-a',
+        title: '后台书',
         visibility: 'hidden',
         labels: ['test'],
       }),
     ])
+    expect(titleResponse.statusCode).toBe(200)
+    expect(titleResponse.json().book).toMatchObject({
+      id: 'book-a',
+      title: '新后台书名',
+      visibility: 'hidden',
+      labels: ['test'],
+    })
     expect(visibilityResponse.statusCode).toBe(200)
     expect(visibilityResponse.json().book).toMatchObject({
       id: 'book-a',
+      title: '新后台书名',
       visibility: 'trusted',
       labels: ['test'],
     })
@@ -1380,6 +1411,10 @@ describe('gateway app', () => {
     expect(deviceResponse.json().device.note).toBe('客厅平板，给父母看书用，超过八十字会被截断'.repeat(4).slice(0, 80))
     expect(clearedNoteResponse.statusCode).toBe(200)
     expect(clearedNoteResponse.json().device).not.toHaveProperty('note')
+    const storedCatalog = JSON.parse(await readFile(join(dataDir, 'books.json'), 'utf8'))
+    expect(storedCatalog.books[0].title).toBe('新后台书名')
+    const storedPackage = JSON.parse(await readFile(join(dataDir, 'books', 'book-a', 'package.json'), 'utf8'))
+    expect(storedPackage.book.title).toBe('新后台书名')
   })
 
   it('enforces patched device roles on mobile APIs', async () => {

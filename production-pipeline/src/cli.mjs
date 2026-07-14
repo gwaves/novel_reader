@@ -2,7 +2,7 @@
 
 import { createHash, randomUUID } from 'node:crypto'
 import { execFile, spawn } from 'node:child_process'
-import { copyFile, mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises'
+import { copyFile, mkdir, readFile, readdir, rename, stat, writeFile } from 'node:fs/promises'
 import { createWriteStream, existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
 import { homedir } from 'node:os'
 import { basename, dirname, join, relative, resolve } from 'node:path'
@@ -370,6 +370,7 @@ async function executeJobStages({ runInfo, job, mainDbPath, resume }) {
     ...runInfo.runJson,
     status: 'completed',
     updatedAt: finishedAt,
+    finishedAt,
     stages: stageResults,
   })
   console.log(`run: ${runInfo.runJson.runId}`)
@@ -419,6 +420,7 @@ async function executeJobStageWithTracking({ stage, runInfo, job, mainDbPath, co
     ...runInfo.runJson,
     status: 'running',
     updatedAt: startedAt,
+    finishedAt: '',
     stages: stageResults,
   })
 
@@ -437,6 +439,7 @@ async function executeJobStageWithTracking({ stage, runInfo, job, mainDbPath, co
           ...runInfo.runJson,
           status: 'running',
           updatedAt: new Date().toISOString(),
+          finishedAt: '',
           stages: stageResults,
         })
       },
@@ -454,6 +457,7 @@ async function executeJobStageWithTracking({ stage, runInfo, job, mainDbPath, co
       ...runInfo.runJson,
       status: 'running',
       updatedAt: finishedAt,
+      finishedAt: '',
       stages: stageResults,
     })
     if (stage === 'import') {
@@ -475,6 +479,7 @@ async function executeJobStageWithTracking({ stage, runInfo, job, mainDbPath, co
       ...runInfo.runJson,
       status: 'failed',
       updatedAt: finishedAt,
+      finishedAt,
       stages: stageResults,
     })
     throw error
@@ -2330,19 +2335,23 @@ function buildGatewayBookPackage(book, generatedAt) {
     wordCount: numberOrDefault(chapter.wordCount, countWords(String(chapter.content || ''))),
     updatedAt: chapter.updatedAt || generatedAt,
   }))
-  const summaries = book.summaries.map((summary) => ({
-    chapterId: String(summary.chapterId),
-    short: String(summary.short || ''),
-    detail: String(summary.detail || ''),
-    keyPoints: safeJsonParse(summary.keyPointsJson, []),
-    keyPointSources: normalizeSummaryKeyPointSources(
-      safeJsonParse(summary.keyPointSourcesJson, []),
-      safeJsonParse(summary.keyPointsJson, []),
-    ),
-    skippable: summary.skippable,
-    generatedBy: summary.generatedBy,
-    updatedAt: summary.updatedAt || generatedAt,
-  }))
+  const chapterContentById = new Map(chapters.map((chapter) => [chapter.id, chapter.content]))
+  const summaries = book.summaries.map((summary) => {
+    const chapterId = String(summary.chapterId)
+    const keyPoints = safeJsonParse(summary.keyPointsJson, [])
+    const storedSources = normalizeSummaryKeyPointSources(safeJsonParse(summary.keyPointSourcesJson, []), keyPoints)
+    const derivedSources = locateSummaryKeyPointSources(chapterContentById.get(chapterId) || '', keyPoints, storedSources)
+    return {
+      chapterId,
+      short: String(summary.short || ''),
+      detail: String(summary.detail || ''),
+      keyPoints,
+      keyPointSources: derivedSources.length > storedSources.length ? derivedSources : storedSources,
+      skippable: summary.skippable,
+      generatedBy: summary.generatedBy,
+      updatedAt: summary.updatedAt || generatedAt,
+    }
+  })
   const summarySourceCoverage = summarizeKeyPointSourceCoverage(summaries)
   const knowledgeGraph = normalizeKnowledgeGraphForPackage(book.knowledgeGraph)
   const embeddingCoverage = normalizeEmbeddingCoverage(book.embeddingCoverage, chapters.length, summaries.length)
@@ -2631,6 +2640,7 @@ function buildPackageQualityReport(book, bookPackage, options = {}) {
   const emptyCompletedKgChapters = safeArray(kgExtraction.completed)
     .filter((row) => numberOrDefault(row.contentLength, 0) >= emptyKgMinChars)
     .filter((row) => numberOrDefault(row.entityCount, 0) === 0 && numberOrDefault(row.relationCount, 0) === 0)
+    .filter((row) => !isReferenceLikeChapterContent(chapterById.get(String(row.chapterId || ''))?.content))
     .map((row) => ({
       chapterId: row.chapterId,
       chapterIndex: row.chapterIndex,
@@ -3829,9 +3839,11 @@ async function inspectJobPreflight({ checks, job, rawJob, jobPath, mainDbPath })
 
   if (job.stages.includes('publish')) {
     const publish = { ...(job.gateway || {}), ...(job.publish || {}) }
-    const hasLocal = Boolean(publish.gatewayDataDir)
+    const localRoot = publish.root && existsSync(expandPath(publish.root)) ? expandPath(publish.root) : ''
+    const localTarget = publish.gatewayDataDir || (localRoot ? join(localRoot, 'data') : '')
+    const hasLocal = Boolean(localTarget)
     const hasRemote = Boolean(publish.remoteHost || publish.host)
-    addDoctorCheck(checks, 'publish.target', hasLocal || hasRemote, hasLocal ? publish.gatewayDataDir : (publish.remoteHost || publish.host || 'missing'))
+    addDoctorCheck(checks, 'publish.target', hasLocal || hasRemote, hasLocal ? localTarget : (publish.remoteHost || publish.host || 'missing'))
   }
 
   if (job.stages.includes('verify')) {
@@ -4250,14 +4262,20 @@ function buildEmbeddingStageArgs(job, common, mode) {
 function buildPublishArgs(job, childRunJson) {
   const publish = { ...(job.gateway || {}), ...(job.publish || {}) }
   const args = ['publish', '--run', childRunJson]
-  if (publish.gatewayDataDir) args.push('--gateway-data-dir', publish.gatewayDataDir)
-  if (publish.gatewayAudioDir) args.push('--gateway-audio-dir', publish.gatewayAudioDir)
-  if (publish.remoteHost || publish.host) args.push('--remote-host', publish.remoteHost || publish.host)
-  if (publish.remoteUser || publish.user) args.push('--remote-user', publish.remoteUser || publish.user)
-  if (publish.remoteRoot || publish.root) args.push('--remote-root', publish.remoteRoot || publish.root)
-  if (publish.remoteDataDir) args.push('--remote-data-dir', publish.remoteDataDir)
-  if (publish.remoteAudioDir) args.push('--remote-audio-dir', publish.remoteAudioDir)
-  if (publish.sshPort || publish.remoteSshPort) args.push('--ssh-port', String(publish.sshPort || publish.remoteSshPort))
+  const localRoot = publish.root && existsSync(expandPath(publish.root)) ? expandPath(publish.root) : ''
+  const localDataDir = publish.gatewayDataDir || (localRoot ? join(localRoot, 'data') : '')
+  const localAudioDir = publish.gatewayAudioDir || (localRoot ? join(localRoot, 'audio') : '')
+  if (localDataDir) {
+    args.push('--gateway-data-dir', localDataDir)
+    if (localAudioDir) args.push('--gateway-audio-dir', localAudioDir)
+  } else {
+    if (publish.remoteHost || publish.host) args.push('--remote-host', publish.remoteHost || publish.host)
+    if (publish.remoteUser || publish.user) args.push('--remote-user', publish.remoteUser || publish.user)
+    if (publish.remoteRoot || publish.root) args.push('--remote-root', publish.remoteRoot || publish.root)
+    if (publish.remoteDataDir) args.push('--remote-data-dir', publish.remoteDataDir)
+    if (publish.remoteAudioDir) args.push('--remote-audio-dir', publish.remoteAudioDir)
+    if (publish.sshPort || publish.remoteSshPort) args.push('--ssh-port', String(publish.sshPort || publish.remoteSshPort))
+  }
   if (isFlagEnabled(publish.dryRun ?? job.dryRun)) args.push('--dry-run')
   return args
 }
@@ -4925,7 +4943,7 @@ function assertKgExtractionQuality(chapter, extraction, options = {}) {
   const contentLength = String(chapter.content || '').trim().length
   const entityCount = safeArray(extraction?.entities).length
   const relationCount = safeArray(extraction?.relations).length
-  if (allowEmpty || contentLength < emptyMinChars || entityCount > 0 || relationCount > 0) return
+  if (allowEmpty || contentLength < emptyMinChars || entityCount > 0 || relationCount > 0 || isReferenceLikeChapterContent(chapter.content)) return
   const qualityIssue = {
     code: 'kg_empty_extraction',
     chapterId: String(chapter.id || ''),
@@ -4939,6 +4957,19 @@ function assertKgExtractionQuality(chapter, extraction, options = {}) {
   const error = new Error(`${qualityIssue.message} chapterId=${qualityIssue.chapterId} contentLength=${contentLength}`)
   error.qualityIssue = qualityIssue
   throw error
+}
+
+function isReferenceLikeChapterContent(content) {
+  const text = String(content || '').trim()
+  if (!text) return false
+  const cjkCount = text.match(/\p{Script=Han}/gu)?.length ?? 0
+  const latinCount = text.match(/[A-Za-z]/g)?.length ?? 0
+  const digitCount = text.match(/\d/g)?.length ?? 0
+  const proseCount = cjkCount + latinCount
+  const compact = text.replace(/\s/g, '')
+  const referenceChars = text.match(/[\d\s.,;:()\[\]{}\-—–_/\\|]+/g)?.join('').length ?? 0
+  const referenceRatio = compact.length ? referenceChars / compact.length : 0
+  return proseCount < 24 && digitCount >= 40 && referenceRatio >= 0.7
 }
 
 function normalizeKgEntity(entity) {
@@ -5433,7 +5464,10 @@ async function writeJson(path, value) {
 }
 
 async function writeRunJson(path, value) {
-  await writeJson(path, value)
+  await mkdir(dirname(path), { recursive: true })
+  const tempPath = `${path}.${process.pid}.${Date.now()}.${randomUUID()}.tmp`
+  await writeFile(tempPath, `${JSON.stringify(value, null, 2)}\n`, 'utf8')
+  await rename(tempPath, path)
 }
 
 function relativeRunPath(runDir, path) {

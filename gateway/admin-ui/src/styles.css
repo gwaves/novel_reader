@@ -543,6 +543,31 @@ code,
   font-size: 13px;
 }
 
+.inline-editor {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  align-items: end;
+}
+
+.inline-editor .field {
+  margin-bottom: 0;
+}
+
+.inline-editor button {
+  border: 1px solid #2563eb;
+  border-radius: 6px;
+  background: #2563eb;
+  color: #ffffff;
+  padding: 9px 12px;
+  cursor: pointer;
+}
+
+.inline-editor button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
 select {
   width: 100%;
   border: 1px solid #cbd5e1;

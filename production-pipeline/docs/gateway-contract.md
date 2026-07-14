@@ -43,6 +43,21 @@ local artifacts
 
 HTTP upload APIs are intentionally avoided for large files.
 
+When Production Pipeline publishes into a Gateway bind mount through
+`gatewayDataDir` or `gatewayAudioDir`, the publisher must run as the same UID/GID
+that owns the Gateway host directories. The 88.100 deployment uses
+`gwaves:gwaves` (`1000:1000`). Do not run the production service as root for
+local bind-mount publishing, because `rsync` will create root-owned Gateway
+assets that later cannot be edited by the Gateway service or normal deploy user.
+
+For same-host deployments, prefer `gateway.root` or explicit
+`gatewayDataDir`/`gatewayAudioDir` local paths. The publisher automatically uses
+local directories when the Gateway root exists inside the container; SSH publish
+is reserved for remote Gateway hosts.
+
+Remote SSH publishing should use the Gateway deploy user, normally `gwaves`, so
+the remote filesystem ownership stays consistent with the Gateway deployment.
+
 ## Verification
 
 After publish, verify through Gateway HTTP APIs:

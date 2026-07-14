@@ -52,6 +52,10 @@ export function loadServiceConfig(env = process.env) {
     discoverRuns: env.PRODUCTION_PIPELINE_CONSOLE_DISCOVER_RUNS !== 'false',
     maxConcurrentJobs: readPositiveInteger(env.PRODUCTION_PIPELINE_MAX_CONCURRENT_JOBS, 1),
     autoResumeInterrupted: env.PRODUCTION_PIPELINE_AUTO_RESUME_INTERRUPTED !== 'false',
+    autoRetryFailures: env.PRODUCTION_PIPELINE_AUTO_RETRY_FAILURES !== 'false',
+    maxAutomaticRetries: readNonNegativeInteger(env.PRODUCTION_PIPELINE_MAX_AUTOMATIC_RETRIES, 5),
+    automaticRetryBaseDelayMs: readPositiveInteger(env.PRODUCTION_PIPELINE_AUTOMATIC_RETRY_BASE_DELAY_MS, 30_000),
+    automaticRetryMaxDelayMs: readPositiveInteger(env.PRODUCTION_PIPELINE_AUTOMATIC_RETRY_MAX_DELAY_MS, 10 * 60_000),
     eventLogFile: resolve(dataDir, 'events.jsonl'),
     credentialsFile: resolve(env.PRODUCTION_PIPELINE_CREDENTIALS_FILE || resolve(dataDir, 'credentials.env')),
     modelProfilesFile: resolve(env.PRODUCTION_PIPELINE_MODEL_PROFILES_FILE || resolve(dataDir, 'model-profiles.json')),
@@ -383,8 +387,14 @@ export async function buildProductionPipelineService(config = loadServiceConfig(
     })
 
     const send = async () => {
-      reply.raw.write('event: job\n')
-      reply.raw.write(`data: ${JSON.stringify(await store.readJobResponse(job.id))}\n\n`)
+      try {
+        const response = await store.readJobResponse(job.id)
+        if (reply.raw.destroyed) return
+        reply.raw.write('event: job\n')
+        reply.raw.write(`data: ${JSON.stringify(response)}\n\n`)
+      } catch (error) {
+        request.log.warn({ err: error, jobId: job.id }, 'production pipeline event refresh skipped')
+      }
     }
     const refresh = setInterval(() => {
       void send()
@@ -464,6 +474,7 @@ class JobStore {
     this.runningJobs = new Map()
     this.events = new EventEmitter()
     this.shuttingDown = false
+    this.retryTimer = null
   }
 
   async load() {
@@ -565,6 +576,8 @@ class JobStore {
       error: '',
       logs: [],
       attempts: 0,
+      automaticRetryCount: 0,
+      nextAttemptAt: '',
       recoveryRequested: false,
     }
     this.jobs.set(job.id, job)
@@ -640,6 +653,8 @@ class JobStore {
     job.pid = null
     job.error = ''
     job.stopRequested = false
+    job.automaticRetryCount = 0
+    job.nextAttemptAt = ''
     job.recoveryRequested = true
     await this.appendEvent(job, 'job.queued', 'info', '任务已排队继续生产，已完成成果将复用。')
     await this.persistAndEmit(job)
@@ -669,9 +684,20 @@ class JobStore {
 
   schedule(logger) {
     if (this.shuttingDown) return
+    if (this.retryTimer) {
+      clearTimeout(this.retryTimer)
+      this.retryTimer = null
+    }
+    const now = Date.now()
     const available = Math.max(0, this.config.maxConcurrentJobs - this.runningJobs.size)
     const queued = [...this.jobs.values()]
-      .filter((job) => !job.readOnly && !job.hidden && job.status === 'queued' && !this.runningJobs.has(job.id))
+      .filter((job) => (
+        !job.readOnly &&
+        !job.hidden &&
+        job.status === 'queued' &&
+        !this.runningJobs.has(job.id) &&
+        (!job.nextAttemptAt || Date.parse(job.nextAttemptAt) <= now)
+      ))
       .sort((left, right) => left.createdAt.localeCompare(right.createdAt))
       .slice(0, available)
     for (const job of queued) {
@@ -683,10 +709,26 @@ class JobStore {
         })
       this.runningJobs.set(job.id, promise)
     }
+    const nextAttemptMs = [...this.jobs.values()]
+      .filter((job) => !job.readOnly && !job.hidden && job.status === 'queued' && !this.runningJobs.has(job.id))
+      .map((job) => Date.parse(job.nextAttemptAt || ''))
+      .filter((value) => Number.isFinite(value) && value > now)
+      .sort((left, right) => left - right)[0]
+    if (nextAttemptMs) {
+      this.retryTimer = setTimeout(() => {
+        this.retryTimer = null
+        this.schedule(logger)
+      }, Math.max(1, nextAttemptMs - now))
+      this.retryTimer.unref?.()
+    }
   }
 
   async shutdown() {
     this.shuttingDown = true
+    if (this.retryTimer) {
+      clearTimeout(this.retryTimer)
+      this.retryTimer = null
+    }
     const active = [...this.activeChildren.entries()]
     await Promise.all(active.map(async ([jobId, child]) => {
       const job = this.getJob(jobId)
@@ -797,6 +839,7 @@ async function runJob(store, job) {
         return
       }
       if (result.code !== 0) {
+        if (await scheduleAutomaticRetry(store, job, `命令退出码 ${result.code}`, result.code)) return
         job.status = 'failed'
         job.exitCode = result.code
         job.error = `命令退出码 ${result.code}`
@@ -808,6 +851,7 @@ async function runJob(store, job) {
     }
     job.status = 'completed'
     job.exitCode = 0
+    job.nextAttemptAt = ''
     job.finishedAt = new Date().toISOString()
     await store.appendEvent(job, 'job.completed', 'info', '任务执行完成。', { exit_code: 0 })
     await store.persistAndEmit(job)
@@ -822,6 +866,7 @@ async function runJob(store, job) {
       await store.persistAndEmit(job)
       return
     }
+    if (!job.stopRequested && await scheduleAutomaticRetry(store, job, error.message)) return
     job.status = job.stopRequested ? 'stopped' : 'failed'
     job.error = job.stopRequested ? '任务已暂停，可继续生产。' : error.message
     job.finishedAt = new Date().toISOString()
@@ -835,6 +880,34 @@ async function runJob(store, job) {
     job.serviceShutdownRequested = false
     await store.persistAndEmit(job)
   }
+}
+
+async function scheduleAutomaticRetry(store, job, errorMessage, exitCode = null) {
+  if (!store.config.autoRetryFailures) return false
+  const retryCount = Number(job.automaticRetryCount || 0)
+  if (retryCount >= store.config.maxAutomaticRetries) return false
+  const productionRun = await readProductionRunState(job).catch(() => null)
+  if (!productionRun?.runJsonPath || !productionRun.runJson) return false
+  const nextRetryCount = retryCount + 1
+  const delayMs = Math.min(
+    store.config.automaticRetryMaxDelayMs,
+    store.config.automaticRetryBaseDelayMs * (2 ** (nextRetryCount - 1)),
+  )
+  job.status = 'queued'
+  job.pid = null
+  job.exitCode = exitCode
+  job.finishedAt = ''
+  job.recoveryRequested = true
+  job.automaticRetryCount = nextRetryCount
+  job.nextAttemptAt = new Date(Date.now() + delayMs).toISOString()
+  job.error = `${errorMessage}；将在 ${Math.ceil(delayMs / 1000)} 秒后自动从 run.json 恢复（${nextRetryCount}/${store.config.maxAutomaticRetries}）。`
+  await store.appendEvent(job, 'job.retry_scheduled', 'warn', job.error, {
+    exit_code: exitCode,
+    retry_delay_ms: delayMs,
+    next_attempt_at: job.nextAttemptAt,
+  })
+  await store.persistAndEmit(job)
+  return true
 }
 
 async function commandsForJobAttempt(job) {
@@ -933,6 +1006,28 @@ function renderConsoleHtml() {
     .jobs { display: grid; gap: 8px; margin-top: 12px; }
     .job { border: 1px solid #d9dee8; background: #fff; border-radius: 8px; padding: 10px; cursor: pointer; }
     .job.active { border-color: #1f5eff; box-shadow: 0 0 0 2px #dbe6ff; }
+    .model-profiles { gap: 10px; }
+    .model-profile { border: 1px solid #d9dee8; border-radius: 8px; background: #fff; padding: 12px; }
+    .model-profile-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding-bottom: 10px; border-bottom: 1px solid #edf0f5; }
+    .model-profile-title { min-width: 0; }
+    .model-profile-title strong { display: block; color: #1d2433; font-size: 14px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .model-profile-title span { display: block; color: #667085; font-size: 12px; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .model-profile-actions { display: flex; align-items: center; gap: 8px; flex: 0 0 auto; }
+    .model-profile button { padding: 6px 9px; }
+    .model-profile-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 10px 12px; padding-top: 10px; }
+    .model-profile-field { display: grid; gap: 5px; margin: 0; min-width: 0; }
+    .model-profile-field.wide { grid-column: 1 / -1; }
+    .model-profile-field span { color: #667085; font-size: 12px; font-weight: 700; }
+    .model-profile-field input { min-width: 0; padding: 8px 9px; font-size: 13px; }
+    .fallback-toggle { display: inline-flex; align-items: center; gap: 6px; min-height: 32px; border: 1px solid #d9dee8; border-radius: 6px; padding: 5px 8px; background: #f8fafc; color: #344054; font-size: 12px; font-weight: 700; margin: 0; }
+    .fallback-toggle:has(input:checked) { border-color: #b8d8c8; background: #edf8f2; color: #11603c; }
+    .toggle-field { display: inline-flex; align-items: center; gap: 8px; margin: 0; color: #344054; font-size: 13px; }
+    .toggle-field input { position: absolute; opacity: 0; pointer-events: none; }
+    .toggle-switch { width: 34px; height: 20px; border-radius: 999px; background: #d9dee8; position: relative; transition: background .15s ease; }
+    .toggle-switch::after { content: ""; position: absolute; top: 3px; left: 3px; width: 14px; height: 14px; border-radius: 50%; background: #fff; box-shadow: 0 1px 2px rgba(16, 24, 40, .18); transition: transform .15s ease; }
+    .toggle-field input:checked + .toggle-switch { background: #1f5eff; }
+    .toggle-field input:checked + .toggle-switch::after { transform: translateX(14px); }
+    .toggle-field input:focus-visible + .toggle-switch { outline: 2px solid #9db7ff; outline-offset: 2px; }
     .meta { color: #667085; font-size: 12px; margin-top: 4px; overflow-wrap: anywhere; }
     .status { display: inline-flex; align-items: center; min-width: 76px; justify-content: center; border-radius: 999px; padding: 3px 8px; font-size: 12px; background: #e8edf5; color: #314056; }
     .status.running, .status.queued { background: #fff3c4; color: #735b00; }
@@ -1006,8 +1101,14 @@ function renderConsoleHtml() {
     .overview-section { margin-top: 18px; }
     .overview-jobs { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 12px; }
     .overview-job { border: 1px solid #d9dee8; border-radius: 10px; padding: 14px; background: #fff; cursor: pointer; }
+    .queue-panel { border: 1px solid #d9dee8; border-radius: 8px; background: #f8fafc; padding: 10px; margin: 12px 0; }
+    .queue-panel h2 { margin-top: 0; }
+    .queue-list { display: grid; gap: 7px; }
+    .queue-row { display: grid; grid-template-columns: 58px minmax(0, 1fr) auto; gap: 8px; align-items: center; border: 1px solid #e3e7ef; border-radius: 7px; background: #fff; padding: 8px; cursor: pointer; }
+    .queue-row strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .queue-rank { color: #667085; font-size: 12px; font-weight: 700; }
     @media (max-width: 1100px) { .shell { grid-template-columns: 180px minmax(0, 1fr); } .workspace { grid-template-columns: 380px minmax(0, 1fr); } }
-    @media (max-width: 760px) { .shell { display: block; } .app-nav { position: sticky; top: 0; z-index: 5; height: auto; align-self: auto; flex-direction: row; overflow-x: auto; padding: 8px; } .app-nav h1, .nav-spacer { display: none; } .nav-button { width: auto; white-space: nowrap; } .workspace { display: block; } .control-pane { max-height: none; border-right: 0; border-bottom: 1px solid #d9dee8; } .stages, .metrics, .concurrency { grid-template-columns: repeat(2, minmax(120px, 1fr)); } }
+    @media (max-width: 760px) { .shell { display: block; } .app-nav { position: sticky; top: 0; z-index: 5; height: auto; align-self: auto; flex-direction: row; overflow-x: auto; padding: 8px; } .app-nav h1, .nav-spacer { display: none; } .nav-button { width: auto; white-space: nowrap; } .workspace { display: block; } .control-pane { max-height: none; border-right: 0; border-bottom: 1px solid #d9dee8; } .model-profile-grid { grid-template-columns: 1fr; } .model-profile-head { align-items: flex-start; } .model-profile-actions { flex-direction: column; align-items: flex-end; } .queue-row { grid-template-columns: 48px minmax(0, 1fr); } .queue-row .status { grid-column: 1 / -1; justify-self: start; } .stages, .metrics, .concurrency { grid-template-columns: repeat(2, minmax(120px, 1fr)); } }
   </style>
 </head>
 <body>
@@ -1033,7 +1134,7 @@ function renderConsoleHtml() {
       <h2>生产环境</h2>
       <div id="settingsStatus" class="book-progress">加载中...</div>
       <h2>模型 API 凭据</h2>
-      <div id="modelProfiles" class="jobs"></div>
+      <div id="modelProfiles" class="jobs model-profiles"></div>
       <div class="actions"><button class="secondary" id="addModelProfile" type="button">创建新 LLM</button><button id="saveModelProfiles" type="button">保存模型配置</button></div>
       <div id="modelProfileFeedback" class="meta" aria-live="polite">可配置多组模型；最多一组可标记为兜底。</div>
       <label>LLM API Key <input id="settingsLlmApiKey" type="password" autocomplete="new-password" placeholder="留空则保留现有 LLM_API_KEY" /></label>
@@ -1078,7 +1179,11 @@ function renderConsoleHtml() {
       <div class="view-description">配置内容来源、生产阶段和资源参数，校验后保存或启动。</div>
       <div class="chips" id="wizardSteps"><button class="secondary" data-wizard-step="1" type="button">1 内容</button><button class="secondary" data-wizard-step="2" type="button">2 目标</button><button class="secondary" data-wizard-step="3" type="button">3 资源</button><button class="secondary" data-wizard-step="4" type="button">4 确认</button></div>
       <div class="wizard-step" data-wizard-panel="1">
+      <label>创建方式 <select id="builderTemplateMode"><option value="new">新建空模板</option><option value="copy">复制已有任务或模板</option></select></label>
+      <label id="builderTemplateSourceRow" hidden>作为模板 <select id="builderTemplateSource"></select></label>
+      <div id="builderTemplateSourceFeedback" class="meta" aria-live="polite"></div>
       <label>模板名称 <input id="templateName" placeholder="新书生产" /></label>
+      <div id="templateNameHint" class="meta">保存为模板时需要填写；复制已有任务或模板启动时可留空。</div>
       <label>任务标题 <input id="builderTitle" placeholder="新书生产" /></label>
       <label>内容来源 <select id="builderMode"><option value="upload">上传源文件</option><option value="main-db">主库已有书籍</option></select></label>
       <label id="builderSourceRow">源文件 <select id="builderSource"></select></label>
@@ -1130,6 +1235,7 @@ function renderConsoleHtml() {
       <section class="view-pane" data-view-pane="tasks">
       <h1>任务</h1>
       <div class="view-description">查看运行中、等待中和历史生产任务。</div>
+      <div id="schedulerQueue"></div>
       <label>搜索 <input id="jobSearch" placeholder="书名或模板" /></label>
       <label>状态 <select id="jobStatusFilter"><option value="">全部状态</option><option value="running">运行中</option><option value="queued">等待中</option><option value="failed">失败</option><option value="stopped">已暂停</option><option value="completed">已完成</option></select></label>
       <div id="jobs" class="jobs"></div>
@@ -1141,7 +1247,7 @@ function renderConsoleHtml() {
     </div>
   </div>
   <script>
-    const state = { selectedJobId: '', eventSource: null, builderBooks: [], modelProfiles: [], jobs: [], jobStatuses: {}, dagProgress: {}, currentView: localStorage.getItem('productionPipeline.currentView') || 'overview', wizardStep: 1, logFilter: 'key' };
+    const state = { selectedJobId: '', eventSource: null, builderBooks: [], builderTemplates: [], modelProfiles: [], jobs: [], jobStatuses: {}, scheduler: null, dagProgress: {}, currentView: localStorage.getItem('productionPipeline.currentView') || 'overview', wizardStep: 1, logFilter: 'key' };
     function showWizardStep(step) {
       state.wizardStep = Math.max(1, Math.min(4, Number(step) || 1));
       document.querySelectorAll('[data-wizard-panel]').forEach(panel => { panel.hidden = Number(panel.dataset.wizardPanel) !== state.wizardStep; });
@@ -1196,6 +1302,8 @@ function renderConsoleHtml() {
       if (saved !== null) el.value = saved;
       el.addEventListener('input', () => localStorage.setItem('productionPipeline.' + id, el.value));
     }
+    document.getElementById('builderTemplateMode').value = localStorage.getItem('productionPipeline.builderTemplateMode') || 'new';
+    document.getElementById('builderTemplateSourceRow').hidden = document.getElementById('builderTemplateMode').value !== 'copy';
     const savedToken = localStorage.getItem('productionPipeline.token') || '';
     document.getElementById('token').value = savedToken;
     if (savedToken) document.getElementById('tokenFeedback').textContent = '已读取当前浏览器保存的 Token。';
@@ -1254,7 +1362,7 @@ function renderConsoleHtml() {
       root.hidden = false;
     }
     async function loadJobs() {
-      const body = await api('/api/jobs?limit=50');
+      const [body, health] = await Promise.all([api('/api/jobs?limit=50'), api('/health')]);
       for (const job of body.jobs) {
         const previous = state.jobStatuses[job.id];
         if (previous && previous !== job.status && (job.status === 'completed' || job.status === 'failed') && typeof Notification !== 'undefined' && Notification.permission === 'granted') {
@@ -1263,6 +1371,9 @@ function renderConsoleHtml() {
         state.jobStatuses[job.id] = job.status;
       }
       state.jobs = body.jobs;
+      state.scheduler = health.scheduler || null;
+      renderBuilderTemplateSourceOptions();
+      renderSchedulerQueue();
       const root = document.getElementById('jobs');
       const visibleJobs = filterJobs(body.jobs);
       root.innerHTML = visibleJobs.map(job => '<div class="job ' + (job.id === state.selectedJobId ? 'active' : '') + '" data-id="' + job.id + '"><div class="topline"><strong>' + escapeHtml(job.title) + '</strong><span class="status ' + job.status + '">' + escapeHtml(statusLabel(job.status)) + '</span></div>' + (job.runSummary ? '<div class="meta">阶段 ' + job.runSummary.completedStages + '/' + job.runSummary.totalStages + (job.runSummary.runningStages.length ? ' · 当前：' + escapeHtml(job.runSummary.runningStages.join('、')) : '') + '</div>' : '') + '<div class="meta">' + escapeHtml(formatLocalTime(job.createdAt)) + '</div><div class="meta">' + escapeHtml(job.productionJobPath || '') + '</div><div class="actions">' + (isActiveJob(job) ? '<button class="secondary stop-job" type="button" data-id="' + job.id + '">暂停生产</button>' : canRetryJob(job) ? '<button class="secondary retry-job" type="button" data-id="' + job.id + '">' + (job.status === 'failed' ? '重试失败项' : '继续生产') + '</button>' : '') + (canDeleteJob(job) ? '<button class="danger delete-job" type="button" data-id="' + job.id + '" data-title="' + escapeHtml(job.title) + '">删除</button>' : '') + '</div></div>').join('') || '<div class="meta">没有符合条件的任务</div>';
@@ -1281,15 +1392,98 @@ function renderConsoleHtml() {
       }));
       if (state.currentView === 'overview') renderOverview();
     }
+    function renderSchedulerQueue() {
+      const root = document.getElementById('schedulerQueue');
+      if (!root) return;
+      const scheduler = state.scheduler || {};
+      const running = state.jobs.filter(job => job.status === 'running' || job.status === 'stopping').sort((a, b) => (a.startedAt || a.createdAt).localeCompare(b.startedAt || b.createdAt));
+      const queued = state.jobs.filter(job => job.status === 'queued').sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+      const rows = [
+        ...running.map(job => queueRow(job, '运行中')),
+        ...queued.map((job, index) => queueRow(job, '第 ' + (index + 1) + ' 个')),
+      ].join('');
+      root.innerHTML = '<div class="queue-panel"><div class="topline"><h2>待执行队列</h2><span class="meta">并发 ' + escapeHtml(scheduler.running || 0) + '/' + escapeHtml(scheduler.maxConcurrentJobs || 1) + ' · 等待 ' + escapeHtml(scheduler.queued || 0) + '</span></div><div class="queue-list">' + (rows || '<div class="meta">当前没有运行或等待中的生产任务。</div>') + '</div></div>';
+      root.querySelectorAll('.queue-row').forEach(row => row.addEventListener('click', () => selectJob(row.dataset.id)));
+    }
+    function queueRow(job, rank) {
+      return '<div class="queue-row" data-id="' + escapeHtml(job.id) + '"><span class="queue-rank">' + escapeHtml(rank) + '</span><strong>' + escapeHtml(job.title) + '</strong><span class="status ' + escapeHtml(job.status) + '">' + escapeHtml(statusLabel(job.status)) + '</span></div>';
+    }
     function filterJobs(jobs) {
       const query = document.getElementById('jobSearch').value.trim().toLowerCase();
       const status = document.getElementById('jobStatusFilter').value;
       return jobs.filter(job => (!status || job.status === status) && (!query || (job.title + ' ' + (job.productionJobPath || '')).toLowerCase().includes(query)));
     }
+    function renderBuilderTemplateSourceOptions() {
+      const select = document.getElementById('builderTemplateSource');
+      if (!select) return;
+      const selected = select.value || localStorage.getItem('productionPipeline.builderTemplateSource') || '';
+      const templateOptions = (state.builderTemplates || []).map(file => ({
+        key: file.name,
+        value: 'template:' + encodeURIComponent(file.name),
+        label: '模板 · ' + (file.title || file.name) + ' · ' + file.name,
+      }));
+      const seenJobTemplates = new Set();
+      const jobOptions = (state.jobs || []).flatMap(job => {
+        const path = job.productionJobPath || '';
+        const prefix = '/app/jobs/';
+        const name = path.startsWith(prefix) && path.endsWith('.json') && !path.slice(prefix.length).includes('/') ? path.slice(prefix.length) : '';
+        if (!name || seenJobTemplates.has(name)) return [];
+        seenJobTemplates.add(name);
+        return [{
+          key: name,
+          value: 'template:' + encodeURIComponent(name),
+          label: '任务 · ' + (job.title || name) + ' · ' + name,
+        }];
+      });
+      const options = [...jobOptions, ...templateOptions.filter(item => !seenJobTemplates.has(item.key))];
+      select.innerHTML = options.map(item => '<option value="' + escapeHtml(item.value) + '">' + escapeHtml(item.label) + '</option>').join('');
+      if (selected && [...select.options].some(option => option.value === selected)) select.value = selected;
+      document.getElementById('builderTemplateSourceFeedback').textContent = options.length ? '选择已有任务或模板后，会复制其生产参数；模板名称可留空，启动时会自动生成后台文件名。' : '暂无可复制的任务或模板。';
+      updateTemplateNameHint();
+    }
+    function canAutonameTemplateForStart() {
+      return document.getElementById('builderTemplateMode').value === 'copy' && Boolean(document.getElementById('builderTemplateSource').value);
+    }
+    function updateTemplateNameHint() {
+      const hint = document.getElementById('templateNameHint');
+      if (!hint) return;
+      hint.textContent = canAutonameTemplateForStart() ? '已选择已有任务或模板：模板名称可留空，确认启动时会按任务标题自动生成后台文件名。' : '保存为模板或新建空模板启动时需要填写模板名称。';
+    }
+    function resetBuilderForNewTemplate() {
+      document.getElementById('templateName').value = '';
+      document.getElementById('builderTitle').value = '';
+      document.getElementById('templateJson').value = '';
+      document.getElementById('builderTemplateSourceFeedback').textContent = '已切换为新建空模板。';
+      localStorage.removeItem('productionPipeline.templateName');
+      localStorage.removeItem('productionPipeline.builderTitle');
+      localStorage.removeItem('productionPipeline.templateJson');
+    }
+    async function applyBuilderTemplateSource() {
+      const mode = document.getElementById('builderTemplateMode').value;
+      const sourceRow = document.getElementById('builderTemplateSourceRow');
+      sourceRow.hidden = mode !== 'copy';
+      if (mode !== 'copy') {
+        resetBuilderForNewTemplate();
+        updateTemplateNameHint();
+        return;
+      }
+      const value = document.getElementById('builderTemplateSource').value;
+      if (!value) {
+        document.getElementById('builderTemplateSourceFeedback').textContent = '暂无可复制的任务或模板。';
+        updateTemplateNameHint();
+        return;
+      }
+      const [, encodedName = ''] = value.split(':');
+      await loadTemplateIntoBuilder(encodedName, true);
+      document.getElementById('builderTemplateMode').value = 'copy';
+      sourceRow.hidden = false;
+      updateTemplateNameHint();
+    }
     async function loadManagedAssets() {
       const [sourceBody, templateBody, backupBody, builderBody, auditBody, sessionBody] = await Promise.all([
         api('/api/sources'), api('/api/templates'), api('/api/backups'), api('/api/builder-metadata'), api('/api/audit?limit=20'), api('/api/session'),
       ]);
+      state.builderTemplates = templateBody.templates || [];
       document.getElementById('tokenFeedback').textContent = '当前权限：' + (sessionBody.role === 'admin' ? '管理员' : '只读查看') + '。Token 保存在当前浏览器。';
       document.getElementById('auditEvents').innerHTML = auditBody.events.map(event => '<div class="job"><strong>' + escapeHtml(event['event.action'] || 'event') + '</strong><div class="meta">' + escapeHtml(event.message || '') + '</div><div class="meta">' + escapeHtml(formatLocalTime(event['@timestamp'])) + ' · ' + escapeHtml(event.job_id || '') + '</div></div>').join('') || '<div class="meta">暂无审计事件</div>';
       document.getElementById('sources').innerHTML = sourceBody.sources.map(file => '<div class="job"><strong>' + escapeHtml(file.name) + '</strong><div class="meta">' + formatBytes(file.sizeBytes) + ' · ' + escapeHtml(formatLocalTime(file.updatedAt)) + '</div><div class="actions"><button class="danger delete-source" data-name="' + encodeURIComponent(file.name) + '" type="button">删除</button></div></div>').join('') || '暂无源文件';
@@ -1298,6 +1492,7 @@ function renderConsoleHtml() {
       const selectedJobPath = jobPath.value || localStorage.getItem('productionPipeline.jobPath') || '';
       jobPath.innerHTML = '<option value="">请选择生产端 JSON</option>' + templateBody.templates.map(file => '<option value="/app/jobs/' + escapeHtml(file.name) + '">' + escapeHtml(file.name) + ' · ' + escapeHtml(file.title || '未命名') + '</option>').join('');
       if ([...jobPath.options].some(option => option.value === selectedJobPath)) jobPath.value = selectedJobPath;
+      renderBuilderTemplateSourceOptions();
       document.querySelectorAll('.start-template').forEach(button => button.addEventListener('click', async () => {
         const body = await api('/api/templates/' + button.dataset.name + '/start', { method: 'POST' });
         await loadJobs();
@@ -1322,8 +1517,19 @@ function renderConsoleHtml() {
       const body = await api('/api/templates/' + encodedName);
       const template = body.template || {};
       const fileName = decodeURIComponent(encodedName);
-      document.getElementById('templateName').value = copy ? fileName.replace(/\.json$/i, '') + '-副本' : fileName.replace(/\.json$/i, '');
+      if (copy) {
+        document.getElementById('builderTemplateMode').value = 'copy';
+        document.getElementById('builderTemplateSourceRow').hidden = false;
+        const sourceValue = 'template:' + encodedName;
+        if ([...document.getElementById('builderTemplateSource').options].some(option => option.value === sourceValue)) {
+          document.getElementById('builderTemplateSource').value = sourceValue;
+          localStorage.setItem('productionPipeline.builderTemplateSource', sourceValue);
+        }
+        localStorage.setItem('productionPipeline.builderTemplateMode', 'copy');
+      }
+      document.getElementById('templateName').value = copy ? '' : fileName.replace(/\.json$/i, '');
       document.getElementById('builderTitle').value = template.title || '';
+      document.getElementById('builderTemplateSourceFeedback').textContent = copy ? '已复制“' + fileName + '”，请按新任务修改标题、内容来源和资源参数；模板名称可留空。' : '已载入“' + fileName + '”，可直接编辑并保存。';
       const mainDb = template.source?.type === 'main-db';
       document.getElementById('builderMode').value = mainDb ? 'main-db' : 'upload';
       document.getElementById('builderSourceRow').hidden = mainDb;
@@ -1339,7 +1545,8 @@ function renderConsoleHtml() {
       updateDirectorConcurrency();
       setConsoleView('new');
       showWizardStep(1);
-      showBuilderFeedback('info', copy ? '已加载模板副本，请修改名称后保存。' : '模板已载入编辑器。');
+      updateTemplateNameHint();
+      showBuilderFeedback('info', copy ? '已加载模板副本，若只启动任务可不填写模板名称。' : '模板已载入编辑器。');
     }
     async function deleteTemplate(encodedName, title) {
       if (!window.confirm('删除模板“' + title + '”？\\n\\n不会删除历史任务和生产产物。')) return;
@@ -1382,7 +1589,23 @@ function renderConsoleHtml() {
     }
     function renderModelProfiles() {
       const root = document.getElementById('modelProfiles');
-      root.innerHTML = state.modelProfiles.map((profile, index) => '<div class="panel model-profile" data-profile-index="' + index + '"><label>名称 <input data-profile-field="label" value="' + escapeHtml(profile.label) + '"></label><label>标识 <input data-profile-field="id" value="' + escapeHtml(profile.id) + '" ' + (profile.persisted ? 'readonly' : '') + '></label><label>Base URL <input data-profile-field="baseUrl" value="' + escapeHtml(profile.baseUrl) + '"></label><label>模型名称 <input data-profile-field="model" value="' + escapeHtml(profile.model) + '"></label><label>API Key <input data-profile-field="apiKey" type="password" autocomplete="new-password" placeholder="留空保留现有凭据"></label><label><input data-profile-field="fallback" type="checkbox" ' + (profile.fallback ? 'checked' : '') + '> 作为兜底模型</label><button class="danger remove-model-profile" type="button">删除</button></div>').join('') || '<div class="meta">尚未创建命名模型配置。</div>';
+      root.innerHTML = state.modelProfiles.map((profile, index) => {
+        const labelValue = escapeHtml(profile.label || '');
+        const modelValue = escapeHtml(profile.model || '');
+        const baseUrlValue = escapeHtml(profile.baseUrl || '');
+        const displayLabel = labelValue || '未命名模型';
+        const displayModel = modelValue || '未填写模型名称';
+        return '<section class="model-profile" data-profile-index="' + index + '">' +
+          '<div class="model-profile-head"><div class="model-profile-title"><strong>' + displayLabel + '</strong><span>' + displayModel + '</span></div><div class="model-profile-actions"><label class="toggle-field fallback-toggle"><input data-profile-field="fallback" type="checkbox" ' + (profile.fallback ? 'checked' : '') + '><span class="toggle-switch" aria-hidden="true"></span><span>兜底</span></label><button class="danger remove-model-profile" type="button">删除</button></div></div>' +
+          '<div class="model-profile-grid">' +
+          '<label class="model-profile-field"><span>名称</span><input data-profile-field="label" value="' + labelValue + '"></label>' +
+          '<label class="model-profile-field"><span>标识</span><input data-profile-field="id" value="' + escapeHtml(profile.id) + '" ' + (profile.persisted ? 'readonly' : '') + '></label>' +
+          '<label class="model-profile-field wide"><span>Base URL</span><input data-profile-field="baseUrl" value="' + baseUrlValue + '"></label>' +
+          '<label class="model-profile-field"><span>模型名称</span><input data-profile-field="model" value="' + modelValue + '"></label>' +
+          '<label class="model-profile-field"><span>API Key</span><input data-profile-field="apiKey" type="password" autocomplete="new-password" placeholder="留空保留现有凭据"></label>' +
+          '</div>' +
+          '</section>';
+      }).join('') || '<div class="meta">尚未创建命名模型配置。</div>';
       root.querySelectorAll('.remove-model-profile').forEach(button => button.addEventListener('click', () => { state.modelProfiles.splice(Number(button.closest('.model-profile').dataset.profileIndex), 1); renderModelProfiles(); }));
     }
     function collectModelProfiles() {
@@ -1461,6 +1684,11 @@ function renderConsoleHtml() {
       showBuilderFeedback('success', 'JSON 已生成。检查后可“保存为模板”，或点击“确认并启动”完成校验并启动。');
       return template;
     }
+    function generateAutomaticTemplateName(template) {
+      const base = (template.title || '生产任务').split('/').join(' ').split(String.fromCharCode(92)).join(' ').trim().slice(0, 80) || '生产任务';
+      const stamp = new Date().toISOString().replace(/\D/g, '').slice(0, 14);
+      return base + '-' + stamp;
+    }
     async function uploadSource() {
       const file = document.getElementById('sourceFile').files[0];
       if (!file) throw new Error('请先选择源文件');
@@ -1471,8 +1699,8 @@ function renderConsoleHtml() {
       if (!response.ok) throw new Error(body.error?.message || response.statusText);
       await loadManagedAssets();
     }
-    async function saveTemplate() {
-      const name = document.getElementById('templateName').value.trim();
+    async function saveTemplate(options = {}) {
+      const name = document.getElementById('templateName').value.trim() || options.name || '';
       if (!name) throw new Error('请填写模板名称。');
       showBuilderFeedback('info', '正在校验配置…');
       const template = generateTemplate();
@@ -1480,7 +1708,7 @@ function renderConsoleHtml() {
       const validation = await api('/api/templates/validate', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ template }) });
       if (!validation.valid) throw new Error(validation.errors.join('；'));
       const saved = await api('/api/templates', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ name, template }) });
-      showBuilderFeedback('success', '模板“' + name + '”已保存。' + (validation.warnings.length ? ' 提示：' + validation.warnings.join('；') : ' 配置校验通过。'));
+      showBuilderFeedback('success', (options.generatedName ? '已自动生成后台模板“' : '模板“') + name + '”已保存。' + (validation.warnings.length ? ' 提示：' + validation.warnings.join('；') : ' 配置校验通过。'));
       await loadManagedAssets();
       return { name: saved.template.name, template, validation };
     }
@@ -1805,6 +2033,14 @@ function renderConsoleHtml() {
       enforceStageDependencies();
       renderBookProduction();
     });
+    document.getElementById('builderTemplateMode').addEventListener('change', event => {
+      localStorage.setItem('productionPipeline.builderTemplateMode', event.target.value);
+      applyBuilderTemplateSource().catch(error => showBuilderFeedback('error', '加载模板来源失败：' + (error.message || String(error))));
+    });
+    document.getElementById('builderTemplateSource').addEventListener('change', event => {
+      localStorage.setItem('productionPipeline.builderTemplateSource', event.target.value);
+      applyBuilderTemplateSource().catch(error => showBuilderFeedback('error', '加载模板来源失败：' + (error.message || String(error))));
+    });
     document.getElementById('builderBook').addEventListener('change', renderBookProduction);
     document.getElementById('llmProfile').addEventListener('change', selectModelProfile);
     document.getElementById('addModelProfile').addEventListener('click', () => {
@@ -1847,7 +2083,9 @@ function renderConsoleHtml() {
         if (!validation.valid) throw new Error(validation.errors.join('；'));
         const stageNames = template.stages.join('、');
         if (!window.confirm('确认启动“' + template.title + '”？\\n\\n阶段：' + stageNames + '\\nLLM/TTS 阶段可能产生费用，发布阶段会写入 Gateway。')) return;
-        const result = await saveTemplate();
+        const explicitName = document.getElementById('templateName').value.trim();
+        const generatedName = !explicitName && canAutonameTemplateForStart();
+        const result = await saveTemplate({ name: generatedName ? generateAutomaticTemplateName(template) : '', generatedName });
         const body = await api('/api/templates/' + encodeURIComponent(result.name) + '/start', { method: 'POST' });
         setConsoleView('tasks');
         await loadJobs();
@@ -2898,6 +3136,11 @@ function clampInteger(value, min, max, fallback) {
 function readPositiveInteger(value, fallback) {
   const number = Number(value)
   return Number.isInteger(number) && number > 0 ? number : fallback
+}
+
+function readNonNegativeInteger(value, fallback) {
+  const number = Number(value)
+  return Number.isInteger(number) && number >= 0 ? number : fallback
 }
 
 function readQueryValue(query, key) {

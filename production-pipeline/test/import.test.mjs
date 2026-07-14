@@ -1466,6 +1466,63 @@ describe('production-pipeline import', () => {
     }
   })
 
+  it('allows empty kg for reference-like index pages', async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), 'production-pipeline-kg-reference-page-test-'))
+    let chatServer
+    try {
+      chatServer = await startFakeChatServer({ emptyKgWhenPromptIncludes: 'EMPTY_KG_INDEX' })
+      const txtPath = join(tempDir, 'sample.txt')
+      const dbPath = join(tempDir, 'main.sqlite')
+      const runRoot = join(tempDir, 'runs')
+      await writeFile(txtPath, `第一章 后汉\nEMPTY_KG_INDEX\n${'1 163 25 1936 28-32 483 522 513 2 115 41 2 121-156 48-56 524 2 159-180\n'.repeat(20)}`, 'utf8')
+      await execFileAsync(process.execPath, [
+        cliPath,
+        'import',
+        '--file',
+        txtPath,
+        '--book-id',
+        'sample-book',
+        '--title',
+        '样书',
+        '--main-db',
+        dbPath,
+        '--run-root',
+        runRoot,
+      ])
+
+      const { stdout } = await execFileAsync(process.execPath, [
+        cliPath,
+        'kg',
+        '--book-id',
+        'sample-book',
+        '--main-db',
+        dbPath,
+        '--run-root',
+        runRoot,
+        '--provider',
+        'openai-compatible',
+        '--base-url',
+        chatServer.url,
+        '--model',
+        'fake-chat',
+        '--empty-min-chars',
+        '100',
+        '--disable-thinking',
+      ])
+
+      assert.match(stdout, /completed: 1/)
+      assert.match(stdout, /failed: 0/)
+      const runIds = await readdir(join(runRoot, 'sample-book'))
+      const kgReport = JSON.parse(await readFile(join(runRoot, 'sample-book', runIds[0], 'artifacts', 'kg-report.json'), 'utf8'))
+      assert.equal(kgReport.completed, 1)
+      assert.equal(kgReport.failed, 0)
+      assert.equal(kgReport.quality.issueCount, 0)
+    } finally {
+      await chatServer?.close()
+      await rm(tempDir, { recursive: true, force: true })
+    }
+  })
+
   it('retries kg quality failures before marking a chapter failed', async () => {
     const tempDir = await mkdtemp(join(tmpdir(), 'production-pipeline-kg-quality-retry-test-'))
     let chatServer
@@ -2070,7 +2127,8 @@ describe('production-pipeline import', () => {
       const txtPath = join(tempDir, 'sample.txt')
       const dbPath = join(tempDir, 'main.sqlite')
       const runRoot = join(tempDir, 'runs')
-      const gatewayDataDir = join(tempDir, 'gateway-data')
+      const gatewayRoot = join(tempDir, 'gateway')
+      const gatewayDataDir = join(gatewayRoot, 'data')
       const jobPath = join(tempDir, 'job.json')
       await writeFile(txtPath, `第一章 开始\n这是第一章内容。`, 'utf8')
       await mkdir(gatewayDataDir, { recursive: true })
@@ -2097,7 +2155,7 @@ describe('production-pipeline import', () => {
           mainDbPath: dbPath,
           stages: ['package', 'publish'],
           gateway: {
-            gatewayDataDir,
+            root: gatewayRoot,
             url: 'https://127.0.0.1:8888',
             token: 'dev-token',
           },
@@ -2129,6 +2187,7 @@ describe('production-pipeline import', () => {
       const runJson = JSON.parse(await readFile(join(parentRunDir, 'run.json'), 'utf8'))
       const publishLog = await readFile(join(parentRunDir, runJson.stages.publish.childRuns[0].logFile), 'utf8')
       assert.match(publishLog, new RegExp(escapeRegExp(gatewayDataDir)))
+      assert.doesNotMatch(publishLog, /remote-host/)
     } finally {
       await rm(tempDir, { recursive: true, force: true })
     }

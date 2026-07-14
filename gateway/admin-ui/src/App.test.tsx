@@ -833,6 +833,60 @@ describe('Gateway 管理后台 UI', () => {
     expect(authHeaders).toContain('/admin/books/delete-book:DELETE:Bearer delete-token')
   })
 
+  it('书籍详情支持编辑书名并同步列表', async () => {
+    window.localStorage.setItem(adminTokenStorageKey, 'title-token')
+    const requests: Array<{ url: string; method: string; authorization: string; body?: string }> = []
+    vi.spyOn(window, 'fetch').mockImplementation(async (input, init) => {
+      const url = String(input)
+      const authorization = init?.headers instanceof Headers ? init.headers.get('authorization') ?? '' : ''
+      requests.push({ url, method: init?.method ?? 'GET', authorization, body: String(init?.body ?? '') })
+      if (url === '/admin/books') {
+        return jsonResponse({
+          books: [
+            {
+              id: 'title-book',
+              title: '旧书名',
+              author: '测试作者',
+              chapterCount: 2,
+              updatedAt: '2026-06-29T12:00:00.000Z',
+              visibility: 'default',
+              labels: [],
+              audioChapterCount: 0,
+            },
+          ],
+        })
+      }
+      if (url === '/admin/books/title-book/title' && init?.method === 'PATCH') return jsonResponse({ book: { id: 'title-book', title: '新书名' } })
+      if (url === '/admin/packages') return jsonResponse({ packages: [] })
+      if (url === '/admin/audio') return jsonResponse({ audio: [] })
+      if (url === '/admin/metrics') return jsonResponse({ requests: {}, downloads: {} })
+      if (url === '/admin/events') return jsonResponse({ events: [] })
+      if (url === '/admin/devices') return jsonResponse({ devices: [] })
+      if (url === '/admin/requests') return jsonResponse({ requests: [] })
+      throw new TypeError(`unexpected request ${url}`)
+    })
+
+    const user = userEvent.setup()
+    render(<App />)
+    await screen.findByText(/实时/)
+
+    await user.click(screen.getByRole('button', { name: '书籍' }))
+    await user.click(screen.getByRole('row', { name: /旧书名/ }))
+    await user.clear(screen.getByLabelText('书名'))
+    await user.type(screen.getByLabelText('书名'), '新书名')
+    await user.click(screen.getByRole('button', { name: '保存书名' }))
+
+    expect(await screen.findByText('保存成功')).toBeInTheDocument()
+    expect(screen.getByRole('row', { name: /新书名/ })).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: '新书名' })).toBeInTheDocument()
+    expect(requests).toContainEqual({
+      url: '/admin/books/title-book/title',
+      method: 'PATCH',
+      authorization: 'Bearer title-token',
+      body: JSON.stringify({ title: '新书名' }),
+    })
+  })
+
   it('书籍和设备编辑失败时回滚并提供重试', async () => {
     window.localStorage.setItem(adminTokenStorageKey, 'retry-token')
     let visibilityAttempts = 0
