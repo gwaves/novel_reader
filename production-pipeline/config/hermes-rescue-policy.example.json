@@ -1,0 +1,35 @@
+{
+  "enabled": false,
+  "pollIntervalMs": 30000,
+  "serviceRoot": "/home/gwaves/production-pipeline-service",
+  "codeWorkspace": "/home/gwaves/novel-reader-agent-workspace",
+  "consoleUrl": "http://127.0.0.1:6290",
+  "maxIncidentsPerJob": 1,
+  "maxJobsPerScan": 1,
+  "maxFailureAgeMs": 86400000,
+  "recentLogLines": 160,
+  "maxRecentLogFiles": 6,
+  "hermes": {
+    "command": "/home/gwaves/.local/bin/hermes",
+    "baseArgs": [],
+    "provider": "",
+    "model": "",
+    "toolsets": "terminal,file",
+    "skills": [],
+    "timeoutMs": 1800000
+  },
+  "repair": {
+    "requireCleanWorkspace": true,
+    "allowedPathPrefixes": ["production-pipeline/"],
+    "verifyCommands": [
+      {
+        "command": "npm",
+        "args": ["run", "production-pipeline:test"],
+        "timeoutMs": 1800000
+      }
+    ],
+    "autoDeploy": false,
+    "deployCommands": [],
+    "autoRetryJob": false
+  }
+}

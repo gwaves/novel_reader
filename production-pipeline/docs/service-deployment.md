@@ -108,3 +108,5 @@ PRODUCTION_PIPELINE_AUTOMATIC_RETRY_MAX_DELAY_MS=600000
 ```
 
 自动重试只会在已经产生可用 `run.json` 时启用。没有持久运行状态的配置错误仍会直接失败，避免重复执行可能不幂等的首次启动命令。
+
+当普通自动重试耗尽后，可以在宿主机启用 Hermes Agent 救援 Worker，生成脱敏现场、在独立代码工作区修复并按静态策略验证。部署方式与安全边界见 [`hermes-rescue.md`](./hermes-rescue.md)。

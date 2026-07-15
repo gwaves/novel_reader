@@ -45,6 +45,8 @@ async function buildTestApp(overrides = {}) {
     PRODUCTION_PIPELINE_JOBS_DIR: join(dataDir, 'jobs'),
     PRODUCTION_PIPELINE_SOURCES_DIR: join(dataDir, 'sources'),
     PRODUCTION_PIPELINE_BACKUPS_DIR: join(dataDir, 'backups'),
+    PRODUCTION_PIPELINE_MAIN_DB: join(dataDir, 'main.sqlite'),
+    PRODUCTION_PIPELINE_RUN_ROOT: join(dataDir, 'runs'),
     ...overrides,
   }))
   apps.push(app)
@@ -574,6 +576,9 @@ describe('production pipeline console service', () => {
     tempDirs.push(dataDir)
     const job = queuedTestJob('delete-job', dataDir, join(dataDir, 'unused.done'), 10)
     job.status = 'failed'
+    const runDir = join(dataDir, 'runs', job.productionBookId, 'failed-run')
+    await mkdir(runDir, { recursive: true })
+    await writeFile(join(runDir, 'artifact.txt'), 'generated')
     await writeFile(join(dataDir, 'jobs.json'), JSON.stringify([job], null, 2))
     const app = await buildTestApp({ PRODUCTION_PIPELINE_CONSOLE_DATA_DIR: dataDir })
 
@@ -583,6 +588,7 @@ describe('production pipeline console service', () => {
     assert.equal(list.json().jobs.some((item) => item.id === 'delete-job'), false)
     const persisted = JSON.parse(await readFile(join(dataDir, 'jobs.json'), 'utf8'))
     assert.equal(persisted.find((item) => item.id === 'delete-job').hidden, true)
+    assert.equal(await fileExists(join(dataDir, 'runs', job.productionBookId)), false)
   })
 
   it('uploads and lists managed production source files', async () => {

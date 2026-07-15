@@ -6,7 +6,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { execFile, spawn } from 'node:child_process'
 import { EventEmitter } from 'node:events'
 import { createReadStream, createWriteStream, existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
-import { chmod, mkdir, readFile, readdir, rename, stat, unlink, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, readFile, readdir, rename, rm, stat, unlink, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { basename, dirname, extname, resolve } from 'node:path'
 import { backup, DatabaseSync } from 'node:sqlite'
@@ -184,27 +184,30 @@ export async function buildProductionPipelineService(config = loadServiceConfig(
     templates: await listJobTemplates(config.jobsDir),
   }))
 
-  app.get('/api/builder-metadata', async () => ({
-    generatedAt: new Date().toISOString(),
-    stages: productionStageMetadata,
-    sources: await listManagedFiles(config.sourcesDir, supportedSourceExtensions),
-    books: listMainBooks(config.mainDbPath, { limit: 200, gatewayRoot: config.gatewayRoot }),
-    defaults: {
-      llm: { provider: 'openai-compatible', baseUrl: 'http://192.168.88.24:30000/v1', model: 'qwen3.6-27b', concurrency: 8, apiKeyEnv: 'LLM_API_KEY' },
-      embedding: { provider: 'openai-compatible', baseUrl: 'http://192.168.88.100:11434/v1', model: 'qwen3-embedding:8b', concurrency: 16, apiKeyEnv: 'EMBEDDING_API_KEY' },
-      audio: { ttsConfig: '/home/node/.novel_reader/tts-director.config.json', llmChapters: 1, ttsConcurrency: 16, ttsChapters: 1 },
-      gateway: { host: '192.168.88.100', user: 'gwaves', root: '/home/gwaves/novel-reader-gateway', url: 'http://192.168.88.100:6180', tokenEnv: 'GATEWAY_TOKEN' },
-    },
-    modelProfiles: readModelProfiles(config.modelProfilesFile),
-    environmentStatus: {
-      llmCredential: Boolean(process.env.LLM_API_KEY || readRuntimeCredentials(config.credentialsFile).LLM_API_KEY),
-      embeddingCredential: Boolean(process.env.EMBEDDING_API_KEY || readRuntimeCredentials(config.credentialsFile).EMBEDDING_API_KEY),
-      gatewayToken: Boolean(process.env.GATEWAY_TOKEN),
-      gatewayAdminToken: Boolean(process.env.GATEWAY_ADMIN_TOKEN),
-      ttsConfig: existsSync('/home/node/.novel_reader/tts-director.config.json'),
-      mainDatabase: existsSync(config.mainDbPath),
-    },
-  }))
+  app.get('/api/builder-metadata', async () => {
+    const mainDatabaseAvailable = existsSync(config.mainDbPath)
+    return {
+      generatedAt: new Date().toISOString(),
+      stages: productionStageMetadata,
+      sources: await listManagedFiles(config.sourcesDir, supportedSourceExtensions),
+      books: mainDatabaseAvailable ? listMainBooks(config.mainDbPath, { limit: 200, gatewayRoot: config.gatewayRoot }) : [],
+      defaults: {
+        llm: { provider: 'openai-compatible', baseUrl: 'http://192.168.88.24:30000/v1', model: 'qwen3.6-27b', concurrency: 8, apiKeyEnv: 'LLM_API_KEY' },
+        embedding: { provider: 'openai-compatible', baseUrl: 'http://192.168.88.100:11434/v1', model: 'qwen3-embedding:8b', concurrency: 16, apiKeyEnv: 'EMBEDDING_API_KEY' },
+        audio: { ttsConfig: '/home/node/.novel_reader/tts-director.config.json', llmChapters: 1, ttsConcurrency: 16, ttsChapters: 1 },
+        gateway: { host: '192.168.88.100', user: 'gwaves', root: '/home/gwaves/novel-reader-gateway', url: 'http://192.168.88.100:6180', tokenEnv: 'GATEWAY_TOKEN' },
+      },
+      modelProfiles: readModelProfiles(config.modelProfilesFile),
+      environmentStatus: {
+        llmCredential: Boolean(process.env.LLM_API_KEY || readRuntimeCredentials(config.credentialsFile).LLM_API_KEY),
+        embeddingCredential: Boolean(process.env.EMBEDDING_API_KEY || readRuntimeCredentials(config.credentialsFile).EMBEDDING_API_KEY),
+        gatewayToken: Boolean(process.env.GATEWAY_TOKEN),
+        gatewayAdminToken: Boolean(process.env.GATEWAY_ADMIN_TOKEN),
+        ttsConfig: existsSync('/home/node/.novel_reader/tts-director.config.json'),
+        mainDatabase: mainDatabaseAvailable,
+      },
+    }
+  })
 
   app.put('/api/model-profiles', async (request) => {
     const body = readObjectBody(request.body)
@@ -438,7 +441,7 @@ export async function buildProductionPipelineService(config = loadServiceConfig(
   })
 
   app.delete('/api/jobs/:jobId', async (request, reply) => {
-    await store.deleteJob(request.params.jobId)
+    await store.deleteJob(request.params.jobId, { cleanup: true })
     reply.status(204).send()
   })
 
@@ -661,14 +664,17 @@ class JobStore {
     return job
   }
 
-  async deleteJob(jobId) {
+  async deleteJob(jobId, { cleanup = false } = {}) {
     const job = this.getJob(jobId)
     if (!job || job.hidden) throw httpError(404, 'job_not_found', `Job not found: ${jobId}`)
     if (job.readOnly) throw httpError(409, 'job_read_only', `Discovered run cannot be deleted here: ${jobId}`)
     if (isActiveJob(job)) throw httpError(409, 'job_active', '请先暂停运行中的任务，再执行删除。')
+    if (cleanup) await cleanupProductionJob(this.config, job)
     job.hidden = true
     job.deletedAt = new Date().toISOString()
-    await this.appendEvent(job, 'job.deleted', 'info', '任务记录已从管理列表删除，运行产物保留。')
+    await this.appendEvent(job, 'job.deleted', 'info', cleanup
+      ? '任务记录及对应的主库、运行目录和 Gateway 发布产物已删除。'
+      : '任务记录已从管理列表删除，运行产物保留。')
     await this.persistAndEmit(job)
   }
 
@@ -794,6 +800,60 @@ class JobStore {
     await writeFile(tmpFile, `${payload}\n`, 'utf8')
     await rename(tmpFile, this.config.jobsFile)
   }
+}
+
+async function cleanupProductionJob(config, job) {
+  const bookId = readString(job.productionBookId)
+  if (!bookId) throw httpError(409, 'job_cleanup_book_missing', '任务缺少 bookId，无法安全清理生产内容。')
+
+  let template = {}
+  const jobPath = readString(job.productionJobPath)
+  if (jobPath) {
+    const hostJobPath = resolveManagedContainerPath(jobPath, '/app/jobs', config.jobsDir)
+    try {
+      template = JSON.parse(await readFile(hostJobPath, 'utf8'))
+    } catch (error) {
+      if (error?.code !== 'ENOENT') throw error
+    }
+  }
+
+  const gatewayUrl = readString(template.gateway?.url)
+  const gatewayTokenEnv = readString(template.gateway?.tokenEnv) || 'GATEWAY_ADMIN_TOKEN'
+  const credentials = { ...process.env, ...readRuntimeCredentials(config.credentialsFile) }
+  const gatewayToken = readString(credentials.GATEWAY_ADMIN_TOKEN || credentials[gatewayTokenEnv])
+  if (gatewayUrl && !gatewayToken) {
+    throw httpError(409, 'gateway_cleanup_token_missing', `缺少 ${gatewayTokenEnv}，无法确认 Gateway 已清理。`)
+  }
+  if (gatewayUrl && gatewayToken) {
+    const response = await fetch(`${gatewayUrl.replace(/\/$/, '')}/admin/books/${encodeURIComponent(bookId)}`, {
+      method: 'DELETE',
+      headers: { authorization: `Bearer ${gatewayToken}` },
+    })
+    if (!response.ok && response.status !== 404) {
+      throw httpError(502, 'gateway_cleanup_failed', `Gateway 清理失败：${response.status} ${await response.text()}`)
+    }
+  }
+
+  const db = new DatabaseSync(config.mainDbPath)
+  try {
+    db.exec('PRAGMA busy_timeout = 60000; PRAGMA foreign_keys = ON;')
+    const hasBooks = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'books'").get()
+    if (hasBooks) db.prepare('DELETE FROM books WHERE id = ?').run(bookId)
+  } finally {
+    db.close()
+  }
+
+  const bookRunRoot = resolve(config.productionRunRoot, bookId)
+  if (bookRunRoot !== config.productionRunRoot && bookRunRoot.startsWith(`${config.productionRunRoot}/`)) {
+    await rm(bookRunRoot, { recursive: true, force: true })
+  }
+  if (job.logFile) await rm(resolve(job.logFile), { force: true })
+}
+
+function resolveManagedContainerPath(path, containerRoot, hostRoot) {
+  if (path === containerRoot) return hostRoot
+  if (path.startsWith(`${containerRoot}/`)) return resolve(hostRoot, path.slice(containerRoot.length + 1))
+  return resolve(path)
 }
 
 async function runJob(store, job) {
@@ -1793,13 +1853,13 @@ function renderConsoleHtml() {
       await selectJob(jobId);
     }
     async function deleteJob(jobId, title) {
-      if (!window.confirm('删除任务“' + title + '”？\\n\\n任务记录会从列表移除，已有日志和生产产物仍会保留。')) return;
+      if (!window.confirm('彻底删除任务“' + title + '”？\\n\\n将删除任务记录、该书主库数据、全部运行目录，以及 Gateway 上已发布的内容和音频。此操作不可撤销。')) return;
       await api('/api/jobs/' + encodeURIComponent(jobId), { method: 'DELETE' });
       if (state.selectedJobId === jobId) {
         state.selectedJobId = '';
         if (state.eventSource) state.eventSource.close();
         document.getElementById('detail').className = 'empty';
-        document.getElementById('detail').textContent = '任务已删除，生产产物仍保留。';
+        document.getElementById('detail').textContent = '任务及对应生产产物已彻底删除。';
       }
       await loadJobs();
     }

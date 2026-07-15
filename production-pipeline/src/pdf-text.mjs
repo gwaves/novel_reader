@@ -1,6 +1,10 @@
+import { fileURLToPath } from 'node:url'
+
+const pdfJsAssetRoot = new URL('../../node_modules/pdfjs-dist/', import.meta.url)
+
 export async function extractPdfDocument(buffer) {
   const pdfjs = await import('pdfjs-dist/legacy/build/pdf.mjs')
-  const loadingTask = pdfjs.getDocument({ data: new Uint8Array(buffer), useSystemFonts: true })
+  const loadingTask = pdfjs.getDocument(createPdfDocumentOptions(buffer))
 
   try {
     const document = await loadingTask.promise
@@ -24,6 +28,19 @@ export async function extractPdfDocument(buffer) {
     return { text, title: metadataTitle || undefined, sections }
   } finally {
     await loadingTask.destroy()
+  }
+}
+
+export function createPdfDocumentOptions(buffer) {
+  return {
+    data: new Uint8Array(buffer),
+    useSystemFonts: true,
+    // Older Chinese PDFs commonly reference built-in GBK/GB CMaps without
+    // embedding a Unicode map. Without these assets PDF.js silently drops the
+    // Chinese glyphs while retaining page numbers and Latin bibliography text.
+    cMapUrl: fileURLToPath(new URL('cmaps/', pdfJsAssetRoot)),
+    cMapPacked: true,
+    standardFontDataUrl: fileURLToPath(new URL('standard_fonts/', pdfJsAssetRoot)),
   }
 }
 

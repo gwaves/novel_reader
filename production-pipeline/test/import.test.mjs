@@ -712,6 +712,66 @@ describe('production-pipeline import', () => {
     }
   })
 
+  it('resumes import by replacing an existing book when the import stage is retried', async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), 'production-pipeline-resume-import-replace-test-'))
+    try {
+      const txtPath = join(tempDir, 'sample.txt')
+      const dbPath = join(tempDir, 'main.sqlite')
+      const runRoot = join(tempDir, 'runs')
+      const jobPath = join(tempDir, 'job.json')
+      await writeFile(txtPath, '第一章 开始\n这是第一章内容。\n\n第二章 继续\n这是第二章内容。', 'utf8')
+      await writeFile(
+        jobPath,
+        JSON.stringify({
+          title: '样书',
+          mainDbPath: dbPath,
+          source: { type: 'txt', file: txtPath },
+          stages: ['import'],
+        }),
+        'utf8',
+      )
+
+      const { stdout: runStdout } = await execFileAsync(process.execPath, [
+        cliPath,
+        'run',
+        '--job',
+        jobPath,
+        '--run-root',
+        runRoot,
+      ])
+      const runDir = runStdout.match(/runDir: (.+)/)?.[1]?.trim()
+      const runJsonPath = join(runDir, 'run.json')
+      assert.equal(await fileExists(runJsonPath), true)
+
+      const runJson = JSON.parse(await readFile(runJsonPath, 'utf8'))
+      const bookId = runJson.job.bookId
+      assert.equal(runJson.stages.import.status, 'completed')
+      runJson.stages.import.status = 'failed'
+      runJson.status = 'failed'
+      await writeFile(runJsonPath, JSON.stringify(runJson, null, 2), 'utf8')
+
+      const { stdout: resumeStdout } = await execFileAsync(process.execPath, [
+        cliPath,
+        'resume',
+        '--run',
+        runJsonPath,
+      ])
+
+      assert.match(resumeStdout, /completed: import/)
+      assert.match(resumeStdout, /status: completed/)
+
+      const db = new DatabaseSync(dbPath, { readOnly: true })
+      try {
+        const book = plainRow(db.prepare('SELECT id, title FROM books WHERE id = ?').get(bookId))
+        assert.deepEqual(book, { id: bookId, title: '样书' })
+      } finally {
+        db.close()
+      }
+    } finally {
+      await rm(tempDir, { recursive: true, force: true })
+    }
+  })
+
   it('rejects configured import bookId that does not match the source file hash', async () => {
     const tempDir = await mkdtemp(join(tmpdir(), 'production-pipeline-derived-book-test-'))
     try {

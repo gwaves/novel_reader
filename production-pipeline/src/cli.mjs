@@ -348,6 +348,7 @@ async function executeJobStages({ runInfo, job, mainDbPath, resume }) {
             context,
             stageResults,
             stageOptions: plan.stageOptions[stage] || {},
+            resume,
           }).then(
             () => ({ stage, status: 'fulfilled' }),
             (reason) => ({ stage, status: 'rejected', reason }),
@@ -408,7 +409,7 @@ function activeLlmSchedulerSlots(runningStages, stageResults) {
   return total
 }
 
-async function executeJobStageWithTracking({ stage, runInfo, job, mainDbPath, context, stageResults, stageOptions = {} }) {
+async function executeJobStageWithTracking({ stage, runInfo, job, mainDbPath, context, stageResults, stageOptions = {}, resume = false }) {
   const startedAt = new Date().toISOString()
   stageResults[stage] = {
     status: 'running',
@@ -431,7 +432,7 @@ async function executeJobStageWithTracking({ stage, runInfo, job, mainDbPath, co
       job,
       mainDbPath,
       context,
-      stageOptions,
+      stageOptions: { ...stageOptions, resume },
       onChildStart: async (child) => {
         const runningStage = stageResults[stage] || { status: 'running', startedAt }
         stageResults[stage] = mergeRunningChildStage(runningStage, child)
@@ -639,7 +640,8 @@ async function executePipelineStage({ stage, runInfo, job, mainDbPath, context, 
         },
       }
     : job
-  const args = buildStageArgs(stage, effectiveJob, mainDbPath, runInfo, stageOptions)
+  const effectiveStageOptions = await buildEffectiveStageOptions(stage, effectiveJob, mainDbPath, stageOptions)
+  const args = buildStageArgs(stage, effectiveJob, mainDbPath, runInfo, effectiveStageOptions)
   const childRun = await executeChildStage(stage, args, runInfo, { onStart: onChildStart })
   return {
     message: `completed ${stage}.`,
@@ -647,6 +649,18 @@ async function executePipelineStage({ stage, runInfo, job, mainDbPath, context, 
     childRunDir: childRun.childRunDir,
     logFile: childRun.logFile,
   }
+}
+
+async function buildEffectiveStageOptions(stage, job, mainDbPath, stageOptions = {}) {
+  if (
+    stage === 'import' &&
+    isFlagEnabled(stageOptions.resume) &&
+    !isFlagEnabled(job.import?.replace ?? job.replace) &&
+    await bookExistsInMainDb(mainDbPath, job.bookId)
+  ) {
+    return { ...stageOptions, replace: true }
+  }
+  return stageOptions
 }
 
 function audioWorkflowOutRoot(job, runInfo) {
@@ -4081,7 +4095,7 @@ function buildStageArgs(stage, job, mainDbPath, runInfo, stageOptions = {}) {
     const title = job.title || job.source?.title
     const args = ['import', '--file', required(file, 'import stage requires job.source.file'), ...common]
     if (title) args.push('--title', title)
-    if (isFlagEnabled(job.import?.replace ?? job.replace)) args.push('--replace')
+    if (isFlagEnabled(job.import?.replace ?? job.replace) || isFlagEnabled(stageOptions.replace)) args.push('--replace')
     return args
   }
   if (stage === 'package') {
@@ -5430,6 +5444,18 @@ function sqliteTableExists(db, tableName) {
 function sqliteColumnExists(db, tableName, columnName) {
   if (!sqliteTableExists(db, tableName)) return false
   return db.prepare(`PRAGMA table_info(${tableName})`).all().some((row) => row.name === columnName)
+}
+
+async function bookExistsInMainDb(dbPath, bookId) {
+  if (!bookId || !existsSync(expandPath(dbPath))) return false
+  const DatabaseSync = await loadDatabaseSync()
+  const db = new DatabaseSync(expandPath(dbPath), { readOnly: true })
+  try {
+    if (!sqliteTableExists(db, 'books')) return false
+    return Boolean(db.prepare('SELECT 1 FROM books WHERE id = ?').get(bookId))
+  } finally {
+    db.close()
+  }
 }
 
 function ensureSqliteColumn(db, tableName, columnName, columnType) {
