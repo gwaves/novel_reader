@@ -78,8 +78,8 @@ NODE
 printf '%s snapshot=%s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$decision" >> "$RUN_LOG"
 
 issue="$(node -e 'process.stdout.write(String(Boolean(JSON.parse(process.argv[1]).issue)))' "$decision")"
-status="$(node -e 'process.stdout.write(JSON.parse(process.argv[1]).status)' "$decision")"
-if [[ "$status" == "completed" ]]; then
+job_status="$(node -e 'process.stdout.write(JSON.parse(process.argv[1]).status)' "$decision")"
+if [[ "$job_status" == "completed" ]]; then
   print -r -- "$(date '+%Y-%m-%dT%H:%M:%S%z')" > "$COMPLETED_FILE"
   printf '%s production completed; future cron checks are disabled by marker\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" >> "$RUN_LOG"
   exit 0
