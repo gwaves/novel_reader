@@ -4,7 +4,7 @@
 
 TTS 合成支持小米 `mimo-v2.5-tts` 和火山引擎豆包语音 `seed-tts-2.0`。生产控制台的“新建生产”可以按任务选择 Provider，“设置”可以管理两个 Provider 的启用状态、配置文件、专用旁白和 API Key。MIMO 凭据默认从 `MIMO_API_KEY` 读取，火山凭据默认从 `VOLCENGINE_TTS_API_KEY` 读取。
 
-仓库内置两份已确认音色说明：`production-pipeline/config/mimo-v2.5-tts-voices.json` 收录 9 个 MIMO 音色，`production-pipeline/config/volcengine-seed-tts-2-voices.json` 收录 99 个 Seed TTS 2.0 音色。通用 TTS 配置只通过 `voices.catalogFile` 引用音色能力，不保存任何小说角色。
+仓库内置两份已确认音色说明：`production-pipeline/config/mimo-v2.5-tts-voices.json` 收录 9 个 MIMO 音色，`production-pipeline/config/volcengine-seed-tts-2-voices.json` 收录 99 个 Seed TTS 2.0 音色。MIMO 的 4 个外文音色和火山的 3 个英语音色保留在完整资料中，但中文小说生产只向导演和 TTS 白名单开放 MIMO 的 5 个中文音色和火山的 96 个中文音色。通用 TTS 配置只通过 `voices.catalogFile` 引用音色能力，不保存任何小说角色。
 
 正式生产会在知识图谱完成后，按全书角色提及次数选出最多 30 个主要角色，并让导演模型结合角色描述和完整音色说明生成固定选角。结果写入当前书籍输出目录的 `voice-cast.json`，后续章节复用；其他角色由每章导演脚本按年龄、性别、身份和性格匹配相近音色，允许多个次要角色复用。两个 Provider 的旁白始终使用各自在设置中指定的专用音色。未显式配置 `tts.availableVoices` 时，目录中的全部音色会自动成为接口调用白名单。
 

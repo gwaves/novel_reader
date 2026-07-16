@@ -155,8 +155,14 @@ describe('production pipeline console service', () => {
     const metadata = await app.inject({ method: 'GET', url: '/api/builder-metadata' })
     assert.equal(metadata.statusCode, 200)
     assert.equal(metadata.json().ttsProfiles.length, 2)
-    assert.equal(metadata.json().ttsProfiles.find(profile => profile.id === 'mimo').voiceCount, 9)
-    assert.equal(metadata.json().ttsProfiles.find(profile => profile.id === 'volcengine').voiceCount, 99)
+    const mimo = metadata.json().ttsProfiles.find(profile => profile.id === 'mimo')
+    assert.equal(mimo.catalogVoiceCount, 9)
+    assert.equal(mimo.voiceCount, 5)
+    assert.equal(mimo.voices.some(voice => ['Mia', 'Chloe', 'Milo', 'Dean'].includes(voice.id)), false)
+    const volcengine = metadata.json().ttsProfiles.find(profile => profile.id === 'volcengine')
+    assert.equal(volcengine.catalogVoiceCount, 99)
+    assert.equal(volcengine.voiceCount, 96)
+    assert.equal(volcengine.voices.some(voice => voice.id.startsWith('en_')), false)
 
     const response = await app.inject({
       method: 'PUT', url: '/api/tts-profiles',

@@ -159,12 +159,25 @@ function normalizeVoiceCatalogEntry(entry) {
   if (!entry || typeof entry !== 'object') return null
   const id = optionalString(entry.id || entry.voice)
   if (!id) return null
+  const tags = Array.isArray(entry.tags) ? uniqueStrings(entry.tags) : []
+  const language = optionalString(entry.language).toLowerCase()
+    || (id.startsWith('en_') || tags.includes('英语') ? 'en' : '')
+    || (id.startsWith('zh_') || id.includes('_zh_') || tags.includes('中文') ? 'zh' : '')
   return {
     id,
     name: optionalString(entry.name) || id,
     description: optionalString(entry.description || entry.style),
-    tags: Array.isArray(entry.tags) ? uniqueStrings(entry.tags) : [],
+    tags,
+    language,
   }
+}
+
+function voiceSupportsContentLanguage(voice, contentLanguage) {
+  const language = optionalString(contentLanguage).toLowerCase()
+  if (!language || !voice.language) return true
+  if (language.startsWith('zh')) return voice.language === 'zh'
+  if (language.startsWith('en')) return voice.language === 'en'
+  return voice.language === language
 }
 
 function loadVoiceCatalog(voicesConfig, configPath, isVolcengine) {
@@ -209,7 +222,14 @@ function loadConfig(configPath) {
   const apiKeyEnv = optionalString(llm.apiKeyEnv)
   const inlineApiKey = optionalString(llm.apiKey)
   const fallback = llm.fallback && typeof llm.fallback === 'object' ? llm.fallback : null
-  const voiceCatalog = loadVoiceCatalog(config.voices, path, isVolcengine)
+  const contentLanguage = optionalString(config.tts?.contentLanguage || config.tts?.content_language) || 'zh-CN'
+  const completeVoiceCatalog = loadVoiceCatalog(config.voices, path, isVolcengine)
+  const voiceCatalog = completeVoiceCatalog.filter(voice => voiceSupportsContentLanguage(voice, contentLanguage))
+  if (!voiceCatalog.length) throw new Error(`音色目录中没有适用于 ${contentLanguage} 的音色。`)
+  const compatibleVoiceIds = new Set(voiceCatalog.map(voice => voice.id))
+  const configuredAvailableVoices = Array.isArray(config.tts?.availableVoices) && config.tts.availableVoices.length
+    ? config.tts.availableVoices.map(voice => optionalString(voice)).filter(Boolean)
+    : null
   return {
     ...config,
     configPath: path,
@@ -259,17 +279,19 @@ function loadConfig(configPath) {
     voices: {
       characters: Array.isArray(config.voices?.characters) ? config.voices.characters : [],
       catalog: voiceCatalog,
+      completeCatalogCount: completeVoiceCatalog.length,
     },
     tts: {
       provider: ttsProvider,
       model: config.tts?.model || (isVolcengine ? 'seed-tts-2.0' : 'mimo-v2.5-tts'),
+      contentLanguage,
       resourceId: optionalString(config.tts?.resourceId) || (isVolcengine ? 'seed-tts-2.0' : ''),
       baseUrl: optionalString(config.tts?.baseUrl),
       apiKey: optionalString(config.tts?.apiKey),
       apiKeyEnv: config.tts?.apiKeyEnv || (isVolcengine ? 'VOLCENGINE_TTS_API_KEY' : 'MIMO_API_KEY'),
       defaultVoice: optionalString(config.tts?.defaultVoice) || (isVolcengine ? DEFAULT_VOLCENGINE_VOICE : DEFAULT_MIMO_VOICE),
-      availableVoices: Array.isArray(config.tts?.availableVoices) && config.tts.availableVoices.length
-        ? config.tts.availableVoices.map(voice => optionalString(voice)).filter(Boolean)
+      availableVoices: configuredAvailableVoices
+        ? configuredAvailableVoices.filter(voice => compatibleVoiceIds.has(voice))
         : (voiceCatalog.length
             ? voiceCatalog.map(voice => voice.id)
             : (isVolcengine ? DEFAULT_VOLCENGINE_AVAILABLE_VOICES : DEFAULT_MIMO_AVAILABLE_VOICES)),
@@ -2962,6 +2984,7 @@ async function main() {
       },
       voiceCount: config.voices.characters.length,
       voiceCatalogCount: config.voices.catalog.length,
+      completeVoiceCatalogCount: config.voices.completeCatalogCount,
       availableVoiceCount: config.tts.availableVoices.length,
     }, null, 2))
     return

@@ -1744,7 +1744,7 @@ function renderConsoleHtml() {
       root.innerHTML = state.ttsProfiles.map((profile, index) => {
         const options = (profile.voices || []).map(voice => '<option value="' + escapeHtml(voice.id) + '" ' + (voice.id === profile.narratorVoice ? 'selected' : '') + '>' + escapeHtml(voice.name || voice.id) + ' · ' + escapeHtml((voice.tags || []).join(' / ')) + '</option>').join('');
         return '<section class="model-profile" data-tts-profile-index="' + index + '">' +
-          '<div class="model-profile-head"><div class="model-profile-title"><strong>' + escapeHtml(profile.label) + '</strong><span>' + escapeHtml(profile.model) + ' · ' + escapeHtml(profile.voiceCount) + ' 音色</span></div><label class="toggle-field"><input data-tts-field="enabled" type="checkbox" ' + (profile.enabled ? 'checked' : '') + '><span>启用</span></label></div>' +
+          '<div class="model-profile-head"><div class="model-profile-title"><strong>' + escapeHtml(profile.label) + '</strong><span>' + escapeHtml(profile.model) + ' · ' + escapeHtml(profile.voiceCount) + ' 中文可用 / ' + escapeHtml(profile.catalogVoiceCount) + ' 目录总数</span></div><label class="toggle-field"><input data-tts-field="enabled" type="checkbox" ' + (profile.enabled ? 'checked' : '') + '><span>启用</span></label></div>' +
           '<div class="model-profile-grid">' +
           '<label class="model-profile-field wide"><span>配置文件</span><input data-tts-field="configPath" value="' + escapeHtml(profile.configPath) + '"></label>' +
           '<label class="model-profile-field wide"><span>旁白音色</span><select data-tts-field="narratorVoice">' + options + '</select></label>' +
@@ -1777,7 +1777,7 @@ function renderConsoleHtml() {
       const profile = state.ttsProfiles.find(item => item.id === document.getElementById('ttsProvider').value) || state.ttsProfiles.find(item => item.enabled);
       if (!profile) return;
       document.getElementById('ttsConfig').value = profile.configPath;
-      document.getElementById('ttsProviderSummary').textContent = profile.model + ' · ' + profile.voiceCount + ' 个已确认音色 · 旁白 ' + profile.narratorVoice;
+      document.getElementById('ttsProviderSummary').textContent = profile.model + ' · ' + profile.voiceCount + ' 个中文可用音色（目录共 ' + profile.catalogVoiceCount + ' 个）· 旁白 ' + profile.narratorVoice;
     }
     function selectModelProfile() {
       const profile = state.modelProfiles.find(item => item.id === document.getElementById('llmProfile').value);
@@ -3123,11 +3123,13 @@ function readTtsProfiles(path, credentials = {}) {
   return ttsProviderDefinitions.map(definition => {
     const profile = { ...definition, ...(overrides.get(definition.id) || {}) }
     const catalog = readTtsCatalog(definition.repositoryCatalogFile)
+    const selectableVoices = catalog.filter(voice => voiceSupportsChinese(voice))
     delete profile.repositoryCatalogFile
     return {
       ...profile,
-      voices: catalog,
-      voiceCount: catalog.length,
+      voices: selectableVoices,
+      voiceCount: selectableVoices.length,
+      catalogVoiceCount: catalog.length,
       hasApiKey: Boolean(process.env[profile.apiKeyEnv] || credentials[profile.apiKeyEnv]),
     }
   })
@@ -3142,12 +3144,20 @@ function readTtsCatalog(path) {
   }
 }
 
+function voiceSupportsChinese(voice) {
+  const id = readString(voice?.id).toLowerCase()
+  const tags = Array.isArray(voice?.tags) ? voice.tags.map(tag => readString(tag).toLowerCase()) : []
+  const language = readString(voice?.language).toLowerCase()
+  if (language) return language === 'zh' || language.startsWith('zh-')
+  return !id.startsWith('en_') && !tags.includes('英语') && !tags.includes('english')
+}
+
 function normalizeTtsProfiles(value, { strict = false } = {}) {
   const entries = Array.isArray(value) ? value : []
   const byId = new Map(entries.map(item => [readString(item?.id), item]))
   return ttsProviderDefinitions.map(definition => {
     const source = byId.get(definition.id) || {}
-    const catalog = readTtsCatalog(definition.repositoryCatalogFile)
+    const catalog = readTtsCatalog(definition.repositoryCatalogFile).filter(voice => voiceSupportsChinese(voice))
     const voiceIds = new Set(catalog.map(voice => readString(voice.id)))
     const requestedNarratorVoice = readString(source.narratorVoice) || definition.narratorVoice
     if (strict && voiceIds.size && !voiceIds.has(requestedNarratorVoice)) throw httpError(400, 'invalid_tts_narrator_voice', `${definition.label} 的旁白音色不在音色目录中。`)

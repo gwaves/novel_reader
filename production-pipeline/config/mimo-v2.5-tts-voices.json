@@ -2,14 +2,14 @@
   "provider": "mimo",
   "model": "mimo-v2.5-tts",
   "voices": [
-    { "id": "mimo_default", "name": "默认音色", "description": "中性、自然、稳定的通用中文声线。", "tags": ["通用", "中性"] },
-    { "id": "白桦", "name": "白桦", "description": "低沉、清晰、平静的成熟男声，长篇叙事自然耐听。", "tags": ["男声", "成熟", "旁白", "有声阅读"] },
-    { "id": "冰糖", "name": "冰糖", "description": "清甜明亮、灵动活泼的年轻女声。", "tags": ["女声", "年轻", "活泼"] },
-    { "id": "茉莉", "name": "茉莉", "description": "温柔知性、语调细腻的成熟女声。", "tags": ["女声", "成熟", "温柔"] },
-    { "id": "苏打", "name": "苏打", "description": "清爽有朝气、表达利落的年轻男声。", "tags": ["男声", "年轻", "开朗"] },
-    { "id": "Mia", "name": "Mia", "description": "自然亲切、情绪细腻的青年女声。", "tags": ["女声", "青年", "自然"] },
-    { "id": "Chloe", "name": "Chloe", "description": "明快自信、表现力鲜活的年轻女声。", "tags": ["女声", "年轻", "自信"] },
-    { "id": "Milo", "name": "Milo", "description": "温润清晰、亲和自然的青年男声。", "tags": ["男声", "青年", "温和"] },
-    { "id": "Dean", "name": "Dean", "description": "沉稳磁性、理性可靠的成熟男声。", "tags": ["男声", "成熟", "沉稳"] }
+    { "id": "mimo_default", "name": "默认音色", "description": "中性、自然、稳定的通用中文声线。", "language": "zh", "tags": ["通用", "中性", "中文"] },
+    { "id": "白桦", "name": "白桦", "description": "低沉、清晰、平静的成熟男声，长篇叙事自然耐听。", "language": "zh", "tags": ["男声", "成熟", "旁白", "有声阅读", "中文"] },
+    { "id": "冰糖", "name": "冰糖", "description": "清甜明亮、灵动活泼的年轻女声。", "language": "zh", "tags": ["女声", "年轻", "活泼", "中文"] },
+    { "id": "茉莉", "name": "茉莉", "description": "温柔知性、语调细腻的成熟女声。", "language": "zh", "tags": ["女声", "成熟", "温柔", "中文"] },
+    { "id": "苏打", "name": "苏打", "description": "清爽有朝气、表达利落的年轻男声。", "language": "zh", "tags": ["男声", "年轻", "开朗", "中文"] },
+    { "id": "Mia", "name": "Mia", "description": "自然亲切、情绪细腻的青年外文女声。", "language": "en", "tags": ["女声", "青年", "自然", "英语"] },
+    { "id": "Chloe", "name": "Chloe", "description": "明快自信、表现力鲜活的年轻外文女声。", "language": "en", "tags": ["女声", "年轻", "自信", "英语"] },
+    { "id": "Milo", "name": "Milo", "description": "温润清晰、亲和自然的青年外文男声。", "language": "en", "tags": ["男声", "青年", "温和", "英语"] },
+    { "id": "Dean", "name": "Dean", "description": "沉稳磁性、理性可靠的成熟外文男声。", "language": "en", "tags": ["男声", "成熟", "沉稳", "英语"] }
   ]
 }

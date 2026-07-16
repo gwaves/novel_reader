@@ -1,6 +1,11 @@
 import assert from 'node:assert/strict'
+import { execFileSync } from 'node:child_process'
+import { dirname, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 import { test } from 'node:test'
 import { parseVolcengineChunkedAudio, pcmToWav, synthesizeVolcengineSegment } from '../src/tts-provider.mjs'
+
+const testDir = dirname(fileURLToPath(import.meta.url))
 
 test('joins base64 audio from Volcengine HTTP chunks', () => {
   const raw = [
@@ -46,4 +51,26 @@ test('reports Volcengine application errors without audio', () => {
     () => parseVolcengineChunkedAudio(JSON.stringify({ code: 45000010, message: 'Invalid X-Api-Key' })),
     /Invalid X-Api-Key/,
   )
+})
+
+test('excludes non-Chinese voices from Chinese novel production', () => {
+  const volcengineOutput = execFileSync(process.execPath, [
+    resolve(testDir, '../scripts/tts-director.mjs'),
+    '--config', resolve(testDir, '../config/tts-director.volcengine.example.json'),
+    'config',
+  ], { encoding: 'utf8' })
+  const volcengineConfig = JSON.parse(volcengineOutput)
+  assert.equal(volcengineConfig.completeVoiceCatalogCount, 99)
+  assert.equal(volcengineConfig.voiceCatalogCount, 96)
+  assert.equal(volcengineConfig.availableVoiceCount, 96)
+
+  const mimoOutput = execFileSync(process.execPath, [
+    resolve(testDir, '../scripts/tts-director.mjs'),
+    '--config', resolve(testDir, '../config/tts-director.example.json'),
+    'config',
+  ], { encoding: 'utf8' })
+  const mimoConfig = JSON.parse(mimoOutput)
+  assert.equal(mimoConfig.completeVoiceCatalogCount, 9)
+  assert.equal(mimoConfig.voiceCatalogCount, 5)
+  assert.equal(mimoConfig.availableVoiceCount, 5)
 })
