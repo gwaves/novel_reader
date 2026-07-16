@@ -28,13 +28,17 @@
     "maxDraftAttempts": 3
   },
   "voices": {
-    "characters": []
+    "characters": [],
+    "catalogFile": "./mimo-v2.5-tts-voices.json"
+  },
+  "casting": {
+    "enabled": true,
+    "topCharacters": 30
   },
   "tts": {
     "provider": "mimo",
     "model": "mimo-v2.5-tts",
     "defaultVoice": "mimo_default",
-    "availableVoices": ["mimo_default", "冰糖", "茉莉", "苏打", "白桦", "Mia", "Chloe", "Milo", "Dean"],
     "format": "wav",
     "finalFormat": "mp3",
     "mp3Bitrate": "96k",

@@ -31,6 +31,10 @@
     "characters": [],
     "catalogFile": "./volcengine-seed-tts-2-voices.json"
   },
+  "casting": {
+    "enabled": true,
+    "topCharacters": 30
+  },
   "tts": {
     "provider": "volcengine",
     "model": "seed-tts-2.0",

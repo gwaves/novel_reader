@@ -78,6 +78,10 @@ describe('production pipeline console service', () => {
     assert.match(html, /id="builderStages"/)
     assert.match(html, /id="generateTemplate"/)
     assert.match(html, /id="ttsConfig"/)
+    assert.match(html, /id="ttsProvider"/)
+    assert.match(html, /id="ttsProfiles"/)
+    assert.match(html, /\/api\/tts-profiles/)
+    assert.match(html, /if \(checked\('audio'\)\) select\('kg'\)/)
     assert.match(html, /id="llmConcurrency"/)
     assert.match(html, /id="builderLlmApiKey"/)
     assert.match(html, /id="builderEmbeddingApiKey"/)
@@ -144,6 +148,29 @@ describe('production pipeline console service', () => {
     const metadata = await app.inject({ method: 'GET', url: '/api/builder-metadata' })
     assert.equal(metadata.json().modelProfiles[0].label, '主模型')
     assert.match(await readFile(join(tempDirs.at(-1), 'credentials.env'), 'utf8'), /LLM_PROFILE_LLM1_API_KEY="profile-secret"/)
+  })
+
+  it('stores TTS provider settings and exposes confirmed voice catalogs without secrets', async () => {
+    const app = await buildTestApp()
+    const metadata = await app.inject({ method: 'GET', url: '/api/builder-metadata' })
+    assert.equal(metadata.statusCode, 200)
+    assert.equal(metadata.json().ttsProfiles.length, 2)
+    assert.equal(metadata.json().ttsProfiles.find(profile => profile.id === 'mimo').voiceCount, 9)
+    assert.equal(metadata.json().ttsProfiles.find(profile => profile.id === 'volcengine').voiceCount, 99)
+
+    const response = await app.inject({
+      method: 'PUT', url: '/api/tts-profiles',
+      payload: { profiles: [
+        { id: 'mimo', configPath: '/tts/mimo.json', narratorVoice: '白桦', apiKey: 'mimo-secret' },
+        { id: 'volcengine', configPath: '/tts/volc.json', narratorVoice: 'zh_male_dongfanghaoran_uranus_bigtts', apiKey: 'volc-secret' },
+      ] },
+    })
+    assert.equal(response.statusCode, 200)
+    assert.doesNotMatch(response.body, /mimo-secret|volc-secret/)
+    assert.equal(response.json().profiles.find(profile => profile.id === 'mimo').configPath, '/tts/mimo.json')
+    const credentials = await readFile(join(tempDirs.at(-1), 'credentials.env'), 'utf8')
+    assert.match(credentials, /MIMO_API_KEY="mimo-secret"/)
+    assert.match(credentials, /VOLCENGINE_TTS_API_KEY="volc-secret"/)
   })
 
   it('requires bearer token when configured', async () => {

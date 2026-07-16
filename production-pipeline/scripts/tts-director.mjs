@@ -42,6 +42,7 @@ Novel Reader 生产流水线 TTS 导演脚本工具
   test-model                   测试配置的 OpenAI-compatible 模型
   list-books                   列出主数据库中的书籍
   inspect-chapter              查看章节元信息与正文预览
+  cast-voices                  按全书知识图谱生成主要角色固定选角表
   draft-script                 调用模型生成导演脚本 JSON
   draft-batch                  批量生成导演脚本，不执行质检或 TTS
   audit-script                 生成导演脚本质量报告
@@ -251,6 +252,10 @@ function loadConfig(configPath) {
       minBatchSize: Math.max(1, Math.floor(finiteNumber(config.batchPipeline?.minBatchSize, 6))),
       maxDraftAttempts: Math.max(1, Math.floor(finiteNumber(config.batchPipeline?.maxDraftAttempts, 3))),
     },
+    casting: {
+      enabled: config.casting?.enabled === true,
+      topCharacters: Math.max(1, Math.min(100, Math.floor(finiteNumber(config.casting?.topCharacters, 30)))),
+    },
     voices: {
       characters: Array.isArray(config.voices?.characters) ? config.voices.characters : [],
       catalog: voiceCatalog,
@@ -375,6 +380,155 @@ function getKgCharacterCandidates(config, bookId, chapterIndex) {
   } finally {
     db.close()
   }
+}
+
+function getRankedBookCharacters(config, bookId, limit) {
+  const db = openMainDb(config)
+  try {
+    return db.prepare(`
+      SELECT e.id, e.name, e.type, e.aliases_json, e.description, e.confidence,
+             e.first_chapter_index, e.last_chapter_index, COUNT(m.id) AS mention_count
+      FROM kg_entities e
+      LEFT JOIN kg_entity_mentions m ON m.entity_id = e.id
+      WHERE e.book_id = ? AND e.type IN ('character', 'person')
+      GROUP BY e.id
+      ORDER BY mention_count DESC, e.confidence DESC, e.name ASC
+      LIMIT ?
+    `).all(bookId, limit).map(row => ({
+      id: row.id,
+      name: row.name,
+      type: row.type,
+      aliases: parseJsonArray(row.aliases_json),
+      description: row.description || '',
+      confidence: Number(row.confidence || 0),
+      mentionCount: Number(row.mention_count || 0),
+      firstChapterIndex: row.first_chapter_index ?? null,
+      lastChapterIndex: row.last_chapter_index ?? null,
+    }))
+  } finally {
+    db.close()
+  }
+}
+
+function voiceCatalogHash(config) {
+  return createHash('sha256').update(JSON.stringify(config.voices.catalog)).digest('hex').slice(0, 16)
+}
+
+function buildMajorCastPrompt(config, bookTitle, characters) {
+  return `你是中文长篇有声书的选角导演。请根据知识图谱角色画像，从指定音色目录中为主要角色固定音色。
+
+只输出严格 JSON：{"assignments":[{"characterId":"...","voice":"音色ID","reason":"简短匹配依据"}]}。
+
+规则：
+1. 每个输入角色必须恰好返回一项，characterId 必须原样保留。
+2. voice 必须是目录中存在的 id。
+3. 综合性别、年龄、身份、性格、气质和剧情功能匹配；不要只按姓名猜测。
+4. 主要角色尽量区分声线；目录较小时允许复用最匹配的音色。
+5. 旁白专用音色 ${config.director.defaultNarrator.voice} 不分配给角色，除非目录中已无其他合适音色。
+
+书籍：${bookTitle}
+TTS Provider：${config.tts.provider}
+主要角色（按全书提及次数排序）：
+${JSON.stringify(characters, null, 2)}
+
+音色说明目录：
+${JSON.stringify(config.voices.catalog, null, 2)}`
+}
+
+function injectVoiceCast(config, cast) {
+  const existing = new Map(config.voices.characters.map(entry => [entry.name, entry]))
+  for (const entry of cast.assignments || []) {
+    if (!entry?.name || !entry?.voice) continue
+    existing.set(entry.name, {
+      ...(existing.get(entry.name) || {}),
+      name: entry.name,
+      aliases: entry.aliases || [],
+      voice: entry.voice,
+      style: entry.style || entry.description || '',
+      characterId: entry.characterId || null,
+      castTier: 'major',
+      castReason: entry.reason || '',
+    })
+  }
+  config.voices.characters = [...existing.values()]
+}
+
+async function ensureMajorCharacterCast(config, { bookId, bookTitle, outRoot, resume }) {
+  if (!config.casting.enabled || !config.voices.catalog.length) return null
+  const castPath = join(outRoot, 'voice-cast.json')
+  const catalogHash = voiceCatalogHash(config)
+  if (resume && existsSync(castPath)) {
+    const existing = JSON.parse(readFileSync(castPath, 'utf8'))
+    if (existing.bookId === bookId && existing.provider === config.tts.provider && existing.catalogHash === catalogHash) {
+      injectVoiceCast(config, existing)
+      console.log(`🎭 复用主要角色选角表：${castPath}`)
+      return existing
+    }
+  }
+
+  const characters = getRankedBookCharacters(config, bookId, config.casting.topCharacters)
+  if (!characters.length) {
+    console.warn('⚠️  知识图谱中没有可用于固定选角的角色，继续按章节动态匹配音色。')
+    return null
+  }
+  const voiceIds = new Set(config.voices.catalog.map(voice => voice.id))
+  const characterIds = new Set(characters.map(character => character.id))
+  const result = await callOpenAICompatibleWithRetry(config, [
+    { role: 'system', content: '你只输出严格 JSON，不输出 Markdown，不输出思考过程。' },
+    { role: 'user', content: buildMajorCastPrompt(config, bookTitle, characters) },
+  ], '主要角色固定选角', 3, null, response => {
+    if (!Array.isArray(response?.assignments)) throw new Error('选角结果缺少 assignments 数组。')
+    const validAssignments = response.assignments.filter(assignment => (
+      characterIds.has(optionalString(assignment?.characterId))
+      && voiceIds.has(optionalString(assignment?.voice))
+    ))
+    const assignedCharacterIds = new Set(validAssignments.map(assignment => optionalString(assignment.characterId)))
+    if (assignedCharacterIds.size !== characters.length) {
+      throw new Error(`主要角色选角不完整：期望 ${characters.length}，实际 ${assignedCharacterIds.size}。`)
+    }
+  })
+  const byId = new Map(characters.map(character => [character.id, character]))
+  const seen = new Set()
+  const assignments = []
+  for (const assignment of result.assignments) {
+    const character = byId.get(optionalString(assignment.characterId))
+    const voice = optionalString(assignment.voice)
+    if (!character || !voiceIds.has(voice) || seen.has(character.id)) continue
+    seen.add(character.id)
+    assignments.push({
+      characterId: character.id,
+      name: character.name,
+      aliases: character.aliases,
+      description: character.description,
+      mentionCount: character.mentionCount,
+      voice,
+      reason: optionalString(assignment.reason),
+      style: character.description,
+    })
+  }
+  if (assignments.length !== characters.length) {
+    throw new Error(`主要角色选角不完整：期望 ${characters.length}，实际 ${assignments.length}。`)
+  }
+  const cast = {
+    kind: 'novel-reader-book-voice-cast',
+    version: 1,
+    generatedAt: new Date().toISOString(),
+    bookId,
+    bookTitle,
+    provider: config.tts.provider,
+    model: config.tts.model,
+    narrator: config.director.defaultNarrator,
+    catalogHash,
+    topCharacters: config.casting.topCharacters,
+    assignments,
+    minorCharacterPolicy: 'match_by_age_gender_identity_personality_and_reuse_similar_voices',
+  }
+  mkdirSync(outRoot, { recursive: true })
+  writeFileSync(castPath, `${JSON.stringify(cast, null, 2)}\n`, 'utf8')
+  injectVoiceCast(config, cast)
+  console.log(`🎭 主要角色固定选角完成：${assignments.length} 人`)
+  console.log(`   选角表：${castPath}`)
+  return cast
 }
 
 function parseJsonArray(value) {
@@ -582,6 +736,8 @@ function buildVoiceCandidates(config, kgCandidates) {
       aliases: uniqueStrings([...(existing.aliases || []), ...(entry.aliases || [])]),
       voice: entry.voice || existing.voice || null,
       style: entry.style || existing.style || '',
+      castTier: entry.castTier || existing.castTier || null,
+      castReason: entry.castReason || existing.castReason || '',
       source: existing.source ? `${existing.source}+config` : 'config',
     })
   }
@@ -632,10 +788,11 @@ function buildDirectorPrompt({ config, book, chapter, preSegments, characterCand
 3. type 只能是 narration、dialogue、thought、stage。
 4. typeHint=dialogue 的片段通常是引号内对白，必须判断 speaker。
 5. narration 必须使用 speaker="旁白"，voice="${config.director.defaultNarrator.voice}"。
-6. speaker 优先使用候选角色；若正文明确给出未进入候选表的姓名、身份或可区分的临时人物，可使用原文姓名或稳定标签（例如“于春儿”“看灯人甲”“圆社甲”），characterId=null，并从可用音色中选择 voice。禁止凭空编造人物。
-7. 只有上下文确实无法区分说话人时才用 speaker="未知角色"，confidence 不得超过 0.45；不要因为人物不在候选表中就直接标为未知角色。
-8. 角色内心独白可标为 thought；纯叙述不可误标为角色对白。
-9. evidence 必须说明依据，例如上下文中的“某某道”“被唤作某某”、候选角色别名或无法判断。
+6. speaker 优先使用候选角色；castTier="major" 的主要角色已经完成全书固定选角，必须使用候选项中的 voice，不得更换。
+7. 若正文明确给出未进入候选表的姓名、身份或可区分的临时人物，可使用原文姓名或稳定标签（例如“于春儿”“看灯人甲”“圆社甲”），characterId=null，并按年龄、性别、身份、性格选择相近音色；次要角色允许复用匹配的音色。禁止凭空编造人物。
+8. 只有上下文确实无法区分说话人时才用 speaker="未知角色"，confidence 不得超过 0.45；不要因为人物不在候选表中就直接标为未知角色。
+9. 角色内心独白可标为 thought；纯叙述不可误标为角色对白。
+10. evidence 必须说明依据，例如上下文中的“某某道”“被唤作某某”、候选角色别名或无法判断。
 
 输出 JSON 结构必须是：
 {
@@ -875,7 +1032,7 @@ function buildDirectorScript({ config, book, chapter, preSegments, decisions, ch
     const isNarration = type === 'narration'
     const rawVoice = isNarration
       ? config.director.defaultNarrator.voice
-      : optionalString(decision.voice) || character?.voice || null
+      : (character?.castTier === 'major' ? character.voice : optionalString(decision.voice) || character?.voice || null)
     const voice = normalizeTtsVoice(config, rawVoice)
     const style = isNarration
       ? config.director.defaultNarrator.style
@@ -2506,6 +2663,12 @@ async function runBatchPipeline(config, args) {
   const outRoot = args['out-root']
     ? resolve(args['out-root'])
     : resolve(`tmp/tts/${safeFilePart(firstChapter.book.title)}`)
+  const voiceCast = await ensureMajorCharacterCast(config, {
+    bookId,
+    bookTitle: firstChapter.book.title,
+    outRoot,
+    resume: args.resume === true,
+  })
   const startedAt = Date.now()
   const results = []
   const audits = []
@@ -2726,6 +2889,7 @@ async function runBatchPipeline(config, args) {
     results,
     audits,
     failures: pipelineFailures.sort((a, b) => a.chapterIndex - b.chapterIndex),
+    voiceCast: voiceCast ? { path: join(outRoot, 'voice-cast.json'), assignments: voiceCast.assignments.length } : null,
     metricsSummary: batchMetricsSummary,
   }
   const summaryPath = join(outRoot, `batch-pipeline-${chapters[0]}-${chapters.at(-1)}.summary.json`)
@@ -2746,6 +2910,18 @@ async function runTestModel(config) {
     { role: 'user', content: '输出 {"ok": true, "message": "模型可用"}' },
   ])
   console.log(JSON.stringify(result, null, 2))
+}
+
+async function runCastVoices(config, args) {
+  const bookId = optionalString(args['book-id'])
+  if (!bookId) throw new Error('cast-voices 需要 --book-id。')
+  const outRoot = resolve(args['out-root'] || `tmp/tts/${safeFilePart(bookId)}`)
+  const db = openMainDb(config)
+  let book
+  try { book = db.prepare('SELECT id, title FROM books WHERE id = ?').get(bookId) } finally { db.close() }
+  if (!book) throw new Error(`找不到书籍：${bookId}`)
+  const cast = await ensureMajorCharacterCast(config, { bookId, bookTitle: book.title, outRoot, resume: args.resume === true })
+  if (cast) console.log(JSON.stringify({ castPath: join(outRoot, 'voice-cast.json'), assignments: cast.assignments.length }, null, 2))
 }
 
 async function main() {
@@ -2820,6 +2996,11 @@ async function main() {
       kgCandidateCount: kgCandidates.length,
       kgCandidates: kgCandidates.slice(0, 12),
     }, null, 2))
+    return
+  }
+
+  if (command === 'cast-voices') {
+    await runCastVoices(config, args)
     return
   }
 

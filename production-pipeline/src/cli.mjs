@@ -326,7 +326,7 @@ async function executeJobStages({ runInfo, job, mainDbPath, resume }) {
     const pendingStages = [...runnableStages]
     const runningStages = new Map()
     while (pendingStages.length || runningStages.size) {
-      const readyStages = pendingStages.filter((stage) => stageDependencies(stage).every((dependency) => !runnableStages.includes(dependency) || stageResults[dependency]?.status === 'completed'))
+      const readyStages = pendingStages.filter((stage) => stageDependencies(stage, job).every((dependency) => !runnableStages.includes(dependency) || stageResults[dependency]?.status === 'completed'))
       if (readyStages.length) {
         const plan = buildStageExecutionPlan(job, readyStages, { usedLlmSlots: activeLlmSchedulerSlots(runningStages, stageResults) })
         if (!plan.stages.length) {
@@ -379,14 +379,14 @@ async function executeJobStages({ runInfo, job, mainDbPath, resume }) {
   console.log('status: completed')
 }
 
-function stageDependencies(stage) {
+function stageDependencies(stage, job = {}) {
   const dependencies = {
     summary: ['import'],
     'summary-locate': ['import', 'summary'],
     kg: ['import'],
     chunkEmbedding: ['import'],
     summaryEmbedding: ['import', 'summary'],
-    directorDraft: ['import'],
+    directorDraft: isFlagEnabled(job.audio?.autoCast ?? job.audio?.auto_cast) ? ['import', 'kg'] : ['import'],
     directorQc: ['directorDraft'],
     ttsSegments: ['directorQc'],
     audioQc: ['ttsSegments'],
@@ -676,6 +676,11 @@ async function executeAudioWorkflowStage({ stage, runInfo, job, mainDbPath, stag
   const configPath = await prepareTtsDirectorConfigForAudio({
     ttsConfig: baseConfigPath,
     ...(ttsLlmConfig ? { ttsLlmConfig: JSON.stringify(ttsLlmConfig) } : {}),
+    ttsProvider: audio.ttsProvider || audio.tts_provider,
+    ttsNarratorVoice: audio.narratorVoice || audio.narrator_voice,
+    ttsCatalogFile: audio.catalogFile || audio.catalog_file,
+    ttsTopCharacters: audio.topCharacters || audio.top_characters,
+    ttsAutoCast: audio.autoCast ?? audio.auto_cast,
   }, { artifactsDir: join(runInfo.rootDir, 'artifacts') })
   const chapters = await resolveAudioWorkflowChapters(job, mainDbPath)
   const outRoot = audioWorkflowOutRoot(job, runInfo)
@@ -4564,11 +4569,10 @@ async function prepareAudioSourceRoot({ options, run, book }) {
 
 async function prepareTtsDirectorConfigForAudio(options, run) {
   const configPath = expandPath(required(options.ttsConfig, 'audio TTS generation requires --tts-config <path>'))
-  if (!options.ttsLlmConfig) return configPath
-
   const baseConfig = JSON.parse(await readFile(configPath, 'utf8'))
   const llmConfig = parseTtsLlmConfigOption(options.ttsLlmConfig)
-  if (!Object.keys(llmConfig).length) return configPath
+  const hasTtsOverrides = Boolean(options.ttsProvider || options.ttsNarratorVoice || options.ttsCatalogFile || options.ttsTopCharacters || options.ttsAutoCast !== undefined)
+  if (!Object.keys(llmConfig).length && !hasTtsOverrides) return configPath
 
   const effectiveConfig = {
     ...baseConfig,
@@ -4576,6 +4580,26 @@ async function prepareTtsDirectorConfigForAudio(options, run) {
       ...(isPlainRecord(baseConfig.llm) ? baseConfig.llm : {}),
       ...llmConfig,
     },
+  }
+  if (options.ttsProvider) effectiveConfig.tts = { ...(effectiveConfig.tts || {}), provider: options.ttsProvider }
+  if (options.ttsNarratorVoice) {
+    effectiveConfig.director = {
+      ...(effectiveConfig.director || {}),
+      defaultNarrator: {
+        ...(effectiveConfig.director?.defaultNarrator || {}),
+        voice: options.ttsNarratorVoice,
+      },
+    }
+  }
+  if (options.ttsCatalogFile) {
+    effectiveConfig.voices = { ...(effectiveConfig.voices || {}), catalogFile: options.ttsCatalogFile, characters: [] }
+  }
+  if (hasTtsOverrides) {
+    effectiveConfig.casting = {
+      ...(effectiveConfig.casting || {}),
+      enabled: options.ttsAutoCast !== false,
+      topCharacters: clampInteger(options.ttsTopCharacters, 30, 1, 100),
+    }
   }
   delete effectiveConfig.llm.apiKey
 
