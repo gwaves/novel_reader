@@ -1,0 +1,52 @@
+{
+  "llm": {
+    "baseUrl": "http://192.168.88.24:30000/v1",
+    "model_name": "qwen3.6-27b",
+    "apiKey": null,
+    "temperature": 0.2,
+    "timeoutMs": 300000,
+    "maxTokens": 8192,
+    "responseFormatJson": true
+  },
+  "database": {
+    "mainDbPath": "~/.novel_reader/novel_reader.sqlite"
+  },
+  "director": {
+    "defaultNarrator": {
+      "speaker": "旁白",
+      "voice": "zh_male_m191_uranus_bigtts",
+      "style": "沉稳清爽的中文男声旁白，吐字清晰，节奏紧凑，保留悬念和必要停顿。"
+    },
+    "performanceStyle": "按照中文有声小说的节奏自然演绎；旁白清晰克制，对白体现人物年龄、身份和当下情绪。",
+    "maxCharactersPerRequest": 3000,
+    "segmentBatchSize": 30,
+    "concurrency": 6
+  },
+  "batchPipeline": {
+    "ttsChapterConcurrency": 2,
+    "minBatchSize": 6,
+    "maxDraftAttempts": 3
+  },
+  "voices": {
+    "characters": [],
+    "catalogFile": "./volcengine-seed-tts-2-voices.json"
+  },
+  "tts": {
+    "provider": "volcengine",
+    "model": "seed-tts-2.0",
+    "resourceId": "seed-tts-2.0",
+    "defaultVoice": "zh_male_m191_uranus_bigtts",
+    "sampleRate": 24000,
+    "speechRate": 0,
+    "loudnessRate": 0,
+    "finalFormat": "mp3",
+    "mp3Bitrate": "96k",
+    "silenceSeconds": 0.35,
+    "maxSilenceSeconds": 8,
+    "maxSecondsPerCharacter": 0.8,
+    "maxCharactersPerRequest": 120,
+    "concurrency": 8,
+    "keepIntermediateWav": false,
+    "apiKeyEnv": "VOLCENGINE_TTS_API_KEY"
+  }
+}
