@@ -8,6 +8,7 @@ import android.view.View;
 import android.view.ViewGroup;
 import android.view.Window;
 import android.webkit.WebView;
+import android.webkit.WebSettings;
 import androidx.core.graphics.Insets;
 import androidx.core.view.ViewCompat;
 import androidx.core.view.WindowCompat;
@@ -19,7 +20,21 @@ public class MainActivity extends BridgeActivity {
     registerPlugin(GatewayAudioPlugin.class);
     registerPlugin(NovelReaderTtsPlugin.class);
     super.onCreate(savedInstanceState);
+    allowBackgroundAudioContinuation();
     protectSystemBarAreas();
+  }
+
+  private void allowBackgroundAudioContinuation() {
+    WebView webView = getBridge().getWebView();
+    if (webView == null) {
+      return;
+    }
+
+    WebSettings settings = webView.getSettings();
+    // A chapter change replaces the HTML audio source and starts it from the
+    // loadedmetadata callback. After the screen is locked that callback no
+    // longer has a user gesture, so WebView's default policy rejects play().
+    settings.setMediaPlaybackRequiresUserGesture(false);
   }
 
   private void protectSystemBarAreas() {
