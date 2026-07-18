@@ -110,3 +110,44 @@ PRODUCTION_PIPELINE_AUTOMATIC_RETRY_MAX_DELAY_MS=600000
 自动重试只会在已经产生可用 `run.json` 时启用。没有持久运行状态的配置错误仍会直接失败，避免重复执行可能不幂等的首次启动命令。
 
 当普通自动重试耗尽后，可以在宿主机启用 Hermes Agent 救援 Worker，生成脱敏现场、在独立代码工作区修复并按静态策略验证。部署方式与安全边界见 [`hermes-rescue.md`](./hermes-rescue.md)。
+
+## Codex 外层生产巡检
+
+生产恢复分三层：常驻服务首先执行有限次数的自动 `retry/resume`；重试耗尽后由 Hermes Rescue 在隔离工作区诊断和验证；`scripts/codex-production-monitor.sh` 是最外层巡检，只在服务不可达、任务最终失败，或活动任务连续两次检查没有任何状态/计数进展时升级给 Codex。巡检不会替代正常调度，也不会在健康任务上修改代码或重启生产。
+
+在运行 Codex 的 macOS 宿主机先做一次只记录、不升级的检查：
+
+```bash
+cd /Users/gwaves/Documents/novel_reader
+CODEX_MONITOR_DRY_RUN=1 \
+  production-pipeline/scripts/codex-production-monitor.sh <production-job-id>
+```
+
+脚本通过批处理 SSH 连接 `192.168.88.100`，在生产容器内部读取 `/health` 和目标 job API。控制台 token 只在容器进程环境中使用，不写入 cron，也不输出到巡检快照。默认状态与日志保存在 `~/.novel_reader/production-monitor/`：
+
+```text
+<job-id>.snapshot.json       # 最近一次脱敏状态快照
+<job-id>.state.json          # 进展签名和连续停滞次数
+<job-id>.completed           # 完成标记；存在后后续 cron 直接退出
+logs/<job-id>.log            # 巡检决策日志
+logs/<job-id>-codex.log      # 仅发生升级时的 Codex 执行日志
+```
+
+确认 dry-run 快照正确后，可每 10 分钟检查一次。使用实际仓库绝对路径和生产 job ID；同一任务有锁目录防止 cron 重叠执行：
+
+```cron
+*/10 * * * * cd /Users/gwaves/Documents/novel_reader && production-pipeline/scripts/codex-production-monitor.sh <production-job-id> >> /Users/gwaves/.novel_reader/production-monitor/cron.log 2>&1
+```
+
+常用覆盖变量：
+
+| 变量 | 默认值 / 用途 |
+|------|---------------|
+| `REPO_ROOT` | `/Users/gwaves/Documents/novel_reader`，Codex 执行目录 |
+| `REMOTE_HOST` | `192.168.88.100`，生产服务宿主机 |
+| `CODEX_BIN` | `/Users/gwaves/.npm-global/bin/codex` |
+| `CODEX_MONITOR_STATE_ROOT` | `~/.novel_reader/production-monitor` |
+| `CODEX_MONITOR_LOG_ROOT` | `<state-root>/logs` |
+| `CODEX_MONITOR_DRY_RUN=1` | 记录判断但跳过 Codex 升级 |
+
+排查时先查看 snapshot、决策日志和对应 Hermes incident，再检查生产控制台、`run.json`、阶段日志和产物计数是否仍在增长。只有补丁验证、部署和恢复条件全部满足后才触发 retry，并优先从已有 `run.json` resume；不要整本重做。任务完成后脚本写入 `.completed` 标记，如需对同一 job 重新启用巡检，应先确认确实开启了新的生产周期，再删除该单个 job 的完成标记。

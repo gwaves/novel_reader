@@ -2,7 +2,7 @@
 
 [English](README.en.md) | [中文](README.md)
 
-Novel Reader Assistant is an **AI-native novel reader** for long-form fiction. It turns a local book into a connected reading experience: chapter summaries, a story knowledge graph, RAG answers grounded in the text, multi-role AI audiobook production, and a Gateway Android app for offline reading and listening.
+Novel Reader Assistant is an **AI-native novel reader** for long-form fiction. It turns a local book into a connected reading experience: chapter summaries, a story knowledge graph, RAG answers grounded in the text, multi-role AI audiobook production, and a Gateway Android app for offline reading and listening. The production pipeline adds a durable queue, resumable jobs, layered recovery, and end-to-end publishing verification.
 
 ![Novel Reader Assistant visual](src/assets/hero.png)
 
@@ -12,8 +12,24 @@ Novel Reader Assistant is an **AI-native novel reader** for long-form fiction. I
 - **Knowledge graph**: track characters, factions, items, skills, locations, events, relations, aliases, evidence, and review queues.
 - **RAG for fiction**: retrieve chapter summaries, body chunks, and graph evidence to answer cross-chapter plot questions.
 - **Multi-role audiobooks**: use `production-pipeline` to generate director scripts, synthesize multi-role MP3 chapters, and publish timeline manifests for text highlighting.
-- **Mobile offline mode**: Gateway Android caches book packages, summaries, graph data, RAG search, MP3 audio, playback manifests, and reading progress.
-- **Production loop**: `import -> summary -> kg -> embedding -> audio -> package -> publish -> verify` keeps generated content traceable and Gateway-visible.
+- **Multi-provider TTS**: choose MIMO or Volcano Engine Seed TTS 2.0, with a book-wide voice cast and Chinese-language voice filtering.
+- **Mobile offline mode**: Gateway Android caches book packages, summaries, graph data, RAG search, MP3 audio, playback manifests, and reading progress; chapter playback continues automatically while the phone is locked.
+- **Production loop**: `import -> summary -> kg -> embedding -> audio -> package -> publish -> verify` keeps generated content traceable and Gateway-visible, with durable retries and resumable checkpoints.
+
+## Recent Improvements
+
+- MIMO and Seed TTS 2.0 can be configured independently, including credentials, narrator voices, and catalogs.
+- A book-wide `voice-cast.json` keeps major characters on consistent voices across chapters.
+- Chinese audiobook jobs expose only Chinese voices to casting and synthesis, while retaining each provider's complete catalog.
+- The persistent production service survives restarts, limits concurrency, retries with exponential backoff, and preserves run/item state and logs.
+- Normal failures use built-in retry/resume first; terminal failures can be inspected by the isolated Hermes Rescue workflow, with an optional Codex outer watchdog for stalled recovery.
+- The Android WebView may start the next chapter's MP3 from a chapter-load callback while the device is locked, removing the previous manual-resume step.
+
+## *Dream of the Red Chamber* Production DAG
+
+![128-chapter production DAG preview for Dream of the Red Chamber](docs/screenshots/production-dag-honglou.png)
+
+This preview uses the 128-chapter production template for the public-domain classic *Dream of the Red Chamber*. The console checks the seven-stage DAG—summary, knowledge graph, vector index, audiobook, package, publish, and verify—together with concurrency, estimated cost, and external-write risks before launch.
 
 ## Real UI Preview
 
@@ -79,6 +95,26 @@ npm run gateway:publish-android-apk
 
 The stable download URL is `/downloads/novel_gateway.apk`.
 
+No additional Android or Gateway setting is required for locked-screen chapter continuation; rebuild and publish the APK after updating the client.
+
+## Production Pipeline
+
+Run a preflight check and a resumable production job:
+
+```bash
+npm run production-pipeline -- doctor --job production-pipeline/config/example.job.json
+npm run production-pipeline -- run --job production-pipeline/config/example.job.json
+npm run production-pipeline -- status --run <runId|runDir|run.json>
+```
+
+Start the durable queue and web console at `http://127.0.0.1:6290`:
+
+```bash
+npm run production-pipeline:service
+```
+
+The service handles ordinary retry/resume recovery. Hermes Rescue can inspect jobs after automatic retries are exhausted, while the optional Codex production monitor watches service health, terminal failure, and repeated no-progress snapshots. See the deployment guides below for the security boundaries and cron setup.
+
 ## Documentation
 
 - [Chinese README](README.md)
@@ -87,6 +123,9 @@ The stable download URL is `/downloads/novel_gateway.apk`.
 - [Gateway Android App Guide](gateway-android-app/README.md)
 - [Gateway Deployment Guide](gateway/docs/deployment.md)
 - [Production Pipeline](production-pipeline/README.md)
+- [Persistent Production Service Deployment and Codex Watchdog](production-pipeline/docs/service-deployment.md)
+- [Multi-role TTS and Book-wide Voice Casting](production-pipeline/docs/tts/README.md)
+- [Hermes Rescue Deployment](production-pipeline/docs/hermes-rescue.md)
 - [Current Progress](docs/current_progress.md)
 
 ## Build

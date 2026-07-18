@@ -39,6 +39,12 @@ PC 端负责导入、阅读、AI 概要、知识图谱和 RAG 检索；`producti
 - **分层故障救援**：普通故障先由服务自动 `resume`；最终失败后可由 Hermes Rescue 在隔离 checkout 中生成脱敏现场、验证有限范围补丁，并按静态策略决定是否部署和重试。
 - **锁屏连续听书**：Android WebView 允许章节加载回调在锁屏状态下启动下一章 MP3，解决当前章结束后必须手动继续的问题。
 
+### 《红楼梦》生产 DAG 预览
+
+![《红楼梦》128 章生产 DAG 预览](docs/screenshots/production-dag-honglou.png)
+
+> 使用公开经典《红楼梦》的 128 章生产模板展示正式生产控制台。DAG 覆盖章节摘要、知识图谱、向量索引、有声书、打包、发布和验证，并在启动前集中检查并发、预计费用和外部写入风险。
+
 ## 真实界面
 
 ### PC 书库与阅读
@@ -319,6 +325,7 @@ novel_reader/
 - [Gateway 说明](gateway/README.md)
 - [Gateway Android App 说明](gateway-android-app/README.md)
 - [Production Pipeline 说明](production-pipeline/README.md)
+- [内容生产常驻服务部署与 Codex 外层巡检](production-pipeline/docs/service-deployment.md)
 - [多角色 TTS 与固定选角](production-pipeline/docs/tts/README.md)
 - [Hermes Agent 生产故障救援](production-pipeline/docs/hermes-rescue.md)
 - [知识图谱路线图](docs/knowledge-graph-roadmap.md)
