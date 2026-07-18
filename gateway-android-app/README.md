@@ -11,6 +11,7 @@
 - 使用 `GET /mobile/books/:bookId/package` 与 `/mobile/books/:bookId/package/download` 读取并缓存单书移动数据包。
 - 支持章节阅读、阅读进度、阅读偏好、概要查看、知识图谱/RAG 搜索。
 - 支持本地系统 TTS，也支持 Gateway 音频清单、MP3 下载和 manifest timeline 播放章节音频，并在正文中高亮当前播放片段。
+- AI 多角色 MP3 播放完当前章后，可在手机锁屏状态下自动加载并播放下一章，无需解锁或手动继续。
 - 支持按书/章节管理 MP3 缓存，避免缓存状态串书。
 - 支持检查 Gateway 发布的 Android APK 更新，并交由 Android 系统确认安装。
 - 日志避免输出 bearer token、上游模型密钥和设备敏感标识。
@@ -58,6 +59,8 @@ npm run gateway:publish-android-apk
 ```
 
 发布后固定下载名为 `novel_gateway.apk`，对应 URL 为 `/downloads/novel_gateway.apk`。
+
+锁屏跨章续播不需要新增 Gateway 或 Android 配置。客户端代码升级后重新构建并发布 APK 即可；验收时应让一章自然播放结束，并分别在前台、熄屏锁屏状态确认下一章自动开始。
 
 版本号规则见 [docs/versioning.md](docs/versioning.md)。App 内、Android 安装信息、Gateway 请求头和 `/downloads/android-app.json` 都使用同一份构建信息。
 
