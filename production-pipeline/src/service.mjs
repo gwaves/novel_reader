@@ -6,7 +6,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import { execFile, spawn } from 'node:child_process'
 import { EventEmitter } from 'node:events'
 import { createReadStream, createWriteStream, existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
-import { chmod, mkdir, readFile, readdir, rename, stat, unlink, writeFile } from 'node:fs/promises'
+import { chmod, mkdir, readFile, readdir, rename, rm, stat, unlink, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { basename, dirname, extname, resolve } from 'node:path'
 import { backup, DatabaseSync } from 'node:sqlite'
@@ -18,6 +18,22 @@ const execFileAsync = promisify(execFile)
 
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..')
 const productionPipelineScript = resolve(repoRoot, 'production-pipeline', 'src', 'cli.mjs')
+const ttsProviderDefinitions = [
+  {
+    id: 'mimo', label: '小米 MiMo TTS', model: 'mimo-v2.5-tts', apiKeyEnv: 'MIMO_API_KEY',
+    configPath: '/home/node/.novel_reader/tts-director.config.json',
+    catalogFile: '/app/production-pipeline/config/mimo-v2.5-tts-voices.json',
+    repositoryCatalogFile: resolve(repoRoot, 'production-pipeline', 'config', 'mimo-v2.5-tts-voices.json'),
+    narratorVoice: '白桦',
+  },
+  {
+    id: 'volcengine', label: '火山 Seed TTS 2.0', model: 'seed-tts-2.0', apiKeyEnv: 'VOLCENGINE_TTS_API_KEY',
+    configPath: '/home/node/.novel_reader/tts-director.volcengine.json',
+    catalogFile: '/app/production-pipeline/config/volcengine-seed-tts-2-voices.json',
+    repositoryCatalogFile: resolve(repoRoot, 'production-pipeline', 'config', 'volcengine-seed-tts-2-voices.json'),
+    narratorVoice: 'zh_male_dongfanghaoran_uranus_bigtts',
+  },
+]
 const supportedSourceExtensions = new Set(['.txt', '.epub', '.pdf', '.mobi', '.azw', '.azw3'])
 const productionStageMetadata = [
   ['import', '导入正文', '把上传文件导入主库'],
@@ -59,6 +75,7 @@ export function loadServiceConfig(env = process.env) {
     eventLogFile: resolve(dataDir, 'events.jsonl'),
     credentialsFile: resolve(env.PRODUCTION_PIPELINE_CREDENTIALS_FILE || resolve(dataDir, 'credentials.env')),
     modelProfilesFile: resolve(env.PRODUCTION_PIPELINE_MODEL_PROFILES_FILE || resolve(dataDir, 'model-profiles.json')),
+    ttsProfilesFile: resolve(env.PRODUCTION_PIPELINE_TTS_PROFILES_FILE || resolve(dataDir, 'tts-profiles.json')),
     jobsDir: resolve(env.PRODUCTION_PIPELINE_JOBS_DIR || joinPath('production-pipeline', 'config')),
     sourcesDir: resolve(env.PRODUCTION_PIPELINE_SOURCES_DIR || joinPath('tmp', 'production-pipeline-service', 'sources')),
     backupsDir: resolve(env.PRODUCTION_PIPELINE_BACKUPS_DIR || joinPath('tmp', 'production-pipeline-service', 'backups')),
@@ -184,27 +201,36 @@ export async function buildProductionPipelineService(config = loadServiceConfig(
     templates: await listJobTemplates(config.jobsDir),
   }))
 
-  app.get('/api/builder-metadata', async () => ({
-    generatedAt: new Date().toISOString(),
-    stages: productionStageMetadata,
-    sources: await listManagedFiles(config.sourcesDir, supportedSourceExtensions),
-    books: listMainBooks(config.mainDbPath, { limit: 200, gatewayRoot: config.gatewayRoot }),
-    defaults: {
-      llm: { provider: 'openai-compatible', baseUrl: 'http://192.168.88.24:30000/v1', model: 'qwen3.6-27b', concurrency: 8, apiKeyEnv: 'LLM_API_KEY' },
-      embedding: { provider: 'openai-compatible', baseUrl: 'http://192.168.88.100:11434/v1', model: 'qwen3-embedding:8b', concurrency: 16, apiKeyEnv: 'EMBEDDING_API_KEY' },
-      audio: { ttsConfig: '/home/node/.novel_reader/tts-director.config.json', llmChapters: 1, ttsConcurrency: 16, ttsChapters: 1 },
-      gateway: { host: '192.168.88.100', user: 'gwaves', root: '/home/gwaves/novel-reader-gateway', url: 'http://192.168.88.100:6180', tokenEnv: 'GATEWAY_TOKEN' },
-    },
-    modelProfiles: readModelProfiles(config.modelProfilesFile),
-    environmentStatus: {
-      llmCredential: Boolean(process.env.LLM_API_KEY || readRuntimeCredentials(config.credentialsFile).LLM_API_KEY),
-      embeddingCredential: Boolean(process.env.EMBEDDING_API_KEY || readRuntimeCredentials(config.credentialsFile).EMBEDDING_API_KEY),
-      gatewayToken: Boolean(process.env.GATEWAY_TOKEN),
-      gatewayAdminToken: Boolean(process.env.GATEWAY_ADMIN_TOKEN),
-      ttsConfig: existsSync('/home/node/.novel_reader/tts-director.config.json'),
-      mainDatabase: existsSync(config.mainDbPath),
-    },
-  }))
+  app.get('/api/builder-metadata', async () => {
+    const mainDatabaseAvailable = existsSync(config.mainDbPath)
+    const credentials = readRuntimeCredentials(config.credentialsFile)
+    const ttsProfiles = readTtsProfiles(config.ttsProfilesFile, credentials)
+    const credentialStatus = runtimeCredentialStatus(config, credentials)
+    return {
+      generatedAt: new Date().toISOString(),
+      stages: productionStageMetadata,
+      sources: await listManagedFiles(config.sourcesDir, supportedSourceExtensions),
+      books: mainDatabaseAvailable ? listMainBooks(config.mainDbPath, { limit: 200, gatewayRoot: config.gatewayRoot }) : [],
+      defaults: {
+        llm: { provider: 'openai-compatible', baseUrl: 'http://192.168.88.24:30000/v1', model: 'qwen3.6-27b', concurrency: 8, apiKeyEnv: 'LLM_API_KEY' },
+        embedding: { provider: 'openai-compatible', baseUrl: 'http://192.168.88.100:11434/v1', model: 'qwen3-embedding:8b', concurrency: 16, apiKeyEnv: 'EMBEDDING_API_KEY' },
+        audio: { ttsConfig: '/home/node/.novel_reader/tts-director.config.json', llmChapters: 1, ttsConcurrency: 16, ttsChapters: 1 },
+        gateway: { host: '192.168.88.100', user: 'gwaves', root: '/home/gwaves/novel-reader-gateway', url: 'http://192.168.88.100:6180', tokenEnv: 'GATEWAY_TOKEN' },
+      },
+      modelProfiles: readModelProfiles(config.modelProfilesFile),
+      ttsProfiles,
+      environmentStatus: {
+        llmCredential: credentialStatus.llmCredential,
+        embeddingCredential: credentialStatus.embeddingCredential,
+        gatewayToken: Boolean(process.env.GATEWAY_TOKEN),
+        gatewayAdminToken: Boolean(process.env.GATEWAY_ADMIN_TOKEN),
+        ttsConfig: ttsProfiles.some(profile => profile.enabled && existsSync(profile.configPath)),
+        mimoTtsCredential: credentialStatus.mimoTtsCredential,
+        volcengineTtsCredential: credentialStatus.volcengineTtsCredential,
+        mainDatabase: mainDatabaseAvailable,
+      },
+    }
+  })
 
   app.put('/api/model-profiles', async (request) => {
     const body = readObjectBody(request.body)
@@ -221,6 +247,23 @@ export async function buildProductionPipelineService(config = loadServiceConfig(
     return { profiles: readModelProfiles(config.modelProfilesFile) }
   })
 
+  app.put('/api/tts-profiles', async (request) => {
+    const body = readObjectBody(request.body)
+    const profiles = normalizeTtsProfiles(body.profiles, { strict: true })
+    const credentials = readRuntimeCredentials(config.credentialsFile)
+    for (const profile of profiles) {
+      if (readString(profile.apiKey)) credentials[profile.apiKeyEnv] = readString(profile.apiKey)
+      delete profile.apiKey
+    }
+    await writeFile(config.ttsProfilesFile, `${JSON.stringify({ profiles }, null, 2)}\n`, { mode: 0o600 })
+    await chmod(config.ttsProfilesFile, 0o600)
+    await writeRuntimeCredentials(config.credentialsFile, credentials)
+    return {
+      profiles: readTtsProfiles(config.ttsProfilesFile, credentials),
+      environmentStatus: runtimeCredentialStatus(config, credentials),
+    }
+  })
+
   app.put('/api/runtime-credentials', async (request) => {
     const body = readObjectBody(request.body)
     const current = readRuntimeCredentials(config.credentialsFile)
@@ -230,6 +273,10 @@ export async function buildProductionPipelineService(config = loadServiceConfig(
     else if (readString(body.llmApiKey)) { next.LLM_API_KEY = readString(body.llmApiKey); updated.push('LLM_API_KEY updated') }
     if (body.clearEmbedding === true) { delete next.EMBEDDING_API_KEY; updated.push('EMBEDDING_API_KEY cleared') }
     else if (readString(body.embeddingApiKey)) { next.EMBEDDING_API_KEY = readString(body.embeddingApiKey); updated.push('EMBEDDING_API_KEY updated') }
+    if (body.clearMimoTts === true) { delete next.MIMO_API_KEY; updated.push('MIMO_API_KEY cleared') }
+    else if (readString(body.mimoTtsApiKey)) { next.MIMO_API_KEY = readString(body.mimoTtsApiKey); updated.push('MIMO_API_KEY updated') }
+    if (body.clearVolcengineTts === true) { delete next.VOLCENGINE_TTS_API_KEY; updated.push('VOLCENGINE_TTS_API_KEY cleared') }
+    else if (readString(body.volcengineTtsApiKey)) { next.VOLCENGINE_TTS_API_KEY = readString(body.volcengineTtsApiKey); updated.push('VOLCENGINE_TTS_API_KEY updated') }
     if (!updated.length) throw httpError(400, 'credential_update_required', '请输入要保存的 API Key，或选择清除现有凭据。')
     await writeRuntimeCredentials(config.credentialsFile, next)
     request.log.info({ updated }, 'production runtime credentials updated')
@@ -438,7 +485,7 @@ export async function buildProductionPipelineService(config = loadServiceConfig(
   })
 
   app.delete('/api/jobs/:jobId', async (request, reply) => {
-    await store.deleteJob(request.params.jobId)
+    await store.deleteJob(request.params.jobId, { cleanup: true })
     reply.status(204).send()
   })
 
@@ -661,14 +708,17 @@ class JobStore {
     return job
   }
 
-  async deleteJob(jobId) {
+  async deleteJob(jobId, { cleanup = false } = {}) {
     const job = this.getJob(jobId)
     if (!job || job.hidden) throw httpError(404, 'job_not_found', `Job not found: ${jobId}`)
     if (job.readOnly) throw httpError(409, 'job_read_only', `Discovered run cannot be deleted here: ${jobId}`)
     if (isActiveJob(job)) throw httpError(409, 'job_active', '请先暂停运行中的任务，再执行删除。')
+    if (cleanup) await cleanupProductionJob(this.config, job)
     job.hidden = true
     job.deletedAt = new Date().toISOString()
-    await this.appendEvent(job, 'job.deleted', 'info', '任务记录已从管理列表删除，运行产物保留。')
+    await this.appendEvent(job, 'job.deleted', 'info', cleanup
+      ? '任务记录及对应的主库、运行目录和 Gateway 发布产物已删除。'
+      : '任务记录已从管理列表删除，运行产物保留。')
     await this.persistAndEmit(job)
   }
 
@@ -794,6 +844,60 @@ class JobStore {
     await writeFile(tmpFile, `${payload}\n`, 'utf8')
     await rename(tmpFile, this.config.jobsFile)
   }
+}
+
+async function cleanupProductionJob(config, job) {
+  const bookId = readString(job.productionBookId)
+  if (!bookId) throw httpError(409, 'job_cleanup_book_missing', '任务缺少 bookId，无法安全清理生产内容。')
+
+  let template = {}
+  const jobPath = readString(job.productionJobPath)
+  if (jobPath) {
+    const hostJobPath = resolveManagedContainerPath(jobPath, '/app/jobs', config.jobsDir)
+    try {
+      template = JSON.parse(await readFile(hostJobPath, 'utf8'))
+    } catch (error) {
+      if (error?.code !== 'ENOENT') throw error
+    }
+  }
+
+  const gatewayUrl = readString(template.gateway?.url)
+  const gatewayTokenEnv = readString(template.gateway?.tokenEnv) || 'GATEWAY_ADMIN_TOKEN'
+  const credentials = { ...process.env, ...readRuntimeCredentials(config.credentialsFile) }
+  const gatewayToken = readString(credentials.GATEWAY_ADMIN_TOKEN || credentials[gatewayTokenEnv])
+  if (gatewayUrl && !gatewayToken) {
+    throw httpError(409, 'gateway_cleanup_token_missing', `缺少 ${gatewayTokenEnv}，无法确认 Gateway 已清理。`)
+  }
+  if (gatewayUrl && gatewayToken) {
+    const response = await fetch(`${gatewayUrl.replace(/\/$/, '')}/admin/books/${encodeURIComponent(bookId)}`, {
+      method: 'DELETE',
+      headers: { authorization: `Bearer ${gatewayToken}` },
+    })
+    if (!response.ok && response.status !== 404) {
+      throw httpError(502, 'gateway_cleanup_failed', `Gateway 清理失败：${response.status} ${await response.text()}`)
+    }
+  }
+
+  const db = new DatabaseSync(config.mainDbPath)
+  try {
+    db.exec('PRAGMA busy_timeout = 60000; PRAGMA foreign_keys = ON;')
+    const hasBooks = db.prepare("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'books'").get()
+    if (hasBooks) db.prepare('DELETE FROM books WHERE id = ?').run(bookId)
+  } finally {
+    db.close()
+  }
+
+  const bookRunRoot = resolve(config.productionRunRoot, bookId)
+  if (bookRunRoot !== config.productionRunRoot && bookRunRoot.startsWith(`${config.productionRunRoot}/`)) {
+    await rm(bookRunRoot, { recursive: true, force: true })
+  }
+  if (job.logFile) await rm(resolve(job.logFile), { force: true })
+}
+
+function resolveManagedContainerPath(path, containerRoot, hostRoot) {
+  if (path === containerRoot) return hostRoot
+  if (path.startsWith(`${containerRoot}/`)) return resolve(hostRoot, path.slice(containerRoot.length + 1))
+  return resolve(path)
 }
 
 async function runJob(store, job) {
@@ -1127,7 +1231,7 @@ function renderConsoleHtml() {
     <aside class="control-pane">
       <section class="view-pane" data-view-pane="settings" hidden>
       <h1>设置</h1>
-      <div class="view-description">管理当前浏览器的访问凭据。模型、并发和 Gateway 默认值将在后续迁入这里。</div>
+      <div class="view-description">管理当前浏览器访问凭据、模型配置和 TTS Provider。</div>
       <label>Token <input id="token" type="password" autocomplete="off" placeholder="PRODUCTION_PIPELINE_CONSOLE_TOKEN" /></label>
       <div class="actions"><button class="secondary" id="saveToken" type="button">验证并保存</button><button class="secondary" id="clearToken" type="button">清除</button></div>
       <div id="tokenFeedback" class="meta" aria-live="polite"></div>
@@ -1141,6 +1245,10 @@ function renderConsoleHtml() {
       <label>向量 API Key <input id="settingsEmbeddingApiKey" type="password" autocomplete="new-password" placeholder="留空则保留现有 EMBEDDING_API_KEY" /></label>
       <div class="actions"><button class="secondary save-runtime-credentials" data-source="settings" type="button">保存到生产环境</button></div>
       <div id="settingsCredentialFeedback" class="meta" aria-live="polite">使用密码框输入，服务端不会回传明文。</div>
+      <h2>TTS Provider</h2>
+      <div id="ttsProfiles" class="jobs model-profiles"></div>
+      <div class="actions"><button id="saveTtsProfiles" type="button">保存 TTS 配置</button></div>
+      <div id="ttsProfileFeedback" class="meta" aria-live="polite">旁白音色来自对应 Provider 的已确认音色目录；API Key 不会回传。</div>
       <h2>费用估算（元/章）</h2>
       <label>摘要 <input id="costSummary" type="number" min="0" step="0.001" value="0" /></label>
       <label>知识图谱 <input id="costKg" type="number" min="0" step="0.001" value="0" /></label>
@@ -1210,7 +1318,9 @@ function renderConsoleHtml() {
       <div class="actions"><button class="secondary save-runtime-credentials" data-source="builder" type="button">保存 API Key 到生产环境</button></div>
       <div id="builderCredentialFeedback" class="meta" aria-live="polite"></div>
       <h2>有声书参数</h2>
-      <label>TTS 配置文件 <input id="ttsConfig" /></label>
+      <label>TTS Provider <select id="ttsProvider"></select></label>
+      <label>TTS 配置文件 <input id="ttsConfig" readonly /></label>
+      <div id="ttsProviderSummary" class="meta"></div>
       <label>导演最大并发数（自动计算） <input id="directorConcurrency" type="number" readonly /></label>
       <div class="meta">导演并发由 LLM 总并发池动态分配；摘要、KG 同时运行时会自动降低，空闲后自动借用。</div>
       <label>同时编排章节 <input id="llmChapters" type="number" min="1" max="16" /></label>
@@ -1247,7 +1357,7 @@ function renderConsoleHtml() {
     </div>
   </div>
   <script>
-    const state = { selectedJobId: '', eventSource: null, builderBooks: [], builderTemplates: [], modelProfiles: [], jobs: [], jobStatuses: {}, scheduler: null, dagProgress: {}, currentView: localStorage.getItem('productionPipeline.currentView') || 'overview', wizardStep: 1, logFilter: 'key' };
+    const state = { selectedJobId: '', eventSource: null, builderBooks: [], builderTemplates: [], modelProfiles: [], ttsProfiles: [], jobs: [], jobStatuses: {}, scheduler: null, dagProgress: {}, currentView: localStorage.getItem('productionPipeline.currentView') || 'overview', wizardStep: 1, logFilter: 'key' };
     function showWizardStep(step) {
       state.wizardStep = Math.max(1, Math.min(4, Number(step) || 1));
       document.querySelectorAll('[data-wizard-panel]').forEach(panel => { panel.hidden = Number(panel.dataset.wizardPanel) !== state.wizardStep; });
@@ -1295,7 +1405,7 @@ function renderConsoleHtml() {
       document.querySelectorAll('[data-overview-job]').forEach(card => card.addEventListener('click', () => { setConsoleView('tasks'); selectJob(card.dataset.overviewJob); }));
     }
     document.querySelectorAll('[data-console-view]').forEach(button => button.addEventListener('click', () => setConsoleView(button.dataset.consoleView)));
-    const fields = ['jobPath','templateName','templateJson','builderTitle','llmBaseUrl','llmModel','llmConcurrency','embeddingBaseUrl','embeddingModel','embeddingConcurrency','ttsConfig','llmChapters','ttsConcurrency','ttsChapters','gatewayHost','gatewayUser','gatewayRoot','gatewayUrl','gatewayTokenEnv','audioSamples','costSummary','costKg','costAudio'];
+    const fields = ['jobPath','templateName','templateJson','builderTitle','llmBaseUrl','llmModel','llmConcurrency','embeddingBaseUrl','embeddingModel','embeddingConcurrency','ttsProvider','ttsConfig','llmChapters','ttsConcurrency','ttsChapters','gatewayHost','gatewayUser','gatewayRoot','gatewayUrl','gatewayTokenEnv','audioSamples','costSummary','costKg','costAudio'];
     for (const id of fields) {
       const saved = localStorage.getItem('productionPipeline.' + id);
       const el = document.getElementById(id);
@@ -1537,6 +1647,10 @@ function renderConsoleHtml() {
       if (template.source?.file) document.getElementById('builderSource').value = template.source.file.split('/').pop();
       if (template.bookId) document.getElementById('builderBook').value = template.bookId;
       if (template.llm?.profileId) document.getElementById('llmProfile').value = template.llm.profileId;
+      if (template.audio?.ttsProvider && state.ttsProfiles.some(profile => profile.id === template.audio.ttsProvider)) {
+        document.getElementById('ttsProvider').value = template.audio.ttsProvider;
+        applyTtsProvider();
+      }
       document.querySelectorAll('#builderStages input').forEach(input => { input.checked = (template.stages || []).includes(input.value); });
       for (const [id, value] of [['llmBaseUrl', template.llm?.baseUrl], ['llmModel', template.llm?.model], ['llmConcurrency', template.llm?.concurrency], ['embeddingBaseUrl', template.embedding?.baseUrl], ['embeddingModel', template.embedding?.model], ['embeddingConcurrency', template.embedding?.concurrency], ['ttsConfig', template.audio?.ttsConfig], ['llmChapters', template.audio?.llmChapters], ['ttsConcurrency', template.audio?.ttsConcurrency], ['ttsChapters', template.audio?.ttsChapters], ['gatewayHost', template.gateway?.host], ['gatewayUser', template.gateway?.user], ['gatewayRoot', template.gateway?.root], ['gatewayUrl', template.gateway?.url], ['gatewayTokenEnv', template.gateway?.tokenEnv], ['audioSamples', template.verify?.audioSamples], ['costSummary', template.costEstimation?.summaryPerChapter], ['costKg', template.costEstimation?.kgPerChapter], ['costAudio', template.costEstimation?.audioPerChapter]]) {
         if (value !== undefined) document.getElementById(id).value = value;
@@ -1556,8 +1670,11 @@ function renderConsoleHtml() {
     function populateBuilder(body) {
       const environmentStatus = body.environmentStatus || {};
       state.modelProfiles = body.modelProfiles || [];
+      state.ttsProfiles = body.ttsProfiles || [];
       renderModelProfiles();
-      const statusLabels = { mainDatabase: '生产主库', ttsConfig: 'TTS配置', llmCredential: 'LLM凭据', embeddingCredential: '向量凭据', gatewayToken: 'Gateway访问凭据', gatewayAdminToken: 'Gateway管理凭据' };
+      renderTtsProfiles();
+      populateTtsProviderSelect();
+      const statusLabels = { mainDatabase: '生产主库', ttsConfig: 'TTS配置', mimoTtsCredential: 'MiMo TTS凭据', volcengineTtsCredential: '火山TTS凭据', llmCredential: 'LLM凭据', embeddingCredential: '向量凭据', gatewayToken: 'Gateway访问凭据', gatewayAdminToken: 'Gateway管理凭据' };
       document.getElementById('settingsStatus').innerHTML = Object.entries(statusLabels).map(([key, label]) => '<div class="topline"><span>' + label + '</span><span class="status ' + (environmentStatus[key] ? 'completed' : 'failed') + '">' + (environmentStatus[key] ? '已配置' : '未配置') + '</span></div>').join('');
       const source = document.getElementById('builderSource');
       const selectedSource = source.value;
@@ -1622,6 +1739,46 @@ function renderConsoleHtml() {
       renderModelProfiles();
       await loadManagedAssets();
     }
+    function renderTtsProfiles() {
+      const root = document.getElementById('ttsProfiles');
+      root.innerHTML = state.ttsProfiles.map((profile, index) => {
+        const options = (profile.voices || []).map(voice => '<option value="' + escapeHtml(voice.id) + '" ' + (voice.id === profile.narratorVoice ? 'selected' : '') + '>' + escapeHtml(voice.name || voice.id) + ' · ' + escapeHtml((voice.tags || []).join(' / ')) + '</option>').join('');
+        return '<section class="model-profile" data-tts-profile-index="' + index + '">' +
+          '<div class="model-profile-head"><div class="model-profile-title"><strong>' + escapeHtml(profile.label) + '</strong><span>' + escapeHtml(profile.model) + ' · ' + escapeHtml(profile.voiceCount) + ' 中文可用 / ' + escapeHtml(profile.catalogVoiceCount) + ' 目录总数</span></div><label class="toggle-field"><input data-tts-field="enabled" type="checkbox" ' + (profile.enabled ? 'checked' : '') + '><span>启用</span></label></div>' +
+          '<div class="model-profile-grid">' +
+          '<label class="model-profile-field wide"><span>配置文件</span><input data-tts-field="configPath" value="' + escapeHtml(profile.configPath) + '"></label>' +
+          '<label class="model-profile-field wide"><span>旁白音色</span><select data-tts-field="narratorVoice">' + options + '</select></label>' +
+          '<label class="model-profile-field wide"><span>API Key</span><input data-tts-field="apiKey" type="password" autocomplete="new-password" placeholder="' + (profile.hasApiKey ? '已配置，留空则保留' : '尚未配置') + '"></label>' +
+          '</div></section>';
+      }).join('');
+    }
+    function collectTtsProfiles() {
+      return [...document.querySelectorAll('[data-tts-profile-index]')].map(card => {
+        const profile = state.ttsProfiles[Number(card.dataset.ttsProfileIndex)];
+        return { id: profile.id, label: profile.label, configPath: card.querySelector('[data-tts-field="configPath"]').value.trim(), narratorVoice: card.querySelector('[data-tts-field="narratorVoice"]').value, apiKey: card.querySelector('[data-tts-field="apiKey"]').value, enabled: card.querySelector('[data-tts-field="enabled"]').checked };
+      });
+    }
+    async function saveTtsProfiles() {
+      const body = await api('/api/tts-profiles', { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ profiles: collectTtsProfiles() }) });
+      state.ttsProfiles = body.profiles || [];
+      document.getElementById('ttsProfileFeedback').textContent = 'TTS Provider 配置已保存。';
+      renderTtsProfiles();
+      populateTtsProviderSelect();
+    }
+    function populateTtsProviderSelect() {
+      const select = document.getElementById('ttsProvider');
+      const selected = select.value || localStorage.getItem('productionPipeline.ttsProvider') || '';
+      const enabled = state.ttsProfiles.filter(profile => profile.enabled);
+      select.innerHTML = enabled.map(profile => '<option value="' + escapeHtml(profile.id) + '">' + escapeHtml(profile.label) + ' · ' + escapeHtml(profile.narratorVoice) + '</option>').join('');
+      if (selected && enabled.some(profile => profile.id === selected)) select.value = selected;
+      applyTtsProvider();
+    }
+    function applyTtsProvider() {
+      const profile = state.ttsProfiles.find(item => item.id === document.getElementById('ttsProvider').value) || state.ttsProfiles.find(item => item.enabled);
+      if (!profile) return;
+      document.getElementById('ttsConfig').value = profile.configPath;
+      document.getElementById('ttsProviderSummary').textContent = profile.model + ' · ' + profile.voiceCount + ' 个中文可用音色（目录共 ' + profile.catalogVoiceCount + ' 个）· 旁白 ' + profile.narratorVoice;
+    }
     function selectModelProfile() {
       const profile = state.modelProfiles.find(item => item.id === document.getElementById('llmProfile').value);
       if (!profile) return;
@@ -1637,6 +1794,7 @@ function renderConsoleHtml() {
       if (checked('summary-locate')) select('summary');
       if (checked('verify')) { select('publish'); select('package'); }
       if (checked('publish')) select('package');
+      if (checked('audio')) select('kg');
     }
     function compactProductionStatus(book) {
       const p = book.production || {};
@@ -1670,7 +1828,10 @@ function renderConsoleHtml() {
         template.llm = { provider: 'openai-compatible', baseUrl: document.getElementById('llmBaseUrl').value.trim(), model: document.getElementById('llmModel').value.trim(), concurrency: Number(document.getElementById('llmConcurrency').value) || 8, apiKeyEnv: selected?.apiKeyEnv || 'LLM_API_KEY', ...(selected ? { profileId: selected.id } : {}), ...(fallback ? { fallback: { profileId: fallback.id, baseUrl: fallback.baseUrl, model: fallback.model, apiKeyEnv: fallback.apiKeyEnv } } : {}), scheduler: { borrowIdle: true, weights: { summary: 4, kg: 2, audio: 4 } } };
       }
       if (stages.includes('embedding')) template.embedding = { provider: 'openai-compatible', baseUrl: document.getElementById('embeddingBaseUrl').value.trim(), model: document.getElementById('embeddingModel').value.trim(), concurrency: Number(document.getElementById('embeddingConcurrency').value) || 16, apiKeyEnv: 'EMBEDDING_API_KEY' };
-      if (stages.includes('audio')) template.audio = { workflowDag: true, ttsConfig: document.getElementById('ttsConfig').value.trim(), llmChapters: Number(document.getElementById('llmChapters').value) || 1, ttsConcurrency: Number(document.getElementById('ttsConcurrency').value) || 16, ttsChapters: Number(document.getElementById('ttsChapters').value) || 1, resume: true, strict: true };
+      if (stages.includes('audio')) {
+        const ttsProfile = state.ttsProfiles.find(item => item.id === document.getElementById('ttsProvider').value);
+        template.audio = { workflowDag: true, ttsProvider: ttsProfile?.id || '', ttsConfig: ttsProfile?.configPath || document.getElementById('ttsConfig').value.trim(), catalogFile: ttsProfile?.catalogFile || '', narratorVoice: ttsProfile?.narratorVoice || '', autoCast: true, topCharacters: 30, llmChapters: Number(document.getElementById('llmChapters').value) || 1, ttsConcurrency: Number(document.getElementById('ttsConcurrency').value) || 16, ttsChapters: Number(document.getElementById('ttsChapters').value) || 1, resume: true, strict: true };
+      }
       if (stages.some(stage => ['publish','verify'].includes(stage))) template.gateway = { host: document.getElementById('gatewayHost').value.trim(), user: document.getElementById('gatewayUser').value.trim(), root: document.getElementById('gatewayRoot').value.trim(), url: document.getElementById('gatewayUrl').value.trim(), tokenEnv: document.getElementById('gatewayTokenEnv').value.trim() };
       if (stages.includes('publish')) template.publish = { dryRun: false };
       if (stages.includes('verify')) template.verify = { audioSamples: Number(document.getElementById('audioSamples').value) || 3 };
@@ -1793,13 +1954,13 @@ function renderConsoleHtml() {
       await selectJob(jobId);
     }
     async function deleteJob(jobId, title) {
-      if (!window.confirm('删除任务“' + title + '”？\\n\\n任务记录会从列表移除，已有日志和生产产物仍会保留。')) return;
+      if (!window.confirm('彻底删除任务“' + title + '”？\\n\\n将删除任务记录、该书主库数据、全部运行目录，以及 Gateway 上已发布的内容和音频。此操作不可撤销。')) return;
       await api('/api/jobs/' + encodeURIComponent(jobId), { method: 'DELETE' });
       if (state.selectedJobId === jobId) {
         state.selectedJobId = '';
         if (state.eventSource) state.eventSource.close();
         document.getElementById('detail').className = 'empty';
-        document.getElementById('detail').textContent = '任务已删除，生产产物仍保留。';
+        document.getElementById('detail').textContent = '任务及对应生产产物已彻底删除。';
       }
       await loadJobs();
     }
@@ -2049,6 +2210,8 @@ function renderConsoleHtml() {
       renderModelProfiles();
     });
     document.getElementById('saveModelProfiles').addEventListener('click', () => saveModelProfiles().catch(error => { document.getElementById('modelProfileFeedback').textContent = '保存失败：' + (error.message || String(error)); }));
+    document.getElementById('saveTtsProfiles').addEventListener('click', () => saveTtsProfiles().catch(error => { document.getElementById('ttsProfileFeedback').textContent = '保存失败：' + (error.message || String(error)); }));
+    document.getElementById('ttsProvider').addEventListener('change', applyTtsProvider);
     function updateDirectorConcurrency() {
       const total = Math.max(1, Number(document.getElementById('llmConcurrency').value) || 8);
       const chapters = Math.max(1, Number(document.getElementById('llmChapters').value) || 1);
@@ -2890,6 +3053,7 @@ function validateServiceJobTemplate(template, config) {
     if (!readString(template.embedding?.model)) errors.push('向量阶段需要填写模型。')
   }
   if (stages.includes('audio') && !readString(template.audio?.ttsConfig) && !readString(template.audio?.sourceRoot)) errors.push('有声书阶段需要配置 audio.ttsConfig 或 audio.sourceRoot。')
+  if (stages.includes('audio') && readString(template.audio?.ttsProvider) && !ttsProviderDefinitions.some(profile => profile.id === readString(template.audio.ttsProvider))) errors.push(`未知 TTS Provider：${readString(template.audio.ttsProvider)}`)
   if (stages.includes('publish') && !readString(template.gateway?.host) && !readString(template.publish?.gatewayDataDir)) errors.push('发布阶段需要配置 Gateway 主机或本地数据目录。')
   if (stages.includes('verify')) {
     if (!readString(template.gateway?.url) && !readString(template.verify?.gatewayUrl)) errors.push('验证阶段需要配置 Gateway URL。')
@@ -2917,7 +3081,7 @@ function readRuntimeCredentials(path) {
   try {
     return Object.fromEntries(readFileSync(path, 'utf8').split(/\r?\n/).flatMap(line => {
       const match = /^([A-Z_][A-Z0-9_]*)=(.*)$/.exec(line.trim())
-      if (!match || (!['LLM_API_KEY', 'EMBEDDING_API_KEY'].includes(match[1]) && !/^LLM_PROFILE_[A-Z0-9_]+_API_KEY$/.test(match[1]))) return []
+      if (!match || (!['LLM_API_KEY', 'EMBEDDING_API_KEY', 'MIMO_API_KEY', 'VOLCENGINE_TTS_API_KEY'].includes(match[1]) && !/^LLM_PROFILE_[A-Z0-9_]+_API_KEY$/.test(match[1]))) return []
       let value = match[2]
       try { value = JSON.parse(value) } catch {}
       return typeof value === 'string' && value ? [[match[1], value]] : []
@@ -2931,7 +3095,7 @@ async function writeRuntimeCredentials(path, credentials) {
   await mkdir(dirname(path), { recursive: true })
   const tempPath = `${path}.${randomUUID()}.tmp`
   const content = Object.keys(credentials)
-    .filter(key => ['LLM_API_KEY', 'EMBEDDING_API_KEY'].includes(key) || /^LLM_PROFILE_[A-Z0-9_]+_API_KEY$/.test(key))
+    .filter(key => ['LLM_API_KEY', 'EMBEDDING_API_KEY', 'MIMO_API_KEY', 'VOLCENGINE_TTS_API_KEY'].includes(key) || /^LLM_PROFILE_[A-Z0-9_]+_API_KEY$/.test(key))
     .sort()
     .filter(key => readString(credentials[key]))
     .map(key => `${key}=${JSON.stringify(readString(credentials[key]))}`)
@@ -2945,7 +3109,71 @@ function runtimeCredentialStatus(config, credentials = readRuntimeCredentials(co
   return {
     llmCredential: Boolean(process.env.LLM_API_KEY || credentials.LLM_API_KEY),
     embeddingCredential: Boolean(process.env.EMBEDDING_API_KEY || credentials.EMBEDDING_API_KEY),
+    mimoTtsCredential: Boolean(process.env.MIMO_API_KEY || credentials.MIMO_API_KEY),
+    volcengineTtsCredential: Boolean(process.env.VOLCENGINE_TTS_API_KEY || credentials.VOLCENGINE_TTS_API_KEY),
   }
+}
+
+function readTtsProfiles(path, credentials = {}) {
+  let stored = []
+  if (existsSync(path)) {
+    try { stored = JSON.parse(readFileSync(path, 'utf8')).profiles || [] } catch {}
+  }
+  const overrides = new Map(normalizeTtsProfiles(stored).map(profile => [profile.id, profile]))
+  return ttsProviderDefinitions.map(definition => {
+    const profile = { ...definition, ...(overrides.get(definition.id) || {}) }
+    const catalog = readTtsCatalog(definition.repositoryCatalogFile)
+    const selectableVoices = catalog.filter(voice => voiceSupportsChinese(voice))
+    delete profile.repositoryCatalogFile
+    return {
+      ...profile,
+      voices: selectableVoices,
+      voiceCount: selectableVoices.length,
+      catalogVoiceCount: catalog.length,
+      hasApiKey: Boolean(process.env[profile.apiKeyEnv] || credentials[profile.apiKeyEnv]),
+    }
+  })
+}
+
+function readTtsCatalog(path) {
+  try {
+    const parsed = JSON.parse(readFileSync(path, 'utf8'))
+    return Array.isArray(parsed) ? parsed : (Array.isArray(parsed.voices) ? parsed.voices : [])
+  } catch {
+    return []
+  }
+}
+
+function voiceSupportsChinese(voice) {
+  const id = readString(voice?.id).toLowerCase()
+  const tags = Array.isArray(voice?.tags) ? voice.tags.map(tag => readString(tag).toLowerCase()) : []
+  const language = readString(voice?.language).toLowerCase()
+  if (language) return language === 'zh' || language.startsWith('zh-')
+  return !id.startsWith('en_') && !tags.includes('英语') && !tags.includes('english')
+}
+
+function normalizeTtsProfiles(value, { strict = false } = {}) {
+  const entries = Array.isArray(value) ? value : []
+  const byId = new Map(entries.map(item => [readString(item?.id), item]))
+  return ttsProviderDefinitions.map(definition => {
+    const source = byId.get(definition.id) || {}
+    const catalog = readTtsCatalog(definition.repositoryCatalogFile).filter(voice => voiceSupportsChinese(voice))
+    const voiceIds = new Set(catalog.map(voice => readString(voice.id)))
+    const requestedNarratorVoice = readString(source.narratorVoice) || definition.narratorVoice
+    if (strict && voiceIds.size && !voiceIds.has(requestedNarratorVoice)) throw httpError(400, 'invalid_tts_narrator_voice', `${definition.label} 的旁白音色不在音色目录中。`)
+    const narratorVoice = voiceIds.has(requestedNarratorVoice) ? requestedNarratorVoice : definition.narratorVoice
+    return {
+      id: definition.id,
+      label: readString(source.label) || definition.label,
+      model: definition.model,
+      apiKeyEnv: definition.apiKeyEnv,
+      configPath: readString(source.configPath) || definition.configPath,
+      catalogFile: definition.catalogFile,
+      narratorVoice,
+      enabled: source.enabled !== false,
+      ...(readString(source.apiKey) ? { apiKey: readString(source.apiKey) } : {}),
+    }
+  })
 }
 
 function readModelProfiles(path) {

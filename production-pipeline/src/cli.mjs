@@ -326,7 +326,7 @@ async function executeJobStages({ runInfo, job, mainDbPath, resume }) {
     const pendingStages = [...runnableStages]
     const runningStages = new Map()
     while (pendingStages.length || runningStages.size) {
-      const readyStages = pendingStages.filter((stage) => stageDependencies(stage).every((dependency) => !runnableStages.includes(dependency) || stageResults[dependency]?.status === 'completed'))
+      const readyStages = pendingStages.filter((stage) => stageDependencies(stage, job).every((dependency) => !runnableStages.includes(dependency) || stageResults[dependency]?.status === 'completed'))
       if (readyStages.length) {
         const plan = buildStageExecutionPlan(job, readyStages, { usedLlmSlots: activeLlmSchedulerSlots(runningStages, stageResults) })
         if (!plan.stages.length) {
@@ -348,6 +348,7 @@ async function executeJobStages({ runInfo, job, mainDbPath, resume }) {
             context,
             stageResults,
             stageOptions: plan.stageOptions[stage] || {},
+            resume,
           }).then(
             () => ({ stage, status: 'fulfilled' }),
             (reason) => ({ stage, status: 'rejected', reason }),
@@ -378,14 +379,14 @@ async function executeJobStages({ runInfo, job, mainDbPath, resume }) {
   console.log('status: completed')
 }
 
-function stageDependencies(stage) {
+function stageDependencies(stage, job = {}) {
   const dependencies = {
     summary: ['import'],
     'summary-locate': ['import', 'summary'],
     kg: ['import'],
     chunkEmbedding: ['import'],
     summaryEmbedding: ['import', 'summary'],
-    directorDraft: ['import'],
+    directorDraft: isFlagEnabled(job.audio?.autoCast ?? job.audio?.auto_cast) ? ['import', 'kg'] : ['import'],
     directorQc: ['directorDraft'],
     ttsSegments: ['directorQc'],
     audioQc: ['ttsSegments'],
@@ -408,7 +409,7 @@ function activeLlmSchedulerSlots(runningStages, stageResults) {
   return total
 }
 
-async function executeJobStageWithTracking({ stage, runInfo, job, mainDbPath, context, stageResults, stageOptions = {} }) {
+async function executeJobStageWithTracking({ stage, runInfo, job, mainDbPath, context, stageResults, stageOptions = {}, resume = false }) {
   const startedAt = new Date().toISOString()
   stageResults[stage] = {
     status: 'running',
@@ -431,7 +432,7 @@ async function executeJobStageWithTracking({ stage, runInfo, job, mainDbPath, co
       job,
       mainDbPath,
       context,
-      stageOptions,
+      stageOptions: { ...stageOptions, resume },
       onChildStart: async (child) => {
         const runningStage = stageResults[stage] || { status: 'running', startedAt }
         stageResults[stage] = mergeRunningChildStage(runningStage, child)
@@ -639,7 +640,8 @@ async function executePipelineStage({ stage, runInfo, job, mainDbPath, context, 
         },
       }
     : job
-  const args = buildStageArgs(stage, effectiveJob, mainDbPath, runInfo, stageOptions)
+  const effectiveStageOptions = await buildEffectiveStageOptions(stage, effectiveJob, mainDbPath, stageOptions)
+  const args = buildStageArgs(stage, effectiveJob, mainDbPath, runInfo, effectiveStageOptions)
   const childRun = await executeChildStage(stage, args, runInfo, { onStart: onChildStart })
   return {
     message: `completed ${stage}.`,
@@ -647,6 +649,18 @@ async function executePipelineStage({ stage, runInfo, job, mainDbPath, context, 
     childRunDir: childRun.childRunDir,
     logFile: childRun.logFile,
   }
+}
+
+async function buildEffectiveStageOptions(stage, job, mainDbPath, stageOptions = {}) {
+  if (
+    stage === 'import' &&
+    isFlagEnabled(stageOptions.resume) &&
+    !isFlagEnabled(job.import?.replace ?? job.replace) &&
+    await bookExistsInMainDb(mainDbPath, job.bookId)
+  ) {
+    return { ...stageOptions, replace: true }
+  }
+  return stageOptions
 }
 
 function audioWorkflowOutRoot(job, runInfo) {
@@ -662,6 +676,11 @@ async function executeAudioWorkflowStage({ stage, runInfo, job, mainDbPath, stag
   const configPath = await prepareTtsDirectorConfigForAudio({
     ttsConfig: baseConfigPath,
     ...(ttsLlmConfig ? { ttsLlmConfig: JSON.stringify(ttsLlmConfig) } : {}),
+    ttsProvider: audio.ttsProvider || audio.tts_provider,
+    ttsNarratorVoice: audio.narratorVoice || audio.narrator_voice,
+    ttsCatalogFile: audio.catalogFile || audio.catalog_file,
+    ttsTopCharacters: audio.topCharacters || audio.top_characters,
+    ttsAutoCast: audio.autoCast ?? audio.auto_cast,
   }, { artifactsDir: join(runInfo.rootDir, 'artifacts') })
   const chapters = await resolveAudioWorkflowChapters(job, mainDbPath)
   const outRoot = audioWorkflowOutRoot(job, runInfo)
@@ -4081,7 +4100,7 @@ function buildStageArgs(stage, job, mainDbPath, runInfo, stageOptions = {}) {
     const title = job.title || job.source?.title
     const args = ['import', '--file', required(file, 'import stage requires job.source.file'), ...common]
     if (title) args.push('--title', title)
-    if (isFlagEnabled(job.import?.replace ?? job.replace)) args.push('--replace')
+    if (isFlagEnabled(job.import?.replace ?? job.replace) || isFlagEnabled(stageOptions.replace)) args.push('--replace')
     return args
   }
   if (stage === 'package') {
@@ -4550,11 +4569,10 @@ async function prepareAudioSourceRoot({ options, run, book }) {
 
 async function prepareTtsDirectorConfigForAudio(options, run) {
   const configPath = expandPath(required(options.ttsConfig, 'audio TTS generation requires --tts-config <path>'))
-  if (!options.ttsLlmConfig) return configPath
-
   const baseConfig = JSON.parse(await readFile(configPath, 'utf8'))
   const llmConfig = parseTtsLlmConfigOption(options.ttsLlmConfig)
-  if (!Object.keys(llmConfig).length) return configPath
+  const hasTtsOverrides = Boolean(options.ttsProvider || options.ttsNarratorVoice || options.ttsCatalogFile || options.ttsTopCharacters || options.ttsAutoCast !== undefined)
+  if (!Object.keys(llmConfig).length && !hasTtsOverrides) return configPath
 
   const effectiveConfig = {
     ...baseConfig,
@@ -4562,6 +4580,26 @@ async function prepareTtsDirectorConfigForAudio(options, run) {
       ...(isPlainRecord(baseConfig.llm) ? baseConfig.llm : {}),
       ...llmConfig,
     },
+  }
+  if (options.ttsProvider) effectiveConfig.tts = { ...(effectiveConfig.tts || {}), provider: options.ttsProvider }
+  if (options.ttsNarratorVoice) {
+    effectiveConfig.director = {
+      ...(effectiveConfig.director || {}),
+      defaultNarrator: {
+        ...(effectiveConfig.director?.defaultNarrator || {}),
+        voice: options.ttsNarratorVoice,
+      },
+    }
+  }
+  if (options.ttsCatalogFile) {
+    effectiveConfig.voices = { ...(effectiveConfig.voices || {}), catalogFile: options.ttsCatalogFile, characters: [] }
+  }
+  if (hasTtsOverrides) {
+    effectiveConfig.casting = {
+      ...(effectiveConfig.casting || {}),
+      enabled: options.ttsAutoCast !== false,
+      topCharacters: clampInteger(options.ttsTopCharacters, 30, 1, 100),
+    }
   }
   delete effectiveConfig.llm.apiKey
 
@@ -5430,6 +5468,18 @@ function sqliteTableExists(db, tableName) {
 function sqliteColumnExists(db, tableName, columnName) {
   if (!sqliteTableExists(db, tableName)) return false
   return db.prepare(`PRAGMA table_info(${tableName})`).all().some((row) => row.name === columnName)
+}
+
+async function bookExistsInMainDb(dbPath, bookId) {
+  if (!bookId || !existsSync(expandPath(dbPath))) return false
+  const DatabaseSync = await loadDatabaseSync()
+  const db = new DatabaseSync(expandPath(dbPath), { readOnly: true })
+  try {
+    if (!sqliteTableExists(db, 'books')) return false
+    return Boolean(db.prepare('SELECT 1 FROM books WHERE id = ?').get(bookId))
+  } finally {
+    db.close()
+  }
 }
 
 function ensureSqliteColumn(db, tableName, columnName, columnType) {

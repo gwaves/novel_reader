@@ -1,4 +1,5 @@
 .env
+hermes-rescue.env
 data/
 runs/
 jobs/

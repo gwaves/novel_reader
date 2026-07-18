@@ -5,6 +5,7 @@ import { homedir } from 'node:os'
 import { createHash } from 'node:crypto'
 import { spawnSync } from 'node:child_process'
 import { DatabaseSync } from 'node:sqlite'
+import { synthesizeVolcengineSegment } from '../src/tts-provider.mjs'
 
 const DEFAULT_CONFIG_PATH = join(homedir(), '.novel_reader', 'tts-director.config.json')
 const DEFAULT_MAIN_DB_PATH = join(homedir(), '.novel_reader', 'novel_reader.sqlite')
@@ -13,6 +14,20 @@ const ALLOWED_SEGMENT_TYPES = new Set(['narration', 'dialogue', 'thought', 'stag
 const DEFAULT_TTS_MAX_CHARACTERS_PER_REQUEST = 120
 const DEFAULT_MIMO_VOICE = 'mimo_default'
 const DEFAULT_MIMO_AVAILABLE_VOICES = ['mimo_default', '冰糖', '茉莉', '苏打', '白桦', 'Mia', 'Chloe', 'Milo', 'Dean']
+const DEFAULT_VOLCENGINE_VOICE = 'zh_male_m191_uranus_bigtts'
+const DEFAULT_VOLCENGINE_AVAILABLE_VOICES = [
+  DEFAULT_VOLCENGINE_VOICE,
+  'zh_male_taocheng_uranus_bigtts',
+  'zh_female_vv_uranus_bigtts',
+  'zh_female_xiaohe_uranus_bigtts',
+]
+
+const DEFAULT_VOLCENGINE_VOICE_CATALOG = [
+  { id: 'zh_male_m191_uranus_bigtts', name: '云舟 2.0', description: '磁性、成熟、理性、可靠的青年男声，适合旁白或稳重角色。' },
+  { id: 'zh_male_taocheng_uranus_bigtts', name: '小天 2.0', description: '清澈温润、有朝气、开朗真诚的青年男声。' },
+  { id: 'zh_female_vv_uranus_bigtts', name: 'Vivi 2.0', description: '语调平稳、咬字柔和、具有治愈感的女声。' },
+  { id: 'zh_female_xiaohe_uranus_bigtts', name: '小何 2.0', description: '甜美有活力、活泼开朗的年轻女声。' },
+]
 
 function printHelp() {
   console.log(`
@@ -27,12 +42,13 @@ Novel Reader 生产流水线 TTS 导演脚本工具
   test-model                   测试配置的 OpenAI-compatible 模型
   list-books                   列出主数据库中的书籍
   inspect-chapter              查看章节元信息与正文预览
+  cast-voices                  按全书知识图谱生成主要角色固定选角表
   draft-script                 调用模型生成导演脚本 JSON
   draft-batch                  批量生成导演脚本，不执行质检或 TTS
   audit-script                 生成导演脚本质量报告
   audit-batch                  批量校验和质检导演脚本，不执行 TTS
   validate-script              校验已有导演脚本 JSON
-  synth                        按导演脚本调用 MIMO TTS，输出 MP3
+  synth                        按导演脚本调用配置的 TTS provider，输出 MP3
   synth-batch                  批量合成已通过质检的导演脚本
   synth-segments-batch         仅批量合成 TTS 片段 WAV
   audio-qc-batch               批量质检 TTS 片段音频
@@ -139,6 +155,49 @@ function optionalString(value) {
   return trimmed && trimmed !== 'null' ? trimmed : ''
 }
 
+function normalizeVoiceCatalogEntry(entry) {
+  if (!entry || typeof entry !== 'object') return null
+  const id = optionalString(entry.id || entry.voice)
+  if (!id) return null
+  const tags = Array.isArray(entry.tags) ? uniqueStrings(entry.tags) : []
+  const language = optionalString(entry.language).toLowerCase()
+    || (id.startsWith('en_') || tags.includes('英语') ? 'en' : '')
+    || (id.startsWith('zh_') || id.includes('_zh_') || tags.includes('中文') ? 'zh' : '')
+  return {
+    id,
+    name: optionalString(entry.name) || id,
+    description: optionalString(entry.description || entry.style),
+    tags,
+    language,
+  }
+}
+
+function voiceSupportsContentLanguage(voice, contentLanguage) {
+  const language = optionalString(contentLanguage).toLowerCase()
+  if (!language || !voice.language) return true
+  if (language.startsWith('zh')) return voice.language === 'zh'
+  if (language.startsWith('en')) return voice.language === 'en'
+  return voice.language === language
+}
+
+function loadVoiceCatalog(voicesConfig, configPath, isVolcengine) {
+  const inlineCatalog = Array.isArray(voicesConfig?.catalog) ? voicesConfig.catalog : []
+  let fileCatalog = []
+  const catalogFile = optionalString(voicesConfig?.catalogFile)
+  if (catalogFile) {
+    const expanded = expandHome(catalogFile)
+    const candidates = [resolve(dirname(configPath), expanded), resolve(expanded)]
+    const path = candidates.find(candidate => existsSync(candidate))
+    if (!path) throw new Error(`找不到音色目录：${catalogFile}`)
+    const parsed = JSON.parse(readFileSync(path, 'utf8'))
+    fileCatalog = Array.isArray(parsed) ? parsed : parsed.voices
+    if (!Array.isArray(fileCatalog)) throw new Error(`音色目录必须是数组或包含 voices 数组：${path}`)
+  }
+  const source = inlineCatalog.length ? inlineCatalog : fileCatalog
+  if (source.length) return source.map(normalizeVoiceCatalogEntry).filter(Boolean)
+  return isVolcengine ? DEFAULT_VOLCENGINE_VOICE_CATALOG : []
+}
+
 function finiteNumber(value, fallback) {
   return typeof value === 'number' && Number.isFinite(value) ? value : fallback
 }
@@ -150,6 +209,8 @@ function loadConfig(configPath) {
   }
 
   const config = JSON.parse(readFileSync(path, 'utf8'))
+  const ttsProvider = optionalString(config.tts?.provider).toLowerCase() || 'mimo'
+  const isVolcengine = ttsProvider === 'volcengine'
   const llm = config.llm || {}
   const model = optionalString(llm.model_name) || optionalString(llm.modelName) || optionalString(llm.model)
   const baseUrl = optionalString(llm.base_url) || optionalString(llm.baseUrl)
@@ -161,6 +222,14 @@ function loadConfig(configPath) {
   const apiKeyEnv = optionalString(llm.apiKeyEnv)
   const inlineApiKey = optionalString(llm.apiKey)
   const fallback = llm.fallback && typeof llm.fallback === 'object' ? llm.fallback : null
+  const contentLanguage = optionalString(config.tts?.contentLanguage || config.tts?.content_language) || 'zh-CN'
+  const completeVoiceCatalog = loadVoiceCatalog(config.voices, path, isVolcengine)
+  const voiceCatalog = completeVoiceCatalog.filter(voice => voiceSupportsContentLanguage(voice, contentLanguage))
+  if (!voiceCatalog.length) throw new Error(`音色目录中没有适用于 ${contentLanguage} 的音色。`)
+  const compatibleVoiceIds = new Set(voiceCatalog.map(voice => voice.id))
+  const configuredAvailableVoices = Array.isArray(config.tts?.availableVoices) && config.tts.availableVoices.length
+    ? config.tts.availableVoices.map(voice => optionalString(voice)).filter(Boolean)
+    : null
   return {
     ...config,
     configPath: path,
@@ -203,19 +272,33 @@ function loadConfig(configPath) {
       minBatchSize: Math.max(1, Math.floor(finiteNumber(config.batchPipeline?.minBatchSize, 6))),
       maxDraftAttempts: Math.max(1, Math.floor(finiteNumber(config.batchPipeline?.maxDraftAttempts, 3))),
     },
+    casting: {
+      enabled: config.casting?.enabled === true,
+      topCharacters: Math.max(1, Math.min(100, Math.floor(finiteNumber(config.casting?.topCharacters, 30)))),
+    },
     voices: {
       characters: Array.isArray(config.voices?.characters) ? config.voices.characters : [],
+      catalog: voiceCatalog,
+      completeCatalogCount: completeVoiceCatalog.length,
     },
     tts: {
-      provider: config.tts?.provider || 'mimo',
-      model: config.tts?.model || 'mimo-v2.5-tts',
+      provider: ttsProvider,
+      model: config.tts?.model || (isVolcengine ? 'seed-tts-2.0' : 'mimo-v2.5-tts'),
+      contentLanguage,
+      resourceId: optionalString(config.tts?.resourceId) || (isVolcengine ? 'seed-tts-2.0' : ''),
+      baseUrl: optionalString(config.tts?.baseUrl),
       apiKey: optionalString(config.tts?.apiKey),
-      apiKeyEnv: config.tts?.apiKeyEnv || 'MIMO_API_KEY',
-      defaultVoice: optionalString(config.tts?.defaultVoice) || DEFAULT_MIMO_VOICE,
-      availableVoices: Array.isArray(config.tts?.availableVoices) && config.tts.availableVoices.length
-        ? config.tts.availableVoices.map(voice => optionalString(voice)).filter(Boolean)
-        : DEFAULT_MIMO_AVAILABLE_VOICES,
-      format: config.tts?.format || 'wav',
+      apiKeyEnv: config.tts?.apiKeyEnv || (isVolcengine ? 'VOLCENGINE_TTS_API_KEY' : 'MIMO_API_KEY'),
+      defaultVoice: optionalString(config.tts?.defaultVoice) || (isVolcengine ? DEFAULT_VOLCENGINE_VOICE : DEFAULT_MIMO_VOICE),
+      availableVoices: configuredAvailableVoices
+        ? configuredAvailableVoices.filter(voice => compatibleVoiceIds.has(voice))
+        : (voiceCatalog.length
+            ? voiceCatalog.map(voice => voice.id)
+            : (isVolcengine ? DEFAULT_VOLCENGINE_AVAILABLE_VOICES : DEFAULT_MIMO_AVAILABLE_VOICES)),
+      format: config.tts?.format || (isVolcengine ? 'pcm' : 'wav'),
+      sampleRate: Math.max(8_000, Math.floor(finiteNumber(config.tts?.sampleRate, 24_000))),
+      speechRate: Math.max(-50, Math.min(100, Math.round(finiteNumber(config.tts?.speechRate, 0)))),
+      loudnessRate: Math.max(-50, Math.min(100, Math.round(finiteNumber(config.tts?.loudnessRate, 0)))),
       finalFormat: config.tts?.finalFormat || 'mp3',
       mp3Bitrate: config.tts?.mp3Bitrate || '96k',
       silenceSeconds: finiteNumber(config.tts?.silenceSeconds, 0.35),
@@ -319,6 +402,155 @@ function getKgCharacterCandidates(config, bookId, chapterIndex) {
   } finally {
     db.close()
   }
+}
+
+function getRankedBookCharacters(config, bookId, limit) {
+  const db = openMainDb(config)
+  try {
+    return db.prepare(`
+      SELECT e.id, e.name, e.type, e.aliases_json, e.description, e.confidence,
+             e.first_chapter_index, e.last_chapter_index, COUNT(m.id) AS mention_count
+      FROM kg_entities e
+      LEFT JOIN kg_entity_mentions m ON m.entity_id = e.id
+      WHERE e.book_id = ? AND e.type IN ('character', 'person')
+      GROUP BY e.id
+      ORDER BY mention_count DESC, e.confidence DESC, e.name ASC
+      LIMIT ?
+    `).all(bookId, limit).map(row => ({
+      id: row.id,
+      name: row.name,
+      type: row.type,
+      aliases: parseJsonArray(row.aliases_json),
+      description: row.description || '',
+      confidence: Number(row.confidence || 0),
+      mentionCount: Number(row.mention_count || 0),
+      firstChapterIndex: row.first_chapter_index ?? null,
+      lastChapterIndex: row.last_chapter_index ?? null,
+    }))
+  } finally {
+    db.close()
+  }
+}
+
+function voiceCatalogHash(config) {
+  return createHash('sha256').update(JSON.stringify(config.voices.catalog)).digest('hex').slice(0, 16)
+}
+
+function buildMajorCastPrompt(config, bookTitle, characters) {
+  return `你是中文长篇有声书的选角导演。请根据知识图谱角色画像，从指定音色目录中为主要角色固定音色。
+
+只输出严格 JSON：{"assignments":[{"characterId":"...","voice":"音色ID","reason":"简短匹配依据"}]}。
+
+规则：
+1. 每个输入角色必须恰好返回一项，characterId 必须原样保留。
+2. voice 必须是目录中存在的 id。
+3. 综合性别、年龄、身份、性格、气质和剧情功能匹配；不要只按姓名猜测。
+4. 主要角色尽量区分声线；目录较小时允许复用最匹配的音色。
+5. 旁白专用音色 ${config.director.defaultNarrator.voice} 不分配给角色，除非目录中已无其他合适音色。
+
+书籍：${bookTitle}
+TTS Provider：${config.tts.provider}
+主要角色（按全书提及次数排序）：
+${JSON.stringify(characters, null, 2)}
+
+音色说明目录：
+${JSON.stringify(config.voices.catalog, null, 2)}`
+}
+
+function injectVoiceCast(config, cast) {
+  const existing = new Map(config.voices.characters.map(entry => [entry.name, entry]))
+  for (const entry of cast.assignments || []) {
+    if (!entry?.name || !entry?.voice) continue
+    existing.set(entry.name, {
+      ...(existing.get(entry.name) || {}),
+      name: entry.name,
+      aliases: entry.aliases || [],
+      voice: entry.voice,
+      style: entry.style || entry.description || '',
+      characterId: entry.characterId || null,
+      castTier: 'major',
+      castReason: entry.reason || '',
+    })
+  }
+  config.voices.characters = [...existing.values()]
+}
+
+async function ensureMajorCharacterCast(config, { bookId, bookTitle, outRoot, resume }) {
+  if (!config.casting.enabled || !config.voices.catalog.length) return null
+  const castPath = join(outRoot, 'voice-cast.json')
+  const catalogHash = voiceCatalogHash(config)
+  if (resume && existsSync(castPath)) {
+    const existing = JSON.parse(readFileSync(castPath, 'utf8'))
+    if (existing.bookId === bookId && existing.provider === config.tts.provider && existing.catalogHash === catalogHash) {
+      injectVoiceCast(config, existing)
+      console.log(`🎭 复用主要角色选角表：${castPath}`)
+      return existing
+    }
+  }
+
+  const characters = getRankedBookCharacters(config, bookId, config.casting.topCharacters)
+  if (!characters.length) {
+    console.warn('⚠️  知识图谱中没有可用于固定选角的角色，继续按章节动态匹配音色。')
+    return null
+  }
+  const voiceIds = new Set(config.voices.catalog.map(voice => voice.id))
+  const characterIds = new Set(characters.map(character => character.id))
+  const result = await callOpenAICompatibleWithRetry(config, [
+    { role: 'system', content: '你只输出严格 JSON，不输出 Markdown，不输出思考过程。' },
+    { role: 'user', content: buildMajorCastPrompt(config, bookTitle, characters) },
+  ], '主要角色固定选角', 3, null, response => {
+    if (!Array.isArray(response?.assignments)) throw new Error('选角结果缺少 assignments 数组。')
+    const validAssignments = response.assignments.filter(assignment => (
+      characterIds.has(optionalString(assignment?.characterId))
+      && voiceIds.has(optionalString(assignment?.voice))
+    ))
+    const assignedCharacterIds = new Set(validAssignments.map(assignment => optionalString(assignment.characterId)))
+    if (assignedCharacterIds.size !== characters.length) {
+      throw new Error(`主要角色选角不完整：期望 ${characters.length}，实际 ${assignedCharacterIds.size}。`)
+    }
+  })
+  const byId = new Map(characters.map(character => [character.id, character]))
+  const seen = new Set()
+  const assignments = []
+  for (const assignment of result.assignments) {
+    const character = byId.get(optionalString(assignment.characterId))
+    const voice = optionalString(assignment.voice)
+    if (!character || !voiceIds.has(voice) || seen.has(character.id)) continue
+    seen.add(character.id)
+    assignments.push({
+      characterId: character.id,
+      name: character.name,
+      aliases: character.aliases,
+      description: character.description,
+      mentionCount: character.mentionCount,
+      voice,
+      reason: optionalString(assignment.reason),
+      style: character.description,
+    })
+  }
+  if (assignments.length !== characters.length) {
+    throw new Error(`主要角色选角不完整：期望 ${characters.length}，实际 ${assignments.length}。`)
+  }
+  const cast = {
+    kind: 'novel-reader-book-voice-cast',
+    version: 1,
+    generatedAt: new Date().toISOString(),
+    bookId,
+    bookTitle,
+    provider: config.tts.provider,
+    model: config.tts.model,
+    narrator: config.director.defaultNarrator,
+    catalogHash,
+    topCharacters: config.casting.topCharacters,
+    assignments,
+    minorCharacterPolicy: 'match_by_age_gender_identity_personality_and_reuse_similar_voices',
+  }
+  mkdirSync(outRoot, { recursive: true })
+  writeFileSync(castPath, `${JSON.stringify(cast, null, 2)}\n`, 'utf8')
+  injectVoiceCast(config, cast)
+  console.log(`🎭 主要角色固定选角完成：${assignments.length} 人`)
+  console.log(`   选角表：${castPath}`)
+  return cast
 }
 
 function parseJsonArray(value) {
@@ -526,6 +758,8 @@ function buildVoiceCandidates(config, kgCandidates) {
       aliases: uniqueStrings([...(existing.aliases || []), ...(entry.aliases || [])]),
       voice: entry.voice || existing.voice || null,
       style: entry.style || existing.style || '',
+      castTier: entry.castTier || existing.castTier || null,
+      castReason: entry.castReason || existing.castReason || '',
       source: existing.source ? `${existing.source}+config` : 'config',
     })
   }
@@ -576,10 +810,11 @@ function buildDirectorPrompt({ config, book, chapter, preSegments, characterCand
 3. type 只能是 narration、dialogue、thought、stage。
 4. typeHint=dialogue 的片段通常是引号内对白，必须判断 speaker。
 5. narration 必须使用 speaker="旁白"，voice="${config.director.defaultNarrator.voice}"。
-6. speaker 优先使用候选角色；若正文明确给出未进入候选表的姓名、身份或可区分的临时人物，可使用原文姓名或稳定标签（例如“于春儿”“看灯人甲”“圆社甲”），characterId=null，并从可用音色中选择 voice。禁止凭空编造人物。
-7. 只有上下文确实无法区分说话人时才用 speaker="未知角色"，confidence 不得超过 0.45；不要因为人物不在候选表中就直接标为未知角色。
-8. 角色内心独白可标为 thought；纯叙述不可误标为角色对白。
-9. evidence 必须说明依据，例如上下文中的“某某道”“被唤作某某”、候选角色别名或无法判断。
+6. speaker 优先使用候选角色；castTier="major" 的主要角色已经完成全书固定选角，必须使用候选项中的 voice，不得更换。
+7. 若正文明确给出未进入候选表的姓名、身份或可区分的临时人物，可使用原文姓名或稳定标签（例如“于春儿”“看灯人甲”“圆社甲”），characterId=null，并按年龄、性别、身份、性格选择相近音色；次要角色允许复用匹配的音色。禁止凭空编造人物。
+8. 只有上下文确实无法区分说话人时才用 speaker="未知角色"，confidence 不得超过 0.45；不要因为人物不在候选表中就直接标为未知角色。
+9. 角色内心独白可标为 thought；纯叙述不可误标为角色对白。
+10. evidence 必须说明依据，例如上下文中的“某某道”“被唤作某某”、候选角色别名或无法判断。
 
 输出 JSON 结构必须是：
 {
@@ -606,8 +841,8 @@ ${JSON.stringify(config.director.defaultNarrator, null, 2)}
 候选角色与音色：
 ${JSON.stringify(characterCandidates, null, 2)}
 
-可用音色：
-${JSON.stringify(config.tts.availableVoices, null, 2)}
+可用音色及声线画像：
+${JSON.stringify(config.voices.catalog.length ? config.voices.catalog : config.tts.availableVoices, null, 2)}
 
 预切分片段：
 ${JSON.stringify(compactPreSegments(preSegments), null, 2)}
@@ -819,7 +1054,7 @@ function buildDirectorScript({ config, book, chapter, preSegments, decisions, ch
     const isNarration = type === 'narration'
     const rawVoice = isNarration
       ? config.director.defaultNarrator.voice
-      : optionalString(decision.voice) || character?.voice || null
+      : (character?.castTier === 'major' ? character.voice : optionalString(decision.voice) || character?.voice || null)
     const voice = normalizeTtsVoice(config, rawVoice)
     const style = isNarration
       ? config.director.defaultNarrator.style
@@ -882,13 +1117,18 @@ function defaultSpeaker(type) {
 function normalizeTtsVoice(config, voice) {
   const requestedVoice = optionalString(voice)
   const availableVoices = new Set(
-    (config.tts.availableVoices?.length ? config.tts.availableVoices : DEFAULT_MIMO_AVAILABLE_VOICES)
+    (config.tts.availableVoices?.length ? config.tts.availableVoices : providerAvailableVoices(config.tts.provider))
       .map(item => optionalString(item))
       .filter(Boolean),
   )
-  const fallbackVoice = availableVoices.has(config.tts.defaultVoice) ? config.tts.defaultVoice : DEFAULT_MIMO_VOICE
+  const providerDefaultVoice = config.tts.provider === 'volcengine' ? DEFAULT_VOLCENGINE_VOICE : DEFAULT_MIMO_VOICE
+  const fallbackVoice = availableVoices.has(config.tts.defaultVoice) ? config.tts.defaultVoice : providerDefaultVoice
   if (!requestedVoice) return fallbackVoice
   return availableVoices.has(requestedVoice) ? requestedVoice : fallbackVoice
+}
+
+function providerAvailableVoices(provider) {
+  return provider === 'volcengine' ? DEFAULT_VOLCENGINE_AVAILABLE_VOICES : DEFAULT_MIMO_AVAILABLE_VOICES
 }
 
 function normalizeConfidence(value, fallback) {
@@ -897,7 +1137,7 @@ function normalizeConfidence(value, fallback) {
   return Math.max(0, Math.min(1, number))
 }
 
-function validateDirectorScript(script, preSegments = null) {
+function validateDirectorScript(script, preSegments = null, expectedNarratorVoice = '') {
   const errors = []
   const warnings = []
   if (script?.kind !== SCRIPT_KIND) {
@@ -922,8 +1162,8 @@ function validateDirectorScript(script, preSegments = null) {
     if (segment.type === 'narration' && segment.speaker !== '旁白') {
       errors.push(`${segment.id}: narration 的 speaker 必须是旁白。`)
     }
-    if (segment.type === 'narration' && segment.voice !== '白桦') {
-      warnings.push(`${segment.id}: 当前默认策略期望旁白使用男声白桦，实际为 ${segment.voice || '空'}。`)
+    if (segment.type === 'narration' && expectedNarratorVoice && segment.voice !== expectedNarratorVoice) {
+      warnings.push(`${segment.id}: 当前配置期望旁白使用 ${expectedNarratorVoice}，实际为 ${segment.voice || '空'}。`)
     }
     if (segment.speaker === '未知角色' && segment.confidence > 0.45) {
       errors.push(`${segment.id}: 未知角色 confidence 不应超过 0.45。`)
@@ -1027,7 +1267,7 @@ async function runDraftScript(config, args) {
   const allDecisions = usedNarrationFallback ? [] : batchResults.flat()
   const decisions = { decisions: allDecisions }
   const script = buildDirectorScript({ config, book, chapter, preSegments, decisions, characterCandidates, sourceLimit })
-  const validation = validateDirectorScript(script, preSegments)
+  const validation = validateDirectorScript(script, preSegments, config.director.defaultNarrator.voice)
   script.diagnostics = diagnosticsFor({ config, preSegments, kgCandidates, characterCandidates, validation, batchSize, directorConcurrency, llmBatchStats })
   if (usedNarrationFallback) {
     script.diagnostics.narrationFallback = {
@@ -1296,11 +1536,11 @@ async function repairUnknownSpeakersWithNarratorFallback(config, scriptPath, scr
   return { repairedCount, script }
 }
 
-async function runValidateScript(args) {
+async function runValidateScript(config, args) {
   const scriptPath = args.script ? resolve(args.script) : null
   if (!scriptPath) throw new Error('validate-script 需要 --script。')
   const script = JSON.parse(readFileSync(scriptPath, 'utf8'))
-  const validation = validateDirectorScript(script)
+  const validation = validateDirectorScript(script, null, config.director.defaultNarrator.voice)
   console.log(`校验文件：${scriptPath}`)
   console.log(`错误：${validation.errors.length}`)
   console.log(`警告：${validation.warnings.length}`)
@@ -1331,6 +1571,8 @@ function segmentCacheKey(segment) {
       voice: segment.voice,
       style: segment.style,
       performanceStyle: segment.performanceStyle || '',
+      provider: segment.provider || 'mimo',
+      model: segment.model || '',
     }))
     .digest('hex')
     .slice(0, 16)
@@ -1389,6 +1631,20 @@ async function synthSegmentWithMimo(config, segment, outputPath) {
   }
   writeFileSync(outputPath, Buffer.from(data, 'base64'))
   return { requestMs, responseBytes: raw.length }
+}
+
+async function synthSegment(config, segment, outputPath) {
+  if (config.tts.provider === 'mimo') return synthSegmentWithMimo(config, segment, outputPath)
+  if (config.tts.provider === 'volcengine') {
+    const result = await synthesizeVolcengineSegment({
+      tts: { ...config.tts, apiKey: getTtsApiKey(config) },
+      segment: { ...segment, voice: normalizeTtsVoice(config, segment.voice) },
+      style: getSegmentTtsStyle(config, segment),
+    })
+    writeFileSync(outputPath, result.audio)
+    return { requestMs: result.requestMs, responseBytes: result.responseBytes }
+  }
+  throw new Error(`暂不支持 TTS provider：${config.tts.provider}`)
 }
 
 function runFfmpeg(args, label) {
@@ -1472,6 +1728,7 @@ function validateSynthesizedAudio(config, item) {
 function classifyTtsError(error) {
   const message = String(error?.message || '')
   if (message.includes('MIMO TTS 返回')) return 'http_error'
+  if (message.includes('火山引擎 TTS 返回')) return 'http_error'
   if (message.includes('响应缺少 audio.data')) return 'missing_audio'
   if (message.includes('音频时长异常')) return 'duration_outlier'
   if (message.includes('含异常长静音')) return 'long_silence'
@@ -1517,7 +1774,7 @@ async function synthSegmentWithValidation(config, item, attempts = 3) {
     metric.attempts.push(attemptMetric)
     try {
       if (existsSync(item.wav)) rmSync(item.wav, { force: true })
-      responseMetric = await synthSegmentWithMimo(config, item.segment, item.wav)
+      responseMetric = await synthSegment(config, item.segment, item.wav)
       attemptMetric.requestMs = responseMetric.requestMs
       attemptMetric.responseBytes = responseMetric.responseBytes
       const audioDurationSeconds = validateSynthesizedAudio(config, item)
@@ -1802,13 +2059,13 @@ function runAudioQc(config, args) {
 }
 
 async function runSynth(config, args) {
-  if (config.tts.provider !== 'mimo') {
+  if (!['mimo', 'volcengine'].includes(config.tts.provider)) {
     throw new Error(`暂不支持 TTS provider：${config.tts.provider}`)
   }
   const scriptPath = args.script ? resolve(args.script) : null
   if (!scriptPath) throw new Error('synth 需要 --script。')
   const script = JSON.parse(readFileSync(scriptPath, 'utf8'))
-  const validation = validateDirectorScript(script)
+  const validation = validateDirectorScript(script, null, config.director.defaultNarrator.voice)
   if (validation.errors.length) {
     throw new Error(`导演脚本校验失败，不能合成：${validation.errors[0]}`)
   }
@@ -1854,7 +2111,12 @@ async function runSynth(config, args) {
   const ttsSegments = expandLongSegmentsForTts(script.segments, config.tts.maxCharactersPerRequest)
     .map(segment => normalizeSegmentForTts(config, segment))
   manifest.segments = ttsSegments.map((segment) => {
-    const key = segmentCacheKey({ ...segment, performanceStyle: config.director.performanceStyle })
+    const key = segmentCacheKey({
+      ...segment,
+      performanceStyle: config.director.performanceStyle,
+      provider: config.tts.provider,
+      model: config.tts.model,
+    })
     const wavPath = join(segmentDir, `${segment.id}-${key}.wav`)
     return {
       id: segment.id,
@@ -2075,11 +2337,11 @@ function getChapterOutputPaths(outRoot, chapterIndex, finalFormat = 'mp3') {
   }
 }
 
-function loadValidScript(scriptPath) {
+function loadValidScript(config, scriptPath) {
   if (!existsSync(scriptPath)) return null
   try {
     const script = JSON.parse(readFileSync(scriptPath, 'utf8'))
-    const validation = validateDirectorScript(script)
+    const validation = validateDirectorScript(script, null, config.director.defaultNarrator.voice)
     if (validation.errors.length) return null
     return { script, validation }
   } catch {
@@ -2118,7 +2380,7 @@ async function runDraftBatch(config, args) {
 
   await runDynamicConcurrent(chapters, () => runtimeControl.current().llmChapters, async (chapterIndex) => {
     const { scriptPath } = getChapterOutputPaths(outRoot, chapterIndex, config.tts.finalFormat)
-    const existing = args.resume === true ? loadValidScript(scriptPath) : null
+    const existing = args.resume === true ? loadValidScript(config, scriptPath) : null
     if (existing) {
       results.push({ chapterIndex, status: 'skipped-valid-script', scriptPath })
       console.log(`⏭️  第 ${chapterIndex} 章导演脚本已存在且有效，跳过`)
@@ -2167,7 +2429,7 @@ async function runAuditBatch(config, args) {
     const { scriptPath } = getChapterOutputPaths(outRoot, chapterIndex, config.tts.finalFormat)
     if (!existsSync(scriptPath)) throw new Error(`第 ${chapterIndex} 章缺少导演脚本：${scriptPath}`)
     const script = JSON.parse(readFileSync(scriptPath, 'utf8'))
-    const validation = validateDirectorScript(script)
+    const validation = validateDirectorScript(script, null, config.director.defaultNarrator.voice)
     const { audit, auditPath } = writeAuditReport(config, scriptPath, script)
     const strictFailures = args.strict === true ? strictAuditFailures(config, audit) : []
     const passed = validation.errors.length === 0 && strictFailures.length === 0
@@ -2423,6 +2685,12 @@ async function runBatchPipeline(config, args) {
   const outRoot = args['out-root']
     ? resolve(args['out-root'])
     : resolve(`tmp/tts/${safeFilePart(firstChapter.book.title)}`)
+  const voiceCast = await ensureMajorCharacterCast(config, {
+    bookId,
+    bookTitle: firstChapter.book.title,
+    outRoot,
+    resume: args.resume === true,
+  })
   const startedAt = Date.now()
   const results = []
   const audits = []
@@ -2566,7 +2834,7 @@ async function runBatchPipeline(config, args) {
       }
 
       let script = null
-      const existing = resume ? loadValidScript(scriptPath) : null
+      const existing = resume ? loadValidScript(config, scriptPath) : null
       if (existing) {
         script = existing.script
         console.log(`♻️  第 ${chapterIndex} 章复用已有导演脚本：${scriptPath}`)
@@ -2643,6 +2911,7 @@ async function runBatchPipeline(config, args) {
     results,
     audits,
     failures: pipelineFailures.sort((a, b) => a.chapterIndex - b.chapterIndex),
+    voiceCast: voiceCast ? { path: join(outRoot, 'voice-cast.json'), assignments: voiceCast.assignments.length } : null,
     metricsSummary: batchMetricsSummary,
   }
   const summaryPath = join(outRoot, `batch-pipeline-${chapters[0]}-${chapters.at(-1)}.summary.json`)
@@ -2663,6 +2932,18 @@ async function runTestModel(config) {
     { role: 'user', content: '输出 {"ok": true, "message": "模型可用"}' },
   ])
   console.log(JSON.stringify(result, null, 2))
+}
+
+async function runCastVoices(config, args) {
+  const bookId = optionalString(args['book-id'])
+  if (!bookId) throw new Error('cast-voices 需要 --book-id。')
+  const outRoot = resolve(args['out-root'] || `tmp/tts/${safeFilePart(bookId)}`)
+  const db = openMainDb(config)
+  let book
+  try { book = db.prepare('SELECT id, title FROM books WHERE id = ?').get(bookId) } finally { db.close() }
+  if (!book) throw new Error(`找不到书籍：${bookId}`)
+  const cast = await ensureMajorCharacterCast(config, { bookId, bookTitle: book.title, outRoot, resume: args.resume === true })
+  if (cast) console.log(JSON.stringify({ castPath: join(outRoot, 'voice-cast.json'), assignments: cast.assignments.length }, null, 2))
 }
 
 async function main() {
@@ -2702,6 +2983,9 @@ async function main() {
         hasApiKey: Boolean(getTtsApiKey(config)),
       },
       voiceCount: config.voices.characters.length,
+      voiceCatalogCount: config.voices.catalog.length,
+      completeVoiceCatalogCount: config.voices.completeCatalogCount,
+      availableVoiceCount: config.tts.availableVoices.length,
     }, null, 2))
     return
   }
@@ -2738,6 +3022,11 @@ async function main() {
     return
   }
 
+  if (command === 'cast-voices') {
+    await runCastVoices(config, args)
+    return
+  }
+
   if (command === 'draft-script') {
     await runDraftScript(config, args)
     return
@@ -2749,7 +3038,7 @@ async function main() {
   }
 
   if (command === 'validate-script') {
-    await runValidateScript(args)
+    await runValidateScript(config, args)
     return
   }
 

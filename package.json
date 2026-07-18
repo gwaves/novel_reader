@@ -43,6 +43,7 @@
     "production-pipeline:service": "node production-pipeline/src/service.mjs",
     "production-pipeline:service:dev": "node --watch production-pipeline/src/service.mjs",
     "production-pipeline:service:test": "node --test production-pipeline/test/service.test.mjs",
+    "production-pipeline:hermes-rescue": "node production-pipeline/scripts/hermes-rescue-worker.mjs",
     "production-pipeline:test": "node --test production-pipeline/test/*.test.mjs",
     "gateway-android:dev": "npm --prefix gateway-android-app run dev",
     "gateway-android:build": "npm --prefix gateway-android-app run build",

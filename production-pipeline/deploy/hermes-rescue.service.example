@@ -1,0 +1,18 @@
+[Unit]
+Description=Novel Reader Hermes production rescue worker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=%h/production-pipeline-service
+Environment=HERMES_RESCUE_POLICY=%h/production-pipeline-service/production-pipeline/config/hermes-rescue-policy.json
+EnvironmentFile=-%h/production-pipeline-service/production-pipeline/deploy/hermes-rescue.env
+ExecStart=/usr/bin/env node %h/production-pipeline-service/production-pipeline/scripts/hermes-rescue-worker.mjs
+Restart=on-failure
+RestartSec=15
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=default.target
